@@ -1,0 +1,44 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Leptos / Trunk
+/frontend/dist/
+/frontend/pkg/
+
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+*.dex
+.cxx/
+captures/
+.externalNativeBuild/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / coverage artifacts
+lcov.info
+/playwright-report/
+/e2e/.auth-state.json
+
+# Tool-local (not committed)
+.claude/
+.cursor/mcp.json
+*.bak
