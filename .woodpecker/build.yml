@@ -15,9 +15,14 @@ steps:
     when:
       - event: push
     image: mingc/android-build-box:latest
+    environment:
+      TERM: dumb
+      GRADLE_OPTS: -Dorg.gradle.console=plain
     commands:
+      - echo "==> build-android ($(date -u +%FT%TZ))"
       - ./scripts/sync-version.sh
-      - cd android && chmod +x ./gradlew && ./gradlew :app:assembleDevDebug :app:testDevDebugUnitTest
+      - cd android && chmod +x ./gradlew
+      - cd android && ./gradlew --no-daemon --console=plain :app:assembleDevDebug :app:testDevDebugUnitTest
 
   contract-validation:
     when:
