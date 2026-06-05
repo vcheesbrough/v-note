@@ -16,7 +16,7 @@ If you change a rule below, change it here — there is no parallel copy.
 | **Remote** | [vcheesbrough/v-note](https://github.com/vcheesbrough/v-note) |
 | **Layout** | **Monorepo** (server, SPA, Android, deploy, schemas — when scaffolded) |
 | **License** | **AGPL-3.0-or-later** — see [`LICENSE`](LICENSE) |
-| **Phase** | **Planning / minimal bootstrap** — no application code yet; full scaffold deferred until more planning |
+| **Phase** | **Minimal bootstrap done** — planning locked; **#145** lands monorepo scaffold + CI; no application code yet |
 
 **Stack summary:** Rust (Axum) server, PostgreSQL, Leptos/Trunk SPA, native Kotlin (Compose) Android, Authentik OIDC, bored-aligned deploy intent. Details and locked decisions are in [`docs/PLAN.md`](docs/PLAN.md) — treat that document as the spec source of truth, not this file.
 
@@ -36,16 +36,28 @@ When this project (or you) uses **Kanban cards** as the task queue:
 
 2. **Start work:** As soon as you pick up a card, **move it to the In Progress column** on the **v-notes** board using **bored MCP** (`list_boards` → find **v-notes** → `list_columns` → **`move_card`**). Resolve the card with **`get_card_by_number`** when you only know `#N`.
 
-3. **Iteration in the card title (this repo):** Bored cards have **no separate title field** — the board shows the **first markdown `#` heading** in **`body`**.
-   - **Todo / backlog:** Use a **plain descriptive** heading only — **do not** write **`# Iteration N — …`** yet (**N** is unknown until work starts).
-   - **In progress:** Right after **`move_card`** into **In progress**, **`update_card`** so the first `#` line becomes **`# Iteration N — …`** where **N** is the iteration you are committing to for this card (same **N** as **`feat/iteration-N-…`** branch at **start of work**; when a workspace **`Cargo.toml`** exists, align minor **1.N.x** with that **N**). One prefix; avoid doubling.
+3. **Iterations — one card, one branch, one N:** Each iteration is exactly **one bored card** and **one feature branch**. No stacking branches; do not split one iteration across multiple cards or branches.
+   - **Sequential N:** Assign iteration numbers **only when work starts**, in strict order. The first card moved to **In progress** is **N=1**, the next started card is **N=2**, and so on. To pick the next **N**, inspect **Done** and **In Progress** cards on the board and use **highest existing N + 1** (or **1** if none exist yet).
+   - **Semver** (locked — see [`docs/PLAN.md`](docs/PLAN.md) **Engineering workflows** → **Versioning**): **minor `N` always = iteration number** (1, 2, 3… globally, assigned only when work starts). **Major** signals **phase**, not card count — **do not assume** a fixed number of pre-MVP iterations; new MVP backbone cards may be inserted before **`vertical-slice-mvp`** closes:
+     - **Pre-MVP** (before **`vertical-slice-mvp`** closes on **`main`**): **`0.N.P`** — e.g. first iteration → **`0.1.0`**, fifth → **`0.5.0`** (count grows with however many iterations ship).
+     - **MVP release:** when the **MVP completion card** (**#151** today) merges to **`main`**, set workspace to **`1.0.0`** and tag **`v1.0.0`** (first stable MVP).
+     - **Post-MVP** (after **`1.0.0`** on **`main`**): **`1.N.P`** — **`N` continues** from the last pre-MVP iteration (e.g. if MVP shipped as iteration 9, next post-MVP card is **`1.10.0`**).
+     - **Patch `P`:** bump only on the active iteration branch; reset **`P` to 0** at iteration start (`0.N.0` or `1.N.0`).
+     - When **`Cargo.toml`** exists, set version at **In progress** per rules above.
 
-4. **Reconcile with reality:** **Compare the card body and [`docs/PLAN.md`](docs/PLAN.md) to the current source tree**, **replan** if scope or facts drifted, then **`update_card`** (and update the plan if needed) so both stay accurate (acceptance, files, out-of-scope notes). Preserve **`# Iteration N — …`** once set; if **N** changes mid-flight, **`update_card`** with the new heading.
+4. **Card title and body (no iteration until start):** Bored cards have **no separate title field** — the board shows the **first markdown `#` heading** in **`body`**.
+   - **Todo / backlog:** **Plain descriptive heading only** — e.g. `# Bootstrap monorepo, CI, and test infrastructure`. Do **not** use **`# Iteration N — …`**, do **not** name **`feat/iteration-N-…`** branches, and do **not** write semver in the card body.
+   - **In progress:** Immediately after **`move_card`**, **`update_card`**:
+     1. Set the first `#` line to **`# Iteration N — …`** (one prefix; keep the descriptive title after the em dash).
+     2. Record **Branch:** `feat/iteration-N-short-slug` from **`main`** in the card body.
+     3. Record **Version:** `0.N.0` (pre-MVP — before **`vertical-slice-mvp`** closes) or `1.N.0` (post-MVP — after **`1.0.0`** on **`main`**) in the card body when a workspace exists. **Exception:** MVP completion card merge sets **`1.0.0`** on **`main`** (today **#151**).
+   - **Done:** Keep **`# Iteration N — …`** — N is historical record.
 
-5. **Branches:** After **N** is fixed (**In progress** per §3), implement on **`feat/iteration-N-short-slug`** from **`main`** (default trunk).
-   **Never** create follow-on branches **from** the feature branch — always branch from **`main`**, one iteration branch per card.
+5. **Reconcile with reality:** **Compare the card body and [`docs/PLAN.md`](docs/PLAN.md) to the current source tree**, **replan** if scope or facts drifted, then **`update_card`** (and update the plan if needed) so both stay accurate (acceptance, files, out-of-scope notes). **New MVP iterations** discovered before release → **`create_card`** in TODO (correct order), update **Kanban card map** in the plan — do **not** assume the backbone stays **#145–#151**. Preserve **`# Iteration N — …`** once set; if **N** must change mid-flight (rare), **`update_card`** with the new heading and semver/branch notes.
 
-6. **Ship:** When the **PR is merged**, **move the card to Done** via bored MCP (**`move_card`** into the Done column). Update **`docs/PLAN.md`** todos if the work closes a planned item.
+6. **Branches:** Create **`feat/iteration-N-short-slug`** from **`main`** only **after** **N** is assigned (**In progress** per §4). **Never** branch from another feature branch.
+
+7. **Ship:** When the **PR is merged**, **move the card to Done** via bored MCP (**`move_card`** into the Done column). Update **`docs/PLAN.md`** todos if the work closes a planned item.
 
 ### Bored — MCP only
 
@@ -69,11 +81,27 @@ When this project (or you) uses **Kanban cards** as the task queue:
 
 **PR review agent (bootstrapped):** Woodpecker runs [`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml) on every pull request — Claude PR agent via [claude-pr-agent](https://github.com/vcheesbrough/claude-pr-agent). Repo prompt: [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md). Secrets and setup: [`docs/PR-AGENT.md`](docs/PR-AGENT.md).
 
-**Full CI still deferred:** push build, e2e, Kotlin/Rust CI, deploy compose, and fixture-validation pipelines are **not** in the tree yet (planned: bored-aligned Woodpecker — see **Stack decisions** in the plan).
+**Full push/deploy CI:** lands with **#145** — [`.woodpecker/build.yml`](.woodpecker/build.yml), deploy compose, contract-validation, e2e (see [`docs/PLAN.md`](docs/PLAN.md) **Engineering workflows**). Until that scaffold exists, do **not** add pipeline files unless the user requests that slice.
 
-- Do **not** add `.woodpecker/build.yml`, deploy compose, or CI fixtures unless the user requests that slice.
-- When full CI lands, extend this section with post-push verification obligations (mirror bored `AGENTS.md` §2).
-- Until then, run **local** sanity checks only when you touch code (`cargo check`, `trunk build`, Gradle tasks, etc.) — and only after those trees exist.
+- **E2E policy (locked):** Every **user-facing feature** in an iteration card must have **automated e2e tests in CI** before that card merges — see [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**. Contract/unit tests supplement; they do not replace e2e. No manual-only or runbook-only acceptance for product behaviour.
+- Until push CI exists, run **local** sanity checks when you touch code (`cargo check`, `trunk build`, Gradle tasks, etc.) — only after those trees exist.
+
+### Woodpecker / CI after every push
+
+When this repo has been pushed (or the user asks to verify CI) **and** [`.woodpecker/build.yml`](.woodpecker/build.yml) exists:
+
+1. **Confirm pipeline outcome** for that commit (Woodpecker → GitHub status):
+   - `SHA=$(git rev-parse HEAD)`
+   - `gh api repos/vcheesbrough/v-note/commits/$SHA/status --jq '.state'` → expect **`success`**.
+   - Optional: `gh api repos/vcheesbrough/v-note/commits/$SHA/status --jq '.statuses[] | "\(.context): \(.state)"'`
+
+2. **If anything failed**, reproduce locally per [`docs/DEV.md`](docs/DEV.md) and [`.woodpecker/build.yml`](.woodpecker/build.yml):
+   - `docker build -t v-note:ci-local .` (rustfmt / clippy / tests / builds inside Dockerfile when wired).
+   - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
+
+3. **Fix failures** in-repo, commit (when user asks), push, **poll status again** until green. **All push steps including `e2e` must be green** before declaring an iteration done.
+
+If `gh` is unavailable or status is `pending`, say so once and ask whether to wait or use the Woodpecker UI. Do not invent a result.
 
 ---
 
