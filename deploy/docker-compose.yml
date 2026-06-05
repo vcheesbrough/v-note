@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: v_note
+      POSTGRES_USER: v_note
+      POSTGRES_PASSWORD: v_note
+    volumes:
+      - v-note-db:/var/lib/postgresql/data
+    networks:
+      - v-note-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U v_note -d v_note"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  v-note:
+    image: registry.desync.link/v-note:${V_NOTE_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: ${V_NOTE_CONTAINER_NAME:-v-note-local}
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_VERSION: ${APP_VERSION:-0.1.0}
+      DATABASE_URL: postgres://v_note:v_note@postgres:5432/v_note
+      STATIC_DIR: /app/dist
+      V_NOTE_HOST: ${V_NOTE_HOST:-localhost}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${V_NOTE_PORT:-8443}:443"
+    networks:
+      - v-note-net
+
+volumes:
+  v-note-db:
+    name: ${DB_VOLUME:-v-note-local-db}
+
+networks:
+  v-note-net:
+    name: ${DOCKER_NETWORK:-v-note-net}

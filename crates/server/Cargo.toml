@@ -1,0 +1,21 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
+protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
+tokio.workspace = true
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
