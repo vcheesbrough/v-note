@@ -67,9 +67,24 @@ Exact names frozen in **#145** `deploy/docker-compose.yml`.
 
 ---
 
+## Client–server version lockstep
+
+Server and SPA ship in the **same image** (same **`release`**). **Android is sideloaded** — it can drift after a server-only deploy.
+
+**Operator default (all phases):** deploy image tag **`X.Y.Z`** **and** install the **APK built for the same `X.Y.Z`** (same CI run or git tag). **Rollback:** previous image tag **and** matching APK.
+
+**Runtime enforcement** (see [`PLAN.md`](PLAN.md) **Client–server version alignment**):
+
+| Phase | Rule |
+| --- | --- |
+| **Pre-MVP** (`0.N.P`) | **Strict** — client **`release`** must exactly match server |
+| **MVP+** (`1.N.P`) | **Relaxed** — same **`major.minor`** OK; patch may drift; cross-minor rejected |
+
+Clients send **`X-V-Note-Client-Release`** / **`X-V-Note-Client-Protocol`**; **`protocol`** must always match.
+
 ## Rollback
 
-Redeploy a **previous image tag** via Woodpecker manual deploy with pinned version env (detail in **#152** runbook).
+Redeploy a **previous image tag** via Woodpecker manual deploy with pinned version env (detail in **#152** runbook). **Also reinstall the matching Android APK.**
 
 ---
 
