@@ -10,8 +10,69 @@
 
 - [x] **supply-spec** — MVP product decisions finalized (page library UX, single pen, HWR queue/provider, disconnect UX, deployments, Authentik, etc.). Major gaps closed; proceed to bootstrap.
 - [x] **choose-stack** — Stack locked — see **Stack decisions** table (Rust Axum, PostgreSQL, Leptos/Trunk, Kotlin Compose, PaddleOCR, bored-aligned deploy).
-- [ ] **bootstrap-repo** — Initialize **v-note** monorepo (workspace, crates, frontend, android, deploy, schemas, CI). **Status (2026-06-05):** **minimal bootstrap done** — `LICENSE`, [`AGENTS.md`](../AGENTS.md), [`README.md`](../README.md), [`.gitignore`](../.gitignore), **PR review agent** ([`.woodpecker/pr-review.yml`](../.woodpecker/pr-review.yml), [`docs/PR-AGENT.md`](PR-AGENT.md)); **full scaffold + build/e2e CI explicitly deferred** until more planning.
-- [ ] **vertical-slice-mvp** — Owner-only ink page on Android; strokes on SPA within freshness bar via shared realtime; handwriting search + jump.
+- [ ] **bootstrap-repo** — Initialize **v-note** monorepo (workspace, crates, frontend, android, deploy, schemas, CI). **Card:** [#145](https://bored.desync.link/boards/v-notes). **Status (2026-06-05):** **minimal bootstrap done** — `LICENSE`, [`AGENTS.md`](../AGENTS.md), [`README.md`](../README.md), [`.gitignore`](../.gitignore), **PR review agent** ([`.woodpecker/pr-review.yml`](../.woodpecker/pr-review.yml), [`docs/PR-AGENT.md`](PR-AGENT.md)); **full scaffold + build/e2e CI** tracked on **#145**.
+- [ ] **vertical-slice-mvp** — Owner-only ink page on Android; strokes on SPA within freshness bar via shared realtime; handwriting search + jump. **Cards:** [#146](https://bored.desync.link/boards/v-notes)–[#151](https://bored.desync.link/boards/v-notes) (auth through search — see **Kanban card map**). **Closes on #151** merge.
+
+## Kanban card map
+
+**Board:** [v-notes](https://bored.desync.link/boards/v-notes) · **Workflow:** [`AGENTS.md`](../AGENTS.md) §1 · **Updated:** 2026-06-05 (post-MVP backlog **#152–#169**)
+
+Iteration numbers (`N`) and semver are assigned **when a card moves to In Progress** — not shown here. **Pre-MVP** (until **`vertical-slice-mvp`** closes): **`0.N.P`**; **MVP release** (today **#151** merge): **`1.0.0`**; **post-MVP** (after **`1.0.0`** on **`main`**): **`1.N.P`**. **MVP backbone below is the current plan, not a fixed count** — additional iterations may be inserted in TODO before MVP; update this map when cards are added. See **Engineering workflows** → **Versioning**. TODO column order = execution order (**#145** first, then ascending). **Every card:** shipped features require **CI e2e** before merge — see **E2E testing**.
+
+### User story backbone (MVP)
+
+| Exec order | Backbone step | Card | Title (board heading) |
+| --- | --- | --- | --- |
+| 1 | *(foundation)* | **#145** | Bootstrap monorepo, CI, and test infrastructure |
+| 2 | **Sign in** | **#146** | MVP authentication (Authentik OIDC) |
+| 3 | **Browse pages** | **#147** | Owner page library |
+| 4 | **Capture ink** | **#148** | Android ink capture |
+| 5 | **View ink live** | **#149** | SPA live ink viewer |
+| 6 | *(sync hardening)* | **#150** | Disconnect and sync error UX |
+| 7 | **Find ink** | **#151** | HWR worker and handwriting search |
+
+### MVP behaviours → cards
+
+| Plan behaviour / spec cluster | Card | Notes |
+| --- | --- | --- |
+| Monorepo scaffold, three runnable artifacts, Woodpecker push CI, e2e health smoke, contract fixtures, deploy pipeline **skeleton** | **#145** | Closes `bootstrap-repo`; worker deferred |
+| Authentik blueprint, OIDC (SPA + Android), JWT middleware, token lifetimes, logout, App Links, `assetlinks.json` | **#146** | Identity only — no page/ink data |
+| Flat page library, recent-first, hard delete, owner-only page REST | **#147** | No ink yet |
+| Single pen (`#006400`, 2px), infinite canvas, WSS + JSON batches, `stroke_batches`, edit lease, gap fill | **#148** | Android capture only; no SPA replay |
+| SPA read-only replay, realtime ticket, pan/zoom, cross-device freshness (happy path) | **#149** | Core live-view path; MVP completes on **#151** (disconnect UX + search still outstanding) |
+| Sync/error transparency, disconnect banner, failed-commit retry, no stale cache (Android + SPA) | **#150** | Cross-cutting |
+| `crates/worker`, PaddleOCR sidecar, `hwr_jobs` queue, 5s debounce, Postgres FTS, search UI + jump | **#151** | Closes `vertical-slice-mvp` |
+
+### Post-MVP backlog (after #151)
+
+Lightweight cards — **spec TBD** when picked up. Suggested order after MVP; reorder on board as needed.
+
+| Suggested order | Card | Title | Plan areas (summary) |
+| --- | --- | --- | --- |
+| 1 | **#152** | Ops hardening and live deploy smoke | Live deploy smoke, TLS/Authentik suites, CSP, runbooks |
+| 2 | **#165** | OpenAPI and REST contract surface | utoipa emit + CI beyond fixture validation |
+| 3 | **#154** | Latency instrumentation and freshness CI | p95 probes, automated Android→SPA timing |
+| 4 | **#153** | Export and backup bundles | Sovereign export UX, versioned restore |
+| 5 | **#155** | Pen tools and eraser | Tool picker, pressure/tilt, eraser UI |
+| 6 | **#156** | Page library enhancements | Archive/trash, clone, tags, pin/reorder |
+| 7 | **#157** | Document ingestion and underlays | PDF/images, tiles, dual-source search |
+| 8 | **#158** | Sharing and collaboration | ACL, invites, multi-editor, presence |
+| 9 | **#159** | Android offline mode | Outbox, zero edit loss reconciliation |
+| 10 | **#160** | Browser stylus capture spike | Pointer Events evaluation |
+| 11 | **#162** | Alternate HWR and search backends | Cloud OCR, Meilisearch/pgvector, brokers |
+| 12 | **#163** | Wire protocol and transport evolution | Binary WSS, SSE+POST fallback |
+| 13 | **#161** | Public perimeter and split DNS | Internet exposure beyond LAN/mesh |
+| 14 | **#164** | iOS client | Universal Links, native iOS (speculative) |
+| 15 | **#166** | Back-channel logout and token revocation | OIDC back-channel / instant session kill |
+| 16 | **#167** | In-app mesh and VPN helpers | Optional NetBird/VPN UI (speculative) |
+| 17 | **#168** | Third staging environment | Optional third env beyond dev+prod |
+| 18 | **#169** | Notes app import spike | Samsung Notes / Google Keep migration (stretch) |
+
+### Folded into other cards
+
+| Plan area | Card |
+| --- | --- |
+| **Provider churn backfill ops** | **#162** Alternate HWR and search backends |
 
 ## Decisions made
 
@@ -72,7 +133,7 @@
 | **dev** | `https://v-notes-dev.desync.link` | `v-note-dev` | `v-note-dev-db` | `v-note:dev:access` |
 | **prod** | `https://v-notes.desync.link` | `v-note` | `v-note-prod-db` | `v-note:prod:access` |
 
-**Shared infra (both envs):** **Traefik on mini** (`proxy-backend`, `certresolver=myresolver`), **Authentik** at **`https://auth.desync.link`**, image registry **`registry.desync.link`**. Dev images tagged **`MAJOR.MINOR.PATCH-<sha>`**; prod **`MAJOR.MINOR.PATCH`** + git release tag on prod deploy (same versioning story as bored). **Post-MVP:** no third “staging” env unless ops explicitly add one.
+**Shared infra (both envs):** **Traefik on mini** (`proxy-backend`, `certresolver=myresolver`), **Authentik** at **`https://auth.desync.link`**, image registry **`registry.desync.link`**. Dev images tagged **`MAJOR.MINOR.PATCH-<sha>`** (pre-MVP: **`0.N.P-<sha>`**); prod **`MAJOR.MINOR.PATCH`** + git release tag on prod deploy — first prod MVP tag **`v1.0.0`** at **#151** (see **Versioning**). **Post-MVP:** no third “staging” env unless ops explicitly add one (**#168**).
 
 ## Stack decisions
 
@@ -98,6 +159,8 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
 | **Contracts** | **`schemas/`** + **`contracts/fixtures/`** + **`crates/protocol`** | JSON Schema (WSS, strokes, REST); CI validates fixtures on server + Android + SPA; **utoipa** OpenAPI; Pact deferred |
 | **HWR v1 provider** | **PaddleOCR** (self-hosted) | **Separate compose service** on mini (sidecar); **dev/prod image tags**; pluggable **provider trait**; internal network from API/worker |
 | **HWR worker** | **Rust worker** (queue + provider abstractions) | Claims jobs via **queue provider trait** (Postgres impl); **rasterizes** world-space ink regions; calls **recognition provider trait** (PaddleOCR v1); 5s idle debounce enqueue; English-only; retry + **re-index on erase** |
+| **E2E testing** | **Full feature coverage in CI** | Every shipped user-facing feature has automated e2e tests before its card merges — see **E2E testing (chosen)**; bored-aligned compose + Playwright + Android instrumented tests; contract/unit tests supplement, never substitute |
+| **Versioning** | **`0.N.P` pre-MVP → `1.0.0` → `1.N.P`** | Pre-MVP until **`vertical-slice-mvp`** closes: `0.N.P`; MVP completion merge (today **#151**): `1.0.0` + `v1.0.0`; post-MVP: `1.N.P` with **global `N` continuing** — count not fixed — **Engineering workflows** |
 | **Deploy / CI** | **Bored-aligned** | Woodpecker push build + e2e; manual `dev\|prod` deploy to mini docker socket; `deploy/docker-compose.yml`; Authentik blueprint before roll-out; `registry.desync.link` images |
 | **Edge / TLS** | **Traefik on mini** | Wildcard cert; `v-notes.desync.link` / `v-notes-dev.desync.link`; no per-service Caddy for MVP |
 | **Identity** | **Authentik** | `v-note-browser-{dev,prod}`, `v-note-android-{dev,prod}`; scopes `v-note:dev:access` / `v-note:prod:access` |
@@ -108,7 +171,9 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
 **Database & ink persistence (confirmed after exploration):** User explored **SurrealDB (embedded)**, **SQLite**, and **document/NoSQL** options (including whether JSON-shaped ink batches justify a document DB). **PostgreSQL reaffirmed for MVP.** Separate **compose Postgres service per env** with bored-aligned volumes **`v-note-dev-db`** / **`v-note-prod-db`**. **Canonical ink** lands in append-only **`stroke_batches`** rows with **JSONB** payloads mirroring **coalesced wire batches**—**not** normalized `(x, y, t)` point tables; optional **page checkpoints** (compact snapshots) may arrive later for gap-fill/replay, not v1 schema requirement. **Search** uses **PostgreSQL FTS** on **derived HWR/OCR text** (owner-scoped index rows)—**Meilisearch, pgvector, and standalone vector DBs stay deferred**. **HWR orchestration (queue, chosen):** **Postgres-backed job table** (`hwr_jobs`: status, attempts, scheduling) with workers claiming via **`FOR UPDATE SKIP LOCKED`**; **pluggable queue provider trait** + config (Postgres first; **RabbitMQ/NATS/Redis** as future alternates); workers and API use the **queue abstraction** so domain job semantics (**5s debounce enqueue**, **retry**, **re-index on erase**) survive a backend swap. User also **explored Kafka and broker-style queues** at MVP scale and **rejected** them for v1—**no Kafka, no external broker** on the MVP hot path. **Explicitly not chosen for MVP:** Surreal embedded, SQLite, Mongo/document DB—the JSONB batch document shape is **storage convenience inside Postgres**, not grounds to pick NoSQL.
 
 - **Repository layout (chosen):** **Monorepo** — **one `v-note` git repository** holds **server** (Rust/Axum), **SPA** (Leptos/Trunk), **native Android** (Compose), **`deploy/`** (compose, Traefik labels, Woodpecker hooks), **Authentik blueprint**, **e2e**, **CI**, and **shared API/contracts**. **Not** multi-repo.
-- **Client alignment & contract testing (chosen):** **Schema-first** layout — **`schemas/`** holds **JSON Schema** for **WSS envelopes**, **stroke batches**, and **REST DTOs**; **`contracts/fixtures/`** holds **golden JSON** examples consumed by every client. **`crates/protocol`** in the **Rust workspace** defines **serde types** aligned to those schemas; **Leptos SPA imports the same crate**; **Android** stays aligned via **codegen** and/or **fixture unit tests** against the same schemas (no drift-by-hand DTOs). **CI (every PR):** all fixtures **validate** on **server + Android + SPA**. **REST:** **OpenAPI** emitted from the server (**utoipa**) plus **contract validation** against fixtures/schemas. **WSS:** **JSON Schema** + **server integration tests** with **scripted connect/replay** sequences; **Pact** deferred unless consumer-driven contracts become necessary later. **Replay sanity (separate from wire contracts):** one golden **page fixture** for **bbox/point-count** checks (and optional **render sanity**)—not part of the wire-contract suite. **Explicit non-goal:** **no shared cross-platform UI/render library** — **two canvas implementations** (Compose + Canvas2D), **one protocol spec**.
+- **Versioning (chosen):** **Pre-MVP** (until **`vertical-slice-mvp`** closes): semver **`0.N.P`** (`N` = global iteration when work starts — **not** tied to a fixed card count). **MVP completion merge** (today **#151**) → **`1.0.0`** (git tag **`v1.0.0`**). **Post-MVP:** **`1.N.P`** with **`N` continuing** from pre-MVP. Additional MVP iterations may be discovered and inserted before release — see **Engineering workflows** → **Versioning**.
+- **E2E testing (chosen):** **Every shipped user-facing feature is covered by automated e2e tests** before its iteration card merges. **Contract/fixture validation and unit tests supplement e2e; they do not replace it.** See **E2E testing** section for harness layout and per-surface rules. **No manual-only acceptance** for product behaviour; **no “runbook instead of CI”** escape hatches.
+- **Client alignment & contract testing (chosen):** **Schema-first** layout — **`schemas/`** holds **JSON Schema** for **WSS envelopes**, **stroke batches**, and **REST DTOs**; **`contracts/fixtures/`** holds **golden JSON** examples consumed by every client. **`crates/protocol`** in the **Rust workspace** defines **serde types** aligned to those schemas; **Leptos SPA imports the same crate**; **Android** stays aligned via **codegen** and/or **fixture unit tests** against the same schemas (no drift-by-hand DTOs). **CI (every PR):** all fixtures **validate** on **server + Android + SPA** **in addition to** e2e coverage per feature. **REST:** **OpenAPI** emitted from the server (**utoipa**) plus **contract validation** against fixtures/schemas. **WSS:** **JSON Schema** + server integration tests with scripted connect/replay sequences (**part of** e2e for realtime paths); **Pact** deferred unless consumer-driven contracts become necessary later. **Replay sanity (separate from wire contracts):** one golden **page fixture** for **bbox/point-count** checks (and optional **render sanity**)—not part of the wire-contract suite. **Explicit non-goal:** **no shared cross-platform UI/render library** — **two canvas implementations** (Compose + Canvas2D), **one protocol spec**.
 - **Server stack (chosen):** **Rust + Axum** — API, owner auth, edit leases, page CRUD, **`stroke_batches`** append, **HWR job enqueue** (via **queue provider trait**; Postgres table impl), search API; **PostgreSQL** (separate compose service per env, **`v-note-dev-db`** / **`v-note-prod-db`** volumes) via sqlx (or equivalent) with migrations; **JSONB** coalesced batch payloads (not normalized point rows); **`hwr_jobs`** + **`SKIP LOCKED`** workers; realtime on **WSS** (tungstenite/axum integration). **Not .NET** — SignalR / ASP.NET out of scope. **Not Surreal/SQLite/Mongo/Kafka/external broker for MVP** — confirmed after DB + queue exploration (see **Database & ink persistence**, **HWR / OCR job queue**).
 - **SPA stack (chosen):** **Leptos + Trunk** — read-only infinite canvas replay, search UI, pan/zoom; **Canvas2D** (web-sys); imports **`crates/protocol`** for wire types.
 - **Android stack (chosen):** **Jetpack Compose** ink layer; **OkHttp** for REST + **WebSocket**; **`dev`/`prod` flavors** for hostname, OIDC client, App Links. **Not** Views/XML, **not** RN/Flutter.
@@ -121,6 +186,116 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
   - **Auth on the live path:** **Bearer access token** on WebSocket upgrade where practical (**Android**). **SPA:** **httpOnly session cookie** may not attach cleanly to WS—mint a **short-lived realtime ticket** via REST after cookie auth (bored-aligned session model otherwise); ticket is **narrow-scoped** (owner + session, short TTL) and consumed on upgrade.
   - **Reconnect / gap recovery:** Client tracks **`last_acked_seq`** (monotonic per-page sequence). On reconnect: **gap fill** from `last_acked_seq + 1` when the server still holds the tail; if gap is too large or session state is stale, **snapshot + tail** (full page stroke snapshot or compact checkpoint, then live tail). Aligns with **Reconnection + gaps** hook below—no durable Android outbox in MVP.
   - **Fallback (not v1):** **Tier B — SSE + POST** (server-push subscribe via SSE, client commits via POST) is **documented only** as a **degraded/fallback** path for environments where WSS is blocked or painful—**not shipped as the MVP hot path**. v1 implements **WSS end-to-end** on server, Android, and SPA.
+
+## E2E testing
+
+**Policy (chosen):** Every **user-facing feature** shipped in an iteration card has **automated e2e coverage in CI** before that card merges. A feature is not done without its e2e spec(s) green in Woodpecker.
+
+**What counts as e2e:** Exercises the **running stack** (or client against the running stack) through **public behaviour** — UI, API, WSS — not internal units in isolation. Contract/fixture validation, `cargo test`, and JVM unit tests **support** e2e but **do not satisfy** this bar alone.
+
+### Harness (bored-aligned; lands in **#145**)
+
+| Piece | Role |
+| --- | --- |
+| **`e2e/docker-compose.test.yml`** | Mock OIDC + Postgres + server + SPA (+ worker/PaddleOCR when needed); `TEST_IMAGE` from fresh CI build |
+| **`e2e/` Playwright** | SPA flows, REST probes, multi-context realtime (two browsers on same page), failure injection (stop service, 5xx) |
+| **`e2e/global-setup.ts`** | Wait for `/health`, seed auth cookie/bearer (bored pattern) |
+| **`.woodpecker/build.yml` `e2e` step** | `docker compose … up --exit-code-from playwright` (+ Android job when instrumented tests exist) |
+| **`android/…/androidTest`** | **Compose UI / instrumented e2e** for native flows Playwright cannot drive (ink capture, lease banner, disconnect UX, search jump) — runs on **emulator in CI** |
+
+Reference implementation: **[bored `e2e/`](https://github.com/vcheesbrough/bored/tree/main/e2e)** (mock-oauth2-server, Playwright, `sse.spec.ts` two-context pattern).
+
+### Per-surface rules
+
+| Surface | E2e vehicle | Examples |
+| --- | --- | --- |
+| **SPA** | Playwright | Login shell, page library, ink replay, search UI, disconnect banners |
+| **REST / auth** | Playwright `request` + rejection contexts | `/api/me`, owner-only pages, 401/403 |
+| **WSS / realtime** | Playwright (two contexts) **and/or** scripted client in `e2e/` or server integration tests wired into the **same compose gate** | Commit stroke → sibling session sees delta; gap fill on reconnect |
+| **Android native** | **`connectedAndroidTest`** on emulator (CI) | Draw/commit ink, lease block, token refresh, offline banners — use **test doubles** for stylus input where hardware is unavailable |
+| **Worker / HWR** | Compose stack with **mock recognition provider** + e2e asserting search UI/API after debounce | Real PaddleOCR optional in dev; CI uses mock |
+
+### Per-card obligation (MVP backbone)
+
+Each **MVP backbone** iteration card (currently **#145–#151**; list may grow) adds or extends e2e specs for **every behaviour in that card's acceptance criteria**. Post-MVP cards follow the same rule when picked up.
+
+| Card | E2e must cover |
+| --- | --- |
+| **#145** | Health smoke, SPA load, harness extensibility (folders + CI job wired) |
+| **#146** | Full auth happy path + 401/403 rejection (SPA + API) |
+| **#147** | Page CRUD on SPA; owner isolation; Android page library smoke |
+| **#148** | Android ink commit + persist; edit-lease block; WSS gap fill |
+| **#149** | Cross-client live ink (Android or WSS helper → SPA tail); non-owner subscribe denied |
+| **#150** | Server stop / failed commit → banners + blocked UI on **both** clients |
+| **#151** | Search find + jump after mock HWR; re-index after erase; owner isolation |
+
+**Flaky tests:** Fix or quarantine with a tracked issue — **not** dropped in favour of manual QA.
+
+**Live deploy smoke (#152):** Complements PR e2e (real Authentik/TLS on mini); does not replace per-feature PR e2e.
+
+## Engineering workflows
+
+Locked engineering/ops conventions — product behaviour stays in **Decisions made** and Kanban cards; this section is **how we build, verify, ship, and run**.
+
+### Versioning (chosen)
+
+| Phase | Trigger | Workspace semver | Git tag (prod deploy) |
+| --- | --- | --- | --- |
+| **Pre-MVP** | Any iteration before **`vertical-slice-mvp`** closes | **`0.N.P`** | Dev images only (`0.N.P-<sha>`); no prod MVP tag yet |
+| **MVP release** | MVP completion card merged (today **#151**) | **`1.0.0`** on **`main`** | **`v1.0.0`** — closes `vertical-slice-mvp` |
+| **Post-MVP** | Iterations after **`1.0.0`** on **`main`** | **`1.N.P`** | Prod **`v1.N.P`** (or patch) per bored `compute-version` |
+
+- **Iteration `N`** (board/branch) is **global and sequential** — assigned when work starts; **not** assumed to equal card count or a fixed pre-MVP total.
+- **MVP backbone is open-ended:** cards **#145–#151** are the **current** walking-skeleton slice; insert new TODO cards (and update this plan) when scope splits or new work is discovered — semver **`N`** simply increments.
+- **Patch `P`:** bump only on the active **`feat/iteration-N-…`** branch; start each iteration at **`P=0`**.
+- **CHANGELOG:** optional per-iteration notes in PR description; formal **`CHANGELOG.md`** deferred until post-**#151** if needed.
+
+### CI — push pipeline (lands **#145**)
+
+Woodpecker [`.woodpecker/build.yml`](../.woodpecker/build.yml) on every **push** to **`main`** and feature branches (bored-aligned). Gates:
+
+| Step | What runs |
+| --- | --- |
+| **build** | Docker image with **rustfmt**, **clippy**, **`cargo test`**; **Trunk** SPA build; **Gradle** `assembleDevDebug`; tag `registry.desync.link/v-note:$CI_COMMIT_SHA` |
+| **contract-validation** | Golden fixtures vs **`schemas/`** on server, SPA, Android |
+| **e2e** | `e2e/docker-compose.test.yml` — Playwright (+ Android emulator job when instrumented tests exist) |
+
+**PRs:** [`.woodpecker/pr-review.yml`](../.woodpecker/pr-review.yml) Claude agent (already bootstrapped). **Agents:** poll GitHub commit status after push — [`AGENTS.md`](../AGENTS.md) §3.
+
+### Local development
+
+See **[`docs/DEV.md`](DEV.md)** — prerequisites, **`just`** / Makefile targets, compose vs native run paths, local e2e reproduction.
+
+### Database migrations
+
+- Migrations in **`crates/server/migrations/`** (sqlx).
+- **Forward-only** in dev and prod — no `reset` on mini DB volumes.
+- Destructive DDL requires explicit review in PR.
+- Local/dev: `sqlx migrate run` via compose or `just migrate`.
+
+### Deploy & release
+
+See **[`docs/DEPLOY.md`](DEPLOY.md)** — Woodpecker manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`), OpenBao secrets, Authentik blueprint apply, compose roll-out. **Prod** only from **`main`**. **Rollback:** redeploy previous image tag (document in **#152**).
+
+### Android distribution (MVP)
+
+- **Sideload** to Tab S8 Ultra / Note 9 — no Play Store in MVP.
+- **`dev`** flavor → **`v-notes-dev.desync.link`**; **`prod`** flavor → **`v-notes.desync.link`**.
+- **Release keystore** lives outside repo (OpenBao / operator machine); **debug** keystore for dev/CI only.
+- CI builds **`devDebug`**; **`prodRelease`** signing wired before prod device rollout (**#152** or first prod deploy).
+
+### Observability (MVP baseline)
+
+- **Structured logging** (JSON or key=value) on server + worker; **correlation id** on failed commits / sync errors (optional in UI).
+- **`GET /health`** — process up; **`GET /ready`** (or health subcheck) — Postgres reachable when wired.
+- **Metrics/tracing** (Prometheus, Grafana, Loki on mini) — **#152** ops hardening; not required for walking skeleton.
+
+### Dependency & security hygiene
+
+- **Rust:** `cargo audit` (or `cargo deny`) in CI when **#145** lands — warn-only acceptable initially.
+- **Android:** Gradle dependency check baseline in CI.
+- **Images:** pin by digest in compose where practical (PR review agent flags drift).
+- **`SECURITY.md`:** deferred until public release.
 
 ## Near-real-time sync — architectural hooks
 
@@ -198,7 +373,8 @@ Nothing here commits to Rust vs Go vs Node vs other **non-.NET** server shapes (
 - **Sync / error UX (decided):** **Android disconnect (chosen):** when the client cannot reach the server, **block input + disconnected banner**—no drawing/editing until connectivity restores. **Failed commit while connected (chosen):** transport/auth may be up but mutation rejected—**block input**, **background retry**, **unblock on success**; banner reflects retry vs disconnect when useful (see **Failed commit while connected**). **Stale read-only snapshot (chosen):** **no**—always require **live server data** in MVP; show **loading/error/blocked** until the live path is healthy; **no** cached/stale read-only page views on reconnect or degraded sync (see **Stale read-only snapshot**). **SPA disconnect/error UX (chosen):** **read-only = no ink capture**, not offline stale viewing—**same blocking trilogy** as Android: disconnect → **banner + blocked UI**; sync/server errors → **banner + blocked UI** (retry vs disconnect when useful); **no stale snapshot**—require live server data (see **SPA disconnect/error UX**).
 - **LAN/mesh deployment details (decided):** **Perimeter**, **no split DNS**, **TLS / termination**, **NetBird / mesh connectivity**, and **two-env deployment** are decided (see **Network perimeter**, **DNS**, **Canonical hostname / DNS**, **TLS / termination**, **NetBird / mesh connectivity**, **Deployments / CI-dev access**): **prod** **`v-notes.desync.link`**, **dev** **`v-notes-dev.desync.link`**, both **A → `mini`**, **HTTPS via existing Traefik + wildcard cert on mini**; **Woodpecker manual deploy** to dev/prod on mini (bored-aligned); **no in-app NetBird**—user-managed mesh/LAN outside the app; unreachable server handled by **disconnect UX**. **Deploy stack decided** (bored mirror). Still nail in **`bootstrap-repo`**: compose/env var names (`V_NOTE_HOST`, `DB_VOLUME`, etc.), OpenBao secret keys, exact service names in `deploy/docker-compose.yml`.
 - **First wire protocol (decided):** **WSS + JSON coalesced stroke batches** on the **same Traefik host** as HTTPS—see **Wire protocol v1 (chosen)**. Reconnect via **`last_acked_seq`** gap fill or **snapshot + tail**; **binary encoding deferred**; **Tier B (SSE+POST)** fallback-only, not v1. **Expect the encoding/transport may be replaced**—keep domain tests on the **interface**, adapter tests on WSS framing/auth/reconnect, so a swap is a **bounded migration**, not a rewrite of ink/search/auth.
-- **Client alignment & contract testing (decided):** **Schema-first monorepo** — **`schemas/`** + **`contracts/fixtures/`** + **`crates/protocol`**; **CI** validates fixtures on **server + Android + SPA** every PR; **REST** via **OpenAPI (utoipa)** + contract checks; **WSS** via **JSON Schema** + scripted server integration tests (**Pact later** if needed); **golden page replay** fixture for bbox/point-count (optional render sanity) **separate from wire contracts**; **no shared cross-platform canvas library** — see **Client alignment & contract testing (chosen)** under **Stack decisions**.
+- **E2E coverage (decided):** **Every shipped feature has automated e2e tests in CI** before merge — Playwright for SPA/API/cross-browser realtime; **Android `connectedAndroidTest`** on emulator for native ink and banners; compose-stack gate on every push. Contract/unit tests **supplement only**. See **E2E testing**.
+- **Client alignment & contract testing (decided):** **Schema-first monorepo** — **`schemas/`** + **`contracts/fixtures/`** + **`crates/protocol`**; **CI** validates fixtures on **server + Android + SPA** every PR **plus** per-feature e2e; **REST** via **OpenAPI (utoipa)** + contract checks; **WSS** via **JSON Schema** + scripted tests in the e2e/compose gate; **golden page replay** fixture for bbox/point-count (optional render sanity) **separate from wire contracts**; **no shared cross-platform canvas library** — see **Client alignment & contract testing (chosen)** under **Stack decisions**.
 - **Authentik client matrix (decided):** **Android redirect pattern** — **App Links** HTTPS per env (**prod** **`/auth/mobile/callback`** on **`v-notes.desync.link`**, **dev** on **`v-notes-dev.desync.link`**—see **Authentik / Android OAuth (MVP, chosen)**); **no backend handler** at callback for MVP; **`/.well-known/assetlinks.json`** via Traefik per hostname. **Env split** — separate Authentik providers/applications for **dev** and **prod** with **access-only** scopes **`v-note:dev:access`** / **`v-note:prod:access`** (bored scope-only model—see **Authentik OIDC scopes/claims (MVP, chosen)**); blueprint applied on deploy. **Web SPA** uses **`/auth/callback`** on the matching env hostname (server-side exchange, bored-aligned). **OIDC scopes/claims decided** — **`openid profile email`** (+ **`offline_access`** on Android) + env access scope only; **no custom claims** beyond Authentik defaults. **Token lifetimes decided** — **1h access / 30d refresh / Authentik refresh rotation** on Android (`offline_access`); SPA **access-only cookie, no refresh** (see **Authentik token lifetimes**). **Logout/revoke decided (minimal)** — SPA **`/auth/logout` + end-session**; Android **local wipe + optional end-session in browser** (see **Authentik logout / revoke UX**). **Blueprint layout** (file paths, OpenBao secret key names) still to nail in **`bootstrap-repo`**—not an open product decision.
 - **Non-goals for MVP:** Samsung/Google cloning; unmanaged bulk OCR dumps; **pen presets / tool picker**; **Android offline capture / durable local outbox**; **in-app NetBird / VPN connect / mesh auto-start**; anonymous links; browser pen capture; cross-platform mobile capture; notebook hierarchies; per-page ACL/sharing/collab; document ingestion; **split DNS / split-horizon DNS**; public-internet API exposure; **SSH/jump-box deploy** (use bored-style Woodpecker + docker socket instead); **Kafka / external message broker** for HWR jobs (Postgres queue sufficient at MVP scale); **concurrent multi-editor merge**, **LWW silent merge**, **conflict-resolution UI**; **shared cross-platform UI/render library** (two canvas implementations, one protocol spec—see **Client alignment & contract testing**). Core MVP: **always-online native Kotlin Android**, **one hardcoded pen**, owner-only ink pages, **single active editor** per page (edit lease), **online multi-device** sync/view over user-managed LAN/mesh at **`v-notes.desync.link`** (prod) / **`v-notes-dev.desync.link`** (dev), handwriting search, Authentik, SPA read/replay (same freshness bar).
 
@@ -220,12 +396,15 @@ Nothing here commits to Rust vs Go vs Node vs other **non-.NET** server shapes (
 
 ## Later horizons (explicitly backlog / speculative)
 
-- **Document ingestion & annotation:** Attach **PDF + raster images** (Office stretch), **placed underlays**, tile compositor, **dual-source search** (handwriting + embedded/printed text), export bundles with originals—**all post-MVP**. MVP is **ink-only** pages.
-- **Public / split-horizon access:** Expose the stack on the **open Internet** (beyond LAN/mesh), **split DNS**, off-LAN use without mesh—**post-MVP** if ever needed. MVP already uses **Traefik + wildcard TLS on mini** for **`https://v-notes.desync.link`** and **`https://v-notes-dev.desync.link`** on **private paths only**; post-MVP is a **perimeter** change, not replacing the Traefik termination model or the **dev/prod pair**.
-- **Per-page ACL & collaboration:** Invitation-based sharing, viewer/editor roles, revocable grants, cross-user realtime merge, presence/awareness, **follow-me** viewport sync, **concurrent multi-editor merge** (beyond single active editor)—**all post-MVP**. MVP auth stays **owner-only** with **one editor per page**; schema/API should not foreclose ACL or shared editing later.
-- **Android offline mode:** Durable local outbox, capture while disconnected, queue-and-replay, **zero edit loss** across flaky connectivity—**post-MVP** (MVP Android is **always-online**).
-- **Pen presets & tools:** Highlighter, marker, eraser, colour/width picker, **pressure/tilt curves**, multiple `tool_kind` profiles—**post-MVP**. MVP uses **one hardcoded dark green pen** (`#006400`) at **fixed 2px width** only.
-- **Browser stylus capture backlog:** Evaluate Pointer Events on desktop/tablet Chrome only if warranted—**native Kotlin Android remains the capture client** unless product scope explicitly changes.
+Kanban cards exist for most items below — see **Post-MVP backlog** in **Kanban card map**. Spec detail deferred until a card is picked up.
+
+- **Document ingestion & annotation:** Attach **PDF + raster images** (Office stretch), **placed underlays**, tile compositor, **dual-source search** (handwriting + embedded/printed text), export bundles with originals—**post-MVP** · card **#157**.
+- **Public / split-horizon access:** Expose the stack on the **open Internet** (beyond LAN/mesh), **split DNS**, off-LAN use without mesh—**post-MVP** if ever needed · card **#161**. MVP already uses **Traefik + wildcard TLS on mini** for **`https://v-notes.desync.link`** and **`https://v-notes-dev.desync.link`** on **private paths only**; post-MVP is a **perimeter** change, not replacing the Traefik termination model or the **dev/prod pair**.
+- **Per-page ACL & collaboration:** Invitation-based sharing, viewer/editor roles, revocable grants, cross-user realtime merge, presence/awareness, **follow-me** viewport sync, **concurrent multi-editor merge** (beyond single active editor)—**post-MVP** · card **#158**. MVP auth stays **owner-only** with **one editor per page**; schema/API should not foreclose ACL or shared editing later.
+- **Android offline mode:** Durable local outbox, capture while disconnected, queue-and-replay, **zero edit loss** across flaky connectivity—**post-MVP** · card **#159** (MVP Android is **always-online**).
+- **Pen presets & tools:** Highlighter, marker, eraser, colour/width picker, **pressure/tilt curves**, multiple `tool_kind` profiles—**post-MVP** · card **#155**. MVP uses **one hardcoded dark green pen** (`#006400`) at **fixed 2px width** only.
+- **Browser stylus capture backlog:** Evaluate Pointer Events on desktop/tablet Chrome only if warranted—card **#160** · **native Kotlin Android remains the capture client** unless product scope explicitly changes.
+- **iOS client:** Universal Links, native capture/viewer—card **#164** (speculative).
 
 ## Recommended flow after spec lands
 
@@ -248,14 +427,14 @@ flowchart LR
 
 
 1. **Stack (done):** **Rust Axum** server + **PostgreSQL** + **Postgres FTS** + **Postgres HWR job queue** (pluggable queue trait); **Leptos/Trunk** SPA + **Canvas2D**; **Compose** Android + **OkHttp**; **HWR worker** + **PaddleOCR** sidecar; bored-aligned **deploy**. **Contract-first:** **`schemas/`**, **`contracts/fixtures/`**, **`crates/protocol`**; **OpenAPI + JSON Schema + golden fixtures** in CI; **two canvases, one spec**. **Defer doc ingest/renderer, Kafka/broker queue** to post-MVP.
-2. **Bootstrap repo:** **Minimal hygiene done** (2026-06-05): **`LICENSE`**, **`AGENTS.md`**, **`README`**, **`.gitignore`**, **PR review agent** (`.woodpecker/pr-review.yml` + prompt + `docs/PR-AGENT.md`). **Remaining:** new **`v-note`** monorepo scaffold — **`crates/server`**, **`crates/protocol`**, **`frontend/`** (Leptos), **`android/`**, **`deploy/`**, **`authentik/`**, **`schemas/`**, **`contracts/fixtures/`**, **e2e**, **Woodpecker build/e2e/deploy**; README badge, crate/package license metadata; formatter/lints; **CI fixture-validation stub**; optional golden **page replay** fixture. **Full build/e2e/deploy CI deferred** until user reopens that slice.
-3. **Ink slice first:** Prove **world-space ink** in the **native Kotlin app** on infinite canvas, then wire **handwriting search ingestion** before expanding library/navigation chrome.
-4. **Parallel clients:** Ship **native Kotlin capture** on Tab + Note 9 while wiring the **SPA viewer** against the same API—reuse checkpoints + optional realtime tail.
-5. **Hardening:** Backup/restore rehearsal (ink + search index); TLS + Authentik suites on **`v-notes.desync.link`** and **`v-notes-dev.desync.link`**; **Woodpecker deploy-dev/prod** smoke (bored-aligned); **realtime** owner-auth regressions (per transport adapter); **search still cross-tenant safe**; SPA CSP; **mesh/LAN connectivity** runbooks (user-managed NetBird/LAN up **outside app**, wrong-Wi-Fi, env hostname unreachable → disconnect UX).
+2. **Bootstrap repo:** **Card #145.** Minimal hygiene done (2026-06-05): **`LICENSE`**, **`AGENTS.md`**, **`README`**, **`.gitignore`**, **PR review agent**. **Remaining on #145:** monorepo scaffold, three runnable artifacts, Woodpecker build/e2e/deploy skeleton, contract CI — see **Kanban card map**.
+3. **Ink slice first:** **Cards #147–#151** (user story backbone). Page library → Android capture → SPA viewer → disconnect UX → HWR search.
+4. **Parallel clients:** **#148** (Android ink) then **#149** (SPA viewer) — sequential cards, not parallel branches.
+5. **Hardening:** **Card #152** (post-MVP). Live deploy smoke, TLS/Authentik suites, CSP, runbooks, observability hardening — after MVP **`1.0.0`**.
 
 `[bored](/home/vincent/dev/bored)` [`.woodpecker/build.yml`](/home/vincent/dev/bored/.woodpecker/build.yml), [`deploy/docker-compose.yml`](/home/vincent/dev/bored/deploy/docker-compose.yml), and [`authentik/blueprint.yaml`](/home/vincent/dev/bored/authentik/blueprint.yaml) are the **reference for dev/prod CI, Traefik labels, and Authentik blueprint**—adapt naming to v-note; **omit `access_token_validity` / `refresh_token_validity` overrides** (inherit Authentik **1h / 30d** defaults, same as bored). Browser auth/logout patterns: [`backend/src/routes/auth.rs`](/home/vincent/dev/bored/backend/src/routes/auth.rs). **v-note server** is **Rust/Axum** (bored-aligned patterns, separate repo).
 
-**[`AGENTS.md`](../AGENTS.md)** governs agent workflow in this repo (Kanban on **[v-notes board](https://bored.desync.link/boards/v-notes)**; PR agent bootstrapped; full CI deferred).
+**[`AGENTS.md`](../AGENTS.md)** governs agent workflow in this repo (Kanban on **[v-notes board](https://bored.desync.link/boards/v-notes)**; PR agent bootstrapped; full build/e2e CI lands on **#145**).
 
 ## Out of scope for this skeleton until spec says otherwise
 

@@ -81,8 +81,10 @@ Rules:
 - Android dev/prod flavor misconfiguration (hostname, App Links, OIDC client)
 
 **Tests**
-- Missing coverage for owner-only auth, edit lease, or reconnect/gap-fill behaviour when those paths change
-- Contract fixture validation gaps when schemas or protocol types change
+- **E2E policy:** every user-facing feature must have automated e2e tests in CI (`docs/PLAN.md` **E2E testing**) — flag product behaviour merged without Playwright and/or Android instrumented coverage
+- Missing e2e for owner-only auth, edit lease, reconnect/gap-fill, disconnect banners, or search when those paths change
+- Contract fixture validation gaps when schemas or protocol types change (contract tests supplement e2e; they do not replace it)
+- Manual-only or runbook-only acceptance proposed instead of CI e2e
 
 **General**
 - Unused dependencies added to Cargo.toml or Gradle
