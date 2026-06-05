@@ -17,7 +17,7 @@
 1. **Start [#145](https://bored.desync.link/boards/v-notes)** — [`AGENTS.md`](../AGENTS.md) §1:
    - `move_card` → **In Progress**
    - `update_card` → `# Iteration 1 — Bootstrap monorepo, CI, and test infrastructure`; **Branch:** `feat/iteration-1-bootstrap` from **`master`**; **Version:** `0.1.0`
-2. **Implement #145** — monorepo skeleton, **three runnable artifacts** (server `/health`, SPA placeholder, Android `devDebug` launch), bored-aligned **`.woodpecker/build.yml`** (build + contract-validation + Playwright e2e), **`e2e/`** harness, deploy pipeline **skeleton**, flesh out [`DEV.md`](DEV.md) / [`DEPLOY.md`](DEPLOY.md) run commands. **Reference:** [bored](https://github.com/vcheesbrough/bored) — `.woodpecker/build.yml`, `deploy/docker-compose.yml`, `e2e/`, `authentik/blueprint.yaml`.
+2. **Implement #145** — monorepo skeleton, **three runnable artifacts** (server `/health` + **`GET /api/meta`** stub, SPA placeholder, Android `devDebug` launch), **workspace `version` → all artifacts** at CI build, bored-aligned **`.woodpecker/build.yml`** (build + contract-validation + Playwright e2e), **`e2e/`** harness, deploy pipeline **skeleton**, flesh out [`DEV.md`](DEV.md) / [`DEPLOY.md`](DEPLOY.md) run commands. **Reference:** [bored](https://github.com/vcheesbrough/bored) — `.woodpecker/build.yml`, `deploy/docker-compose.yml`, `e2e/`, `authentik/blueprint.yaml`.
 3. **Ops check (before first green CI):** confirm **v-note** repo is active in Woodpecker and can push to **`registry.desync.link`** (mirror bored setup).
 4. **PR → merge #145** → closes **`bootstrap-repo`** todo; move card **Done**.
 
@@ -193,6 +193,7 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
 | **HWR worker** | **Rust worker** (queue + provider abstractions) | Claims jobs via **queue provider trait** (Postgres impl); **rasterizes** world-space ink regions; calls **recognition provider trait** (PaddleOCR v1); 5s idle debounce enqueue; English-only; retry + **re-index on erase** |
 | **E2E testing** | **Full feature coverage in CI** | Every shipped user-facing feature has automated e2e tests before its card merges — see **E2E testing (chosen)**; bored-aligned compose + Playwright + Android instrumented tests; contract/unit tests supplement, never substitute |
 | **Versioning** | **`0.N.P` pre-MVP → `1.0.0` → `1.N.P`** | Pre-MVP until **`vertical-slice-mvp`** closes: `0.N.P`; MVP completion merge (today **#151**): `1.0.0` + `v1.0.0`; post-MVP: `1.N.P` with **global `N` continuing** — count not fixed — **Engineering workflows** |
+| **Client–server sync** | **`release` + `protocol`** | Pre-MVP: **exact `release`**; MVP+ (`1.x.x`): **same `major.minor`**, patch may drift; **`protocol`** always exact — **Engineering workflows** → **Client–server version alignment** |
 | **Deploy / CI** | **Bored-aligned** | Woodpecker push build + e2e; manual `dev\|prod` deploy to mini docker socket; `deploy/docker-compose.yml`; Authentik blueprint before roll-out; `registry.desync.link` images |
 | **Edge / TLS** | **Traefik on mini** | Wildcard cert; `v-notes.desync.link` / `v-notes-dev.desync.link`; no per-service Caddy for MVP |
 | **Identity** | **Authentik** | `v-note-browser-{dev,prod}`, `v-note-android-{dev,prod}`; scopes `v-note:dev:access` / `v-note:prod:access` |
@@ -204,6 +205,7 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
 
 - **Repository layout (chosen):** **Monorepo** — **one `v-note` git repository** holds **server** (Rust/Axum), **SPA** (Leptos/Trunk), **native Android** (Compose), **`deploy/`** (compose, Traefik labels, Woodpecker hooks), **Authentik blueprint**, **e2e**, **CI**, and **shared API/contracts**. **Not** multi-repo.
 - **Versioning (chosen):** **Pre-MVP** (until **`vertical-slice-mvp`** closes): semver **`0.N.P`** (`N` = global iteration when work starts — **not** tied to a fixed card count). **MVP completion merge** (today **#151**) → **`1.0.0`** (git tag **`v1.0.0`**). **Post-MVP:** **`1.N.P`** with **`N` continuing** from pre-MVP. Additional MVP iterations may be discovered and inserted before release — see **Engineering workflows** → **Versioning**.
+- **Client–server version alignment (chosen):** **`release`** + **`protocol`** propagated at build from workspace **`version`**; **`GET /api/meta`**; client headers. **Pre-MVP (`0.N.P`):** **strict** exact **`release`**. **MVP+ (`1.N.P`):** **relaxed** — same **`major.minor`**, patch may drift; **`protocol`** always exact. **Ops default:** lockstep deploy (image + APK same tag) in both phases — see **Engineering workflows** → **Client–server version alignment**.
 - **E2E testing (chosen):** **Every shipped user-facing feature is covered by automated e2e tests** before its iteration card merges. **Contract/fixture validation and unit tests supplement e2e; they do not replace it.** See **E2E testing** section for harness layout and per-surface rules. **No manual-only acceptance** for product behaviour; **no “runbook instead of CI”** escape hatches.
 - **Client alignment & contract testing (chosen):** **Schema-first** layout — **`schemas/`** holds **JSON Schema** for **WSS envelopes**, **stroke batches**, and **REST DTOs**; **`contracts/fixtures/`** holds **golden JSON** examples consumed by every client. **`crates/protocol`** in the **Rust workspace** defines **serde types** aligned to those schemas; **Leptos SPA imports the same crate**; **Android** stays aligned via **codegen** and/or **fixture unit tests** against the same schemas (no drift-by-hand DTOs). **CI (every PR):** all fixtures **validate** on **server + Android + SPA** **in addition to** e2e coverage per feature. **REST:** **OpenAPI** emitted from the server (**utoipa**) plus **contract validation** against fixtures/schemas. **WSS:** **JSON Schema** + server integration tests with scripted connect/replay sequences (**part of** e2e for realtime paths); **Pact** deferred unless consumer-driven contracts become necessary later. **Replay sanity (separate from wire contracts):** one golden **page fixture** for **bbox/point-count** checks (and optional **render sanity**)—not part of the wire-contract suite. **Explicit non-goal:** **no shared cross-platform UI/render library** — **two canvas implementations** (Compose + Canvas2D), **one protocol spec**.
 - **Server stack (chosen):** **Rust + Axum** — API, owner auth, edit leases, page CRUD, **`stroke_batches`** append, **HWR job enqueue** (via **queue provider trait**; Postgres table impl), search API; **PostgreSQL** (separate compose service per env, **`v-note-dev-db`** / **`v-note-prod-db`** volumes) via sqlx (or equivalent) with migrations; **JSONB** coalesced batch payloads (not normalized point rows); **`hwr_jobs`** + **`SKIP LOCKED`** workers; realtime on **WSS** (tungstenite/axum integration). **Not .NET** — SignalR / ASP.NET out of scope. **Not Surreal/SQLite/Mongo/Kafka/external broker for MVP** — confirmed after DB + queue exploration (see **Database & ink persistence**, **HWR / OCR job queue**).
@@ -281,6 +283,45 @@ Locked engineering/ops conventions — product behaviour stays in **Decisions ma
 - **MVP backbone is open-ended:** cards **#145–#151** are the **current** walking-skeleton slice; insert new TODO cards (and update this plan) when scope splits or new work is discovered — semver **`N`** simply increments.
 - **Patch `P`:** bump only on the active **`feat/iteration-N-…`** branch; start each iteration at **`P=0`**.
 - **CHANGELOG:** optional per-iteration notes in PR description; formal **`CHANGELOG.md`** deferred until post-**#151** if needed.
+
+### Client–server version alignment (chosen)
+
+**Problem:** Workspace semver governs **builds and deploys**, but **Android is sideloaded** and can outlive a server upgrade. **Schema/fixture CI** keeps wire **shapes** aligned in the monorepo — it does **not** tell a running Tab S8 app that the server moved on without a matching APK.
+
+**Two version axes** (do not conflate):
+
+| Axis | Type | Meaning |
+| --- | --- | --- |
+| **`release`** | Semver (`0.N.P` / `1.N.P`) | Product + deploy version — from root workspace **`version`** |
+| **`protocol`** | Integer (`1` for MVP WSS+JSON) | **Breaking** REST/WSS contract — bump only when **`schemas/`** change incompatibly |
+
+**Single source of truth:** root **`Cargo.toml`** workspace **`version`** → propagated at **CI build** to server, SPA (compile-time embed), and Android **`versionName`** (generated file or Gradle task — **not** hand-edited). Same Woodpecker **`build`** step that tags **`registry.desync.link/v-note:{release}`** must produce the **matching Android APK** artifact for that **`release`**.
+
+**Server surface:** **`GET /api/meta`** (lands **#145** stub, full behavior **#146+**):
+
+```json
+{
+  "release": "0.3.0",
+  "protocol": 1
+}
+```
+
+**Client headers (all phases):** every REST call and WSS connect sends **`X-V-Note-Client-Release`** and **`X-V-Note-Client-Protocol`** (Android + SPA). **`protocol` mismatch** → server **rejects** (HTTP **409** or WSS close with reason); client shows **incompatible-version banner** (distinct from disconnect/retry UX).
+
+**Enforcement by phase:**
+
+| Phase | Server `release` | Rule |
+| --- | --- | --- |
+| **Pre-MVP** | **`0.N.P`** | **Strict lockstep** — client **`release`** must **exactly** equal server **`release`** (no patch or minor drift). |
+| **MVP+** | **`1.N.P`** (from **`1.0.0`** on **`main`**) | **Relaxed lockstep** — client **`major.minor`** must match server **`major.minor`**; **patch may drift** either way within that line (e.g. server **`1.2.3`** accepts client **`1.2.0`**). Cross-minor → **reject**. |
+
+**`GET /api/meta` from `1.0.0` onward** may add **`min_client_release`** (floor patch for the current minor line, e.g. **`1.2.0`**) — implement when **#151** closes or first post-MVP iteration touches version checks.
+
+**Operator norm (both phases):** deploy server image **and** install the **APK from the same CI build / git tag** — **lockstep is the default** even when MVP+ runtime allows patch slack. Document in [`DEPLOY.md`](DEPLOY.md) and **#152** runbook. **Rollback:** redeploy **previous image tag** **and** previous APK together.
+
+**CI / tests:** **#145** — version propagation + **`/api/meta`** stub (pre-MVP strict checks); **#146** — client headers + mismatch e2e; **#151** or follow-on — add e2e for MVP+ same-minor / cross-minor rules when server is **`1.x.x`**.
+
+**Post-MVP UX:** optional in-app “update available” when server patch **`release`** > client (still sideload — link to operator doc, not Play Store).
 
 ### CI — push pipeline (lands **#145**)
 
