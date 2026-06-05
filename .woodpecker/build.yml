@@ -2,7 +2,7 @@ when:
   - event: [push, deployment]
 
 steps:
-  build:
+  build-web:
     when:
       - event: push
     image: &docker-image docker:27-cli
@@ -29,6 +29,9 @@ steps:
   e2e:
     when:
       - event: push
+    depends_on:
+      - build-web
+      - build-android
     image: *docker-image
     volumes: *docker-socket
     commands:
