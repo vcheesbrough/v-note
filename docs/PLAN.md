@@ -6,6 +6,38 @@
 
 **Overview:** Greenfield **v-note** (slug `v-note`): **flat ink-only pages**; **MVP: owner-only, ink capture/sync/search**; **native Kotlin Android** (always online); **SPA same freshness as Android**; **LAN or mesh only**, **no split DNS**; **two deployments (dev + prod)** on **mini** via Traefik—**prod `v-notes.desync.link`**, **dev `v-notes-dev.desync.link`** (bored-aligned); **single hardcoded pen**; **English-only HWR**; Authentik on private network.
 
+## Next session
+
+**Paused:** 2026-06-05 · **Branch:** `master` at **`40cb8f3`** (engineering workflows + doc stubs pushed).
+
+**Current state:** Planning locked. **No application code.** No Kanban card **In Progress**. Board has MVP backbone **#145–#151** and post-MVP backlog **#152–#169**.
+
+### Do this first
+
+1. **Start [#145](https://bored.desync.link/boards/v-notes)** — [`AGENTS.md`](../AGENTS.md) §1:
+   - `move_card` → **In Progress**
+   - `update_card` → `# Iteration 1 — Bootstrap monorepo, CI, and test infrastructure`; **Branch:** `feat/iteration-1-bootstrap` from **`master`**; **Version:** `0.1.0`
+2. **Implement #145** — monorepo skeleton, **three runnable artifacts** (server `/health`, SPA placeholder, Android `devDebug` launch), bored-aligned **`.woodpecker/build.yml`** (build + contract-validation + Playwright e2e), **`e2e/`** harness, deploy pipeline **skeleton**, flesh out [`DEV.md`](DEV.md) / [`DEPLOY.md`](DEPLOY.md) run commands. **Reference:** [bored](https://github.com/vcheesbrough/bored) — `.woodpecker/build.yml`, `deploy/docker-compose.yml`, `e2e/`, `authentik/blueprint.yaml`.
+3. **Ops check (before first green CI):** confirm **v-note** repo is active in Woodpecker and can push to **`registry.desync.link`** (mirror bored setup).
+4. **PR → merge #145** → closes **`bootstrap-repo`** todo; move card **Done**.
+
+### Then (MVP backbone, in order)
+
+| Card | What |
+| --- | --- |
+| **#146** | Authentik OIDC — SPA + Android auth |
+| **#147** | Owner page library |
+| **#148** | Android ink capture (WSS, edit lease) |
+| **#149** | SPA live ink viewer |
+| **#150** | Disconnect / sync error UX (both clients) |
+| **#151** | HWR worker + handwriting search → **`1.0.0`** / **`v1.0.0`** |
+
+### Conventions to remember
+
+- **Semver:** pre-MVP **`0.N.P`** until **#151** merges; **`N`** = global iteration (assigned at **In Progress** only) — **not** a fixed seven-card count; insert new MVP cards in TODO + update **Kanban card map** if scope splits.
+- **E2e:** every shipped feature needs **CI e2e** before its card merges ([**E2E testing**](#e2e-testing) below).
+- **One card, one branch** — no stacking; branch always from **`master`**.
+
 ## Project todos
 
 - [x] **supply-spec** — MVP product decisions finalized (page library UX, single pen, HWR queue/provider, disconnect UX, deployments, Authentik, etc.). Major gaps closed; proceed to bootstrap.
