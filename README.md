@@ -4,7 +4,7 @@ Self-hosted ink note capture and sync: native Android stylus authoring, owner-on
 
 ## Status
 
-**Planning phase** — product and stack decisions are locked in the plan; **application code and monorepo scaffold are not started yet** (next card: **#145**). **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes). **Semver:** pre-MVP **`0.N.P`** → **`1.0.0`** at MVP (**#151**). **PR review agent** runs on pull requests via [`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml) ([setup](docs/PR-AGENT.md)). Full build/e2e/deploy CI lands with **#145**.
+**Ready for #145** — planning locked; docs on **`master`**; **no application code yet**. **Next steps:** [`docs/PLAN.md` → Next session](docs/PLAN.md#next-session). **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes). **Semver:** pre-MVP **`0.N.P`** → **`1.0.0`** at MVP (**#151**). **PR review agent** on pull requests ([`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml), [setup](docs/PR-AGENT.md)).
 
 ## Documentation
 
