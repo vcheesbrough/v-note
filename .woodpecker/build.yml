@@ -14,15 +14,23 @@ steps:
   build-android:
     when:
       - event: push
-    image: mingc/android-build-box:latest
-    environment:
-      TERM: dumb
-      GRADLE_OPTS: -Dorg.gradle.console=plain
+    # mingc/android-build-box default CMD is /bin/bash; as a Woodpecker step image it
+    # does not attach stdout to the log collector. Run it via docker run instead.
+    image: *docker-image
+    volumes: *docker-socket
     commands:
-      - echo "==> build-android ($(date -u +%FT%TZ))"
-      - ./scripts/sync-version.sh
-      - cd android && chmod +x ./gradlew
-      - cd android && ./gradlew --no-daemon --console=plain :app:assembleDevDebug :app:testDevDebugUnitTest
+      - |
+        docker run --rm \
+          -v "$$PWD:/workspace" \
+          -w /workspace \
+          -e TERM=dumb \
+          -e GRADLE_OPTS=-Dorg.gradle.console=plain \
+          mingc/android-build-box:latest \
+          bash -ec 'set -x
+        echo "==> build-android"
+        ./scripts/sync-version.sh
+        cd android && chmod +x ./gradlew
+        ./gradlew --no-daemon --console=plain :app:assembleDevDebug :app:testDevDebugUnitTest'
 
   contract-validation:
     when:
