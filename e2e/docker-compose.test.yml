@@ -60,7 +60,7 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        FROM mcr.microsoft.com/playwright:v1.54.2-jammy
+        FROM mcr.microsoft.com/playwright:v1.54.2-jammy@sha256:948dc1e8601eeb152b31ef57959a74c2170be6fe875c33518bf33aea424d8940
         WORKDIR /e2e
         COPY package.json package-lock.json ./
         RUN npm ci
