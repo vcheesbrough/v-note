@@ -7,9 +7,12 @@
 #   pr_reviewer_gh_app_installation_id
 #   pr_reviewer_gh_app_private_key_b64
 # Mark pull_request-allowed in Woodpecker/OpenBao. Do not commit secret values.
+#
+# TEMPORARILY DISABLED (2026-06-06): Claude account/OAuth issues.
+# Re-enable: replace `when` below with `event: pull_request`.
 
 when:
-  - event: pull_request
+  - evaluate: 'false'
 
 steps:
   review:

@@ -5,17 +5,23 @@
 # Leptos / Trunk
 /frontend/dist/
 /frontend/pkg/
+/frontend/target/
 
 # Android / Gradle
-.gradle/
-build/
+scripts/.jdk-shim/
+android/home/
+**/.gradle/
+**/.gradle-user/
+**/build/
 local.properties
 *.apk
 *.aab
 *.dex
-.cxx/
-captures/
-.externalNativeBuild/
+**/.cxx/
+**/captures/
+**/.externalNativeBuild/
+**/.kotlin/
+*.hprof
 
 # IDE
 .idea/
@@ -24,10 +30,14 @@ captures/
 *.swp
 *~
 
+# Generated from Cargo.toml (scripts/sync-version.sh)
+/version.txt
+
 # Env and secrets
 .env
 .env.*
 !.env.example
+!deploy/.env.example
 
 # OS
 .DS_Store
@@ -35,8 +45,12 @@ Thumbs.db
 
 # Test / coverage artifacts
 lcov.info
-/playwright-report/
+
+# Playwright (e2e/)
+/e2e/node_modules/
 /e2e/.auth-state.json
+/e2e/playwright-report/
+/e2e/test-results/
 
 # Tool-local (not committed)
 .claude/

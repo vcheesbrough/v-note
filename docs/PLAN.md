@@ -8,18 +8,15 @@
 
 ## Next session
 
-**Paused:** 2026-06-05 · **Branch:** `master` at **`40cb8f3`** (engineering workflows + doc stubs pushed).
+**Paused:** 2026-06-05 · **Branch:** `feat/iteration-1-bootstrap` pushed · **Base:** `master` at **`0d1c47b`**.
 
-**Current state:** Planning locked. **No application code.** No Kanban card **In Progress**. Board has MVP backbone **#145–#151** and post-MVP backlog **#152–#169**.
+**Current state:** **[#145](https://bored.desync.link/boards/v-notes)** **In Progress** — `# Iteration 1 — Bootstrap monorepo, CI, and test infrastructure`. Monorepo scaffold **committed**; server, SPA (compose), Android emulator, Playwright e2e verified locally.
 
 ### Do this first
 
-1. **Start [#145](https://bored.desync.link/boards/v-notes)** — [`AGENTS.md`](../AGENTS.md) §1:
-   - `move_card` → **In Progress**
-   - `update_card` → `# Iteration 1 — Bootstrap monorepo, CI, and test infrastructure`; **Branch:** `feat/iteration-1-bootstrap` from **`master`**; **Version:** `0.1.0`
-2. **Implement #145** — monorepo skeleton, **three runnable artifacts** (server `/health` + **`GET /api/meta`** stub, SPA placeholder, Android `devDebug` launch), **workspace `version` → all artifacts** at CI build, bored-aligned **`.woodpecker/build.yml`** (build + contract-validation + Playwright e2e), **`e2e/`** harness, deploy pipeline **skeleton**, flesh out [`DEV.md`](DEV.md) / [`DEPLOY.md`](DEPLOY.md) run commands. **Reference:** [bored](https://github.com/vcheesbrough/bored) — `.woodpecker/build.yml`, `deploy/docker-compose.yml`, `e2e/`, `authentik/blueprint.yaml`.
-3. **Ops check (before first green CI):** confirm **v-note** repo is active in Woodpecker and can push to **`registry.desync.link`** (mirror bored setup).
-4. **PR → merge #145** → closes **`bootstrap-repo`** todo; move card **Done**.
+1. **Open PR → merge #145** → move card **Done**; closes **`bootstrap-repo`** todo.
+2. **Ops check (first push):** confirm Woodpecker **build** pipeline is green and **v-note** can push to **`registry.desync.link`**.
+3. **#146** — Authentik OIDC (SPA + Android auth).
 
 ### Then (MVP backbone, in order)
 
