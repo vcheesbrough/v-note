@@ -86,6 +86,10 @@ When this project (or you) uses **Kanban cards** as the task queue:
 - **E2E policy (locked):** Every **user-facing feature** in an iteration card must have **automated e2e tests in CI** before that card merges — see [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**. Contract/unit tests supplement; they do not replace e2e. No manual-only or runbook-only acceptance for product behaviour.
 - Until push CI exists, run **local** sanity checks when you touch code (`cargo check`, `trunk build`, Gradle tasks, etc.) — only after those trees exist.
 
+### Monitor builds (agent obligation)
+
+Whenever you **trigger or depend on a remote build** (git push, Woodpecker pipeline, CI-context `docker build`, etc.), **monitor it until completion**. Poll GitHub commit status for the relevant SHA (`gh api repos/vcheesbrough/v-note/commits/$SHA/status`) and/or **Woodpecker MCP** when available. Report the outcome: which checks ran, and whether the combined state is **success**, **failure**, or still **pending**. If status stays **pending**, say so and that monitoring should continue — do not invent a final result.
+
 ### Woodpecker / CI after every push
 
 When this repo has been pushed (or the user asks to verify CI) **and** [`.woodpecker/build.yml`](.woodpecker/build.yml) exists:
@@ -99,9 +103,9 @@ When this repo has been pushed (or the user asks to verify CI) **and** [`.woodpe
    - `docker build -t v-note:ci-local .` (rustfmt / clippy / tests / builds inside Dockerfile when wired).
    - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
 
-3. **Fix failures** in-repo, commit (when user asks), push, **poll status again** until green. **All push steps including `e2e` must be green** before declaring an iteration done.
+3. **Fix failures** in-repo, commit (when user asks), push, **poll status again** until green (see **Monitor builds** above). **All push steps including `e2e` must be green** before declaring an iteration done.
 
-If `gh` is unavailable or status is `pending`, say so once and ask whether to wait or use the Woodpecker UI. Do not invent a result.
+If `gh` is unavailable, say so once and use Woodpecker MCP or the Woodpecker UI when you can. While status is **pending**, report that and continue monitoring when the user wants a live update.
 
 ---
 
@@ -128,10 +132,30 @@ These apply when using MCP tools in Cursor or Claude Code:
 
 ## 6. Pull requests and review comments
 
-When the user asks to **raise a PR**, or when a PR has **unresolved review comments** (from the [`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml) Claude PR agent or a human reviewer):
+When the user asks to **raise a PR**, or when a PR has **unresolved review comments** (from self-review, the [`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml) Claude PR agent, Cursor Automation, or a human reviewer), work in order: **self-review and post to GitHub**, then **triage and resolve** every open thread the same way.
 
-1. **Detect / open the PR** — push the feature branch from **`main`**, open with `gh pr create` if needed.
-2. **Fetch unresolved threads** via GitHub GraphQL (`reviewThreads` where `isResolved == false`).
+### Self-review when you open the PR (required)
+
+Remote PR review agents (Woodpecker `pr-review`, Cursor Automation) are **unreliable** — do **not** treat them as the primary review path. When **you** raise or update a PR (push to its branch), **immediately** perform an in-session review:
+
+1. Read [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md) — same rubric the Woodpecker agent uses (correctness, security/OWASP, contracts, e2e policy, scope).
+2. Review the **full PR diff** (`git diff master...HEAD` or `gh pr diff <N>`), file-by-file against those criteria. Consult `docs/PLAN.md`, `AGENTS.md`, and touched source files for context when needed.
+3. **Present findings to the user** in chat before waiting on remote agents: actionable issues with **file/line**, **severity** (blocker / major / minor / nit), and **suggested fix**; include a short summary and positives where useful.
+4. **Submit the same findings to the GitHub PR** (not chat-only): post a PR review with **`gh`** — summary (`gh pr review` with `--comment`, `--approve`, or `--request-changes`) plus **inline comments** on specific lines where possible (blockers and majors at minimum). Use GraphQL (`addPullRequestReview` / `addPullRequestReviewComment`) or `gh api` when needed; take **commit SHA** and **line numbers** from `gh pr diff` / the PR head commit. Minor items and nits may stay in the summary when inline placement is awkward.
+5. **Then fall back to [Triage and resolve](#triage-and-resolve-comments)** — treat your submitted inline threads like any other reviewer’s: unresolved GraphQL `reviewThreads`, one-at-a-time user decisions, local fixes when approved, reply and resolve on GitHub. Do **not** skip triage because you authored the comments.
+
+Self-review is **required** when the agent opens the PR; remote agent output is **optional/supplementary**.
+
+### Monitor after you open a PR
+
+In parallel with triage (and after self-review is posted), **watch for supplementary feedback** from humans and remote agents. You may wait for automated review agents to finish before treating **external** review state as final — e.g. Woodpecker `pr-review`, Cursor Automation, Bugbot, or similar check contexts. Poll **`gh pr checks`** and commit statuses (pending → success/failure) and GraphQL unresolved `reviewThreads`. **Surface agent completion** when it arrives (which agent finished, pass/fail), then **surface new comments** to the user (count and brief summary). **Do not assume** there are no review threads while agent checks are still pending; re-check while CI or agents are in flight unless the user says to stop.
+
+### Triage and resolve comments
+
+Applies to **all** unresolved PR review threads — including those you posted in self-review, plus humans and remote agents.
+
+1. **Detect / open the PR** — push the feature branch from **`main`**, open with `gh pr create` if needed; run **Self-review** first when you open the PR.
+2. **Fetch unresolved threads** via GitHub GraphQL (`reviewThreads` where `isResolved == false`); refresh after **Monitor** surfaces new external comments.
 3. **Present one comment at a time** — file, author, analysis, suggested fix; **the user decides** (include ignore / push back).
 4. **Apply chosen resolutions locally** — sanity-check, but **do not commit** until the user approves a batch.
 5. **Reply on the PR thread** and resolve threads when the user picks a fix or explicit won't-do.
@@ -139,7 +163,7 @@ When the user asks to **raise a PR**, or when a PR has **unresolved review comme
 
 **Hard rules:** User decides every comment; one comment per decision prompt; no auto-resolve on "discuss further"; audit trail stays on the PR.
 
-**CI after push:** PR review agent runs automatically on pull requests (§3). Full build/e2e CI is not required until that slice lands. When full CI exists, verify green status before declaring a batch done.
+**CI after push:** Full build/e2e CI runs on push when [`.woodpecker/build.yml`](.woodpecker/build.yml) exists (§3). Woodpecker `pr-review` may be disabled — self-review covers that gap. Verify green push CI before declaring an iteration done.
 
 ---
 
