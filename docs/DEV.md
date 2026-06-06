@@ -140,8 +140,11 @@ WSL builds/install via `adb` (USB or emulator started on Windows); `just android
 ## Compose (local)
 
 ```bash
-docker compose -f deploy/docker-compose.yml up --build
+cp deploy/.env.example deploy/.env   # once; POSTGRES_PASSWORD for local Postgres
+just run-compose
 ```
+
+Or: `docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build`
 
 - **API + SPA:** `https://localhost:8443` (self-signed — use `curl -k`)
 - **Postgres:** internal only (`postgres:5432`)

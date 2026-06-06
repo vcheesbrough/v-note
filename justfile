@@ -7,7 +7,7 @@ run-spa:
     trunk serve --config frontend/Trunk.toml frontend/index.html
 
 run-compose:
-    docker compose -f deploy/docker-compose.yml up --build
+    docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build
 
 # Host JDK + SDK (Android Studio). See docs/DEV.md → Android.
 build-android:
@@ -18,7 +18,7 @@ build-android:
 # CI-parity build when JDK/SDK are not installed locally.
 build-android-docker:
     ./scripts/sync-version.sh
-    docker run --rm -e GRADLE_USER_HOME=/workspace/android/.gradle-user -v "{{justfile_directory()}}:/workspace" -w /workspace/android mingc/android-build-box:latest bash -lc './gradlew --project-cache-dir /workspace/android/.gradle-user/project-cache -Pandroid.sdk.dir=/opt/android-sdk :app:assembleDevDebug :app:testDevDebugUnitTest'
+    docker run --rm -e GRADLE_USER_HOME=/workspace/android/.gradle-user -v "{{justfile_directory()}}:/workspace" -w /workspace/android mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c bash -lc './gradlew --project-cache-dir /workspace/android/.gradle-user/project-cache -Pandroid.sdk.dir=/opt/android-sdk :app:assembleDevDebug :app:testDevDebugUnitTest'
 
 # Forward device/emulator port 8080 → host server (run once per adb device).
 android-reverse:

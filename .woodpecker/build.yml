@@ -63,7 +63,7 @@ steps:
   compute-version:
     when:
       - event: deployment
-    image: &alpine-git alpine/git:latest
+    image: &alpine-git alpine/git:latest@sha256:19e4b384912f316e1ebd93a2f5277df2ed9252e441c96eccc56914a9e8e009e8
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
@@ -134,6 +134,8 @@ steps:
         from_secret: zot_ci_password
       OIDC_CLIENT_SECRET:
         from_secret: v_note_dev_oidc_client_secret
+      POSTGRES_PASSWORD:
+        from_secret: v_note_dev_postgres_password
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-dev-db
@@ -141,6 +143,7 @@ steps:
         V_NOTE_IMAGE_TAG=$(cat .version-dev) APP_VERSION=$(cat .version-dev) \
         APP_ENV=$$CI_COMMIT_BRANCH V_NOTE_HOST=v-notes-dev.desync.link \
         V_NOTE_CONTAINER_NAME=v-note-dev DB_VOLUME=v-note-dev-db \
+        POSTGRES_PASSWORD=$$POSTGRES_PASSWORD \
         OIDC_ISSUER_URL=https://auth.desync.link/application/o/v-note-dev/ \
         OIDC_CLIENT_ID=v-note-browser-dev \
         OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
@@ -162,6 +165,8 @@ steps:
         from_secret: zot_ci_password
       OIDC_CLIENT_SECRET:
         from_secret: v_note_prod_oidc_client_secret
+      POSTGRES_PASSWORD:
+        from_secret: v_note_prod_postgres_password
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-prod-db
@@ -169,6 +174,7 @@ steps:
         V_NOTE_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) \
         APP_ENV=production V_NOTE_HOST=v-notes.desync.link \
         V_NOTE_CONTAINER_NAME=v-note DB_VOLUME=v-note-prod-db \
+        POSTGRES_PASSWORD=$$POSTGRES_PASSWORD \
         OIDC_ISSUER_URL=https://auth.desync.link/application/o/v-note-prod/ \
         OIDC_CLIENT_ID=v-note-browser-prod \
         OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
