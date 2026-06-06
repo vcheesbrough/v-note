@@ -1,0 +1,72 @@
+services:
+  # Mock OIDC — wired for #146 auth e2e; tests skip auth setup when OIDC_TOKEN_URL is unset.
+  mock-oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10@sha256:65d4ed47ce094cc3849e41e03499bfb32372d69c726ec22b3d5a19eba9bc787e
+    environment:
+      SERVER_PORT: 8080
+      JSON_CONFIG: |
+        {
+          "interactiveLogin": false,
+          "tokenCallbacks": [
+            {
+              "issuerId": "default",
+              "tokenExpiry": 3600,
+              "requestMappings": [
+                {
+                  "requestParam": "client_id",
+                  "match": "v-note-test",
+                  "claims": {
+                    "sub": "v-note-test-service-account",
+                    "aud": ["v-note-test"],
+                    "scope": "openid profile email v-note:test:access",
+                    "preferred_username": "test-user",
+                    "email": "test@example.com"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+    networks:
+      - e2e-net
+
+  app:
+    image: ${TEST_IMAGE:?TEST_IMAGE must be set}
+    environment:
+      APP_ENV: test
+      APP_VERSION: test
+      OIDC_ISSUER_URL: http://mock-oidc:8080/default
+      OIDC_CLIENT_ID: v-note-test
+      OIDC_CLIENT_SECRET: test-secret
+      REQUIRED_SCOPE: v-note:test:access
+    depends_on:
+      - mock-oidc
+    networks:
+      - e2e-net
+
+  playwright:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM mcr.microsoft.com/playwright:v1.54.2-jammy
+        WORKDIR /e2e
+        COPY package.json package-lock.json ./
+        RUN npm ci
+        COPY . .
+        CMD ["npx", "playwright", "test"]
+    environment:
+      BASE_URL: https://app:443
+      OIDC_TOKEN_URL: http://mock-oidc:8080/default/token
+      OIDC_CLIENT_ID: v-note-test
+      OIDC_CLIENT_SECRET: test-secret
+      REQUIRED_SCOPE: v-note:test:access
+    volumes:
+      - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
+    depends_on:
+      - app
+      - mock-oidc
+    networks:
+      - e2e-net
+
+networks:
+  e2e-net:

@@ -1,0 +1,7 @@
+# Copy to local.properties (gitignored) if scripts/android-env.sh cannot auto-detect your SDK.
+#
+# Android Studio on Windows, repo in WSL:
+sdk.dir=/mnt/c/Users/YOUR_WINDOWS_USER/AppData/Local/Android/Sdk
+#
+# SDK installed inside WSL:
+# sdk.dir=/home/YOUR_USER/Android/Sdk

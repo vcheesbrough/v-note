@@ -33,12 +33,15 @@ Triggered manually with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** (bored
 
 Document keys here as they are wired in **#145** — **never commit values**.
 
-| Secret (example name) | Used for |
+| Woodpecker secret key | Used for |
 | --- | --- |
-| `OIDC_CLIENT_SECRET_DEV` | SPA confidential client (dev) |
-| `OIDC_CLIENT_SECRET_PROD` | SPA confidential client (prod) |
-| `DATABASE_URL` / per-env DB creds | Postgres (if not inline in compose) |
+| `v_note_dev_oidc_client_secret` | SPA confidential client (dev) |
+| `v_note_prod_oidc_client_secret` | SPA confidential client (prod) |
+| `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
+| `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | Android signing (post-MVP prod) | Release keystore — **outside repo** |
+
+Add values under OpenBao path `secret/woodpecker/repos/vcheesbrough/v-note` (same broker layout as bored). Rotate with `bao kv patch` on mini.
 
 Mirror bored OpenBao layout where applicable.
 

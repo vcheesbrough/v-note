@@ -1,21 +1,66 @@
 # v-note
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+
 Self-hosted ink note capture and sync: native Android stylus authoring, owner-only pages, realtime replay on a read-only web SPA, and handwriting search over private LAN or mesh.
 
 ## Status
 
-**Ready for #145** — planning locked; docs on **`master`**; **no application code yet**. **Next steps:** [`docs/PLAN.md` → Next session](docs/PLAN.md#next-session). **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes). **Semver:** pre-MVP **`0.N.P`** → **`1.0.0`** at MVP (**#151**). **PR review agent** on pull requests ([`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml), [setup](docs/PR-AGENT.md)).
+**Iteration 1 (#145)** — monorepo scaffold on branch `feat/iteration-1-bootstrap`. Runnable **server**, **SPA**, and **Android** placeholders; Woodpecker build/e2e/contract-validation wired. **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes).
+
+## Quick start
+
+Prerequisites: **Rust**, **Docker**, **Trunk** (`cargo install trunk`), **Node.js** (e2e), **JDK 17** + **Android SDK** (Android builds). See [`docs/DEV.md`](docs/DEV.md).
+
+```bash
+# Server (HTTP on :8080)
+just run-server
+curl http://localhost:8080/health
+curl http://localhost:8080/api/meta
+
+# SPA (Trunk dev server — proxies API to server in dev)
+just run-spa
+
+# Full stack (Postgres + TLS server + SPA static on :8443)
+just run-compose
+curl -k https://localhost:8443/health
+curl -k https://localhost:8443/api/meta
+
+# Android — Android Studio on Windows; see docs/DEV.md
+just run-server    # terminal 1
+just android-run   # terminal 2: adb reverse + install + launch dev APK
+
+# Contract fixtures
+just contract-validation
+
+# E2e (build image first: docker build -t v-note:local .)
+just e2e
+```
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `crates/server/` | Axum API (`/health`, `/api/meta`) + static SPA |
+| `crates/protocol/` | Shared serde types + fixture tests |
+| `frontend/` | Leptos/Trunk WASM SPA placeholder |
+| `android/` | Kotlin/Compose capture shell (`dev` / `prod` flavors) |
+| `schemas/`, `contracts/fixtures/` | JSON Schema + golden fixtures |
+| `deploy/` | Compose (local + prod Traefik overlay) |
+| `e2e/` | Playwright harness |
+| `.woodpecker/build.yml` | Push CI + deploy skeleton |
 
 ## Documentation
 
 | Doc | Purpose |
 | --- | --- |
-| **[docs/PLAN.md](docs/PLAN.md)** | Product spec, stack decisions, engineering workflows — **single source of truth** |
-| **[AGENTS.md](AGENTS.md)** | Agent working rules (Kanban, semver `0.N.P` pre-MVP → `1.0.0` at MVP, CI, git safety, PRs) |
-| **[docs/DEV.md](docs/DEV.md)** | Local development and CI reproduction (after **#145**) |
-| **[docs/DEPLOY.md](docs/DEPLOY.md)** | Woodpecker deploy, secrets, image tags (skeleton until **#145**) |
-| **[docs/PR-AGENT.md](docs/PR-AGENT.md)** | Woodpecker PR review agent — secrets, trigger, GitHub App |
+| **[docs/PLAN.md](docs/PLAN.md)** | Product spec, stack decisions, engineering workflows |
+| **[AGENTS.md](AGENTS.md)** | Agent working rules (Kanban, semver, CI, git safety) |
+| **[docs/DEV.md](docs/DEV.md)** | Local development and CI reproduction |
+| **[docs/DEPLOY.md](docs/DEPLOY.md)** | Woodpecker deploy, secrets, image tags |
+| **[docs/PR-AGENT.md](docs/PR-AGENT.md)** | Woodpecker PR review agent |
 
 ## License
 
 **AGPL-3.0-or-later** — see [LICENSE](LICENSE).
+
