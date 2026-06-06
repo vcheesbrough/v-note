@@ -21,7 +21,7 @@ steps:
     commands:
       - |
         docker run --rm \
-          -v "$$PWD:/workspace" \
+          -v "$$CI_WORKSPACE:/workspace" \
           -w /workspace \
           -e TERM=dumb \
           -e GRADLE_OPTS=-Dorg.gradle.console=plain \
