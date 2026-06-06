@@ -39,12 +39,11 @@ steps:
     commands:
       - cargo test -p protocol
 
-  e2e:
+  e2e-web:
     when:
       - event: push
     depends_on:
       - build-web
-      - build-android
     image: *docker-image
     volumes: *docker-socket
     commands:
