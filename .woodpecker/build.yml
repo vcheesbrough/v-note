@@ -14,23 +14,13 @@ steps:
   build-android:
     when:
       - event: push
-    # mingc/android-build-box default CMD is /bin/bash; as a Woodpecker step image it
-    # does not attach stdout to the log collector. Run it via docker run instead.
+    # mingc/android-build-box as a Woodpecker step image does not attach stdout to logs.
+    # docker run -v $CI_WORKSPACE fails when the agent workspace is a named volume, not a
+    # host path — use docker build (context over API) like build-web.
     image: *docker-image
     volumes: *docker-socket
     commands:
-      - |
-        docker run --rm \
-          -v "$$CI_WORKSPACE:/workspace" \
-          -w /workspace \
-          -e TERM=dumb \
-          -e GRADLE_OPTS=-Dorg.gradle.console=plain \
-          mingc/android-build-box:latest \
-          bash -ec 'set -x
-        echo "==> build-android"
-        ./scripts/sync-version.sh
-        cd android && chmod +x ./gradlew
-        ./gradlew --no-daemon --console=plain :app:assembleDevDebug :app:testDevDebugUnitTest'
+      - docker build -f Dockerfile.android -t v-note-android:$$CI_COMMIT_SHA .
 
   contract-validation:
     when:

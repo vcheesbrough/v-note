@@ -1,0 +1,9 @@
+# CI-only: Android devDebug APK + unit tests (Woodpecker build-android).
+FROM mingc/android-build-box:latest
+WORKDIR /workspace
+COPY . .
+RUN ./scripts/sync-version.sh \
+    && cd android \
+    && chmod +x ./gradlew \
+    && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \
+        :app:assembleDevDebug :app:testDevDebugUnitTest
