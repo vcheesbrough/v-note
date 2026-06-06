@@ -6,7 +6,7 @@ Self-hosted ink note capture and sync: native Android stylus authoring, owner-on
 
 ## Status
 
-**Iteration 1 (#145)** — monorepo scaffold on branch `feat/iteration-1-bootstrap`. Runnable **server**, **SPA**, and **Android** placeholders; Woodpecker build/e2e/contract-validation wired. **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes).
+**Iteration 2 (#146)** — MVP authentication on branch `feat/iteration-2-authentik-oidc`. Authentik OIDC for **SPA** (cookie session), **Android** (PKCE + Keystore), and **API** (`GET /api/me`). Woodpecker build/e2e includes Playwright `auth.spec.ts`. **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes).
 
 ## Quick start
 
@@ -17,6 +17,7 @@ Prerequisites: **Rust**, **Docker**, **Trunk** (`cargo install trunk`), **Node.j
 just run-server
 curl http://localhost:8080/health
 curl http://localhost:8080/api/meta
+# Auth routes are active when OIDC_* env vars are set (see docs/DEV.md)
 
 # SPA (Trunk dev server — proxies API to server in dev)
 just run-spa
@@ -41,7 +42,7 @@ just e2e
 
 | Path | Purpose |
 | --- | --- |
-| `crates/server/` | Axum API (`/health`, `/api/meta`) + static SPA |
+| `crates/server/` | Axum API (`/health`, `/api/meta`, `/api/me`, `/auth/*`) + static SPA |
 | `crates/protocol/` | Shared serde types + fixture tests |
 | `frontend/` | Leptos/Trunk WASM SPA placeholder |
 | `android/` | Kotlin/Compose capture shell (`dev` / `prod` flavors) |

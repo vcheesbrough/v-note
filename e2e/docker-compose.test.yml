@@ -22,6 +22,17 @@ services:
                     "preferred_username": "test-user",
                     "email": "test@example.com"
                   }
+                },
+                {
+                  "requestParam": "client_id",
+                  "match": "v-note-test-wrong",
+                  "claims": {
+                    "sub": "wrong-scope-user",
+                    "aud": ["v-note-test"],
+                    "scope": "openid profile email v-note:wrong:access",
+                    "preferred_username": "wrong-scope-user",
+                    "email": "wrong@example.com"
+                  }
                 }
               ]
             }
@@ -38,6 +49,7 @@ services:
       OIDC_ISSUER_URL: http://mock-oidc:8080/default
       OIDC_CLIENT_ID: v-note-test
       OIDC_CLIENT_SECRET: test-secret
+      OIDC_REDIRECT_URI: https://app:443/auth/callback
       REQUIRED_SCOPE: v-note:test:access
     depends_on:
       - mock-oidc

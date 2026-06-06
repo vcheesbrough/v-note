@@ -1,9 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
+import * as path from 'path';
 
 const baseURL = process.env.BASE_URL;
 if (!baseURL) {
   throw new Error('BASE_URL environment variable is required');
 }
+
+const storageState = path.resolve(__dirname, '.auth-state.json');
 
 export default defineConfig({
   testDir: './tests',
@@ -17,6 +20,10 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
     screenshot: 'only-on-failure',
     trace: 'on-first-retry',
+    storageState,
+    extraHTTPHeaders: process.env.AUTH_TOKEN
+      ? { Authorization: `Bearer ${process.env.AUTH_TOKEN}` }
+      : {},
   },
   projects: [
     {

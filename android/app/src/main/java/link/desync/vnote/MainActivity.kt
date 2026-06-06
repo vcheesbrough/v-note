@@ -1,12 +1,16 @@
 package link.desync.vnote
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -14,52 +18,170 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.auth.AuthConfig
+import link.desync.vnote.auth.AuthRepository
+import link.desync.vnote.auth.MeProfile
+import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ui.theme.VNoteTheme
-import okhttp3.OkHttpClient
-import okhttp3.Request
 
 class MainActivity : ComponentActivity() {
+    private lateinit var tokenStore: TokenStore
+    private lateinit var authRepository: AuthRepository
+    private lateinit var apiClient: ApiClient
+
+    private val authLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+            scope.launch {
+                authRepository.handleAuthorizationResponse(result.data).fold(
+                    onSuccess = { sessionState.value = SessionState.Loading },
+                    onFailure = { error ->
+                        sessionState.value =
+                            SessionState.Error(error.message ?: "Sign in failed")
+                    },
+                )
+            }
+        }
+
+    private val sessionState =
+        androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        tokenStore = TokenStore(applicationContext)
+        val authConfig = AuthConfig.fromBuildConfig()
+        authRepository = AuthRepository(applicationContext, authConfig, tokenStore)
+        apiClient = ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+
+        handleDeepLink(intent)
+
         setContent {
             VNoteTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    PlaceholderScreen(baseUrl = BuildConfig.BASE_URL)
+                    AppScreen(
+                        sessionState = sessionState.value,
+                        onSignIn = { signIn() },
+                        onSignOut = { signOut() },
+                        onReload = { reloadSession() },
+                    )
                 }
             }
+        }
+
+        reloadSession()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    override fun onDestroy() {
+        authRepository.shutdown()
+        super.onDestroy()
+    }
+
+    private fun handleDeepLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (!data.path.orEmpty().endsWith("/auth/mobile/callback")) {
+            return
+        }
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            authRepository.handleAuthorizationResponse(intent).fold(
+                onSuccess = { reloadSession() },
+                onFailure = { error ->
+                    sessionState.value =
+                        SessionState.Error(error.message ?: "Sign in callback failed")
+                },
+            )
+        }
+    }
+
+    private fun signIn() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            sessionState.value = SessionState.Loading
+            runCatching { authRepository.beginLogin(authLauncher) }
+                .onFailure { error ->
+                    sessionState.value =
+                        SessionState.Error(error.message ?: "Unable to start sign in")
+                }
+        }
+    }
+
+    private fun signOut() {
+        val endSessionIntent = authRepository.createEndSessionIntent()
+        authRepository.signOutLocal()
+        sessionState.value = SessionState.SignedOut
+        endSessionIntent?.data?.let { uri ->
+            CustomTabsIntent.Builder().build().launchUrl(this, uri)
+        }
+    }
+
+    private fun reloadSession() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            sessionState.value = SessionState.Loading
+            if (!tokenStore.hasSession()) {
+                sessionState.value = SessionState.SignedOut
+                return@launch
+            }
+            authRepository.refreshAccessTokenIfNeeded()
+            apiClient.fetchMe().fold(
+                onSuccess = { profile -> sessionState.value = SessionState.SignedIn(profile) },
+                onFailure = { error ->
+                    authRepository.signOutLocal()
+                    sessionState.value =
+                        SessionState.Error(error.message ?: "Session check failed")
+                },
+            )
         }
     }
 }
 
+private sealed interface SessionState {
+    data object Loading : SessionState
+
+    data object SignedOut : SessionState
+
+    data class SignedIn(val profile: MeProfile) : SessionState
+
+    data class Error(val message: String) : SessionState
+}
+
 @Composable
-private fun PlaceholderScreen(baseUrl: String) {
+private fun AppScreen(
+    sessionState: SessionState,
+    onSignIn: () -> Unit,
+    onSignOut: () -> Unit,
+    onReload: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
     val healthState = remember { mutableStateOf("Checking server health…") }
 
-    LaunchedEffect(baseUrl) {
+    LaunchedEffect(Unit) {
         healthState.value =
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val client = OkHttpClient()
-                    val request =
-                        Request.Builder()
-                            .url("$baseUrl/health")
-                            .get()
-                            .build()
-                    client.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) {
-                            "Health check failed: HTTP ${response.code}"
-                        } else {
-                            "Server healthy at $baseUrl"
-                        }
+            runCatching {
+                val client = okhttp3.OkHttpClient()
+                val request =
+                    okhttp3.Request.Builder()
+                        .url("${BuildConfig.BASE_URL}/health")
+                        .get()
+                        .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        "Health check failed: HTTP ${response.code}"
+                    } else {
+                        "Server healthy at ${BuildConfig.BASE_URL}"
                     }
-                }.getOrElse { error ->
-                    val detail = error.message ?: error.javaClass.simpleName
-                    "Health check failed: $detail"
                 }
+            }.getOrElse { error ->
+                "Health check failed: ${error.message ?: error.javaClass.simpleName}"
             }
     }
 
@@ -68,8 +190,25 @@ private fun PlaceholderScreen(baseUrl: String) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("v-note", style = MaterialTheme.typography.headlineMedium)
-        Text("Bootstrap placeholder", style = MaterialTheme.typography.bodyLarge)
-        Text("BASE_URL: $baseUrl", style = MaterialTheme.typography.bodyMedium)
         Text(healthState.value, style = MaterialTheme.typography.bodyMedium)
+
+        when (sessionState) {
+            SessionState.Loading -> Text("Checking session…")
+            SessionState.SignedOut -> {
+                Text("Sign in with Authentik to use v-note on this device.")
+                Button(onClick = onSignIn) { Text("Sign in") }
+            }
+            is SessionState.SignedIn -> {
+                val label = sessionState.profile.email ?: sessionState.profile.sub
+                Text("Signed in as $label", style = MaterialTheme.typography.bodyLarge)
+                Text("sub: ${sessionState.profile.sub}")
+                Button(onClick = onSignOut) { Text("Sign out") }
+            }
+            is SessionState.Error -> {
+                Text(sessionState.message, style = MaterialTheme.typography.bodyMedium)
+                Button(onClick = { scope.launch { onReload() } }) { Text("Retry") }
+                Button(onClick = onSignIn) { Text("Sign in") }
+            }
+        }
     }
 }

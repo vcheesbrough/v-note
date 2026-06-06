@@ -52,6 +52,17 @@ Environment:
 | `STATIC_DIR` | unset | when set, serves SPA + fallback `index.html` |
 | `DATABASE_URL` | unset | sqlx migrations dir present; optional Postgres |
 | `TLS_CERT` / `TLS_KEY` | unset | Docker image sets self-signed TLS on `:443` |
+| `OIDC_ISSUER_URL` | unset | When unset, auth is disabled (`/api/me` returns anonymous) |
+| `OIDC_CLIENT_ID` | required with issuer | SPA confidential client |
+| `OIDC_CLIENT_SECRET` | required with issuer | SPA client secret |
+| `OIDC_REDIRECT_URI` | required with issuer | e.g. `https://v-notes-dev.desync.link/auth/callback` |
+| `REQUIRED_SCOPE` | required with issuer | `v-note:dev:access` or `v-note:prod:access` |
+| `OIDC_END_SESSION_URL` | optional | RP-initiated logout redirect |
+| `ASSETLINKS_JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json` |
+
+**Local auth-disabled mode:** omit `OIDC_ISSUER_URL` — same as pre-#146 bootstrap.
+
+**E2e auth:** `e2e/docker-compose.test.yml` runs mock OIDC; Playwright `global-setup.ts` seeds the `auth` cookie. See `e2e/tests/auth.spec.ts`.
 
 ---
 

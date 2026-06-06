@@ -1,6 +1,6 @@
 # Deploy — v-note
 
-**Status:** Pipeline skeleton lands in **#145**; live deploy smoke in **#152**.
+**Status:** Authentik blueprint + OIDC env wiring land in **#146**; live deploy smoke in **#152**.
 
 **Spec:** [`PLAN.md`](PLAN.md) · **Local dev:** [`DEV.md`](DEV.md) · **Reference:** [bored `.woodpecker/build.yml`](https://github.com/vcheesbrough/bored/blob/main/.woodpecker/build.yml)
 
@@ -55,8 +55,13 @@ Mirror bored OpenBao layout where applicable.
 | `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
 | `REQUIRED_SCOPE` | `v-note:prod:access` vs `v-note:dev:access` |
 | `OIDC_ISSUER_URL` | Matching Authentik provider issuer |
+| `OIDC_CLIENT_ID` | SPA confidential client (`v-note-browser-{dev,prod}`) |
+| `OIDC_CLIENT_SECRET` | SPA client secret (Woodpecker secret per env) |
+| `OIDC_REDIRECT_URI` | `https://{host}/auth/callback` |
+| `OIDC_END_SESSION_URL` | Authentik RP logout URL for env |
+| `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
 
-Exact names frozen in **#145** `deploy/docker-compose.yml`.
+Exact names in `deploy/docker-compose.yml`. Android App Links template: `deploy/assetlinks.example.json` — set `ASSETLINKS_JSON` to the minified JSON for each env (package name + signing cert SHA-256).
 
 ---
 

@@ -29,6 +29,13 @@ services:
       DATABASE_URL: postgres://v_note:${POSTGRES_PASSWORD}@postgres:5432/v_note
       STATIC_DIR: /app/dist
       V_NOTE_HOST: ${V_NOTE_HOST:-localhost}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      REQUIRED_SCOPE: ${REQUIRED_SCOPE:-}
+      OIDC_END_SESSION_URL: ${OIDC_END_SESSION_URL:-}
+      ASSETLINKS_JSON: ${ASSETLINKS_JSON:-}
     depends_on:
       postgres:
         condition: service_healthy
