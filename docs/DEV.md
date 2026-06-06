@@ -58,6 +58,8 @@ Environment:
 | `OIDC_REDIRECT_URI` | required with issuer | e.g. `https://v-notes-dev.desync.link/auth/callback` |
 | `REQUIRED_SCOPE` | required with issuer | `v-note:dev:access` or `v-note:prod:access` |
 | `OIDC_END_SESSION_URL` | optional | RP-initiated logout redirect |
+| `OIDC_ANDROID_CLIENT_ID` | optional | Android Authentik app client id (`v-note-android-{dev,prod}`) |
+| `OIDC_ANDROID_ISSUER_URL` | optional | Android provider issuer (separate Authentik app) |
 | `ASSETLINKS_JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json` |
 
 **Local auth-disabled mode:** omit `OIDC_ISSUER_URL` — same as pre-#146 bootstrap.

@@ -43,6 +43,36 @@ test.describe('auth — rejection', () => {
     await ctx.dispose();
   });
 
+  test('GET /api/me with android-shaped bearer token returns 200', async () => {
+    const tokenUrl = process.env.OIDC_TOKEN_URL;
+    test.skip(!tokenUrl, 'OIDC_TOKEN_URL required for android bearer test');
+
+    const ctx = await request.newContext({ ignoreHTTPSErrors: true });
+    const tokenRes = await ctx.post(tokenUrl!, {
+      form: {
+        grant_type: 'client_credentials',
+        client_id: 'v-note-android-test',
+        client_secret: process.env.OIDC_CLIENT_SECRET,
+        scope: 'openid profile email v-note:test:access',
+      },
+    });
+    expect(tokenRes.ok()).toBeTruthy();
+    const tokenBody = await tokenRes.json();
+
+    const apiCtx = await request.newContext({
+      ...unauthOptions,
+      extraHTTPHeaders: {
+        Authorization: `Bearer ${tokenBody.access_token}`,
+      },
+    });
+    const res = await apiCtx.get('/api/me');
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.sub).toBe('v-note-android-test-user');
+    await apiCtx.dispose();
+    await ctx.dispose();
+  });
+
   test('GET /api/me with wrong scope returns 403', async () => {
     const tokenUrl = process.env.OIDC_TOKEN_URL;
     test.skip(!tokenUrl, 'OIDC_TOKEN_URL required for scope rejection test');

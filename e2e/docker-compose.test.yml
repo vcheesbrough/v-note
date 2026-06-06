@@ -25,6 +25,17 @@ services:
                 },
                 {
                   "requestParam": "client_id",
+                  "match": "v-note-android-test",
+                  "claims": {
+                    "sub": "v-note-android-test-user",
+                    "aud": ["v-note-android-test"],
+                    "scope": "openid profile email v-note:test:access",
+                    "preferred_username": "android-test-user",
+                    "email": "android@example.com"
+                  }
+                },
+                {
+                  "requestParam": "client_id",
                   "match": "v-note-test-wrong",
                   "claims": {
                     "sub": "wrong-scope-user",
@@ -51,6 +62,8 @@ services:
       OIDC_CLIENT_SECRET: test-secret
       OIDC_REDIRECT_URI: https://app:443/auth/callback
       REQUIRED_SCOPE: v-note:test:access
+      OIDC_ANDROID_CLIENT_ID: v-note-android-test
+      OIDC_ANDROID_ISSUER_URL: http://mock-oidc:8080/default
     depends_on:
       - mock-oidc
     networks:

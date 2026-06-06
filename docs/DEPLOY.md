@@ -59,6 +59,8 @@ Mirror bored OpenBao layout where applicable.
 | `OIDC_CLIENT_SECRET` | SPA client secret (Woodpecker secret per env) |
 | `OIDC_REDIRECT_URI` | `https://{host}/auth/callback` |
 | `OIDC_END_SESSION_URL` | Authentik RP logout URL for env |
+| `OIDC_ANDROID_CLIENT_ID` | Android app client (`v-note-android-{dev,prod}`) |
+| `OIDC_ANDROID_ISSUER_URL` | Android Authentik provider issuer URL |
 | `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
 
 Exact names in `deploy/docker-compose.yml`. Android App Links template: `deploy/assetlinks.example.json` — set `ASSETLINKS_JSON` to the minified JSON for each env (package name + signing cert SHA-256).

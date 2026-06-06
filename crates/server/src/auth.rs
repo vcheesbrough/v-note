@@ -25,6 +25,10 @@ pub struct AuthConfig {
     pub authorize_endpoint: String,
     pub token_endpoint: String,
     pub jwks_uri: String,
+    /// Optional issuer URL for the Android OIDC provider (separate Authentik app).
+    pub android_issuer_url: Option<String>,
+    /// OAuth2 `client_id` for the Android provider. Tokens carry this in `aud`.
+    pub android_client_id: Option<String>,
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -39,6 +43,8 @@ impl std::fmt::Debug for AuthConfig {
             .field("authorize_endpoint", &self.authorize_endpoint)
             .field("token_endpoint", &self.token_endpoint)
             .field("jwks_uri", &self.jwks_uri)
+            .field("android_issuer_url", &self.android_issuer_url)
+            .field("android_client_id", &self.android_client_id)
             .finish()
     }
 }
@@ -66,6 +72,12 @@ impl AuthConfig {
         let end_session_url = std::env::var("OIDC_END_SESSION_URL")
             .ok()
             .filter(|value| !value.is_empty());
+        let android_issuer_url = std::env::var("OIDC_ANDROID_ISSUER_URL")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let android_client_id = std::env::var("OIDC_ANDROID_CLIENT_ID")
+            .ok()
+            .filter(|value| !value.is_empty());
 
         let discovery = Self::discover(&issuer_url)
             .await
@@ -81,6 +93,8 @@ impl AuthConfig {
             authorize_endpoint: discovery.authorization_endpoint,
             token_endpoint: discovery.token_endpoint,
             jwks_uri: discovery.jwks_uri,
+            android_issuer_url,
+            android_client_id,
         })
     }
 
@@ -128,6 +142,14 @@ impl JwksCache {
             keys: RwLock::new(HashMap::new()),
             http: reqwest::Client::new(),
             jwks_url,
+        }
+    }
+
+    pub fn with_keys(keys: HashMap<String, DecodingKey>) -> Self {
+        Self {
+            keys: RwLock::new(keys),
+            http: reqwest::Client::new(),
+            jwks_url: String::new(),
         }
     }
 
@@ -229,8 +251,16 @@ pub async fn validate_jwt(
 
     let mut validation = Validation::new(header.alg);
     validation.algorithms = allowed_algs.to_vec();
-    validation.set_audience(&[config.client_id.as_str()]);
-    validation.set_issuer(&[config.issuer_url.as_str()]);
+    let mut audiences = vec![config.client_id.as_str()];
+    if let Some(android_cid) = config.android_client_id.as_deref() {
+        audiences.push(android_cid);
+    }
+    validation.set_audience(&audiences);
+    let mut issuers = vec![config.issuer_url.as_str()];
+    if let Some(android_iss) = config.android_issuer_url.as_deref() {
+        issuers.push(android_iss);
+    }
+    validation.set_issuer(&issuers);
 
     let data = decode::<Claims>(token, &key, &validation).map_err(|error| {
         tracing::debug!(error = %error, "JWT validation failed");

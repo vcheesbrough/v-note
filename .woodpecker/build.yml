@@ -150,6 +150,8 @@ steps:
         OIDC_REDIRECT_URI=https://v-notes-dev.desync.link/auth/callback \
         REQUIRED_SCOPE=v-note:dev:access \
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-dev/end-session/ \
+        OIDC_ANDROID_CLIENT_ID=v-note-android-dev \
+        OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-dev/ \
         docker compose -p v-note-dev -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d --pull always
 
   deploy-prod:
@@ -181,4 +183,6 @@ steps:
         OIDC_REDIRECT_URI=https://v-notes.desync.link/auth/callback \
         REQUIRED_SCOPE=v-note:prod:access \
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-prod/end-session/ \
+        OIDC_ANDROID_CLIENT_ID=v-note-android-prod \
+        OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-prod/ \
         docker compose -p v-note -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d --pull always

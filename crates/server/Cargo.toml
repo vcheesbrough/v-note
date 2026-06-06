@@ -27,4 +27,6 @@ url = "2"
 
 [dev-dependencies]
 axum-extra = { version = "0.10", features = ["cookie"] }
+jsonwebtoken = "9"
+serde = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
