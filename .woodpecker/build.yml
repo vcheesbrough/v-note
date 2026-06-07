@@ -2,14 +2,34 @@ when:
   - event: [push, deployment]
 
 steps:
+  compute-version:
+    when:
+      - event: [push, deployment]
+    pull: true
+    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
+    settings:
+      mode: compute
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
   build-web:
     when:
       - event: push
+    depends_on:
+      - compute-version
     image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
+    environment: &registry-creds
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
     commands:
-      - docker build -t registry.desync.link/v-note:$$CI_COMMIT_SHA .
+      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - docker build -t registry.desync.link/v-note:$(cat .release-tag) .
+      - docker push registry.desync.link/v-note:$(cat .release-tag)
 
   build-android:
     when:
@@ -38,9 +58,10 @@ steps:
     volumes: *docker-socket
     commands:
       - |
+        RELEASE_TAG=$$(cat .release-tag)
         REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml down --volumes
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC
 
@@ -60,17 +81,6 @@ steps:
           exit 1
         fi
 
-  compute-version:
-    when:
-      - event: deployment
-    pull: true
-    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
-    settings:
-      mode: compute
-      major_minor_source: cargo
-      github_token:
-        from_secret: github_token
-
   apply-authentik-blueprint:
     when:
       - event: deployment
@@ -88,21 +98,6 @@ steps:
           from_secret: v_note_dev_oidc_client_secret
         AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
           from_secret: v_note_prod_oidc_client_secret
-
-  push:
-    when:
-      - event: deployment
-    image: *docker-image
-    volumes: *docker-socket
-    environment: &registry-creds
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-    commands:
-      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker build -t registry.desync.link/v-note:$(cat .release-tag) .
-      - docker push registry.desync.link/v-note:$(cat .release-tag)
 
   tag-release:
     when:
