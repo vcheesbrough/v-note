@@ -2,7 +2,6 @@ package link.desync.vnote
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
@@ -18,7 +17,10 @@ class PlaceholderInstrumentedTest {
     fun launchesAuthShellWhenSignedOut() {
         composeRule.onNodeWithText("v-note").assertIsDisplayed()
         composeRule.waitUntil(timeoutMillis = 15_000) {
-            composeRule.onAllNodesWithText("Sign in").fetchSemanticsNodes().isNotEmpty()
+            runCatching {
+                composeRule.onNodeWithText("Sign in").assertIsDisplayed()
+                true
+            }.getOrDefault(false)
         }
         composeRule
             .onNodeWithText("Sign in with Authentik to use v-note on this device.")
