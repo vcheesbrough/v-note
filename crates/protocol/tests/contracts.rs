@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use protocol::{HealthResponse, MetaResponse, PROTOCOL_VERSION};
+use protocol::{HealthResponse, MeResponse, MetaResponse, PROTOCOL_VERSION};
 
 fn fixture(path: &str) -> String {
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -26,6 +26,14 @@ fn deserializes_meta_fixture() {
         serde_json::from_str(&fixture("meta.json")).expect("meta fixture should parse");
     assert_eq!(parsed.app_name, "v-note");
     assert_eq!(parsed.protocol_version, PROTOCOL_VERSION);
+}
+
+#[test]
+fn deserializes_me_fixture() {
+    let parsed: MeResponse =
+        serde_json::from_str(&fixture("me.json")).expect("me fixture should parse");
+    assert_eq!(parsed.sub, "v-note-test-service-account");
+    assert_eq!(parsed.email.as_deref(), Some("test@example.com"));
 }
 
 #[test]

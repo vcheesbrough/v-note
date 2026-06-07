@@ -1,6 +1,9 @@
+# Mini deploy (Woodpecker, default): Traefik on proxy-backend, LAN/VPN middleware, no host ports.
+# Local temporary dev: add -f deploy/docker-compose.local.yml (published :8443, no Traefik).
+
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
     restart: unless-stopped
     environment:
       POSTGRES_DB: v_note
@@ -21,26 +24,47 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    container_name: ${V_NOTE_CONTAINER_NAME:-v-note-local}
+    container_name: ${V_NOTE_CONTAINER_NAME:?V_NOTE_CONTAINER_NAME is required}
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_VERSION: ${APP_VERSION:-0.1.0}
       DATABASE_URL: postgres://v_note:${POSTGRES_PASSWORD}@postgres:5432/v_note
       STATIC_DIR: /app/dist
-      V_NOTE_HOST: ${V_NOTE_HOST:-localhost}
+      V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_AUTHORIZE_URL: ${OIDC_AUTHORIZE_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      REQUIRED_SCOPE: ${REQUIRED_SCOPE:-}
+      OIDC_END_SESSION_URL: ${OIDC_END_SESSION_URL:-}
+      OIDC_ANDROID_CLIENT_ID: ${OIDC_ANDROID_CLIENT_ID:-}
+      OIDC_ANDROID_ISSUER_URL: ${OIDC_ANDROID_ISSUER_URL:-}
+      ASSETLINKS_JSON: ${ASSETLINKS_JSON:-}
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "${V_NOTE_PORT:-8443}:443"
     networks:
       - v-note-net
+      - proxy-backend
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.entrypoints=websecure
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.rule=Host(`${V_NOTE_HOST}`)
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls=true
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls.certresolver=myresolver
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,crowdsec@docker,security-headers@docker
+      - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.port=443
+      - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.scheme=https
 
 volumes:
   v-note-db:
-    name: ${DB_VOLUME:-v-note-local-db}
+    name: ${DB_VOLUME:?DB_VOLUME is required}
+    external: true
 
 networks:
   v-note-net:
     name: ${DOCKER_NETWORK:-v-note-net}
+  proxy-backend:
+    external: true

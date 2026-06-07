@@ -16,7 +16,7 @@
 | **Android Studio** (Windows) | Emulator, USB device, SDK, `adb` — **recommended on WSL** |
 | **NetBird / LAN** | Reach deployed dev env (optional) |
 
-No dev container — Android local run needs Studio/emulator or a USB device; Docker is for **build-only** (`just build-android-docker`).
+No dev container — Android local run needs Studio/emulator or a USB device; Docker is for **build-only** (`just build-android-docker`). All Android Docker paths pin **`scripts/android-build-box-image.ref`** (CI, `Dockerfile.android*`, `just`). App Links fingerprint: **`scripts/android-dev-debug-fingerprint.sh`** uses local `keytool` by default (`--docker` is the slow CI-parity path).
 
 ---
 
@@ -52,6 +52,20 @@ Environment:
 | `STATIC_DIR` | unset | when set, serves SPA + fallback `index.html` |
 | `DATABASE_URL` | unset | sqlx migrations dir present; optional Postgres |
 | `TLS_CERT` / `TLS_KEY` | unset | Docker image sets self-signed TLS on `:443` |
+| `OIDC_ISSUER_URL` | **required** | OIDC issuer (mock-oidc locally — `deploy/compose.env`) |
+| `OIDC_AUTHORIZE_URL` | optional | Browser-facing `/authorize` URL when it differs from discovery (local mock on `localhost:18080`) |
+| `OIDC_CLIENT_ID` | **required** | SPA confidential client |
+| `OIDC_CLIENT_SECRET` | **required** | SPA client secret (`test-secret` for local mock OIDC) |
+| `OIDC_REDIRECT_URI` | **required** | e.g. `https://v-notes-dev.desync.link/auth/callback` |
+| `REQUIRED_SCOPE` | **required** | `v-note:dev:access` or `v-note:prod:access` |
+| `OIDC_END_SESSION_URL` | optional | RP-initiated logout redirect |
+| `OIDC_ANDROID_CLIENT_ID` | optional | Android Authentik app client id (`v-note-android-{dev,prod}`) |
+| `OIDC_ANDROID_ISSUER_URL` | optional | Android provider issuer (separate Authentik app) |
+| `ASSETLINKS_JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json` |
+
+**OIDC is mandatory:** the server refuses to start without `OIDC_ISSUER_URL` and related vars. Local dev and CI use **mock OIDC** (`deploy/docker-compose.local.yml`, `e2e/docker-compose.test.yml`) — not auth-disabled anonymous mode.
+
+**E2e auth:** `e2e/docker-compose.test.yml` runs mock OIDC; Playwright `global-setup.ts` seeds the `auth` cookie. See `e2e/tests/auth.spec.ts`.
 
 ---
 
@@ -107,7 +121,7 @@ Unit tests (host or Docker):
 source scripts/android-env.sh && cd android && ./gradlew :app:testDevDebugUnitTest
 ```
 
-Instrumented tests: `./gradlew :app:connectedDevDebugAndroidTest` with emulator running (`PlaceholderInstrumentedTest` scaffold).
+Instrumented tests: `./gradlew :app:connectedDevDebugAndroidTest` with emulator running, or CI-parity `just android-instrumented-docker` (Woodpecker `android-instrumented` step).
 
 ### Emulator (WSL2 / Hyper-V)
 
@@ -140,16 +154,20 @@ WSL builds/install via `adb` (USB or emulator started on Windows); `just android
 ## Compose (local)
 
 ```bash
-cp deploy/.env.example deploy/.env   # once; POSTGRES_PASSWORD for local Postgres
+export BAO_ADDR=https://secrets.desync.link
+export BAO_TOKEN=<token with read on secret/v-note-stack/env>
+./scripts/fetch-compose-env.sh   # writes deploy/.env from OpenBao + deploy/compose.env
 just run-compose
 ```
 
-Or: `docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build`
+Non-secret compose defaults are in **`deploy/compose.env`** (committed). Secrets (**`POSTGRES_PASSWORD`**, **`OIDC_CLIENT_SECRET`**) live in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator).
+
+Or: `./scripts/fetch-compose-env.sh` then `docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build`
 
 - **API + SPA:** `https://localhost:8443` (self-signed — use `curl -k`)
 - **Postgres:** internal only (`postgres:5432`)
 
-Prod deploy on mini adds `deploy/docker-compose.prod.yml` (Traefik `proxy-backend`).
+Mini deploy uses `deploy/docker-compose.yml` only (Traefik `proxy-backend`, `lan-vpn-only@docker`). Local dev adds `deploy/docker-compose.local.yml` (mock OIDC on `:18080`, published `:8443`, Traefik off). The server talks to **`mock-oidc:8080`** on the compose network; the browser sign-in redirect uses **`http://localhost:18080`** via optional **`OIDC_AUTHORIZE_URL`**.
 
 ---
 

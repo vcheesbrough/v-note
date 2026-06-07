@@ -14,8 +14,16 @@ class PlaceholderInstrumentedTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun launchesPlaceholderShell() {
+    fun launchesAuthShellWhenSignedOut() {
         composeRule.onNodeWithText("v-note").assertIsDisplayed()
-        composeRule.onNodeWithText("Bootstrap placeholder").assertIsDisplayed()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            runCatching {
+                composeRule.onNodeWithText("Sign in").assertIsDisplayed()
+                true
+            }.getOrDefault(false)
+        }
+        composeRule
+            .onNodeWithText("Sign in with Authentik to use v-note on this device.")
+            .assertIsDisplayed()
     }
 }

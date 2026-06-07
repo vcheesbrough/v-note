@@ -1,6 +1,6 @@
 # Deploy — v-note
 
-**Status:** Pipeline skeleton lands in **#145**; live deploy smoke in **#152**.
+**Status:** Authentik blueprint + OIDC env wiring land in **#146**; live deploy smoke in **#152**.
 
 **Spec:** [`PLAN.md`](PLAN.md) · **Local dev:** [`DEV.md`](DEV.md) · **Reference:** [bored `.woodpecker/build.yml`](https://github.com/vcheesbrough/bored/blob/main/.woodpecker/build.yml)
 
@@ -29,9 +29,13 @@ Triggered manually with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** (bored
 
 ---
 
-## Secrets (OpenBao → Woodpecker)
+## Secrets (OpenBao)
 
-Document keys here as they are wired in **#145** — **never commit values**.
+**Never commit values.** Two OpenBao paths:
+
+### Woodpecker mini deploy
+
+`secret/woodpecker/repos/vcheesbrough/v-note` (broker layout, same as bored):
 
 | Woodpecker secret key | Used for |
 | --- | --- |
@@ -39,11 +43,22 @@ Document keys here as they are wired in **#145** — **never commit values**.
 | `v_note_prod_oidc_client_secret` | SPA confidential client (prod) |
 | `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
+| `v_note_dev_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (dev App Links, package `link.desync.vnote.dev`) |
+| `v_note_prod_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (prod App Links, package `link.desync.vnote`) |
 | Android signing (post-MVP prod) | Release keystore — **outside repo** |
 
-Add values under OpenBao path `secret/woodpecker/repos/vcheesbrough/v-note` (same broker layout as bored). Rotate with `bao kv patch` on mini.
+Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
 
-Mirror bored OpenBao layout where applicable.
+### Local compose (WSL / laptop)
+
+`secret/v-note-stack/env`:
+
+| Key | Used for |
+| --- | --- |
+| `POSTGRES_PASSWORD` | Local Postgres in `deploy/docker-compose.yml` |
+| `OIDC_CLIENT_SECRET` | SPA client secret (mock OIDC or Authentik) |
+
+Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merges with committed **`deploy/compose.env`**). Seed: **`./scripts/patch-v-note-openbao-secrets.sh`**.
 
 ---
 
@@ -55,8 +70,37 @@ Mirror bored OpenBao layout where applicable.
 | `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
 | `REQUIRED_SCOPE` | `v-note:prod:access` vs `v-note:dev:access` |
 | `OIDC_ISSUER_URL` | Matching Authentik provider issuer |
+| `OIDC_CLIENT_ID` | SPA confidential client (`v-note-browser-{dev,prod}`) |
+| `OIDC_CLIENT_SECRET` | SPA client secret (Woodpecker secret per env) |
+| `OIDC_REDIRECT_URI` | `https://{host}/auth/callback` |
+| `OIDC_END_SESSION_URL` | Authentik RP logout URL for env |
+| `OIDC_ANDROID_CLIENT_ID` | Android app client (`v-note-android-{dev,prod}`) |
+| `OIDC_ANDROID_ISSUER_URL` | Android Authentik provider issuer URL |
+| `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
 
-Exact names frozen in **#145** `deploy/docker-compose.yml`.
+**OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
+
+Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for deploy** — Woodpecker injects minified JSON from OpenBao keys `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` (step `environment:` → `docker compose` reads `${ASSETLINKS_JSON}`). Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do not commit real fingerprints).
+
+**Seed Woodpecker App Links secrets** (operator, on mini or with write access to `secret/woodpecker/repos/vcheesbrough/v-note`):
+
+```bash
+export BAO_ADDR=https://secrets.desync.link
+export BAO_TOKEN=<token>
+
+# Dev — fingerprint from your local debug keystore (fast; must match the APK you sideload):
+export V_NOTE_DEV_ANDROID_CERT_SHA256="$(./scripts/android-dev-debug-fingerprint.sh)"
+# CI container keystore instead (slow): ./scripts/android-dev-debug-fingerprint.sh --docker
+./scripts/patch-v-note-woodpecker-openbao-secrets.sh
+
+# Prod — release keystore SHA-256 (keytool -list -v …), when prod Android ships:
+export V_NOTE_PROD_ANDROID_CERT_SHA256='AA:BB:CC:...'
+./scripts/patch-v-note-woodpecker-openbao-secrets.sh
+```
+
+Manual render (without patch script): `./scripts/render-assetlinks-json.sh dev "$SHA"` → pipe to `bao kv patch` as `v_note_dev_assetlinks_json`.
+
+Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keystore), `--docker` only for the CI image keystore, or `keytool -list -v` on a release keystore (prod).
 
 ---
 

@@ -1,5 +1,7 @@
 # CI-only: Android devDebug APK + unit tests (Woodpecker build-android).
-FROM mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
+# Base image pin: scripts/android-build-box-image.ref (pass as ANDROID_BUILD_BOX_IMAGE).
+ARG ANDROID_BUILD_BOX_IMAGE
+FROM ${ANDROID_BUILD_BOX_IMAGE}
 WORKDIR /workspace
 COPY . .
 RUN ./scripts/sync-version.sh \
