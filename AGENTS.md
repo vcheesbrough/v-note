@@ -59,6 +59,25 @@ When this project (or you) uses **Kanban cards** as the task queue:
 
 7. **Ship:** When the **PR is merged**, **move the card to Done** via bored MCP (**`move_card`** into the Done column). Update **`docs/PLAN.md`** todos if the work closes a planned item.
 
+### Planning vs implementation (scope gate)
+
+Cards in **TODO / backlog** are **spec only** until the card moves to **In progress** (§2–4). Do **not** treat runbook or design discussion as permission to edit the repo.
+
+| User intent | Allowed edits | Not allowed |
+| --- | --- | --- |
+| Refine / update a **TODO** card (runbook, acceptance, order) | **bored MCP** `update_card` (and **`docs/PLAN.md`** only if the user asks for plan alignment) | Source code, CI, scripts, compose, new files, commits |
+| **Start iteration** — e.g. *pick up #N*, *implement #N*, *start work*, *open PR* | Full implementation per the active card + §1 branch/version rules | Scope beyond the card without replanning |
+| Ambiguous — shaping a card vs building it | **Ask once:** *“Ticket only, or implement?”* then follow the answer | Guessing and coding “helpfully” |
+
+**While a card is TODO:**
+
+- The **card body** is the source of truth for acceptance, operator runbook, expected paths, and out-of-scope — not the repo.
+- **One deliverable per request** — ticket update **or** plan update **or** implementation; not all three unless the user asks for each.
+- **Verify before writing** facts into a card or plan: read **this repo’s** pipeline, plugins, and scripts (e.g. `.woodpecker/build.yml`, [`woodpecker-plugin-release-versions`](https://github.com/vcheesbrough/woodpecker-plugin-release-versions)). Do **not** copy formats or behaviour from **bored** or other repos unless v-note uses the same mechanism.
+- Use placeholders like **`{release}`** in cards and define them once (v-note: Woodpecker **`compute-version`** → **`.release-tag`**, plain semver **`MAJOR.MINOR.PATCH`** — not `semver-<sha>` unless the pipeline changes).
+
+**If you overstepped** (repo edited when only the card should change): revert repo changes immediately; keep or fix the card; do not “finish” the implementation in the same turn unless the user then asks to start work.
+
 ### Bored — MCP only
 
 - Use **bored MCP tools** for **all** board/column/card reads and writes on the **v-notes** board: `list_boards`, `get_board`, `list_columns`, `list_cards`, `get_card`, **`get_card_by_number`**, `create_card`, **`update_card`**, **`move_card`**, `delete_*`, `reorder_columns`, etc.
