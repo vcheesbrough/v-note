@@ -5,14 +5,11 @@ FROM mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f5
 
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
-ENV PATH="${ANDROID_HOME}/emulator:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/cmdline-tools/latest/bin:${PATH}"
-
-ARG SYSTEM_IMAGE=system-images;android-35;google_apis;x86_64
-ARG AVD_NAME=vnote-ci
+ENV PATH=/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:${PATH}
 
 RUN yes | sdkmanager --licenses >/dev/null 2>&1 || true \
-    && sdkmanager "platform-tools" "emulator" "${SYSTEM_IMAGE}" \
-    && echo no | avdmanager create avd -n "${AVD_NAME}" -k "${SYSTEM_IMAGE}" -d pixel_6 --force
+    && sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64" \
+    && echo no | avdmanager create avd -n vnote-ci -k "system-images;android-35;google_apis;x86_64" -d pixel_6 --force
 
 WORKDIR /workspace
 COPY . .
