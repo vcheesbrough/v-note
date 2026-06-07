@@ -146,6 +146,22 @@ Remote PR review agents (Woodpecker `pr-review`, Cursor Automation) are **unreli
 
 Self-review is **required** when the agent opens the PR; remote agent output is **optional/supplementary**.
 
+### Merge PRs (required)
+
+When merging a PR to **`master`** (user request or iteration ship), **always squash**, then **delete the feature branch** locally and on the remote:
+
+```bash
+gh pr merge <N> --squash --subject "<title>" --body "<summary>"
+# branch name from: gh pr view <N> --json headRefName
+git checkout master && git pull origin master
+git branch -d <headRefName>
+git push origin --delete <headRefName>
+```
+
+- **Do not** use merge commits (`gh pr merge --merge`) or rebase merge (`--rebase`) unless the user **explicitly** overrides for that PR.
+- Squash keeps **one commit per iteration/PR** on **`master`**, aligned with trunk-based flow and semver iteration boundaries (§1).
+- **Branch cleanup** is part of ship — do not leave merged `feat/iteration-*` branches on the remote or in the local checkout unless the user asks to keep them.
+
 ### Monitor after you open a PR
 
 In parallel with triage (and after self-review is posted), **watch for supplementary feedback** from humans and remote agents. You may wait for automated review agents to finish before treating **external** review state as final — e.g. Woodpecker `pr-review`, Cursor Automation, Bugbot, or similar check contexts. Poll **`gh pr checks`** and commit statuses (pending → success/failure) and GraphQL unresolved `reviewThreads`. **Surface agent completion** when it arrives (which agent finished, pass/fail), then **surface new comments** to the user (count and brief summary). **Do not assume** there are no review threads while agent checks are still pending; re-check while CI or agents are in flight unless the user says to stop.
