@@ -9,6 +9,7 @@ import link.desync.vnote.auth.TokenStore
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import java.net.InetAddress
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -24,7 +25,7 @@ class AuthRefreshInstrumentedTest {
     @Before
     fun setUp() {
         server = MockWebServer()
-        server.start()
+        server.start(InetAddress.getByName("127.0.0.1"), 0)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         tokenStore = TokenStore(context)
         tokenStore.clear()

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI: boot an Android emulator and run devDebug instrumented tests.
+# CI: boot the pre-baked Android emulator and run devDebug instrumented tests.
 set -euo pipefail
 
 export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
@@ -7,15 +7,30 @@ export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
 export ADB_INSTALL_TIMEOUT=120
 
-AVD_NAME="vnote-ci"
+AVD_NAME="${AVD_NAME:-vnote-ci}"
+SYSTEM_IMAGE="${SYSTEM_IMAGE:-system-images;android-35;google_apis;x86_64}"
 BOOT_TIMEOUT_SEC="${BOOT_TIMEOUT_SEC:-900}"
 
-pick_system_image() {
-  if [ -c /dev/kvm ]; then
-    echo "system-images;android-35;google_apis;x86_64"
-  else
-    echo "system-images;android-35;google_apis;arm64-v8a"
+ensure_avd() {
+  if avdmanager list avd 2>/dev/null | grep -q "Name: ${AVD_NAME}"; then
+    echo "Using pre-baked AVD: ${AVD_NAME}"
+    return 0
   fi
+
+  echo "AVD ${AVD_NAME} missing — installing ${SYSTEM_IMAGE}" >&2
+  local attempt
+  for attempt in 1 2 3; do
+    rm -rf "${ANDROID_HOME}/.temp" 2>/dev/null || true
+    if yes | sdkmanager --licenses >/dev/null 2>&1 \
+      && sdkmanager "platform-tools" "emulator" "$SYSTEM_IMAGE"; then
+      echo no | avdmanager create avd -n "$AVD_NAME" -k "$SYSTEM_IMAGE" -d pixel_6 --force
+      return 0
+    fi
+    echo "sdkmanager attempt ${attempt} failed; retrying..." >&2
+    sleep 10
+  done
+  echo "Failed to provision emulator system image after 3 attempts" >&2
+  return 1
 }
 
 wait_for_emulator() {
@@ -39,18 +54,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ ! -c /dev/kvm ]; then
+  echo "WARNING: /dev/kvm not available — x86_64 emulator will be slow without hardware acceleration" >&2
+fi
+
 cd /workspace
 ./scripts/sync-version.sh
-
-SYSTEM_IMAGE="$(pick_system_image)"
-echo "Using system image: ${SYSTEM_IMAGE}"
-
-yes | sdkmanager --licenses >/dev/null 2>&1 || true
-sdkmanager "platform-tools" "emulator" "$SYSTEM_IMAGE"
-
-if ! avdmanager list avd 2>/dev/null | grep -q "Name: ${AVD_NAME}"; then
-  echo no | avdmanager create avd -n "$AVD_NAME" -k "$SYSTEM_IMAGE" -d pixel_6 --force
-fi
+ensure_avd
 
 EMULATOR_ARGS=(
   -avd "$AVD_NAME"

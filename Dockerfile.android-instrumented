@@ -1,6 +1,19 @@
 # CI-only: Android devDebug instrumented tests (Woodpecker android-instrumented).
-# Requires --privileged and /dev/kvm on the Woodpecker agent when available.
+# Requires --privileged and /dev/kvm on the Woodpecker agent.
+# Emulator + system image are baked here so runtime does not re-download SDK packages.
 FROM mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
+
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+ENV PATH="${ANDROID_HOME}/emulator:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/cmdline-tools/latest/bin:${PATH}"
+
+ARG SYSTEM_IMAGE=system-images;android-35;google_apis;x86_64
+ARG AVD_NAME=vnote-ci
+
+RUN yes | sdkmanager --licenses >/dev/null 2>&1 || true \
+    && sdkmanager "platform-tools" "emulator" "${SYSTEM_IMAGE}" \
+    && echo no | avdmanager create avd -n "${AVD_NAME}" -k "${SYSTEM_IMAGE}" -d pixel_6 --force
+
 WORKDIR /workspace
 COPY . .
 RUN chmod +x scripts/run-android-instrumented-ci.sh
