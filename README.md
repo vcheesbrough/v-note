@@ -6,7 +6,7 @@ Self-hosted ink note capture and sync: native Android stylus authoring, owner-on
 
 ## Status
 
-**Iteration 2 (#146)** — MVP authentication on branch `feat/iteration-2-authentik-oidc`. Authentik OIDC for **SPA** (cookie session), **Android** (PKCE + Keystore), and **API** (`GET /api/me`). Woodpecker build/e2e includes Playwright `auth.spec.ts`. **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes).
+**Iteration 2 (#146) merged** — `master` at **`0.2.0`**. MVP authentication: Authentik OIDC for **SPA** (cookie session), **Android** (PKCE + Keystore), and **API** (`GET /api/me`). Next: **#147** owner page library. **Task queue:** [v-notes Kanban board](https://bored.desync.link/boards/v-notes).
 
 ## Quick start
 

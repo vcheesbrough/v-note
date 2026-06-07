@@ -8,21 +8,18 @@
 
 ## Next session
 
-**Paused:** 2026-06-05 · **Branch:** `feat/iteration-1-bootstrap` pushed · **Base:** `master` at **`0d1c47b`**.
+**Paused:** 2026-06-07 · **Branch:** `master` at **`f2f112f`** (`0.2.0`) · **PR #2** merged.
 
-**Current state:** **[#145](https://bored.desync.link/boards/v-notes)** **In Progress** — `# Iteration 1 — Bootstrap monorepo, CI, and test infrastructure`. Monorepo scaffold **committed**; server, SPA (compose), Android emulator, Playwright e2e verified locally.
+**Current state:** **[#146](https://bored.desync.link/boards/v-notes)** **Done** — `# Iteration 2 — MVP authentication (Authentik OIDC)`. Authentik OIDC on SPA + Android + API; Woodpecker `android-instrumented` + OpenBao App Links deploy secrets; dev deploy smoke OK.
 
 ### Do this first
 
-1. **Open PR → merge #145** → move card **Done**; closes **`bootstrap-repo`** todo.
-2. **Ops check (first push):** confirm Woodpecker **build** pipeline is green and **v-note** can push to **`registry.desync.link`**.
-3. **#146** — Authentik OIDC (SPA + Android auth).
+1. **#147** — Owner page library (next MVP backbone card).
 
 ### Then (MVP backbone, in order)
 
 | Card | What |
 | --- | --- |
-| **#146** | Authentik OIDC — SPA + Android auth |
 | **#147** | Owner page library |
 | **#148** | Android ink capture (WSS, edit lease) |
 | **#149** | SPA live ink viewer |
