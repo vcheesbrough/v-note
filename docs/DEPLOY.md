@@ -80,7 +80,7 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 
 **OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
 
-Exact names in `deploy/docker-compose.yml`. Android App Links templates: `deploy/assetlinks.dev.json`, `deploy/assetlinks.prod.json` (or `deploy/assetlinks.example.json` for dev). Woodpecker `deploy-dev` / `deploy-prod` inject secrets `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` into the step environment; `docker compose` reads `ASSETLINKS_JSON` from that env (not inlined in the deploy script — JSON quoting is unsafe in shell).
+Exact names in `deploy/docker-compose.yml`. Android App Links: edit `deploy/assetlinks.{dev,prod}.json` (pretty) then regenerate minified with `jq -c . deploy/assetlinks.dev.json > deploy/assetlinks.dev.min.json` (same for prod). Woodpecker `deploy-dev` / `deploy-prod` pass `ASSETLINKS_JSON` from the committed `*.min.json` files (placeholder SHA until you set a real cert fingerprint). Optional: override via OpenBao Woodpecker secrets `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` if you switch deploy back to `from_secret` once seeded.
 
 **Seed Woodpecker secrets** (operator, on mini):
 
