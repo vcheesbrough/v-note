@@ -27,6 +27,8 @@ android {
         versionCode = 1
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Required by net.openid.appauth manifest merger (HTTPS App Links use a separate intent filter).
+        manifestPlaceholders["appAuthRedirectScheme"] = "link.desync.vnote"
     }
 
     flavorDimensions += "env"
@@ -34,12 +36,56 @@ android {
         create("dev") {
             dimension = "env"
             applicationIdSuffix = ".dev"
+            manifestPlaceholders["appLinkHost"] = "v-notes-dev.desync.link"
             // Loopback + `adb reverse tcp:8080 tcp:8080` — works on emulator and USB devices.
             buildConfigField("String", "BASE_URL", "\"http://127.0.0.1:8080\"")
+            buildConfigField(
+                "String",
+                "OIDC_ISSUER_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-dev/\"",
+            )
+            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-android-dev\"")
+            buildConfigField(
+                "String",
+                "OIDC_REDIRECT_URI",
+                "\"https://v-notes-dev.desync.link/auth/mobile/callback\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_END_SESSION_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-dev/end-session/\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_SCOPES",
+                "\"openid profile email offline_access v-note:dev:access\"",
+            )
         }
         create("prod") {
             dimension = "env"
+            manifestPlaceholders["appLinkHost"] = "v-notes.desync.link"
             buildConfigField("String", "BASE_URL", "\"https://v-notes.desync.link\"")
+            buildConfigField(
+                "String",
+                "OIDC_ISSUER_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-prod/\"",
+            )
+            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-android-prod\"")
+            buildConfigField(
+                "String",
+                "OIDC_REDIRECT_URI",
+                "\"https://v-notes.desync.link/auth/mobile/callback\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_END_SESSION_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-prod/end-session/\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_SCOPES",
+                "\"openid profile email offline_access v-note:prod:access\"",
+            )
         }
     }
 
@@ -82,6 +128,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("net.openid:appauth:0.11.1")
+    implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     testImplementation("org.json:json:20240303")
@@ -90,6 +139,7 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

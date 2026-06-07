@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let app = router_from_env();
+    let app = router_from_env().await;
 
     match (env::var("TLS_CERT").ok(), env::var("TLS_KEY").ok()) {
         (Some(cert_path), Some(key_path)) => {

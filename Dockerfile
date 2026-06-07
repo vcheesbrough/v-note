@@ -1,11 +1,11 @@
-FROM rust:1.89.0 AS builder
+FROM rust:1.89.0@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9 AS builder
 RUN rustup target add wasm32-unknown-unknown && cargo install trunk
 WORKDIR /app
 COPY . .
 RUN cd frontend && trunk build --release
 RUN cargo build --release -p server
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
 RUN apt-get update \
     && apt-get install -y ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*

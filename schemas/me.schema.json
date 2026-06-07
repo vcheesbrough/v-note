@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MeResponse",
+  "type": "object",
+  "required": ["sub"],
+  "properties": {
+    "sub": { "type": "string" },
+    "email": { "type": "string" }
+  },
+  "additionalProperties": false
+}

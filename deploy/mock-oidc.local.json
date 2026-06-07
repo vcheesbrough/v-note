@@ -1,0 +1,34 @@
+{
+  "interactiveLogin": true,
+  "httpServer": "NettyWrapper",
+  "tokenCallbacks": [
+    {
+      "issuerId": "default",
+      "tokenExpiry": 3600,
+      "requestMappings": [
+        {
+          "requestParam": "client_id",
+          "match": "v-note-test",
+          "claims": {
+            "sub": "local-test-user",
+            "aud": ["v-note-test"],
+            "scope": "openid profile email v-note:test:access",
+            "preferred_username": "local-test-user",
+            "email": "test@example.com"
+          }
+        },
+        {
+          "requestParam": "client_id",
+          "match": "v-note-android-test",
+          "claims": {
+            "sub": "local-android-user",
+            "aud": ["v-note-android-test"],
+            "scope": "openid profile email v-note:test:access",
+            "preferred_username": "local-android-user",
+            "email": "android@example.com"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,33 +1,78 @@
+# Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
+# Push: compute-version ∥ contract-validation ∥ build-android ∥ android-instrumented → build-web → e2e-web
+# Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release (prod)
+
 when:
   - event: [push, deployment]
 
 steps:
-  build-web:
+  compute-version:
     when:
-      - event: push
-    image: &docker-image docker:27-cli
-    volumes: &docker-socket
-      - /var/run/docker.sock:/var/run/docker.sock
-    commands:
-      - docker build -t registry.desync.link/v-note:$$CI_COMMIT_SHA .
-
-  build-android:
-    when:
-      - event: push
-    # mingc/android-build-box as a Woodpecker step image does not attach stdout to logs.
-    # docker run -v $CI_WORKSPACE fails when the agent workspace is a named volume, not a
-    # host path — use docker build (context over API) like build-web.
-    image: *docker-image
-    volumes: *docker-socket
-    commands:
-      - docker build -f Dockerfile.android -t v-note-android:$$CI_COMMIT_SHA .
+      - event: [push, deployment]
+    depends_on: []
+    pull: true
+    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
+    settings:
+      mode: compute
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
 
   contract-validation:
     when:
       - event: push
-    image: rust:1.89.0
+    depends_on: []
+    image: rust:1.89.0@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9
     commands:
       - cargo test -p protocol
+      - ./scripts/check-android-build-box-image.sh
+
+  build-android:
+    when:
+      - event: push
+    depends_on:
+      - compute-version
+    # mingc/android-build-box as a Woodpecker step image does not attach stdout to logs.
+    # docker run -v $CI_WORKSPACE fails when the agent workspace is a named volume, not a
+    # host path — use docker build (context over API) like build-web.
+    image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+    volumes: &docker-socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - docker build -f Dockerfile.android --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) -t v-note-android:$$CI_COMMIT_SHA .
+
+  android-instrumented:
+    when:
+      - event: push
+    depends_on:
+      - compute-version
+    image: *docker-image
+    volumes: *docker-socket
+    commands:
+      - docker build -f Dockerfile.android-instrumented --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) -t v-note-android-instrumented:$$CI_COMMIT_SHA .
+      - |
+        if [ -c /dev/kvm ]; then
+          docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA
+        else
+          docker run --rm --privileged v-note-android-instrumented:$$CI_COMMIT_SHA
+        fi
+
+  build-web:
+    when:
+      - event: push
+    depends_on:
+      - compute-version
+    image: *docker-image
+    volumes: *docker-socket
+    environment: &registry-creds
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+    commands:
+      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - docker build -t registry.desync.link/v-note:$(cat .release-tag) .
+      - docker push registry.desync.link/v-note:$(cat .release-tag)
 
   e2e-web:
     when:
@@ -38,16 +83,18 @@ steps:
     volumes: *docker-socket
     commands:
       - |
+        RELEASE_TAG=$$(cat .release-tag)
         REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml down --volumes
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC
 
   validate-deployment:
     when:
       - event: deployment
-    image: alpine:3.21
+    depends_on: []
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
     commands:
       - |
         if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
@@ -60,26 +107,13 @@ steps:
           exit 1
         fi
 
-  compute-version:
-    when:
-      - event: deployment
-    image: &alpine-git alpine/git:latest@sha256:19e4b384912f316e1ebd93a2f5277df2ed9252e441c96eccc56914a9e8e009e8
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-    commands:
-      - ./scripts/sync-version.sh
-      - VERSION_BASE=$(cat version.txt)
-      - PATCH=$(git ls-remote --tags --refs https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$VERSION_BASE.*" | wc -l | tr -d ' ')
-      - echo "$$VERSION_BASE.$$PATCH" > .version
-      - echo "$$VERSION_BASE.$$PATCH-$(echo $$CI_COMMIT_SHA | cut -c1-7)" > .version-dev
-      - echo "Version $(cat .version), dev $(cat .version-dev)"
-
   apply-authentik-blueprint:
     when:
       - event: deployment
+    depends_on: 
+      - validate-deployment
     pull: true
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
     settings:
       api_url: https://auth.desync.link
       api_token:
@@ -93,38 +127,14 @@ steps:
         AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
           from_secret: v_note_prod_oidc_client_secret
 
-  push:
-    when:
-      - event: deployment
-    image: *docker-image
-    volumes: *docker-socket
-    environment: &registry-creds
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-    commands:
-      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker build -t registry.desync.link/v-note:$(cat .version) -t registry.desync.link/v-note:$(cat .version-dev) .
-      - docker push registry.desync.link/v-note:$(cat .version)
-      - docker push registry.desync.link/v-note:$(cat .version-dev)
-
-  tag-release:
-    when:
-      - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    image: *alpine-git
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-    commands:
-      - git tag v$(cat .version)
-      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$(cat .version)
-
   deploy-dev:
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - validate-deployment
+      - compute-version
+      - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
     environment:
@@ -136,11 +146,13 @@ steps:
         from_secret: v_note_dev_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_dev_postgres_password
+      ASSETLINKS_JSON:
+        from_secret: v_note_dev_assetlinks_json
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-dev-db
       - |
-        V_NOTE_IMAGE_TAG=$(cat .version-dev) APP_VERSION=$(cat .version-dev) \
+        V_NOTE_IMAGE_TAG=$(cat .release-tag) APP_VERSION=$(cat .release-tag) \
         APP_ENV=$$CI_COMMIT_BRANCH V_NOTE_HOST=v-notes-dev.desync.link \
         V_NOTE_CONTAINER_NAME=v-note-dev DB_VOLUME=v-note-dev-db \
         POSTGRES_PASSWORD=$$POSTGRES_PASSWORD \
@@ -150,12 +162,18 @@ steps:
         OIDC_REDIRECT_URI=https://v-notes-dev.desync.link/auth/callback \
         REQUIRED_SCOPE=v-note:dev:access \
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-dev/end-session/ \
-        docker compose -p v-note-dev -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d --pull always
+        OIDC_ANDROID_CLIENT_ID=v-note-android-dev \
+        OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-dev/ \
+        docker compose -p v-note-dev -f deploy/docker-compose.yml up -d
 
   deploy-prod:
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - validate-deployment
+      - compute-version
+      - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
     environment:
@@ -167,11 +185,13 @@ steps:
         from_secret: v_note_prod_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_prod_postgres_password
+      ASSETLINKS_JSON:
+        from_secret: v_note_prod_assetlinks_json
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-prod-db
       - |
-        V_NOTE_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) \
+        V_NOTE_IMAGE_TAG=$(cat .release-tag) APP_VERSION=$(cat .release-tag) \
         APP_ENV=production V_NOTE_HOST=v-notes.desync.link \
         V_NOTE_CONTAINER_NAME=v-note DB_VOLUME=v-note-prod-db \
         POSTGRES_PASSWORD=$$POSTGRES_PASSWORD \
@@ -181,4 +201,20 @@ steps:
         OIDC_REDIRECT_URI=https://v-notes.desync.link/auth/callback \
         REQUIRED_SCOPE=v-note:prod:access \
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-prod/end-session/ \
-        docker compose -p v-note -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d --pull always
+        OIDC_ANDROID_CLIENT_ID=v-note-android-prod \
+        OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-prod/ \
+        docker compose -p v-note -f deploy/docker-compose.yml up -d
+
+  tag-release:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - deploy-prod
+    pull: true
+    image: *version-plugin
+    settings:
+      mode: push-tag
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
