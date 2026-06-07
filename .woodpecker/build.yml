@@ -145,7 +145,7 @@ steps:
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-dev/end-session/ \
         OIDC_ANDROID_CLIENT_ID=v-note-android-dev \
         OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-dev/ \
-        docker compose -p v-note-dev -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+        docker compose -p v-note-dev -f deploy/docker-compose.yml up -d
 
   deploy-prod:
     when:
@@ -182,7 +182,7 @@ steps:
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-prod/end-session/ \
         OIDC_ANDROID_CLIENT_ID=v-note-android-prod \
         OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-prod/ \
-        docker compose -p v-note -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+        docker compose -p v-note -f deploy/docker-compose.yml up -d
 
   tag-release:
     when:

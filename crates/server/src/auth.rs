@@ -83,6 +83,11 @@ impl AuthConfig {
             .await
             .expect("OIDC discovery failed for OIDC_ISSUER_URL");
 
+        let authorize_endpoint = std::env::var("OIDC_AUTHORIZE_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(discovery.authorization_endpoint);
+
         Some(Self {
             issuer_url,
             client_id,
@@ -90,7 +95,7 @@ impl AuthConfig {
             redirect_uri,
             required_scope,
             end_session_url,
-            authorize_endpoint: discovery.authorization_endpoint,
+            authorize_endpoint,
             token_endpoint: discovery.token_endpoint,
             jwks_uri: discovery.jwks_uri,
             android_issuer_url,

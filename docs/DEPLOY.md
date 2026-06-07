@@ -29,9 +29,13 @@ Triggered manually with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** (bored
 
 ---
 
-## Secrets (OpenBao → Woodpecker)
+## Secrets (OpenBao)
 
-Document keys here as they are wired in **#145** — **never commit values**.
+**Never commit values.** Two OpenBao paths:
+
+### Woodpecker mini deploy
+
+`secret/woodpecker/repos/vcheesbrough/v-note` (broker layout, same as bored):
 
 | Woodpecker secret key | Used for |
 | --- | --- |
@@ -41,9 +45,18 @@ Document keys here as they are wired in **#145** — **never commit values**.
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | Android signing (post-MVP prod) | Release keystore — **outside repo** |
 
-Add values under OpenBao path `secret/woodpecker/repos/vcheesbrough/v-note` (same broker layout as bored). Rotate with `bao kv patch` on mini.
+Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
 
-Mirror bored OpenBao layout where applicable.
+### Local compose (WSL / laptop)
+
+`secret/v-note-stack/env`:
+
+| Key | Used for |
+| --- | --- |
+| `POSTGRES_PASSWORD` | Local Postgres in `deploy/docker-compose.yml` |
+| `OIDC_CLIENT_SECRET` | SPA client secret (mock OIDC or Authentik) |
+
+Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merges with committed **`deploy/compose.env`**). Seed: **`./scripts/patch-v-note-openbao-secrets.sh`**.
 
 ---
 

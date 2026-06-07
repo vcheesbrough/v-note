@@ -7,7 +7,8 @@ run-spa:
     trunk serve --config frontend/Trunk.toml frontend/index.html
 
 run-compose:
-    docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build
+    ./scripts/fetch-compose-env.sh
+    docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build
 
 # Host JDK + SDK (Android Studio). See docs/DEV.md → Android.
 build-android:

@@ -53,6 +53,7 @@ Environment:
 | `DATABASE_URL` | unset | sqlx migrations dir present; optional Postgres |
 | `TLS_CERT` / `TLS_KEY` | unset | Docker image sets self-signed TLS on `:443` |
 | `OIDC_ISSUER_URL` | unset | When unset, auth is disabled (`/api/me` returns anonymous) |
+| `OIDC_AUTHORIZE_URL` | optional | Browser-facing `/authorize` URL when it differs from discovery (local mock on `localhost:18080`) |
 | `OIDC_CLIENT_ID` | required with issuer | SPA confidential client |
 | `OIDC_CLIENT_SECRET` | required with issuer | SPA client secret |
 | `OIDC_REDIRECT_URI` | required with issuer | e.g. `https://v-notes-dev.desync.link/auth/callback` |
@@ -153,16 +154,20 @@ WSL builds/install via `adb` (USB or emulator started on Windows); `just android
 ## Compose (local)
 
 ```bash
-cp deploy/.env.example deploy/.env   # once; POSTGRES_PASSWORD for local Postgres
+export BAO_ADDR=https://secrets.desync.link
+export BAO_TOKEN=<token with read on secret/v-note-stack/env>
+./scripts/fetch-compose-env.sh   # writes deploy/.env from OpenBao + deploy/compose.env
 just run-compose
 ```
 
-Or: `docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build`
+Non-secret compose defaults are in **`deploy/compose.env`** (committed). Secrets (**`POSTGRES_PASSWORD`**, **`OIDC_CLIENT_SECRET`**) live in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator).
+
+Or: `./scripts/fetch-compose-env.sh` then `docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build`
 
 - **API + SPA:** `https://localhost:8443` (self-signed — use `curl -k`)
 - **Postgres:** internal only (`postgres:5432`)
 
-Prod deploy on mini adds `deploy/docker-compose.prod.yml` (Traefik `proxy-backend`).
+Mini deploy uses `deploy/docker-compose.yml` only (Traefik `proxy-backend`, `lan-vpn-only@docker`). Local dev adds `deploy/docker-compose.local.yml` (mock OIDC on `:18080`, published `:8443`, Traefik off). The server talks to **`mock-oidc:8080`** on the compose network; the browser sign-in redirect uses **`http://localhost:18080`** via optional **`OIDC_AUTHORIZE_URL`**.
 
 ---
 
