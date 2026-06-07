@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push: compute-version ∥ contract-validation ∥ build-android → build-web → e2e-web
+# Push: compute-version ∥ contract-validation ∥ build-android ∥ android-instrumented → build-web → e2e-web
 # Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release (prod)
 
 when:
@@ -39,6 +39,22 @@ steps:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
       - docker build -f Dockerfile.android -t v-note-android:$$CI_COMMIT_SHA .
+
+  android-instrumented:
+    when:
+      - event: push
+    depends_on:
+      - compute-version
+    image: *docker-image
+    volumes: *docker-socket
+    commands:
+      - docker build -f Dockerfile.android-instrumented -t v-note-android-instrumented:$$CI_COMMIT_SHA .
+      - |
+        if [ -c /dev/kvm ]; then
+          docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA
+        else
+          docker run --rm --privileged v-note-android-instrumented:$$CI_COMMIT_SHA
+        fi
 
   build-web:
     when:
@@ -129,6 +145,8 @@ steps:
         from_secret: v_note_dev_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_dev_postgres_password
+      ASSETLINKS_JSON:
+        from_secret: v_note_dev_assetlinks_json
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-dev-db
@@ -166,6 +184,8 @@ steps:
         from_secret: v_note_prod_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_prod_postgres_password
+      ASSETLINKS_JSON:
+        from_secret: v_note_prod_assetlinks_json
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-prod-db

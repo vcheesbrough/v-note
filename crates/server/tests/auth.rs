@@ -76,7 +76,7 @@ fn sign_test_token(claims: SignedTokenClaims) -> String {
 async fn me_without_token_returns_401_when_auth_enabled() {
     let auth = test_auth_config();
     let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-    let app = build_router("test-version".to_string(), Some(auth), Some(jwks));
+    let app = build_router("test-version".to_string(), auth, jwks);
 
     let response = app
         .oneshot(
@@ -95,7 +95,7 @@ async fn me_without_token_returns_401_when_auth_enabled() {
 async fn me_with_malformed_bearer_returns_401() {
     let auth = test_auth_config();
     let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-    let app = build_router("test-version".to_string(), Some(auth), Some(jwks));
+    let app = build_router("test-version".to_string(), auth, jwks);
 
     let response = app
         .oneshot(
@@ -115,7 +115,7 @@ async fn me_with_malformed_bearer_returns_401() {
 async fn health_is_public_when_auth_enabled() {
     let auth = test_auth_config();
     let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-    let app = build_router("test-version".to_string(), Some(auth), Some(jwks));
+    let app = build_router("test-version".to_string(), auth, jwks);
 
     let response = app
         .oneshot(
@@ -131,34 +131,11 @@ async fn health_is_public_when_auth_enabled() {
 }
 
 #[tokio::test]
-async fn me_with_anonymous_claim_when_auth_disabled() {
-    let app = build_router("test-version".to_string(), None, None);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/me")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should be readable");
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body).expect("me response should deserialize");
-    assert_eq!(payload["sub"], "anonymous");
-}
-
-#[tokio::test]
 async fn me_with_android_bearer_returns_200() {
     let config = android_auth_config();
     let auth = Arc::new(config.clone());
     let jwks = Arc::new(test_jwks_cache());
-    let app = build_router("test-version".to_string(), Some(auth), Some(jwks));
+    let app = build_router("test-version".to_string(), auth, jwks);
 
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

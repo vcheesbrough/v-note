@@ -43,6 +43,8 @@ Triggered manually with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** (bored
 | `v_note_prod_oidc_client_secret` | SPA confidential client (prod) |
 | `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
+| `v_note_dev_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (dev App Links, package `link.desync.vnote.dev`) |
+| `v_note_prod_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (prod App Links, package `link.desync.vnote`) |
 | Android signing (post-MVP prod) | Release keystore — **outside repo** |
 
 Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
@@ -76,7 +78,29 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 | `OIDC_ANDROID_ISSUER_URL` | Android Authentik provider issuer URL |
 | `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
 
-Exact names in `deploy/docker-compose.yml`. Android App Links template: `deploy/assetlinks.example.json` — set `ASSETLINKS_JSON` to the minified JSON for each env (package name + signing cert SHA-256).
+**OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
+
+Exact names in `deploy/docker-compose.yml`. Android App Links templates: `deploy/assetlinks.dev.json`, `deploy/assetlinks.prod.json` (or `deploy/assetlinks.example.json` for dev). Woodpecker `deploy-dev` / `deploy-prod` inject secrets `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` into the step environment; `docker compose` reads `ASSETLINKS_JSON` from that env (not inlined in the deploy script — JSON quoting is unsafe in shell).
+
+**Seed Woodpecker secrets** (operator, on mini):
+
+```bash
+# Dev — edit deploy/assetlinks.dev.json with the devDebug (or release) cert SHA-256, then:
+bao kv patch secret/woodpecker/repos/vcheesbrough/v-note \
+  v_note_dev_assetlinks_json="$(jq -c . deploy/assetlinks.dev.json)"
+
+# Prod — edit deploy/assetlinks.prod.json with the release keystore SHA-256, then:
+bao kv patch secret/woodpecker/repos/vcheesbrough/v-note \
+  v_note_prod_assetlinks_json="$(jq -c . deploy/assetlinks.prod.json)"
+```
+
+Example minified value (dev):
+
+```json
+[{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"link.desync.vnote.dev","sha256_cert_fingerprints":["AA:BB:CC:..."]}}]
+```
+
+Obtain SHA-256: `keytool -list -v -keystore <keystore> -alias <alias>` (release) or debug keystore for dev sideload builds.
 
 ---
 

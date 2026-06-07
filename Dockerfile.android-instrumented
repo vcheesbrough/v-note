@@ -1,0 +1,7 @@
+# CI-only: Android devDebug instrumented tests (Woodpecker android-instrumented).
+# Requires --privileged and /dev/kvm on the Woodpecker agent when available.
+FROM mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
+WORKDIR /workspace
+COPY . .
+RUN chmod +x scripts/run-android-instrumented-ci.sh
+CMD ["bash", "scripts/run-android-instrumented-ci.sh"]

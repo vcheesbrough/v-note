@@ -17,8 +17,8 @@ use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callba
 #[derive(Clone)]
 pub struct AppState {
     pub app_version: String,
-    pub auth: Option<Arc<AuthConfig>>,
-    pub jwks_cache: Option<Arc<JwksCache>>,
+    pub auth: Arc<AuthConfig>,
+    pub jwks_cache: Arc<JwksCache>,
 }
 
 pub fn app_version_from_env() -> String {
@@ -26,21 +26,15 @@ pub fn app_version_from_env() -> String {
 }
 
 pub async fn router_from_env() -> Router {
-    let auth = AuthConfig::load().await;
-    let jwks_cache = auth
-        .as_ref()
-        .map(|config| Arc::new(JwksCache::new(config.jwks_uri.clone())));
-    build_router(
-        app_version_from_env(),
-        auth.map(Arc::new),
-        jwks_cache,
-    )
+    let auth = Arc::new(AuthConfig::load().await);
+    let jwks_cache = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
+    build_router(app_version_from_env(), auth, jwks_cache)
 }
 
 pub fn build_router(
     app_version: String,
-    auth: Option<Arc<AuthConfig>>,
-    jwks_cache: Option<Arc<JwksCache>>,
+    auth: Arc<AuthConfig>,
+    jwks_cache: Arc<JwksCache>,
 ) -> Router {
     let state = AppState {
         app_version,

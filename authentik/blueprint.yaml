@@ -172,6 +172,8 @@ entries:
     attrs:
       order: 0
       enabled: true
+      negate: false
+      timeout: 30
       target: !Find [authentik_core.application, [slug, v-note-dev]]
       group: !Find [authentik_core.group, [name, v-note-dev-users]]
 
@@ -184,6 +186,8 @@ entries:
     attrs:
       order: 0
       enabled: true
+      negate: false
+      timeout: 30
       target: !Find [authentik_core.application, [slug, v-note-prod]]
       group: !Find [authentik_core.group, [name, v-note-prod-users]]
 
@@ -196,6 +200,8 @@ entries:
     attrs:
       order: 0
       enabled: true
+      negate: false
+      timeout: 30
       target: !Find [authentik_core.application, [slug, v-note-android-dev]]
       group: !Find [authentik_core.group, [name, v-note-dev-users]]
 
@@ -208,5 +214,7 @@ entries:
     attrs:
       order: 0
       enabled: true
+      negate: false
+      timeout: 30
       target: !Find [authentik_core.application, [slug, v-note-android-prod]]
       group: !Find [authentik_core.group, [name, v-note-prod-users]]

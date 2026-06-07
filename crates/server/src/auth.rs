@@ -57,18 +57,17 @@ struct DiscoveryDoc {
 }
 
 impl AuthConfig {
-    pub async fn load() -> Option<Self> {
+    pub async fn load() -> Self {
         let issuer_url = std::env::var("OIDC_ISSUER_URL")
-            .ok()
-            .filter(|value| !value.is_empty())?;
-        let client_id = std::env::var("OIDC_CLIENT_ID")
-            .expect("OIDC_CLIENT_ID required when OIDC_ISSUER_URL is set");
-        let client_secret = std::env::var("OIDC_CLIENT_SECRET")
-            .expect("OIDC_CLIENT_SECRET required when OIDC_ISSUER_URL is set");
-        let redirect_uri = std::env::var("OIDC_REDIRECT_URI")
-            .expect("OIDC_REDIRECT_URI required when OIDC_ISSUER_URL is set");
-        let required_scope = std::env::var("REQUIRED_SCOPE")
-            .expect("REQUIRED_SCOPE required when OIDC_ISSUER_URL is set");
+            .expect("OIDC_ISSUER_URL is required (use mock-oidc locally — see deploy/compose.env)");
+        if issuer_url.is_empty() {
+            panic!("OIDC_ISSUER_URL must not be empty");
+        }
+        let client_id = std::env::var("OIDC_CLIENT_ID").expect("OIDC_CLIENT_ID is required");
+        let client_secret =
+            std::env::var("OIDC_CLIENT_SECRET").expect("OIDC_CLIENT_SECRET is required");
+        let redirect_uri = std::env::var("OIDC_REDIRECT_URI").expect("OIDC_REDIRECT_URI is required");
+        let required_scope = std::env::var("REQUIRED_SCOPE").expect("REQUIRED_SCOPE is required");
         let end_session_url = std::env::var("OIDC_END_SESSION_URL")
             .ok()
             .filter(|value| !value.is_empty());
@@ -88,7 +87,7 @@ impl AuthConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or(discovery.authorization_endpoint);
 
-        Some(Self {
+        Self {
             issuer_url,
             client_id,
             client_secret,
@@ -100,7 +99,7 @@ impl AuthConfig {
             jwks_uri: discovery.jwks_uri,
             android_issuer_url,
             android_client_id,
-        })
+        }
     }
 
     async fn discover(issuer_url: &str) -> Result<DiscoveryDoc, String> {
@@ -290,31 +289,13 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let Some(auth) = state.auth.as_ref() else {
-        let claims = Claims {
-            sub: "anonymous".to_string(),
-            email: None,
-            preferred_username: Some("anonymous".to_string()),
-            scope: None,
-            iss: "auth-disabled".to_string(),
-            exp: u64::MAX,
-        };
-        req.extensions_mut().insert(claims);
-        return next.run(req).await;
-    };
-
     let token = extract_bearer(&headers)
         .or_else(|| cookies.get(AUTH_COOKIE).map(|cookie| cookie.value().to_string()));
     let Some(token) = token else {
         return (StatusCode::UNAUTHORIZED, "missing token").into_response();
     };
 
-    let jwks = state
-        .jwks_cache
-        .as_ref()
-        .expect("jwks_cache must be present when auth is configured");
-
-    match validate_jwt(&token, auth, jwks).await {
+    match validate_jwt(&token, &state.auth, &state.jwks_cache).await {
         Ok(claims) => {
             req.extensions_mut().insert(claims);
             next.run(req).await

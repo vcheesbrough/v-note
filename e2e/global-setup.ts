@@ -12,13 +12,7 @@ export default async function globalSetup() {
 
   await waitForApp(baseURL);
 
-  const tokenUrl = process.env.OIDC_TOKEN_URL;
-  if (!tokenUrl) {
-    console.log('OIDC_TOKEN_URL unset — skipping auth setup (auth-disabled mode)');
-    fs.writeFileSync(STORAGE_STATE, JSON.stringify({ cookies: [], origins: [] }));
-    return;
-  }
-
+  const tokenUrl = required('OIDC_TOKEN_URL');
   const clientId = required('OIDC_CLIENT_ID');
   const clientSecret = required('OIDC_CLIENT_SECRET');
   const requiredScope = required('REQUIRED_SCOPE');
@@ -51,7 +45,7 @@ export default async function globalSetup() {
 function required(name: string): string {
   const value = process.env[name];
   if (!value) {
-    throw new Error(`${name} env var is required when OIDC_TOKEN_URL is set`);
+    throw new Error(`${name} env var is required for e2e auth setup`);
   }
   return value;
 }

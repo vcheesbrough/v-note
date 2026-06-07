@@ -16,9 +16,7 @@ const STATE_COOKIE_MAX_AGE_SECS: i64 = 300;
 const AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24;
 
 pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
-    let Some(auth) = state.auth.as_ref() else {
-        return Redirect::to("/").into_response();
-    };
+    let auth = &state.auth;
 
     let mut nonce_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -73,9 +71,7 @@ pub async fn callback(
     jar: CookieJar,
     Query(params): Query<CallbackQuery>,
 ) -> Response {
-    let Some(auth) = state.auth.as_ref() else {
-        return Redirect::to("/").into_response();
-    };
+    let auth = &state.auth;
 
     if let Some(error) = &params.error {
         tracing::warn!(error = %error, "auth callback received error");
@@ -130,13 +126,12 @@ pub async fn callback(
         }
     };
 
-    let jwks = state
-        .jwks_cache
-        .as_ref()
-        .expect("jwks_cache present when auth configured");
-
-    if let Err(error) =
-        crate::auth::validate_jwt(&token_response.access_token, auth, jwks).await
+    if let Err(error) = crate::auth::validate_jwt(
+        &token_response.access_token,
+        auth,
+        &state.jwks_cache,
+    )
+    .await
     {
         let message = match error {
             crate::auth::TokenValidationError::MissingScope => "issued token missing required scope",
@@ -176,8 +171,8 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
 
     let target = state
         .auth
-        .as_ref()
-        .and_then(|auth| auth.end_session_url.clone())
+        .end_session_url
+        .clone()
         .unwrap_or_else(|| "/".to_string());
 
     (jar, Redirect::to(&target)).into_response()

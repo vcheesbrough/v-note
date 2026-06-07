@@ -21,6 +21,16 @@ build-android-docker:
     ./scripts/sync-version.sh
     docker run --rm -e GRADLE_USER_HOME=/workspace/android/.gradle-user -v "{{justfile_directory()}}:/workspace" -w /workspace/android mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c bash -lc './gradlew --project-cache-dir /workspace/android/.gradle-user/project-cache -Pandroid.sdk.dir=/opt/android-sdk :app:assembleDevDebug :app:testDevDebugUnitTest'
 
+# CI-parity instrumented tests (emulator inside container; needs --privileged + /dev/kvm).
+android-instrumented-docker:
+    ./scripts/sync-version.sh
+    docker build -f Dockerfile.android-instrumented -t v-note-android-instrumented:local .
+    if [ -c /dev/kvm ]; then
+      docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:local
+    else
+      docker run --rm --privileged v-note-android-instrumented:local
+    fi
+
 # Forward device/emulator port 8080 → host server (run once per adb device).
 android-reverse:
     source scripts/android-env.sh

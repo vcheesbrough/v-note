@@ -3,7 +3,9 @@
 #
 # KV path: secret/v-note-stack/env
 # Woodpecker deploy uses separate keys under secret/woodpecker/repos/vcheesbrough/v-note
-# (v_note_dev_postgres_password, v_note_dev_oidc_client_secret, etc.).
+# (v_note_dev_postgres_password, v_note_dev_oidc_client_secret,
+#  v_note_dev_assetlinks_json, v_note_prod_assetlinks_json, etc.).
+# App Links JSON is Woodpecker-only — see docs/DEPLOY.md for jq -c seeding.
 #
 # Usage:
 #   export BAO_ADDR=https://secrets.desync.link
