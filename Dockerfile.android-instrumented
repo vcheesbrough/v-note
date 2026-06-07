@@ -1,7 +1,9 @@
 # CI-only: Android devDebug instrumented tests (Woodpecker android-instrumented).
 # Requires --privileged and /dev/kvm on the Woodpecker agent.
 # Emulator + system image are baked here so runtime does not re-download SDK packages.
-FROM mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
+# Base image pin: scripts/android-build-box-image.ref (pass as ANDROID_BUILD_BOX_IMAGE).
+ARG ANDROID_BUILD_BOX_IMAGE
+FROM ${ANDROID_BUILD_BOX_IMAGE}
 
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk

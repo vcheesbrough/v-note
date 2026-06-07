@@ -1,5 +1,8 @@
 set shell := ["bash", "-cu"]
 
+# Pin: scripts/android-build-box-image.ref (must match Dockerfile.android* build-arg).
+android_build_box_image := trim(read('scripts/android-build-box-image.ref'))
+
 run-server:
     cargo run -p server
 
@@ -19,12 +22,12 @@ build-android:
 # CI-parity build when JDK/SDK are not installed locally.
 build-android-docker:
     ./scripts/sync-version.sh
-    docker run --rm -e GRADLE_USER_HOME=/workspace/android/.gradle-user -v "{{justfile_directory()}}:/workspace" -w /workspace/android mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c bash -lc './gradlew --project-cache-dir /workspace/android/.gradle-user/project-cache -Pandroid.sdk.dir=/opt/android-sdk :app:assembleDevDebug :app:testDevDebugUnitTest'
+    docker run --rm -e GRADLE_USER_HOME=/workspace/android/.gradle-user -v "{{justfile_directory()}}:/workspace" -w /workspace/android {{android_build_box_image}} bash -lc './gradlew --project-cache-dir /workspace/android/.gradle-user/project-cache -Pandroid.sdk.dir=/opt/android-sdk :app:assembleDevDebug :app:testDevDebugUnitTest'
 
 # CI-parity instrumented tests (emulator inside container; needs --privileged + /dev/kvm).
 android-instrumented-docker:
     ./scripts/sync-version.sh
-    docker build -f Dockerfile.android-instrumented -t v-note-android-instrumented:local .
+    docker build -f Dockerfile.android-instrumented --build-arg ANDROID_BUILD_BOX_IMAGE={{android_build_box_image}} -t v-note-android-instrumented:local .
     if [ -c /dev/kvm ]; then
       docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:local
     else

@@ -80,27 +80,27 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 
 **OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
 
-Exact names in `deploy/docker-compose.yml`. Android App Links: edit `deploy/assetlinks.{dev,prod}.json` (pretty) then regenerate minified with `jq -c . deploy/assetlinks.dev.json > deploy/assetlinks.dev.min.json` (same for prod). Woodpecker `deploy-dev` / `deploy-prod` pass `ASSETLINKS_JSON` from the committed `*.min.json` files (placeholder SHA until you set a real cert fingerprint). Optional: override via OpenBao Woodpecker secrets `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` if you switch deploy back to `from_secret` once seeded.
+Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for deploy** — Woodpecker injects minified JSON from OpenBao keys `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` (step `environment:` → `docker compose` reads `${ASSETLINKS_JSON}`). Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do not commit real fingerprints).
 
-**Seed Woodpecker secrets** (operator, on mini):
+**Seed Woodpecker App Links secrets** (operator, on mini or with write access to `secret/woodpecker/repos/vcheesbrough/v-note`):
 
 ```bash
-# Dev — edit deploy/assetlinks.dev.json with the devDebug (or release) cert SHA-256, then:
-bao kv patch secret/woodpecker/repos/vcheesbrough/v-note \
-  v_note_dev_assetlinks_json="$(jq -c . deploy/assetlinks.dev.json)"
+export BAO_ADDR=https://secrets.desync.link
+export BAO_TOKEN=<token>
 
-# Prod — edit deploy/assetlinks.prod.json with the release keystore SHA-256, then:
-bao kv patch secret/woodpecker/repos/vcheesbrough/v-note \
-  v_note_prod_assetlinks_json="$(jq -c . deploy/assetlinks.prod.json)"
+# Dev — fingerprint from your local debug keystore (fast; must match the APK you sideload):
+export V_NOTE_DEV_ANDROID_CERT_SHA256="$(./scripts/android-dev-debug-fingerprint.sh)"
+# CI container keystore instead (slow): ./scripts/android-dev-debug-fingerprint.sh --docker
+./scripts/patch-v-note-woodpecker-openbao-secrets.sh
+
+# Prod — release keystore SHA-256 (keytool -list -v …), when prod Android ships:
+export V_NOTE_PROD_ANDROID_CERT_SHA256='AA:BB:CC:...'
+./scripts/patch-v-note-woodpecker-openbao-secrets.sh
 ```
 
-Example minified value (dev):
+Manual render (without patch script): `./scripts/render-assetlinks-json.sh dev "$SHA"` → pipe to `bao kv patch` as `v_note_dev_assetlinks_json`.
 
-```json
-[{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"link.desync.vnote.dev","sha256_cert_fingerprints":["AA:BB:CC:..."]}}]
-```
-
-Obtain SHA-256: `keytool -list -v -keystore <keystore> -alias <alias>` (release) or debug keystore for dev sideload builds.
+Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keystore), `--docker` only for the CI image keystore, or `keytool -list -v` on a release keystore (prod).
 
 ---
 

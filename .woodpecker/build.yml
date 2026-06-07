@@ -25,6 +25,7 @@ steps:
     image: rust:1.89.0@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9
     commands:
       - cargo test -p protocol
+      - ./scripts/check-android-build-box-image.sh
 
   build-android:
     when:
@@ -38,7 +39,7 @@ steps:
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
-      - docker build -f Dockerfile.android -t v-note-android:$$CI_COMMIT_SHA .
+      - docker build -f Dockerfile.android --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) -t v-note-android:$$CI_COMMIT_SHA .
 
   android-instrumented:
     when:
@@ -48,7 +49,7 @@ steps:
     image: *docker-image
     volumes: *docker-socket
     commands:
-      - docker build -f Dockerfile.android-instrumented -t v-note-android-instrumented:$$CI_COMMIT_SHA .
+      - docker build -f Dockerfile.android-instrumented --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) -t v-note-android-instrumented:$$CI_COMMIT_SHA .
       - |
         if [ -c /dev/kvm ]; then
           docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA
@@ -145,6 +146,8 @@ steps:
         from_secret: v_note_dev_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_dev_postgres_password
+      ASSETLINKS_JSON:
+        from_secret: v_note_dev_assetlinks_json
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-dev-db
@@ -161,7 +164,6 @@ steps:
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-dev/end-session/ \
         OIDC_ANDROID_CLIENT_ID=v-note-android-dev \
         OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-dev/ \
-        ASSETLINKS_JSON="$$(cat deploy/assetlinks.dev.min.json)" \
         docker compose -p v-note-dev -f deploy/docker-compose.yml up -d
 
   deploy-prod:
@@ -183,6 +185,8 @@ steps:
         from_secret: v_note_prod_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_prod_postgres_password
+      ASSETLINKS_JSON:
+        from_secret: v_note_prod_assetlinks_json
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-prod-db
@@ -199,7 +203,6 @@ steps:
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-prod/end-session/ \
         OIDC_ANDROID_CLIENT_ID=v-note-android-prod \
         OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-prod/ \
-        ASSETLINKS_JSON="$$(cat deploy/assetlinks.prod.min.json)" \
         docker compose -p v-note -f deploy/docker-compose.yml up -d
 
   tag-release:

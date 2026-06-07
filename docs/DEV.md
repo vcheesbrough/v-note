@@ -16,7 +16,7 @@
 | **Android Studio** (Windows) | Emulator, USB device, SDK, `adb` — **recommended on WSL** |
 | **NetBird / LAN** | Reach deployed dev env (optional) |
 
-No dev container — Android local run needs Studio/emulator or a USB device; Docker is for **build-only** (`just build-android-docker`).
+No dev container — Android local run needs Studio/emulator or a USB device; Docker is for **build-only** (`just build-android-docker`). All Android Docker paths pin **`scripts/android-build-box-image.ref`** (CI, `Dockerfile.android*`, `just`). App Links fingerprint: **`scripts/android-dev-debug-fingerprint.sh`** uses local `keytool` by default (`--docker` is the slow CI-parity path).
 
 ---
 
