@@ -29,7 +29,8 @@ steps:
   build-android:
     when:
       - event: push
-    depends_on: []
+    depends_on:
+      - compute-version
     # mingc/android-build-box as a Woodpecker step image does not attach stdout to logs.
     # docker run -v $CI_WORKSPACE fails when the agent workspace is a named volume, not a
     # host path — use docker build (context over API) like build-web.
