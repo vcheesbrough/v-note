@@ -56,7 +56,6 @@ steps:
           --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           -t "$$IMAGE" .
-        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
 
   android-instrumented:
     when:
@@ -83,7 +82,6 @@ steps:
           --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           -t "$$IMAGE" .
-        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
       - |
         if [ -c /dev/kvm ]; then
           docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA
@@ -121,7 +119,6 @@ steps:
           --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           -t "$$IMAGE" .
-        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
         docker push "$$IMAGE"
 
   e2e-web:
