@@ -146,7 +146,7 @@ steps:
         REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
         TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml build playwright
         ./scripts/check-image-metadata.sh "v-note-e2e-playwright:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
         REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC
