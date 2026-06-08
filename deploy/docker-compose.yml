@@ -23,7 +23,7 @@ services:
     image: registry.desync.link/v-note:${V_NOTE_IMAGE_TAG:-local}
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.web
     container_name: ${V_NOTE_CONTAINER_NAME:?V_NOTE_CONTAINER_NAME is required}
     restart: unless-stopped
     environment:

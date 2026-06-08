@@ -120,7 +120,7 @@ All four repo-built images set [OCI Image Spec](https://github.com/opencontainer
 
 | Image | Dockerfile / compose | CI tag (examples) |
 | --- | --- | --- |
-| **`v-note`** | `Dockerfile` | `registry.desync.link/v-note:{release}` |
+| **`v-note`** | `Dockerfile.web` | `registry.desync.link/v-note:{release}` |
 | **`v-note-android`** | `Dockerfile.android` | `v-note-android:{sha}` |
 | **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}` |
 | **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
@@ -145,6 +145,15 @@ Label sources:
 
 Woodpecker runs **`scripts/check-image-metadata.sh`** after **`build-web`** (before push), **`build-android`**, **`android-instrumented`**, and **`e2e-web`** (playwright build) — pipeline fails if labels are missing or version/revision mismatch.
 
+**Build context:** each image uses a Dockerfile-paired ignore file (BuildKit convention) so `COPY . .` cache is not busted by unrelated tree changes:
+
+| Image | Ignore file |
+| --- | --- |
+| Web | `Dockerfile.web.dockerignore` |
+| Android | `Dockerfile.android.dockerignore` |
+| Android instrumented | `Dockerfile.android-instrumented.dockerignore` |
+| Playwright e2e | `e2e/.dockerignore` (compose `context: e2e/`) |
+
 Local check after build:
 
 ```bash
@@ -157,7 +166,7 @@ OCI_LABELS=(
   --label org.opencontainers.image.created="$CREATED"
 )
 
-docker build "${OCI_LABELS[@]}" -t v-note:local .
+docker build -f Dockerfile.web "${OCI_LABELS[@]}" -t v-note:local .
 ./scripts/check-image-metadata.sh v-note:local 0.3.0-local "$SHA"
 
 docker build -f Dockerfile.android \

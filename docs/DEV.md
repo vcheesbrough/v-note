@@ -174,7 +174,7 @@ Mini deploy uses `deploy/docker-compose.yml` only (Traefik `proxy-backend`, `lan
 ## CI reproduction
 
 ```bash
-docker build -t v-note:local .
+docker build -f Dockerfile.web -t v-note:local .
 cargo test -p protocol -p server
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright

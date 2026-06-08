@@ -119,7 +119,7 @@ When this repo has been pushed (or the user asks to verify CI) **and** [`.woodpe
    - Optional: `gh api repos/vcheesbrough/v-note/commits/$SHA/status --jq '.statuses[] | "\(.context): \(.state)"'`
 
 2. **If anything failed**, reproduce locally per [`docs/DEV.md`](docs/DEV.md) and [`.woodpecker/build.yml`](.woodpecker/build.yml):
-   - `docker build -t v-note:ci-local .` (rustfmt / clippy / tests / builds inside Dockerfile when wired).
+   - `docker build -f Dockerfile.web -t v-note:ci-local .` (rustfmt / clippy / tests / builds inside Dockerfile.web when wired).
    - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
 
 3. **Fix failures** in-repo, commit (when user asks), push, **poll status again** until green (see **Monitor builds** above). **All push steps including `e2e` must be green** before declaring an iteration done.

@@ -32,7 +32,7 @@ just android-run   # terminal 2: adb reverse + install + launch dev APK
 # Contract fixtures
 just contract-validation
 
-# E2e (build image first: docker build -t v-note:local .)
+# E2e (build image first: docker build -f Dockerfile.web -t v-note:local .)
 just e2e
 ```
 

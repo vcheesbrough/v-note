@@ -94,7 +94,7 @@ steps:
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
-        docker build \
+        docker build -f Dockerfile.web \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \
           --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
           --label org.opencontainers.image.source="https://github.com/vcheesbrough/v-note" \
