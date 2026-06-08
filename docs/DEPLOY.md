@@ -134,6 +134,7 @@ Label sources:
 | `org.opencontainers.image.licenses` | Dockerfile (`PolyForm-Noncommercial-1.0.0`) |
 | `org.opencontainers.image.url` | Dockerfile |
 | `org.opencontainers.image.authors` | Dockerfile |
+| `org.opencontainers.image.vendor` | Dockerfile |
 | `org.opencontainers.image.documentation` | Dockerfile |
 | `org.opencontainers.image.base.name` | Dockerfile (matches pinned base image) |
 | `org.opencontainers.image.base.digest` | Dockerfile (matches pinned base digest) |

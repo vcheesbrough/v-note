@@ -12,6 +12,7 @@ LABEL org.opencontainers.image.title="v-note" \
     org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
     org.opencontainers.image.url="https://github.com/vcheesbrough/v-note" \
     org.opencontainers.image.authors="Vincent Cheesbrough" \
+    org.opencontainers.image.vendor="Vincent Cheesbrough" \
     org.opencontainers.image.documentation="https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md" \
     org.opencontainers.image.base.name="debian:trixie-slim" \
     org.opencontainers.image.base.digest="sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8"

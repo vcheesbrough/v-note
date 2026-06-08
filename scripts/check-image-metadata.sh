@@ -27,6 +27,7 @@ require_label org.opencontainers.image.licenses
 require_label org.opencontainers.image.source
 require_label org.opencontainers.image.url
 require_label org.opencontainers.image.authors
+require_label org.opencontainers.image.vendor
 require_label org.opencontainers.image.documentation
 require_label org.opencontainers.image.base.name
 require_label org.opencontainers.image.base.digest
