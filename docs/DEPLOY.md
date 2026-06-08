@@ -112,6 +112,68 @@ Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keysto
 | MVP **1.0.0** | `1.0.0-<sha>` | `1.0.0` + git tag **`v1.0.0`** |
 | Post-MVP | `1.N.P-<sha>` | `1.N.P` |
 
+**Tag source:** Woodpecker **`compute-version`** → **`.release-tag`** (plain semver `MAJOR.MINOR.PATCH`, e.g. `0.3.0`).
+
+### OCI image metadata
+
+All four repo-built images set [OCI Image Spec](https://github.com/opencontainers/image-spec/blob/main/annotations.md) labels:
+
+| Image | Dockerfile / compose | CI tag (examples) |
+| --- | --- | --- |
+| **`v-note`** | `Dockerfile` | `registry.desync.link/v-note:{release}` |
+| **`v-note-android`** | `Dockerfile.android` | `v-note-android:{sha}` |
+| **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}` |
+| **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
+
+Label sources:
+
+| Label | Source |
+| --- | --- |
+| `org.opencontainers.image.title` | Dockerfile (image-specific) |
+| `org.opencontainers.image.description` | Dockerfile |
+| `org.opencontainers.image.licenses` | Dockerfile (`PolyForm-Noncommercial-1.0.0`) |
+| `org.opencontainers.image.url` | Dockerfile |
+| `org.opencontainers.image.authors` | Dockerfile |
+| `org.opencontainers.image.documentation` | Dockerfile |
+| `org.opencontainers.image.base.name` | Dockerfile (matches pinned base image) |
+| `org.opencontainers.image.base.digest` | Dockerfile (matches pinned base digest) |
+| `org.opencontainers.image.version` | `docker build --label` or compose `build.labels` (`.release-tag`) |
+| `org.opencontainers.image.revision` | `docker build --label` or compose `build.labels` (`CI_COMMIT_SHA`) |
+| `org.opencontainers.image.source` | `docker build --label` or compose `build.labels` |
+| `org.opencontainers.image.created` | `docker build --label` or compose `build.labels` (UTC RFC 3339 at build time) |
+
+Woodpecker runs **`scripts/check-image-metadata.sh`** after **`build-web`** (before push), **`build-android`**, **`android-instrumented`**, and **`e2e-web`** (playwright build) — pipeline fails if labels are missing or version/revision mismatch.
+
+Local check after build:
+
+```bash
+SHA=$(git rev-parse HEAD)
+CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+OCI_LABELS=(
+  --label org.opencontainers.image.version=0.3.0-local
+  --label org.opencontainers.image.revision="$SHA"
+  --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note
+  --label org.opencontainers.image.created="$CREATED"
+)
+
+docker build "${OCI_LABELS[@]}" -t v-note:local .
+./scripts/check-image-metadata.sh v-note:local 0.3.0-local "$SHA"
+
+docker build -f Dockerfile.android \
+  --build-arg ANDROID_BUILD_BOX_IMAGE="$(cat scripts/android-build-box-image.ref)" \
+  "${OCI_LABELS[@]}" -t v-note-android:local .
+./scripts/check-image-metadata.sh v-note-android:local 0.3.0-local "$SHA"
+
+docker build -f Dockerfile.android-instrumented \
+  --build-arg ANDROID_BUILD_BOX_IMAGE="$(cat scripts/android-build-box-image.ref)" \
+  "${OCI_LABELS[@]}" -t v-note-android-instrumented:local .
+./scripts/check-image-metadata.sh v-note-android-instrumented:local 0.3.0-local "$SHA"
+
+export OCI_IMAGE_VERSION=0.3.0-local OCI_IMAGE_REVISION="$SHA" OCI_IMAGE_CREATED="$CREATED"
+TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml build playwright
+./scripts/check-image-metadata.sh v-note-e2e-playwright:0.3.0-local 0.3.0-local "$SHA"
+```
+
 ---
 
 ## Client–server version lockstep

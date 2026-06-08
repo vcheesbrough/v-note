@@ -15,7 +15,7 @@ If you change a rule below, change it here — there is no parallel copy.
 | **Local path** | `/home/vincent/dev/v-note` |
 | **Remote** | [vcheesbrough/v-note](https://github.com/vcheesbrough/v-note) |
 | **Layout** | **Monorepo** (server, SPA, Android, deploy, schemas — when scaffolded) |
-| **License** | **AGPL-3.0-or-later** — see [`LICENSE`](LICENSE) |
+| **License** | **PolyForm Noncommercial 1.0.0** — see [`LICENSE`](LICENSE), [`LICENSE-TIER.md`](LICENSE-TIER.md) |
 | **Phase** | **Minimal bootstrap done** — planning locked; **#145** lands monorepo scaffold + CI; no application code yet |
 
 **Stack summary:** Rust (Axum) server, PostgreSQL, Leptos/Trunk SPA, native Kotlin (Compose) Android, Authentik OIDC, bored-aligned deploy intent. Details and locked decisions are in [`docs/PLAN.md`](docs/PLAN.md) — treat that document as the spec source of truth, not this file.

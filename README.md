@@ -1,7 +1,5 @@
 # v-note
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
-
 Self-hosted ink note capture and sync: native Android stylus authoring, owner-only pages, realtime replay on a read-only web SPA, and handwriting search over private LAN or mesh.
 
 ## Status
@@ -63,5 +61,7 @@ just e2e
 
 ## License
 
-**AGPL-3.0-or-later** — see [LICENSE](LICENSE).
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). This is **not** an OSI-approved open source license.
+
+**Commercial use** requires a separate license. See [LICENSE-TIER.md](LICENSE-TIER.md).
 
