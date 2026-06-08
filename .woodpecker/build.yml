@@ -266,16 +266,26 @@ steps:
         OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-prod/ \
         docker compose -p v-note -f deploy/docker-compose.yml up -d
 
-  tag-release:
+  tag-release-dev:
     when:
       - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - deploy-dev
-      - deploy-prod
     pull: true
     image: *version-plugin
-    settings:
+    settings: &push-tag-settings
       mode: push-tag
       major_minor_source: cargo
       github_token:
         from_secret: github_token
+
+  tag-release-prod:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - deploy-prod
+    pull: true
+    image: *version-plugin
+    settings: *push-tag-settings
