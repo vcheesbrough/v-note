@@ -1,0 +1,44 @@
+# Paired with Dockerfile.web (auto-selected by BuildKit). See docs/DEPLOY.md.
+
+# Build artifacts
+target/
+frontend/dist/
+frontend/pkg/
+frontend/target/
+
+# Android (not used by web image)
+android/
+
+# CI / deploy / docs
+docs/
+deploy/
+e2e/
+.woodpecker/
+authentik/
+
+# Contract tests/schemas (not compiled in release server build)
+contracts/
+schemas/
+crates/server/tests/
+
+# Dockerfiles (avoid COPY . . cache bust on Dockerfile-only edits)
+Dockerfile
+Dockerfile.*
+
+# Scripts (not invoked by Dockerfile.web)
+scripts/
+
+# Meta
+README.md
+AGENTS.md
+LICENSE
+LICENSE-TIER.md
+justfile
+.gitignore
+version.txt
+
+# Git / IDE
+.git/
+.idea/
+.vscode/
+.cursor/

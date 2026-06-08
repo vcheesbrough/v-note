@@ -27,7 +27,23 @@ build-android-docker:
 # CI-parity instrumented tests (emulator inside container; needs --privileged + /dev/kvm).
 android-instrumented-docker:
     ./scripts/sync-version.sh
-    docker build -f Dockerfile.android-instrumented --build-arg ANDROID_BUILD_BOX_IMAGE={{android_build_box_image}} -t v-note-android-instrumented:local .
+    CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" SHA="$(git rev-parse HEAD)" && \
+    docker build -f Dockerfile.android-instrumented \
+      --build-arg ANDROID_BUILD_BOX_IMAGE={{android_build_box_image}} \
+      --label org.opencontainers.image.title=v-note-android-instrumented \
+      --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
+      --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+      --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+      --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+      --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+      --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+      --label org.opencontainers.image.base.name=mingc/android-build-box:master \
+      --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
+      --label org.opencontainers.image.version=local \
+      --label org.opencontainers.image.revision="$SHA" \
+      --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
+      --label org.opencontainers.image.created="$CREATED" \
+      -t v-note-android-instrumented:local .
     if [ -c /dev/kvm ]; then
       docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:local
     else
@@ -49,6 +65,7 @@ android-run: android-install
     adb shell am start -n link.desync.vnote.dev/link.desync.vnote.MainActivity
 
 e2e:
+    export OCI_IMAGE_VERSION=local OCI_IMAGE_REVISION="$(git rev-parse HEAD)" OCI_IMAGE_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" && \
     TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright
 
 contract-validation:

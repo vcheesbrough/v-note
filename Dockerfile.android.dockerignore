@@ -1,0 +1,47 @@
+# Paired with Dockerfile.android (auto-selected by BuildKit). See docs/DEPLOY.md.
+
+# Rust / SPA (Gradle only needs root Cargo.toml via sync-version.sh)
+target/
+frontend/
+crates/
+
+# CI / deploy / docs
+docs/
+deploy/
+e2e/
+.woodpecker/
+authentik/
+
+# Schema validation is CI-only; unit tests read contracts/fixtures/
+schemas/
+
+# Dockerfiles (avoid COPY . . cache bust on Dockerfile-only edits)
+Dockerfile
+Dockerfile.*
+
+# Scripts except those invoked in image builds
+scripts/*
+!scripts/sync-version.sh
+!scripts/run-android-instrumented-ci.sh
+
+# Android build artifacts (sources under android/ are still included)
+android/.gradle/
+android/.gradle-user/
+android/build/
+android/app/build/
+android/local.properties
+
+# Meta
+README.md
+AGENTS.md
+LICENSE
+LICENSE-TIER.md
+justfile
+.gitignore
+version.txt
+
+# Git / IDE
+.git/
+.idea/
+.vscode/
+.cursor/
