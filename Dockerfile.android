@@ -3,16 +3,6 @@
 ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
 FROM ${ANDROID_BUILD_BOX_IMAGE}
 
-LABEL org.opencontainers.image.title="v-note-android" \
-    org.opencontainers.image.description="v-note Android CI image (devDebug APK + unit tests)" \
-    org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
-    org.opencontainers.image.url="https://github.com/vcheesbrough/v-note" \
-    org.opencontainers.image.authors="Vincent Cheesbrough" \
-    org.opencontainers.image.vendor="Vincent Cheesbrough" \
-    org.opencontainers.image.documentation="https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md" \
-    org.opencontainers.image.base.name="mingc/android-build-box:master" \
-    org.opencontainers.image.base.digest="sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c"
-
 WORKDIR /workspace
 COPY . .
 RUN ./scripts/sync-version.sh \

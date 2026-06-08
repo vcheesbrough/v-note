@@ -75,21 +75,21 @@ services:
       context: .
       dockerfile_inline: |
         FROM mcr.microsoft.com/playwright:v1.54.2-jammy@sha256:948dc1e8601eeb152b31ef57959a74c2170be6fe875c33518bf33aea424d8940
-        LABEL org.opencontainers.image.title="v-note-e2e-playwright" \
-            org.opencontainers.image.description="v-note Playwright e2e test runner image" \
-            org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
-            org.opencontainers.image.url="https://github.com/vcheesbrough/v-note" \
-            org.opencontainers.image.authors="Vincent Cheesbrough" \
-            org.opencontainers.image.vendor="Vincent Cheesbrough" \
-            org.opencontainers.image.documentation="https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md" \
-            org.opencontainers.image.base.name="mcr.microsoft.com/playwright:v1.54.2-jammy" \
-            org.opencontainers.image.base.digest="sha256:948dc1e8601eeb152b31ef57959a74c2170be6fe875c33518bf33aea424d8940"
         WORKDIR /e2e
         COPY package.json package-lock.json ./
         RUN npm ci
         COPY . .
         CMD ["npx", "playwright", "test"]
       labels:
+        org.opencontainers.image.title: v-note-e2e-playwright
+        org.opencontainers.image.description: v-note Playwright e2e test runner image
+        org.opencontainers.image.licenses: PolyForm-Noncommercial-1.0.0
+        org.opencontainers.image.url: https://github.com/vcheesbrough/v-note
+        org.opencontainers.image.authors: Vincent Cheesbrough
+        org.opencontainers.image.vendor: Vincent Cheesbrough
+        org.opencontainers.image.documentation: https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md
+        org.opencontainers.image.base.name: mcr.microsoft.com/playwright:v1.54.2-jammy
+        org.opencontainers.image.base.digest: sha256:948dc1e8601eeb152b31ef57959a74c2170be6fe875c33518bf33aea424d8940
         org.opencontainers.image.version: ${OCI_IMAGE_VERSION:-local}
         org.opencontainers.image.revision: ${OCI_IMAGE_REVISION:-dev}
         org.opencontainers.image.source: https://github.com/vcheesbrough/v-note

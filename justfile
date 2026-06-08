@@ -30,6 +30,15 @@ android-instrumented-docker:
     CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" SHA="$(git rev-parse HEAD)" && \
     docker build -f Dockerfile.android-instrumented \
       --build-arg ANDROID_BUILD_BOX_IMAGE={{android_build_box_image}} \
+      --label org.opencontainers.image.title=v-note-android-instrumented \
+      --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
+      --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+      --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+      --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+      --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+      --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+      --label org.opencontainers.image.base.name=mingc/android-build-box:master \
+      --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
       --label org.opencontainers.image.version=local \
       --label org.opencontainers.image.revision="$SHA" \
       --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \

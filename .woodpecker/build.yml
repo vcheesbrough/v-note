@@ -44,9 +44,18 @@ steps:
         IMAGE=v-note-android:$$CI_COMMIT_SHA
         docker build -f Dockerfile.android \
           --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --label org.opencontainers.image.title=v-note-android \
+          --label "org.opencontainers.image.description=v-note Android CI image (devDebug APK + unit tests)" \
+          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+          --label org.opencontainers.image.base.name=mingc/android-build-box:master \
+          --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \
           --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
-          --label org.opencontainers.image.source="https://github.com/vcheesbrough/v-note" \
+          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           -t "$$IMAGE" .
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
@@ -64,9 +73,18 @@ steps:
         IMAGE=v-note-android-instrumented:$$CI_COMMIT_SHA
         docker build -f Dockerfile.android-instrumented \
           --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --label org.opencontainers.image.title=v-note-android-instrumented \
+          --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
+          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+          --label org.opencontainers.image.base.name=mingc/android-build-box:master \
+          --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \
           --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
-          --label org.opencontainers.image.source="https://github.com/vcheesbrough/v-note" \
+          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           -t "$$IMAGE" .
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
@@ -95,9 +113,18 @@ steps:
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
         docker build -f Dockerfile.web \
+          --label org.opencontainers.image.title=v-note \
+          --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
+          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+          --label org.opencontainers.image.base.name=debian:trixie-slim \
+          --label org.opencontainers.image.base.digest=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \
           --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
-          --label org.opencontainers.image.source="https://github.com/vcheesbrough/v-note" \
+          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           -t "$$IMAGE" .
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
