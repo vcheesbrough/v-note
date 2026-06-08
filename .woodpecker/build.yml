@@ -269,8 +269,8 @@ steps:
   tag-release:
     when:
       - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     depends_on:
+      - deploy-dev
       - deploy-prod
     pull: true
     image: *version-plugin
