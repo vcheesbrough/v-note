@@ -48,8 +48,6 @@ steps:
           --label "org.opencontainers.image.description=v-note Android CI image (devDebug APK + unit tests)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
           --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
-          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
           --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
           --label org.opencontainers.image.base.name=mingc/android-build-box:master \
           --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
@@ -77,8 +75,6 @@ steps:
           --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
           --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
-          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
           --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
           --label org.opencontainers.image.base.name=mingc/android-build-box:master \
           --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
@@ -117,8 +113,6 @@ steps:
           --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
           --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
-          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
           --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
           --label org.opencontainers.image.base.name=debian:trixie-slim \
           --label org.opencontainers.image.base.digest=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 \
