@@ -1,8 +1,8 @@
 # CI-only: Android devDebug instrumented tests (Woodpecker android-instrumented).
 # Requires --privileged and /dev/kvm on the Woodpecker agent.
 # Emulator + system image are baked here so runtime does not re-download SDK packages.
-# Base image pin: scripts/android-build-box-image.ref (pass as ANDROID_BUILD_BOX_IMAGE).
-ARG ANDROID_BUILD_BOX_IMAGE
+# Base image pin: scripts/android-build-box-image.ref (override via --build-arg in CI).
+ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
 FROM ${ANDROID_BUILD_BOX_IMAGE}
 
 LABEL org.opencontainers.image.title="v-note-android-instrumented" \
