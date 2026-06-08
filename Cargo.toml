@@ -4,9 +4,9 @@ members = ["crates/protocol", "crates/server", "frontend"]
 default-members = ["crates/protocol", "crates/server"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-license = "AGPL-3.0-or-later"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

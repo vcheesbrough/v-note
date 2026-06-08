@@ -112,6 +112,68 @@ Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keysto
 | MVP **1.0.0** | `1.0.0-<sha>` | `1.0.0` + git tag **`v1.0.0`** |
 | Post-MVP | `1.N.P-<sha>` | `1.N.P` |
 
+**Tag source:** Woodpecker **`compute-version`** → **`.release-tag`** (plain semver `MAJOR.MINOR.PATCH`, e.g. `0.3.0`).
+
+### OCI image metadata
+
+All four repo-built images set [OCI Image Spec](https://github.com/opencontainers/image-spec/blob/main/annotations.md) labels:
+
+| Image | Dockerfile / compose | CI tag (examples) |
+| --- | --- | --- |
+| **`v-note`** | `Dockerfile.web` | `registry.desync.link/v-note:{release}` |
+| **`v-note-android`** | `Dockerfile.android` | `v-note-android:{sha}` |
+| **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}` |
+| **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
+
+Label sources (no `LABEL` instructions in Dockerfiles — all set at build time):
+
+| Label | Source |
+| --- | --- |
+| Static (title, description, licenses, url, authors, vendor, documentation, base.name, base.digest) | **`docker build --label`** in [`.woodpecker/build.yml`](../.woodpecker/build.yml), or compose **`build.labels`** (deploy compose, e2e playwright) |
+| `org.opencontainers.image.version` | `docker build --label` or compose `build.labels` (`.release-tag` / `OCI_IMAGE_VERSION`) |
+| `org.opencontainers.image.revision` | `docker build --label` or compose `build.labels` (`CI_COMMIT_SHA` / `OCI_IMAGE_REVISION`) |
+| `org.opencontainers.image.source` | `docker build --label` or compose `build.labels` |
+| `org.opencontainers.image.created` | `docker build --label` or compose `build.labels` (UTC RFC 3339 at build time) |
+
+Woodpecker runs **`scripts/check-image-metadata.sh`** after **`build-web`** (before push), **`build-android`**, **`android-instrumented`**, and **`e2e-web`** (playwright build) — pipeline fails if labels are missing or version/revision mismatch.
+
+**Build context:** each image uses a Dockerfile-paired ignore file (BuildKit convention) so `COPY . .` cache is not busted by unrelated tree changes:
+
+| Image | Ignore file |
+| --- | --- |
+| Web | `Dockerfile.web.dockerignore` |
+| Android | `Dockerfile.android.dockerignore` |
+| Android instrumented | `Dockerfile.android-instrumented.dockerignore` |
+| Playwright e2e | `e2e/.dockerignore` (compose `context: e2e/`) |
+
+Local check after build — copy `--label` flags from `.woodpecker/build.yml` (`build-web`, `build-android`, `android-instrumented`); substitute `0.3.0-local`, `$SHA`, and `$CREATED` for version/revision/created. Example (web):
+
+```bash
+SHA=$(git rev-parse HEAD)
+CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+docker build -f Dockerfile.web \
+  --label org.opencontainers.image.title=v-note \
+  --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
+  --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+  --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+  --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+  --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+  --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+  --label org.opencontainers.image.base.name=debian:trixie-slim \
+  --label org.opencontainers.image.base.digest=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 \
+  --label org.opencontainers.image.version=0.3.0-local \
+  --label org.opencontainers.image.revision="$SHA" \
+  --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
+  --label org.opencontainers.image.created="$CREATED" \
+  -t v-note:local .
+./scripts/check-image-metadata.sh v-note:local 0.3.0-local "$SHA"
+
+export OCI_IMAGE_VERSION=0.3.0-local OCI_IMAGE_REVISION="$SHA" OCI_IMAGE_CREATED="$CREATED"
+TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml build playwright
+./scripts/check-image-metadata.sh v-note-e2e-playwright:0.3.0-local 0.3.0-local "$SHA"
+```
+
 ---
 
 ## Client–server version lockstep

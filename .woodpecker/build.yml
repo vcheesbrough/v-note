@@ -3,12 +3,12 @@
 # Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release (prod)
 
 when:
-  - event: [push, deployment]
+  - event: [push, deployment, manual]
 
 steps:
   compute-version:
     when:
-      - event: [push, deployment]
+      - event: [push, deployment, manual]
     depends_on: []
     pull: true
     image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
@@ -20,7 +20,7 @@ steps:
 
   contract-validation:
     when:
-      - event: push
+      - event: [push, manual]
     depends_on: []
     image: rust:1.89.0@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9
     commands:
@@ -29,7 +29,7 @@ steps:
 
   build-android:
     when:
-      - event: push
+      - event: [push, manual]
     depends_on:
       - compute-version
     # mingc/android-build-box as a Woodpecker step image does not attach stdout to logs.
@@ -39,17 +39,55 @@ steps:
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
-      - docker build -f Dockerfile.android --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) -t v-note-android:$$CI_COMMIT_SHA .
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        IMAGE=v-note-android:$$CI_COMMIT_SHA
+        docker build -f Dockerfile.android \
+          --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --label org.opencontainers.image.title=v-note-android \
+          --label "org.opencontainers.image.description=v-note Android CI image (devDebug APK + unit tests)" \
+          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+          --label org.opencontainers.image.base.name=mingc/android-build-box:master \
+          --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
+          --label org.opencontainers.image.version="$$RELEASE_TAG" \
+          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
+          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          -t "$$IMAGE" .
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
 
   android-instrumented:
     when:
-      - event: push
+      - event: [push, manual]
     depends_on:
       - compute-version
     image: *docker-image
     volumes: *docker-socket
     commands:
-      - docker build -f Dockerfile.android-instrumented --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) -t v-note-android-instrumented:$$CI_COMMIT_SHA .
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        IMAGE=v-note-android-instrumented:$$CI_COMMIT_SHA
+        docker build -f Dockerfile.android-instrumented \
+          --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --label org.opencontainers.image.title=v-note-android-instrumented \
+          --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
+          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+          --label org.opencontainers.image.base.name=mingc/android-build-box:master \
+          --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
+          --label org.opencontainers.image.version="$$RELEASE_TAG" \
+          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
+          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          -t "$$IMAGE" .
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
       - |
         if [ -c /dev/kvm ]; then
           docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA
@@ -59,7 +97,7 @@ steps:
 
   build-web:
     when:
-      - event: push
+      - event: [push, manual]
     depends_on:
       - compute-version
     image: *docker-image
@@ -71,12 +109,30 @@ steps:
         from_secret: zot_ci_password
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker build -t registry.desync.link/v-note:$(cat .release-tag) .
-      - docker push registry.desync.link/v-note:$(cat .release-tag)
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
+        docker build -f Dockerfile.web \
+          --label org.opencontainers.image.title=v-note \
+          --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
+          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
+          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
+          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
+          --label org.opencontainers.image.base.name=debian:trixie-slim \
+          --label org.opencontainers.image.base.digest=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 \
+          --label org.opencontainers.image.version="$$RELEASE_TAG" \
+          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
+          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          -t "$$IMAGE" .
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        docker push "$$IMAGE"
 
   e2e-web:
     when:
-      - event: push
+      - event: [push, manual]
     depends_on:
       - build-web
     image: *docker-image
@@ -84,8 +140,13 @@ steps:
     commands:
       - |
         RELEASE_TAG=$$(cat .release-tag)
+        export OCI_IMAGE_VERSION="$$RELEASE_TAG"
+        export OCI_IMAGE_REVISION="$$CI_COMMIT_SHA"
+        export OCI_IMAGE_CREATED="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml build playwright
+        ./scripts/check-image-metadata.sh "v-note-e2e-playwright:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
         REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC

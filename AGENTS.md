@@ -15,7 +15,7 @@ If you change a rule below, change it here — there is no parallel copy.
 | **Local path** | `/home/vincent/dev/v-note` |
 | **Remote** | [vcheesbrough/v-note](https://github.com/vcheesbrough/v-note) |
 | **Layout** | **Monorepo** (server, SPA, Android, deploy, schemas — when scaffolded) |
-| **License** | **AGPL-3.0-or-later** — see [`LICENSE`](LICENSE) |
+| **License** | **PolyForm Noncommercial 1.0.0** — see [`LICENSE`](LICENSE), [`LICENSE-TIER.md`](LICENSE-TIER.md) |
 | **Phase** | **Minimal bootstrap done** — planning locked; **#145** lands monorepo scaffold + CI; no application code yet |
 
 **Stack summary:** Rust (Axum) server, PostgreSQL, Leptos/Trunk SPA, native Kotlin (Compose) Android, Authentik OIDC, bored-aligned deploy intent. Details and locked decisions are in [`docs/PLAN.md`](docs/PLAN.md) — treat that document as the spec source of truth, not this file.
@@ -119,7 +119,7 @@ When this repo has been pushed (or the user asks to verify CI) **and** [`.woodpe
    - Optional: `gh api repos/vcheesbrough/v-note/commits/$SHA/status --jq '.statuses[] | "\(.context): \(.state)"'`
 
 2. **If anything failed**, reproduce locally per [`docs/DEV.md`](docs/DEV.md) and [`.woodpecker/build.yml`](.woodpecker/build.yml):
-   - `docker build -t v-note:ci-local .` (rustfmt / clippy / tests / builds inside Dockerfile when wired).
+   - `docker build -f Dockerfile.web -t v-note:ci-local .` with `--label` flags from `.woodpecker/build.yml` `build-web` (rustfmt / clippy / tests / builds inside Dockerfile.web when wired).
    - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
 
 3. **Fix failures** in-repo, commit (when user asks), push, **poll status again** until green (see **Monitor builds** above). **All push steps including `e2e` must be green** before declaring an iteration done.
