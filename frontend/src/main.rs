@@ -94,6 +94,17 @@ fn App() -> impl IntoView {
                 .into_any(),
             }}
         </main>
+
+        // Version watermark — persistent build identity (server release via /api/meta).
+        {move || {
+            meta.get().and_then(|result| result.ok()).map(|info| view! {
+                <div style="position: fixed; bottom: 0.5rem; right: 0.75rem; opacity: 0.35; \
+                    font-size: 0.75rem; pointer-events: none; user-select: none; \
+                    font-family: system-ui, sans-serif;">
+                    {format!("v{}", info.app_version)}
+                </div>
+            })
+        }}
     }
 }
 
