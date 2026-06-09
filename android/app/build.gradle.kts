@@ -20,6 +20,16 @@ val appVersionName =
             "0.1.0"
         }
 
+// Monotonic versionCode from major.minor.patch so in-place upgrades are accepted
+// (e.g. 0.4.1 -> 4001). Pre-release suffixes are ignored for the code.
+val appVersionCode =
+    appVersionName.substringBefore('-').split('.').let { parts ->
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        (major * 1_000_000 + minor * 1_000 + patch).coerceAtLeast(1)
+    }
+
 android {
     namespace = "link.desync.vnote"
     compileSdk = 35
@@ -28,7 +38,7 @@ android {
         applicationId = "link.desync.vnote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        versionCode = appVersionCode
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Required by net.openid.appauth manifest merger (HTTPS App Links use a separate intent filter).
@@ -120,9 +130,23 @@ android {
         }
     }
 
+    signingConfigs {
+        // Shared, non-secret debug keystore committed at android/app/debug.keystore so every
+        // build (CI, docker, Android Studio) signs with the same certificate. Required for
+        // in-place upgrades and a stable App Links fingerprint. A secret release keystore
+        // replaces this before any prod release (see backlog).
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
         release {
             isMinifyEnabled = false

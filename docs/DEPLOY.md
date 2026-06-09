@@ -45,7 +45,8 @@ Triggered manually with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** (bored
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | `v_note_dev_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (dev App Links, package `link.desync.vnote.dev`) |
 | `v_note_prod_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (prod App Links, package `link.desync.vnote`) |
-| Android signing (post-MVP prod) | Release keystore — **outside repo** |
+| Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
+| Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
 Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
 
@@ -88,9 +89,10 @@ Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for 
 export BAO_ADDR=https://secrets.desync.link
 export BAO_TOKEN=<token>
 
-# Dev — fingerprint from your local debug keystore (fast; must match the APK you sideload):
+# Dev — fingerprint of the committed keystore android/app/debug.keystore (all builds
+# sign with it, so this is fixed): SHA-256
+#   3A:49:7C:AE:57:AD:FF:E4:D0:C8:3B:D2:D0:98:2C:C2:98:CB:1D:B6:3F:70:68:5A:57:13:07:96:CC:9C:62:3A
 export V_NOTE_DEV_ANDROID_CERT_SHA256="$(./scripts/android-dev-debug-fingerprint.sh)"
-# CI container keystore instead (slow): ./scripts/android-dev-debug-fingerprint.sh --docker
 ./scripts/patch-v-note-woodpecker-openbao-secrets.sh
 
 # Prod — release keystore SHA-256 (keytool -list -v …), when prod Android ships:
