@@ -22,7 +22,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
@@ -142,23 +144,27 @@ private fun AppScreen(
     val healthState = remember { mutableStateOf("Checking server health…") }
 
     LaunchedEffect(Unit) {
+        // okhttp execute() is blocking — must run off the main thread or it throws
+        // NetworkOnMainThreadException before the request is even sent.
         healthState.value =
-            runCatching {
-                val client = okhttp3.OkHttpClient()
-                val request =
-                    okhttp3.Request.Builder()
-                        .url("${BuildConfig.BASE_URL}/health")
-                        .get()
-                        .build()
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        "Health check failed: HTTP ${response.code}"
-                    } else {
-                        "Server healthy at ${BuildConfig.BASE_URL}"
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val client = okhttp3.OkHttpClient()
+                    val request =
+                        okhttp3.Request.Builder()
+                            .url("${BuildConfig.BASE_URL}/health")
+                            .get()
+                            .build()
+                    client.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            "Health check failed: HTTP ${response.code}"
+                        } else {
+                            "Server healthy at ${BuildConfig.BASE_URL}"
+                        }
                     }
+                }.getOrElse { error ->
+                    "Health check failed: ${error.message ?: error.javaClass.simpleName}"
                 }
-            }.getOrElse { error ->
-                "Health check failed: ${error.message ?: error.javaClass.simpleName}"
             }
     }
 

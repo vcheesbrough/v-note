@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Print SHA-256 (colon-separated) for the devDebug signing cert — seeds App Links.
 #
-# Default: local ~/.android/debug.keystore via keytool (seconds).
-#   --docker: CI image + Gradle assemble (~minutes; only if you need the container keystore).
+# Default: the committed keystore android/app/debug.keystore via keytool (seconds).
+# Every build (CI, docker, Studio) signs with this key, so its fingerprint is canonical.
+#   --docker: CI image + Gradle signingReport (~minutes; parity check only).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,6 +23,11 @@ sha_from_keystore() {
 
 find_local_debug_keystore() {
   local candidate
+  # Committed keystore first — it is what every build actually signs with.
+  if [[ -f "$ROOT/android/app/debug.keystore" ]]; then
+    echo "$ROOT/android/app/debug.keystore"
+    return 0
+  fi
   for candidate in \
     "${ANDROID_SDK_HOME:-$HOME/.android}/debug.keystore" \
     "$HOME/.android/debug.keystore"; do
