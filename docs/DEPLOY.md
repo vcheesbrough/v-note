@@ -202,15 +202,15 @@ Redeploy a **previous image tag** via Woodpecker manual deploy with pinned versi
 After a successful dev deploy, the `dev` APK is served at:
 
 ```
-https://v-notes-dev.desync.link/downloads/android/v-note.apk
+https://v-notes-dev.desync.link/dl/apk
 ```
 
-Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + PathPrefix(/downloads/android/)` rule.
+The SPA links to it ("Download Android app"). Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + Path(/dl/apk)` rule. `Content-Disposition` saves it as `v-note.apk`.
 
 Download on the device browser and enable "Install from unknown sources", or:
 
 ```bash
-curl -O https://v-notes-dev.desync.link/downloads/android/v-note.apk
+curl -L -o v-note.apk https://v-notes-dev.desync.link/dl/apk
 adb install v-note.apk
 ```
 
