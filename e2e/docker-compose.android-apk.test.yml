@@ -17,6 +17,9 @@ services:
                 '        root /usr/share/nginx/html;' \
                 '        default_type application/vnd.android.package-archive;' \
                 '        add_header Content-Disposition "attachment; filename=v-note.apk";' \
+                '        add_header Cache-Control "no-store";' \
+                '        etag off;' \
+                '        if_modified_since off;' \
                 '    }' \
                 '}' \
                 > /etc/nginx/conf.d/default.conf
