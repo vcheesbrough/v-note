@@ -99,16 +99,13 @@ fn App() -> impl IntoView {
             </footer>
         </main>
 
-        // Version watermark — persistent build identity (server release via /api/meta).
-        {move || {
-            meta.get().and_then(|result| result.ok()).map(|info| view! {
-                <div style="position: fixed; bottom: 0.5rem; right: 0.75rem; opacity: 0.35; \
-                    font-size: 0.75rem; pointer-events: none; user-select: none; \
-                    font-family: system-ui, sans-serif;">
-                    {format!("v{}", info.app_version)}
-                </div>
-            })
-        }}
+        // Version watermark — compile-time build version, rendered on every screen
+        // (including the pre-login front screen) with no dependency on /api/meta.
+        <div style="position: fixed; bottom: 0.5rem; right: 0.75rem; opacity: 0.35; \
+            font-size: 0.75rem; pointer-events: none; user-select: none; \
+            font-family: system-ui, sans-serif;">
+            {format!("v{}", env!("CARGO_PKG_VERSION"))}
+        </div>
     }
 }
 
