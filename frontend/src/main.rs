@@ -2,6 +2,14 @@ use gloo_net::http::Request;
 use leptos::prelude::*;
 use protocol::{MeResponse, MetaResponse};
 
+/// CI release tag (`V_NOTE_RELEASE`) when present, else the cargo version for local builds.
+fn release_version() -> &'static str {
+    match option_env!("V_NOTE_RELEASE") {
+        Some(v) if !v.is_empty() => v,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let meta = RwSignal::new(None::<Result<MetaResponse, String>>);
@@ -101,10 +109,12 @@ fn App() -> impl IntoView {
 
         // Version watermark — compile-time build version, rendered on every screen
         // (including the pre-login front screen) with no dependency on /api/meta.
+        // CI injects the computed release tag via V_NOTE_RELEASE so this matches the
+        // deployed image + /api/meta; local builds fall back to the cargo version.
         <div style="position: fixed; bottom: 0.5rem; right: 0.75rem; opacity: 0.35; \
             font-size: 0.75rem; pointer-events: none; user-select: none; \
             font-family: system-ui, sans-serif;">
-            {format!("v{}", env!("CARGO_PKG_VERSION"))}
+            {format!("v{}", release_version())}
         </div>
     }
 }

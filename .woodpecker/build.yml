@@ -50,6 +50,7 @@ steps:
         IMAGE=registry.desync.link/v-note-android:$$RELEASE_TAG
         docker build -f Dockerfile.android \
           --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
           --label org.opencontainers.image.title=v-note-android \
           --label "org.opencontainers.image.description=v-note Android APK delivery image (nginx; devDebug APK for remote dev sideload)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
@@ -112,6 +113,7 @@ steps:
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
         docker build -f Dockerfile.web \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
           --label org.opencontainers.image.title=v-note \
           --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
