@@ -4,6 +4,9 @@
 ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
 
 FROM ${ANDROID_BUILD_BOX_IMAGE} AS builder
+# CI passes the computed release tag so versionName matches the deployed image.
+ARG V_NOTE_RELEASE=
+ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 WORKDIR /workspace
 COPY . .
 RUN ./scripts/sync-version.sh \

@@ -208,6 +208,16 @@ gh api repos/vcheesbrough/v-note/commits/$SHA/status --jq '.state'
 
 ## Versioning
 
-Workspace version in root `Cargo.toml` (`0.1.0` for iteration 1). `./scripts/sync-version.sh` propagates to `version.txt` → Android `versionName`.
+Two version numbers, deliberately:
+
+- **Cargo `major.minor.patch`** in root `Cargo.toml` — source of `major.minor` only; the patch digit is a placeholder. `./scripts/sync-version.sh` propagates it to `version.txt` → Android `versionName`. `version.txt` is gitignored (regenerated at build).
+- **CI release tag** (`compute-version` → `.release-tag`) — `major.minor` from cargo + **patch from git tag count**. This is the real deployed version (image tag, server `APP_VERSION`, `/api/meta`).
+
+CI injects the release tag into both clients via **`V_NOTE_RELEASE`** (`--build-arg` → Dockerfile `ENV`) so the version watermark matches the deployed release:
+
+- **SPA:** `option_env!("V_NOTE_RELEASE")` (frontend), falls back to `CARGO_PKG_VERSION`.
+- **Android:** `System.getenv("V_NOTE_RELEASE")` (`build.gradle.kts`), falls back to `version.txt`.
+
+Local builds (`just build-android`, `cargo`/`trunk` directly) don't set `V_NOTE_RELEASE`, so the watermark shows the cargo version (e.g. `0.4.0`) — fine for dev. A CI build of the same commit shows the real tag (e.g. `0.4.1`).
 
 See [`PLAN.md`](PLAN.md) **Engineering workflows** → **Versioning** and **Client–server version alignment**.

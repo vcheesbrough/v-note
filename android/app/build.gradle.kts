@@ -9,12 +9,16 @@ plugins {
 
 val repoRoot = rootProject.projectDir.parentFile
 val versionFile = File(repoRoot, "version.txt")
+// CI injects the computed release tag (e.g. 0.4.1) via V_NOTE_RELEASE so versionName
+// matches the deployed image; local builds fall back to the cargo version in version.txt.
+val injectedRelease = System.getenv("V_NOTE_RELEASE")?.trim()?.takeIf { it.isNotEmpty() }
 val appVersionName =
-    if (versionFile.exists()) {
-        versionFile.readText().trim()
-    } else {
-        "0.1.0"
-    }
+    injectedRelease
+        ?: if (versionFile.exists()) {
+            versionFile.readText().trim()
+        } else {
+            "0.1.0"
+        }
 
 android {
     namespace = "link.desync.vnote"
