@@ -1,0 +1,20 @@
+# Android APK delivery overlay — add to deploy-dev compose command.
+# Usage: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.android-apk.yml up -d
+# Traefik: Host+PathPrefix rule wins over the catch-all Host-only rule on v-note — no explicit priority needed.
+
+services:
+  v-note-android-apk:
+    image: registry.desync.link/v-note-android:${V_NOTE_IMAGE_TAG:-local}
+    container_name: ${V_NOTE_CONTAINER_NAME}-android-apk
+    restart: unless-stopped
+    networks:
+      - v-note-net
+      - proxy-backend
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-android-apk.entrypoints=websecure
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-android-apk.rule=Host(`${V_NOTE_HOST}`) && PathPrefix(`/downloads/android/`)
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-android-apk.tls=true
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-android-apk.tls.certresolver=myresolver
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-android-apk.middlewares=lan-vpn-only@docker,security-headers@docker
+      - traefik.http.services.${V_NOTE_CONTAINER_NAME}-android-apk.loadbalancer.server.port=80

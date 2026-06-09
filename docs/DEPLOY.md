@@ -121,7 +121,7 @@ All four repo-built images set [OCI Image Spec](https://github.com/opencontainer
 | Image | Dockerfile / compose | CI tag (examples) |
 | --- | --- | --- |
 | **`v-note`** | `Dockerfile.web` | `registry.desync.link/v-note:{release}` |
-| **`v-note-android`** | `Dockerfile.android` | `v-note-android:{sha}` |
+| **`v-note-android`** | `Dockerfile.android` | `registry.desync.link/v-note-android:{release}` |
 | **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}` |
 | **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
 
@@ -194,6 +194,27 @@ Clients send **`X-V-Note-Client-Release`** / **`X-V-Note-Client-Protocol`**; **`
 ## Rollback
 
 Redeploy a **previous image tag** via Woodpecker manual deploy with pinned version env (detail in **#152** runbook). **Also reinstall the matching Android APK.**
+
+---
+
+## Android APK sideload (dev)
+
+After a successful dev deploy, the `dev` APK is served at:
+
+```
+https://v-notes-dev.desync.link/downloads/android/v-note.apk
+```
+
+Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + PathPrefix(/downloads/android/)` rule.
+
+Download on the device browser and enable "Install from unknown sources", or:
+
+```bash
+curl -O https://v-notes-dev.desync.link/downloads/android/v-note.apk
+adb install v-note.apk
+```
+
+The `dev` flavor connects to `https://v-notes-dev.desync.link` — no `adb reverse` needed. For laptop dev with a local server, use the `devLocal` APK (see [`DEV.md`](DEV.md)).
 
 ---
 
