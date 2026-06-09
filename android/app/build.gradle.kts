@@ -37,7 +37,34 @@ android {
             dimension = "env"
             applicationIdSuffix = ".dev"
             manifestPlaceholders["appLinkHost"] = "v-notes-dev.desync.link"
-            // Loopback + `adb reverse tcp:8080 tcp:8080` — works on emulator and USB devices.
+            buildConfigField("String", "BASE_URL", "\"https://v-notes-dev.desync.link\"")
+            buildConfigField(
+                "String",
+                "OIDC_ISSUER_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-dev/\"",
+            )
+            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-android-dev\"")
+            buildConfigField(
+                "String",
+                "OIDC_REDIRECT_URI",
+                "\"https://v-notes-dev.desync.link/auth/mobile/callback\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_END_SESSION_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-dev/end-session/\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_SCOPES",
+                "\"openid profile email offline_access v-note:dev:access\"",
+            )
+        }
+        create("devLocal") {
+            dimension = "env"
+            applicationIdSuffix = ".dev"
+            manifestPlaceholders["appLinkHost"] = "v-notes-dev.desync.link"
+            // Loopback + `adb reverse tcp:8080 tcp:8080` — for laptop dev without a deployed stack.
             buildConfigField("String", "BASE_URL", "\"http://127.0.0.1:8080\"")
             buildConfigField(
                 "String",
