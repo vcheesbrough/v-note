@@ -13,16 +13,19 @@ RUN ./scripts/sync-version.sh \
         :app:assembleDevDebug :app:testDevDebugUnitTest
 
 FROM nginx:alpine@sha256:8b1e78743a03dbb2c95171cc58639fef29abc8816598e27fb910ed2e621e589a
+# Serve the APK at /dl/apk. The path has no extension, so set the MIME type
+# explicitly and a download filename via Content-Disposition.
 RUN printf '%s\n' \
     'server {' \
     '    listen 80;' \
     '    server_name _;' \
-    '    location /downloads/android/ {' \
+    '    location = /dl/apk {' \
     '        root /usr/share/nginx/html;' \
-    '        types { application/vnd.android.package-archive apk; }' \
+    '        default_type application/vnd.android.package-archive;' \
+    '        add_header Content-Disposition "attachment; filename=v-note.apk";' \
     '    }' \
     '}' \
     > /etc/nginx/conf.d/default.conf
 COPY --from=builder \
     /workspace/android/app/build/outputs/apk/dev/debug/app-dev-debug.apk \
-    /usr/share/nginx/html/downloads/android/v-note.apk
+    /usr/share/nginx/html/dl/apk

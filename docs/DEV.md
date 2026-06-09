@@ -119,10 +119,10 @@ adb install -r android/app/build/outputs/apk/devLocal/debug/app-devLocal-debug.a
 
 ### Phone/tablet on LAN/mesh (no local server)
 
-Download the `dev` APK from the deployed dev stack after a CI push:
+Download the `dev` APK from the deployed dev stack after a CI push (the SPA links to it):
 
 ```
-https://v-notes-dev.desync.link/downloads/android/v-note.apk
+https://v-notes-dev.desync.link/dl/apk
 ```
 
 Or build locally and sideload:

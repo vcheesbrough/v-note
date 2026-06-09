@@ -93,6 +93,10 @@ fn App() -> impl IntoView {
                 }
                 .into_any(),
             }}
+
+            <footer style="margin-top: 2rem; font-size: 0.875rem;">
+                <a href="/dl/apk">"Download Android app (.apk)"</a>
+            </footer>
         </main>
 
         // Version watermark — persistent build identity (server release via /api/meta).
