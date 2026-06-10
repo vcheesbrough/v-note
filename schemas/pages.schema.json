@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/pages.schema.json",
+  "title": "ListPagesResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pages"],
+  "properties": {
+    "pages": {
+      "type": "array",
+      "items": {
+        "$ref": "page.schema.json"
+      }
+    }
+  }
+}
