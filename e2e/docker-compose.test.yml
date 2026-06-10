@@ -78,7 +78,11 @@ services:
       REQUIRED_SCOPE: v-note:test:access
       OIDC_ANDROID_CLIENT_ID: v-note-android-test
       OIDC_ANDROID_ISSUER_URL: http://mock-oidc:8080/default
-      DATABASE_URL: postgres://v_note:test-password@postgres:5432/v_note
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: v_note
+      DATABASE_PASSWORD: test-password
+      DATABASE_NAME: v_note
     depends_on:
       mock-oidc:
         condition: service_started
