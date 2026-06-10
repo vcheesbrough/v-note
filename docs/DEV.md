@@ -89,31 +89,48 @@ cd frontend && trunk build --release
 
 Repo stays in **WSL**; `scripts/android-env.sh` finds Studio’s JDK/SDK under `/mnt/c/...` and writes `android/local.properties` if needed. Override with [`android/local.properties.example`](../android/local.properties.example).
 
-**Dev flavor** `BASE_URL` is `http://127.0.0.1:8080`. Before each test session, forward the port (emulator **or** USB — same command):
+### Flavors
 
-```bash
-adb reverse tcp:8080 tcp:8080
-```
+| Flavor | `BASE_URL` | Use case |
+| --- | --- | --- |
+| **`dev`** | `https://v-notes-dev.desync.link` | Phone/tablet on LAN/mesh — no local server needed |
+| **`devLocal`** | `http://127.0.0.1:8080` | Laptop emulator/USB with `adb reverse` |
+| **`prod`** | `https://v-notes.desync.link` | Deployed prod stack only |
 
-### Daily loop
+`dev` and `devLocal` share the same package ID (`link.desync.vnote.dev`) and Authentik OIDC config — installing one replaces the other.
+
+### Daily loop (laptop, local server)
 
 ```bash
 # Terminal 1
 just run-server
 
-# Terminal 2 — build, install, launch dev APK
+# Terminal 2 — build devLocal, reverse, install, launch
 just android-run
 ```
 
 Manual steps:
 
 ```bash
-just build-android          # or just build-android-docker (no local SDK)
+just build-android          # builds devLocal APK (loopback)
 just android-reverse
-adb install -r android/app/build/outputs/apk/dev/debug/app-dev-debug.apk
+adb install -r android/app/build/outputs/apk/devLocal/debug/app-devLocal-debug.apk
 ```
 
-**Prod flavor** `BASE_URL`: `https://v-notes.desync.link` (deployed stack only).
+### Phone/tablet on LAN/mesh (no local server)
+
+Download the `dev` APK from the deployed dev stack after a CI push (the SPA links to it):
+
+```
+https://v-notes-dev.desync.link/dl/apk
+```
+
+Or build locally and sideload:
+
+```bash
+just build-android-docker   # CI-parity: builds dev APK (remote stack)
+adb install -r android/app/build/outputs/apk/dev/debug/app-dev-debug.apk
+```
 
 Unit tests (host or Docker):
 
@@ -191,6 +208,16 @@ gh api repos/vcheesbrough/v-note/commits/$SHA/status --jq '.state'
 
 ## Versioning
 
-Workspace version in root `Cargo.toml` (`0.1.0` for iteration 1). `./scripts/sync-version.sh` propagates to `version.txt` → Android `versionName`.
+Two version numbers, deliberately:
+
+- **Cargo `major.minor.patch`** in root `Cargo.toml` — source of `major.minor` only; the patch digit is a placeholder. `./scripts/sync-version.sh` propagates it to `version.txt` → Android `versionName`. `version.txt` is gitignored (regenerated at build).
+- **CI release tag** (`compute-version` → `.release-tag`) — `major.minor` from cargo + **patch from git tag count**. This is the real deployed version (image tag, server `APP_VERSION`, `/api/meta`).
+
+CI injects the release tag into both clients via **`V_NOTE_RELEASE`** (`--build-arg` → Dockerfile `ENV`) so the version watermark matches the deployed release:
+
+- **SPA:** `option_env!("V_NOTE_RELEASE")` (frontend), falls back to `CARGO_PKG_VERSION`.
+- **Android:** `System.getenv("V_NOTE_RELEASE")` (`build.gradle.kts`), falls back to `version.txt`.
+
+Local builds (`just build-android`, `cargo`/`trunk` directly) don't set `V_NOTE_RELEASE`, so the watermark shows the cargo version (e.g. `0.4.0`) — fine for dev. A CI build of the same commit shows the real tag (e.g. `0.4.1`).
 
 See [`PLAN.md`](PLAN.md) **Engineering workflows** → **Versioning** and **Client–server version alignment**.

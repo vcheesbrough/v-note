@@ -38,24 +38,34 @@ steps:
     image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
+    environment: &registry-creds
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
     commands:
+      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - |
         RELEASE_TAG=$$(cat .release-tag)
-        IMAGE=v-note-android:$$CI_COMMIT_SHA
+        IMAGE=registry.desync.link/v-note-android:$$RELEASE_TAG
         docker build -f Dockerfile.android \
           --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
           --label org.opencontainers.image.title=v-note-android \
-          --label "org.opencontainers.image.description=v-note Android CI image (devDebug APK + unit tests)" \
+          --label "org.opencontainers.image.description=v-note Android APK delivery image (nginx; devDebug APK for remote dev sideload)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
           --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
+          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
+          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
           --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
-          --label org.opencontainers.image.base.name=mingc/android-build-box:master \
-          --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
+          --label org.opencontainers.image.base.name=nginx:alpine \
+          --label org.opencontainers.image.base.digest=sha256:8b1e78743a03dbb2c95171cc58639fef29abc8816598e27fb910ed2e621e589a \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \
           --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
           --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           -t "$$IMAGE" .
+        docker push "$$IMAGE"
 
   android-instrumented:
     when:
@@ -96,17 +106,14 @@ steps:
       - compute-version
     image: *docker-image
     volumes: *docker-socket
-    environment: &registry-creds
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
+    environment: *registry-creds
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
         docker build -f Dockerfile.web \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
           --label org.opencontainers.image.title=v-note \
           --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
@@ -135,10 +142,10 @@ steps:
         export OCI_IMAGE_REVISION="$$CI_COMMIT_SHA"
         export OCI_IMAGE_CREATED="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml build playwright
+        TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml build playwright v-note-android-apk
         ./scripts/check-image-metadata.sh "v-note-e2e-playwright:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC
 
@@ -203,6 +210,7 @@ steps:
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create v-note-dev-db
+      - docker pull registry.desync.link/v-note-android:$$(cat .release-tag)
       - |
         V_NOTE_IMAGE_TAG=$(cat .release-tag) APP_VERSION=$(cat .release-tag) \
         APP_ENV=$$CI_COMMIT_BRANCH V_NOTE_HOST=v-notes-dev.desync.link \
@@ -216,7 +224,7 @@ steps:
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-dev/end-session/ \
         OIDC_ANDROID_CLIENT_ID=v-note-android-dev \
         OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-dev/ \
-        docker compose -p v-note-dev -f deploy/docker-compose.yml up -d
+        docker compose -p v-note-dev -f deploy/docker-compose.yml -f deploy/docker-compose.android-apk.yml up -d
 
   deploy-prod:
     when:

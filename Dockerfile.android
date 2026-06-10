@@ -1,12 +1,38 @@
 # CI-only: Android devDebug APK + unit tests (Woodpecker build-android).
+# Stage 1 builds the APK; stage 2 (nginx:alpine) delivers it over HTTP for sideloading.
 # Base image pin: scripts/android-build-box-image.ref (override via --build-arg in CI).
 ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
-FROM ${ANDROID_BUILD_BOX_IMAGE}
 
+FROM ${ANDROID_BUILD_BOX_IMAGE} AS builder
+# CI passes the computed release tag so versionName matches the deployed image.
+ARG V_NOTE_RELEASE=
+ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 WORKDIR /workspace
 COPY . .
 RUN ./scripts/sync-version.sh \
     && cd android \
     && chmod +x ./gradlew \
     && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \
-        :app:assembleDevDebug :app:testDevDebugUnitTest
+        :app:assembleDevDebug \
+        :app:testDevDebugUnitTest :app:testDevLocalDebugUnitTest :app:testProdDebugUnitTest
+
+FROM nginx:alpine@sha256:8b1e78743a03dbb2c95171cc58639fef29abc8816598e27fb910ed2e621e589a
+# Serve the APK at /dl/apk. The path has no extension, so set the MIME type
+# explicitly and a download filename via Content-Disposition.
+RUN printf '%s\n' \
+    'server {' \
+    '    listen 80;' \
+    '    server_name _;' \
+    '    location = /dl/apk {' \
+    '        root /usr/share/nginx/html;' \
+    '        default_type application/vnd.android.package-archive;' \
+    '        add_header Content-Disposition "attachment; filename=v-note.apk";' \
+    '        add_header Cache-Control "no-store";' \
+    '        etag off;' \
+    '        if_modified_since off;' \
+    '    }' \
+    '}' \
+    > /etc/nginx/conf.d/default.conf
+COPY --from=builder \
+    /workspace/android/app/build/outputs/apk/dev/debug/app-dev-debug.apk \
+    /usr/share/nginx/html/dl/apk

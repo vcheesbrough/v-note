@@ -9,11 +9,25 @@ plugins {
 
 val repoRoot = rootProject.projectDir.parentFile
 val versionFile = File(repoRoot, "version.txt")
+// CI injects the computed release tag (e.g. 0.4.1) via V_NOTE_RELEASE so versionName
+// matches the deployed image; local builds fall back to the cargo version in version.txt.
+val injectedRelease = System.getenv("V_NOTE_RELEASE")?.trim()?.takeIf { it.isNotEmpty() }
 val appVersionName =
-    if (versionFile.exists()) {
-        versionFile.readText().trim()
-    } else {
-        "0.1.0"
+    injectedRelease
+        ?: if (versionFile.exists()) {
+            versionFile.readText().trim()
+        } else {
+            "0.1.0"
+        }
+
+// Monotonic versionCode from major.minor.patch so in-place upgrades are accepted
+// (e.g. 0.4.1 -> 4001). Pre-release suffixes are ignored for the code.
+val appVersionCode =
+    appVersionName.substringBefore('-').split('.').let { parts ->
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        (major * 1_000_000 + minor * 1_000 + patch).coerceAtLeast(1)
     }
 
 android {
@@ -24,7 +38,7 @@ android {
         applicationId = "link.desync.vnote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        versionCode = appVersionCode
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Required by net.openid.appauth manifest merger (HTTPS App Links use a separate intent filter).
@@ -37,7 +51,34 @@ android {
             dimension = "env"
             applicationIdSuffix = ".dev"
             manifestPlaceholders["appLinkHost"] = "v-notes-dev.desync.link"
-            // Loopback + `adb reverse tcp:8080 tcp:8080` — works on emulator and USB devices.
+            buildConfigField("String", "BASE_URL", "\"https://v-notes-dev.desync.link\"")
+            buildConfigField(
+                "String",
+                "OIDC_ISSUER_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-dev/\"",
+            )
+            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-android-dev\"")
+            buildConfigField(
+                "String",
+                "OIDC_REDIRECT_URI",
+                "\"https://v-notes-dev.desync.link/auth/mobile/callback\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_END_SESSION_URL",
+                "\"https://auth.desync.link/application/o/v-note-android-dev/end-session/\"",
+            )
+            buildConfigField(
+                "String",
+                "OIDC_SCOPES",
+                "\"openid profile email offline_access v-note:dev:access\"",
+            )
+        }
+        create("devLocal") {
+            dimension = "env"
+            applicationIdSuffix = ".dev"
+            manifestPlaceholders["appLinkHost"] = "v-notes-dev.desync.link"
+            // Loopback + `adb reverse tcp:8080 tcp:8080` — for laptop dev without a deployed stack.
             buildConfigField("String", "BASE_URL", "\"http://127.0.0.1:8080\"")
             buildConfigField(
                 "String",
@@ -89,9 +130,23 @@ android {
         }
     }
 
+    signingConfigs {
+        // Shared, non-secret debug keystore committed at android/app/debug.keystore so every
+        // build (CI, docker, Android Studio) signs with the same certificate. Required for
+        // in-place upgrades and a stable App Links fingerprint. A secret release keystore
+        // replaces this before any prod release (see backlog).
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
         release {
             isMinifyEnabled = false
