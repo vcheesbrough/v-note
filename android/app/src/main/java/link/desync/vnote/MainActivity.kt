@@ -1,12 +1,12 @@
 package link.desync.vnote
 
-import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -19,9 +19,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
@@ -39,7 +42,7 @@ class MainActivity : ComponentActivity() {
             val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
             scope.launch {
                 authRepository.handleAuthorizationResponse(result.data).fold(
-                    onSuccess = { sessionState.value = SessionState.Loading },
+                    onSuccess = { reloadSession() },
                     onFailure = { error ->
                         sessionState.value =
                             SessionState.Error(error.message ?: "Sign in failed")
@@ -59,8 +62,6 @@ class MainActivity : ComponentActivity() {
         authRepository = AuthRepository(applicationContext, authConfig, tokenStore)
         apiClient = ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
 
-        handleDeepLink(intent)
-
         setContent {
             VNoteTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -77,31 +78,9 @@ class MainActivity : ComponentActivity() {
         reloadSession()
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        handleDeepLink(intent)
-    }
-
     override fun onDestroy() {
         authRepository.shutdown()
         super.onDestroy()
-    }
-
-    private fun handleDeepLink(intent: Intent?) {
-        val data = intent?.data ?: return
-        if (!data.path.orEmpty().endsWith("/auth/mobile/callback")) {
-            return
-        }
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            authRepository.handleAuthorizationResponse(intent).fold(
-                onSuccess = { reloadSession() },
-                onFailure = { error ->
-                    sessionState.value =
-                        SessionState.Error(error.message ?: "Sign in callback failed")
-                },
-            )
-        }
     }
 
     private fun signIn() {
@@ -165,50 +144,67 @@ private fun AppScreen(
     val healthState = remember { mutableStateOf("Checking server health…") }
 
     LaunchedEffect(Unit) {
+        // okhttp execute() is blocking — must run off the main thread or it throws
+        // NetworkOnMainThreadException before the request is even sent.
         healthState.value =
-            runCatching {
-                val client = okhttp3.OkHttpClient()
-                val request =
-                    okhttp3.Request.Builder()
-                        .url("${BuildConfig.BASE_URL}/health")
-                        .get()
-                        .build()
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        "Health check failed: HTTP ${response.code}"
-                    } else {
-                        "Server healthy at ${BuildConfig.BASE_URL}"
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val client = okhttp3.OkHttpClient()
+                    val request =
+                        okhttp3.Request.Builder()
+                            .url("${BuildConfig.BASE_URL}/health")
+                            .get()
+                            .build()
+                    client.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            "Health check failed: HTTP ${response.code}"
+                        } else {
+                            "Server healthy at ${BuildConfig.BASE_URL}"
+                        }
                     }
+                }.getOrElse { error ->
+                    "Health check failed: ${error.message ?: error.javaClass.simpleName}"
                 }
-            }.getOrElse { error ->
-                "Health check failed: ${error.message ?: error.javaClass.simpleName}"
             }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("v-note", style = MaterialTheme.typography.headlineMedium)
-        Text(healthState.value, style = MaterialTheme.typography.bodyMedium)
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("v-note", style = MaterialTheme.typography.headlineMedium)
+            Text(healthState.value, style = MaterialTheme.typography.bodyMedium)
 
-        when (sessionState) {
-            SessionState.Loading -> Text("Checking session…")
-            SessionState.SignedOut -> {
-                Text("Sign in with Authentik to use v-note on this device.")
-                Button(onClick = onSignIn) { Text("Sign in") }
-            }
-            is SessionState.SignedIn -> {
-                val label = sessionState.profile.email ?: sessionState.profile.sub
-                Text("Signed in as $label", style = MaterialTheme.typography.bodyLarge)
-                Text("sub: ${sessionState.profile.sub}")
-                Button(onClick = onSignOut) { Text("Sign out") }
-            }
-            is SessionState.Error -> {
-                Text(sessionState.message, style = MaterialTheme.typography.bodyMedium)
-                Button(onClick = { scope.launch { onReload() } }) { Text("Retry") }
-                Button(onClick = onSignIn) { Text("Sign in") }
+            when (sessionState) {
+                SessionState.Loading -> Text("Checking session…")
+                SessionState.SignedOut -> {
+                    Text("Sign in with Authentik to use v-note on this device.")
+                    Button(onClick = onSignIn) { Text("Sign in") }
+                }
+                is SessionState.SignedIn -> {
+                    val label = sessionState.profile.email ?: sessionState.profile.sub
+                    Text("Signed in as $label", style = MaterialTheme.typography.bodyLarge)
+                    Text("sub: ${sessionState.profile.sub}")
+                    Button(onClick = onSignOut) { Text("Sign out") }
+                }
+                is SessionState.Error -> {
+                    Text(sessionState.message, style = MaterialTheme.typography.bodyMedium)
+                    Button(onClick = { scope.launch { onReload() } }) { Text("Retry") }
+                    Button(onClick = onSignIn) { Text("Sign in") }
+                }
             }
         }
+
+        // Version watermark — persistent build identity (release · flavor) for lockstep checks.
+        Text(
+            text = "v${BuildConfig.VERSION_NAME} · ${BuildConfig.FLAVOR}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            modifier =
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
     }
 }

@@ -13,11 +13,11 @@ run-compose:
     ./scripts/fetch-compose-env.sh
     docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build
 
-# Host JDK + SDK (Android Studio). See docs/DEV.md → Android.
+# Host JDK + SDK (Android Studio). Builds devLocal (loopback). See docs/DEV.md → Android.
 build-android:
     ./scripts/sync-version.sh
     source scripts/android-env.sh
-    cd android && bash ./gradlew :app:assembleDevDebug
+    cd android && bash ./gradlew :app:assembleDevLocalDebug
 
 # CI-parity build when JDK/SDK are not installed locally.
 build-android-docker:
@@ -57,7 +57,7 @@ android-reverse:
 
 android-install: build-android android-reverse
     source scripts/android-env.sh
-    adb install -r android/app/build/outputs/apk/dev/debug/app-dev-debug.apk
+    adb install -r android/app/build/outputs/apk/devLocal/debug/app-devLocal-debug.apk
 
 # Server must be running: `just run-server` in another terminal.
 android-run: android-install
@@ -66,7 +66,7 @@ android-run: android-install
 
 e2e:
     export OCI_IMAGE_VERSION=local OCI_IMAGE_REVISION="$(git rev-parse HEAD)" OCI_IMAGE_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" && \
-    TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright
+    TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright
 
 contract-validation:
     cargo test -p protocol

@@ -45,7 +45,8 @@ Triggered manually with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** (bored
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | `v_note_dev_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (dev App Links, package `link.desync.vnote.dev`) |
 | `v_note_prod_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (prod App Links, package `link.desync.vnote`) |
-| Android signing (post-MVP prod) | Release keystore — **outside repo** |
+| Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
+| Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
 Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
 
@@ -88,9 +89,10 @@ Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for 
 export BAO_ADDR=https://secrets.desync.link
 export BAO_TOKEN=<token>
 
-# Dev — fingerprint from your local debug keystore (fast; must match the APK you sideload):
+# Dev — fingerprint of the committed keystore android/app/debug.keystore (all builds
+# sign with it, so this is fixed): SHA-256
+#   3A:49:7C:AE:57:AD:FF:E4:D0:C8:3B:D2:D0:98:2C:C2:98:CB:1D:B6:3F:70:68:5A:57:13:07:96:CC:9C:62:3A
 export V_NOTE_DEV_ANDROID_CERT_SHA256="$(./scripts/android-dev-debug-fingerprint.sh)"
-# CI container keystore instead (slow): ./scripts/android-dev-debug-fingerprint.sh --docker
 ./scripts/patch-v-note-woodpecker-openbao-secrets.sh
 
 # Prod — release keystore SHA-256 (keytool -list -v …), when prod Android ships:
@@ -121,7 +123,7 @@ All four repo-built images set [OCI Image Spec](https://github.com/opencontainer
 | Image | Dockerfile / compose | CI tag (examples) |
 | --- | --- | --- |
 | **`v-note`** | `Dockerfile.web` | `registry.desync.link/v-note:{release}` |
-| **`v-note-android`** | `Dockerfile.android` | `v-note-android:{sha}` |
+| **`v-note-android`** | `Dockerfile.android` | `registry.desync.link/v-note-android:{release}` |
 | **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}` |
 | **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
 
@@ -194,6 +196,27 @@ Clients send **`X-V-Note-Client-Release`** / **`X-V-Note-Client-Protocol`**; **`
 ## Rollback
 
 Redeploy a **previous image tag** via Woodpecker manual deploy with pinned version env (detail in **#152** runbook). **Also reinstall the matching Android APK.**
+
+---
+
+## Android APK sideload (dev)
+
+After a successful dev deploy, the `dev` APK is served at:
+
+```
+https://v-notes-dev.desync.link/dl/apk
+```
+
+The SPA links to it ("Download Android app"). Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + Path(/dl/apk)` rule. `Content-Disposition` saves it as `v-note.apk`.
+
+Download on the device browser and enable "Install from unknown sources", or:
+
+```bash
+curl -L -o v-note.apk https://v-notes-dev.desync.link/dl/apk
+adb install v-note.apk
+```
+
+The `dev` flavor connects to `https://v-notes-dev.desync.link` — no `adb reverse` needed. For laptop dev with a local server, use the `devLocal` APK (see [`DEV.md`](DEV.md)).
 
 ---
 
