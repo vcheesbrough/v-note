@@ -13,7 +13,8 @@ RUN ./scripts/sync-version.sh \
     && cd android \
     && chmod +x ./gradlew \
     && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \
-        :app:assembleDevDebug :app:testDevDebugUnitTest
+        :app:assembleDevDebug \
+        :app:testDevDebugUnitTest :app:testDevLocalDebugUnitTest :app:testProdDebugUnitTest
 
 FROM nginx:alpine@sha256:8b1e78743a03dbb2c95171cc58639fef29abc8816598e27fb910ed2e621e589a
 # Serve the APK at /dl/apk. The path has no extension, so set the MIME type

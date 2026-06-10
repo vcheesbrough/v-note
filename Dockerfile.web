@@ -3,6 +3,9 @@ RUN rustup target add wasm32-unknown-unknown && cargo install trunk
 WORKDIR /app
 # CI passes the computed release tag so the SPA version watermark matches the
 # deployed image + /api/meta; read at compile time via option_env! in the frontend.
+# Keep ENV before `COPY . .`: cargo does NOT track option_env! for rebuilds, so a
+# changed tag must bust this layer (and the trunk build below) to avoid baking a
+# stale version. Do not move the cache boundary below the build.
 ARG V_NOTE_RELEASE=
 ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 COPY . .
