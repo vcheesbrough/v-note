@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/library-event.schema.json",
+  "title": "LibraryEvent",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "page"],
+      "properties": {
+        "type": {
+          "const": "page-created"
+        },
+        "page": {
+          "$ref": "page.schema.json"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "page_id"],
+      "properties": {
+        "type": {
+          "const": "page-deleted"
+        },
+        "page_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  ]
+}

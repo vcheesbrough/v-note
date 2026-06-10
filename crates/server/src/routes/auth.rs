@@ -82,7 +82,9 @@ pub async fn callback(
             .into_response();
     }
 
-    let cookie_state = jar.get(STATE_COOKIE).map(|cookie| cookie.value().to_string());
+    let cookie_state = jar
+        .get(STATE_COOKIE)
+        .map(|cookie| cookie.value().to_string());
     let Some(cookie_state) = cookie_state else {
         return (StatusCode::BAD_REQUEST, "missing state cookie").into_response();
     };
@@ -126,15 +128,13 @@ pub async fn callback(
         }
     };
 
-    if let Err(error) = crate::auth::validate_jwt(
-        &token_response.access_token,
-        auth,
-        &state.jwks_cache,
-    )
-    .await
+    if let Err(error) =
+        crate::auth::validate_jwt(&token_response.access_token, auth, &state.jwks_cache).await
     {
         let message = match error {
-            crate::auth::TokenValidationError::MissingScope => "issued token missing required scope",
+            crate::auth::TokenValidationError::MissingScope => {
+                "issued token missing required scope"
+            }
             crate::auth::TokenValidationError::Invalid(reason) => reason,
         };
         tracing::warn!(reason = message, "issued access token failed validation");
