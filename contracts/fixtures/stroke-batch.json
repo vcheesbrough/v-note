@@ -1,0 +1,15 @@
+{
+  "seq": 1,
+  "client_batch_id": "batch_aaaaaaaaaaaaaaaaaaaaaaaa",
+  "strokes": [
+    {
+      "tool": "pen",
+      "color": "#006400",
+      "width": 2.0,
+      "points": [
+        { "x": 10.0, "y": 20.0, "t": 0 },
+        { "x": 30.0, "y": 25.0, "t": 16 }
+      ]
+    }
+  ]
+}

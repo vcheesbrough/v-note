@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/page-replay.schema.json",
+  "title": "PageReplay",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["page_id", "last_seq", "batches"],
+  "properties": {
+    "page_id": { "type": "string", "minLength": 1 },
+    "last_seq": { "type": "integer", "minimum": 0 },
+    "batches": {
+      "type": "array",
+      "items": { "$ref": "stroke-batch.schema.json" }
+    }
+  }
+}

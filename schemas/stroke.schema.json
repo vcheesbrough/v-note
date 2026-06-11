@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/stroke.schema.json",
+  "title": "Stroke",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "color", "width", "points"],
+  "properties": {
+    "tool": {
+      "type": "string",
+      "description": "Constant \"pen\" in MVP (single hardcoded tool)."
+    },
+    "color": {
+      "type": "string",
+      "description": "Constant #006400 dark green in MVP."
+    },
+    "width": {
+      "type": "number",
+      "description": "Constant 2.0 logical px in MVP."
+    },
+    "points": {
+      "type": "array",
+      "items": { "$ref": "stroke-point.schema.json" }
+    }
+  }
+}
