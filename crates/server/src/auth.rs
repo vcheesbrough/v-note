@@ -66,7 +66,8 @@ impl AuthConfig {
         let client_id = std::env::var("OIDC_CLIENT_ID").expect("OIDC_CLIENT_ID is required");
         let client_secret =
             std::env::var("OIDC_CLIENT_SECRET").expect("OIDC_CLIENT_SECRET is required");
-        let redirect_uri = std::env::var("OIDC_REDIRECT_URI").expect("OIDC_REDIRECT_URI is required");
+        let redirect_uri =
+            std::env::var("OIDC_REDIRECT_URI").expect("OIDC_REDIRECT_URI is required");
         let required_scope = std::env::var("REQUIRED_SCOPE").expect("REQUIRED_SCOPE is required");
         let end_session_url = std::env::var("OIDC_END_SESSION_URL")
             .ok()
@@ -239,7 +240,8 @@ pub async fn validate_jwt(
     config: &AuthConfig,
     cache: &JwksCache,
 ) -> Result<Claims, TokenValidationError> {
-    let header = decode_header(token).map_err(|_| TokenValidationError::Invalid("invalid JWT header"))?;
+    let header =
+        decode_header(token).map_err(|_| TokenValidationError::Invalid("invalid JWT header"))?;
     let kid = header
         .kid
         .ok_or(TokenValidationError::Invalid("JWT missing kid header"))?;
@@ -289,8 +291,11 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let token = extract_bearer(&headers)
-        .or_else(|| cookies.get(AUTH_COOKIE).map(|cookie| cookie.value().to_string()));
+    let token = extract_bearer(&headers).or_else(|| {
+        cookies
+            .get(AUTH_COOKIE)
+            .map(|cookie| cookie.value().to_string())
+    });
     let Some(token) = token else {
         return (StatusCode::UNAUTHORIZED, "missing token").into_response();
     };
