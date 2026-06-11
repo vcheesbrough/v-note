@@ -1,7 +1,7 @@
 use axum::{
-    extract::{Query, State},
+    extract::{OriginalUri, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     Extension, Json,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -182,8 +182,35 @@ pub async fn me(Extension(claims): Extension<Claims>) -> Json<protocol::MeRespon
     Json(claims.to_me_response())
 }
 
-pub async fn mobile_callback() -> &'static str {
-    "v-note mobile auth callback"
+pub async fn mobile_callback(OriginalUri(uri): OriginalUri) -> Html<String> {
+    let custom_scheme_url = match uri.query() {
+        Some(query) if !query.is_empty() => {
+            format!("link.desync.vnote:/oauth2redirect?{query}")
+        }
+        _ => "link.desync.vnote:/oauth2redirect".to_string(),
+    };
+    let escaped_custom_scheme_url = escape_html(&custom_scheme_url);
+    let js_custom_scheme_url = escape_js_string(&custom_scheme_url);
+
+    Html(format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>v-note mobile auth callback</title>
+  </head>
+  <body style="font-family: system-ui, sans-serif; padding: 2rem; line-height: 1.5;">
+    <p>Returning to v-note…</p>
+    <p><a href="{escaped_custom_scheme_url}">Open the app</a></p>
+    <script>
+      const appUrl = '{js_custom_scheme_url}';
+      window.location.replace(appUrl);
+      window.setTimeout(() => window.location.assign(appUrl), 250);
+    </script>
+  </body>
+</html>"#,
+    ))
 }
 
 pub async fn assetlinks() -> Response {
@@ -196,4 +223,23 @@ pub async fn assetlinks() -> Response {
             .into_response(),
         _ => (StatusCode::NOT_FOUND, "assetlinks not configured").into_response(),
     }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn escape_js_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }

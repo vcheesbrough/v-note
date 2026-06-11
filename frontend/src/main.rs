@@ -58,7 +58,11 @@ fn App() -> impl IntoView {
                     library_error.set(Some(error));
                 }
             });
-            wasm_bindgen_futures::spawn_local(library_realtime_loop(pages, library_error));
+            wasm_bindgen_futures::spawn_local(library_realtime_loop(
+                pages,
+                selected_page,
+                library_error,
+            ));
         }
     });
 
@@ -109,28 +113,33 @@ fn App() -> impl IntoView {
                         })}
 
                         <ul>
-                            {move || pages.get().into_iter().map(|page| {
-                                let open_page = page.clone();
-                                let delete_page_id = page.id.clone();
-                                view! {
-                                    <li style="display: flex; gap: 0.75rem; align-items: center; margin: 0.5rem 0;">
-                                        <button on:click=move |_| selected_page.set(Some(open_page.clone()))>
-                                            {page.title.clone()}
-                                        </button>
-                                        <small>{format!("updated {}", page.updated_at)}</small>
-                                        <button aria-label=format!("Delete {}", page.title) on:click=move |_| {
-                                            let page_id = delete_page_id.clone();
-                                            wasm_bindgen_futures::spawn_local(async move {
-                                                if let Err(error) = delete_page(page_id, pages, selected_page, library_error).await {
-                                                    library_error.set(Some(error));
-                                                }
-                                            });
-                                        }>
-                                            "Delete"
-                                        </button>
-                                    </li>
+                            <For
+                                each=move || pages.get()
+                                key=|page| page.id.clone()
+                                children=move |page| {
+                                    let open_page = page.clone();
+                                    let delete_page_id = page.id.clone();
+                                    let delete_page_title = page.title.clone();
+                                    view! {
+                                        <li style="display: flex; gap: 0.75rem; align-items: center; margin: 0.5rem 0;">
+                                            <button on:click=move |_| selected_page.set(Some(open_page.clone()))>
+                                                {page.title.clone()}
+                                            </button>
+                                            <small>{format!("updated {}", page.updated_at)}</small>
+                                            <button aria-label=format!("Delete {}", delete_page_title) on:click=move |_| {
+                                                let page_id = delete_page_id.clone();
+                                                wasm_bindgen_futures::spawn_local(async move {
+                                                    if let Err(error) = delete_page(page_id, pages, selected_page, library_error).await {
+                                                        library_error.set(Some(error));
+                                                    }
+                                                });
+                                            }>
+                                                "Delete"
+                                            </button>
+                                        </li>
+                                    }
                                 }
-                            }).collect_view()}
+                            />
                         </ul>
 
                         {move || match selected_page.get() {
@@ -261,10 +270,11 @@ async fn delete_page(
 
 async fn library_realtime_loop(
     pages: RwSignal<Vec<PageSummary>>,
+    selected_page: RwSignal<Option<PageSummary>>,
     library_error: RwSignal<Option<String>>,
 ) {
     loop {
-        if let Err(error) = library_realtime_once(pages, library_error).await {
+        if let Err(error) = library_realtime_once(pages, selected_page, library_error).await {
             library_error.set(Some(error));
             TimeoutFuture::new(1_000).await;
         }
@@ -273,6 +283,7 @@ async fn library_realtime_loop(
 
 async fn library_realtime_once(
     pages: RwSignal<Vec<PageSummary>>,
+    selected_page: RwSignal<Option<PageSummary>>,
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
     let ticket_response = Request::post("/api/realtime-ticket")
@@ -300,7 +311,7 @@ async fn library_realtime_once(
         if let Message::Text(text) = message {
             let event: LibraryEvent = serde_json::from_str(&text)
                 .map_err(|error| format!("invalid realtime event: {error}"))?;
-            apply_event(pages, event);
+            apply_event(pages, selected_page, event);
             library_error.set(None);
         }
     }
@@ -321,12 +332,14 @@ fn realtime_url(ticket: &str) -> Result<String, String> {
     Ok(format!("{scheme}://{host}/api/realtime?ticket={ticket}"))
 }
 
-fn apply_event(pages: RwSignal<Vec<PageSummary>>, event: LibraryEvent) {
+fn apply_event(
+    pages: RwSignal<Vec<PageSummary>>,
+    selected_page: RwSignal<Option<PageSummary>>,
+    event: LibraryEvent,
+) {
     match event {
         LibraryEvent::PageCreated { page } => upsert_page(pages, page),
-        LibraryEvent::PageDeleted { page_id } => {
-            pages.update(|items| items.retain(|page| page.id != page_id));
-        }
+        LibraryEvent::PageDeleted { page_id } => remove_page(pages, selected_page, &page_id),
     }
 }
 

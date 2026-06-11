@@ -16,7 +16,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::auth::{auth_middleware, AuthConfig, JwksCache};
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, list_pages};
-use crate::routes::realtime::{realtime_socket, realtime_ticket, RealtimeHub};
+use crate::routes::realtime::{page_socket, realtime_socket, realtime_ticket, RealtimeHub};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -131,6 +131,10 @@ pub fn build_router_with_db(
         .route(
             "/api/realtime",
             get(realtime_socket).with_state(state.clone()),
+        )
+        .route(
+            "/api/pages/{page_id}/realtime",
+            get(page_socket).with_state(state.clone()),
         );
 
     if let Ok(static_dir) = env::var("STATIC_DIR") {
