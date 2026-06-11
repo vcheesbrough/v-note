@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/stroke-batch.schema.json",
+  "title": "StrokeBatch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seq", "client_batch_id", "strokes"],
+  "properties": {
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-page monotonic sequence assigned by the server on commit."
+    },
+    "client_batch_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Client-generated idempotency key."
+    },
+    "strokes": {
+      "type": "array",
+      "items": { "$ref": "stroke.schema.json" }
+    }
+  }
+}

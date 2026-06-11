@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/page-client-message.schema.json",
+  "title": "PageClientMessage",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "from_seq"],
+      "properties": {
+        "type": { "const": "subscribe" },
+        "from_seq": { "type": "integer", "minimum": 0 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "acquire-lease" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "release-lease" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "client_batch_id", "strokes"],
+      "properties": {
+        "type": { "const": "commit-batch" },
+        "client_batch_id": { "type": "string", "minLength": 1 },
+        "strokes": {
+          "type": "array",
+          "items": { "$ref": "stroke.schema.json" }
+        }
+      }
+    }
+  ]
+}

@@ -4,17 +4,21 @@ use std::sync::Mutex;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
 use chrono::{DateTime, Duration, Utc};
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use protocol::{LibraryEvent, RealtimeTicketResponse};
+use protocol::{
+    LibraryEvent, PageClientMessage, PageServerMessage, RealtimeTicketResponse, Stroke, StrokeBatch,
+};
 use rand::RngCore;
 use serde::Deserialize;
+use sqlx::PgPool;
 use tokio::sync::broadcast;
 
 use crate::auth::{validate_jwt, Claims};
@@ -22,17 +26,31 @@ use crate::AppState;
 
 const TICKET_TTL_SECONDS: i64 = 60;
 const LIBRARY_CHANNEL_CAPACITY: usize = 64;
+const PAGE_CHANNEL_CAPACITY: usize = 256;
+const LEASE_TTL_SECONDS: i64 = 30;
 
 #[derive(Default)]
 pub struct RealtimeHub {
     tickets: Mutex<HashMap<String, Ticket>>,
     library_channels: Mutex<HashMap<String, broadcast::Sender<LibraryEvent>>>,
+    page_channels: Mutex<HashMap<String, broadcast::Sender<PageServerMessage>>>,
+    leases: Mutex<HashMap<String, Lease>>,
 }
 
 #[derive(Clone)]
 struct Ticket {
     owner_id: String,
     expires_at: DateTime<Utc>,
+}
+
+struct Lease {
+    holder: String,
+    expires_at: DateTime<Utc>,
+}
+
+enum LeaseOutcome {
+    Granted,
+    Denied { holder: String },
 }
 
 impl RealtimeHub {
@@ -89,6 +107,92 @@ impl RealtimeHub {
                 .clone()
         };
         let _ = sender.send(event);
+    }
+
+    fn subscribe_page(&self, page_id: &str) -> broadcast::Receiver<PageServerMessage> {
+        let mut channels = self
+            .page_channels
+            .lock()
+            .expect("page channel mutex poisoned");
+        channels
+            .entry(page_id.to_string())
+            .or_insert_with(|| {
+                let (sender, _) = broadcast::channel(PAGE_CHANNEL_CAPACITY);
+                sender
+            })
+            .subscribe()
+    }
+
+    fn publish_page(&self, page_id: &str, message: PageServerMessage) {
+        let sender = {
+            let mut channels = self
+                .page_channels
+                .lock()
+                .expect("page channel mutex poisoned");
+            channels
+                .entry(page_id.to_string())
+                .or_insert_with(|| {
+                    let (sender, _) = broadcast::channel(PAGE_CHANNEL_CAPACITY);
+                    sender
+                })
+                .clone()
+        };
+        let _ = sender.send(message);
+    }
+
+    /// Acquire (or renew, for the current holder) the single-editor edit lease.
+    fn acquire_lease(&self, page_id: &str, session_id: &str) -> LeaseOutcome {
+        let now = Utc::now();
+        let mut leases = self.leases.lock().expect("lease mutex poisoned");
+        if let Some(existing) = leases.get(page_id) {
+            if existing.expires_at <= now {
+                leases.remove(page_id);
+            }
+        }
+        match leases.get_mut(page_id) {
+            Some(existing) if existing.holder == session_id => {
+                existing.expires_at = now + Duration::seconds(LEASE_TTL_SECONDS);
+                LeaseOutcome::Granted
+            }
+            Some(existing) => LeaseOutcome::Denied {
+                holder: existing.holder.clone(),
+            },
+            None => {
+                leases.insert(
+                    page_id.to_string(),
+                    Lease {
+                        holder: session_id.to_string(),
+                        expires_at: now + Duration::seconds(LEASE_TTL_SECONDS),
+                    },
+                );
+                LeaseOutcome::Granted
+            }
+        }
+    }
+
+    /// Release the lease if held by `session_id`; returns true when released.
+    fn release_lease(&self, page_id: &str, session_id: &str) -> bool {
+        let mut leases = self.leases.lock().expect("lease mutex poisoned");
+        match leases.get(page_id) {
+            Some(existing) if existing.holder == session_id => {
+                leases.remove(page_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn current_lease_holder(&self, page_id: &str) -> Option<String> {
+        let now = Utc::now();
+        let mut leases = self.leases.lock().expect("lease mutex poisoned");
+        match leases.get(page_id) {
+            Some(existing) if existing.expires_at > now => Some(existing.holder.clone()),
+            Some(_) => {
+                leases.remove(page_id);
+                None
+            }
+            None => None,
+        }
     }
 }
 
@@ -182,4 +286,366 @@ fn random_hex(bytes: usize) -> String {
     let mut buffer = vec![0u8; bytes];
     rand::thread_rng().fill_bytes(&mut buffer);
     buffer.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+// ---- Page channel (per-`page_id` ink WSS) --------------------------------
+
+/// Per-page ink socket. Authenticates like the library socket (Bearer for
+/// Android, realtime ticket for SPA), then enforces owner-only access to the
+/// page before upgrading. Bidirectional: gap-fill/snapshot, edit lease, and
+/// coalesced stroke-batch commits fanned out to the owner's sibling sessions.
+pub async fn page_socket(
+    State(state): State<AppState>,
+    Path(page_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<RealtimeQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let owner_id = match authenticate_realtime(&state, &headers, query.ticket.as_deref()).await {
+        Ok(owner_id) => owner_id,
+        Err(status) => return (status, "realtime authentication failed").into_response(),
+    };
+
+    let Some(pool) = state.db.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "database not configured").into_response();
+    };
+
+    match page_belongs_to_owner(&pool, &page_id, &owner_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "page not found").into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "page ownership check failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "ownership check failed").into_response();
+        }
+    }
+
+    ws.on_upgrade(move |socket| async move {
+        handle_page_socket(state, pool, page_id, socket).await;
+    })
+}
+
+async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, socket: WebSocket) {
+    let session_id = format!("session_{}", random_hex(16));
+    let mut receiver = state.realtime.subscribe_page(&page_id);
+    let (mut sender, mut inbound) = socket.split();
+
+    let last_seq = max_seq(&pool, &page_id).await.unwrap_or(0);
+    let lease_holder = state.realtime.current_lease_holder(&page_id);
+    let welcome = PageServerMessage::Welcome {
+        session_id: session_id.clone(),
+        last_seq,
+        lease_holder,
+    };
+    if !send_page(&mut sender, welcome).await {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            event = receiver.recv() => {
+                match event {
+                    Ok(message) => {
+                        if !send_page(&mut sender, message).await {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            inbound_message = inbound.next() => {
+                match inbound_message {
+                    Some(Ok(Message::Text(text))) => {
+                        if !handle_page_client_message(
+                            &state, &pool, &page_id, &session_id, &mut sender, &text,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+
+    // Release the lease on disconnect so a sibling session can take over.
+    if state.realtime.release_lease(&page_id, &session_id) {
+        state
+            .realtime
+            .publish_page(&page_id, PageServerMessage::LeaseChanged { holder: None });
+    }
+}
+
+/// Returns false when the socket should close (send failure).
+async fn handle_page_client_message(
+    state: &AppState,
+    pool: &PgPool,
+    page_id: &str,
+    session_id: &str,
+    sender: &mut SplitSink<WebSocket, Message>,
+    text: &str,
+) -> bool {
+    let message: PageClientMessage = match serde_json::from_str(text) {
+        Ok(message) => message,
+        Err(_) => {
+            return send_page(
+                sender,
+                PageServerMessage::Error {
+                    code: "bad_message".to_string(),
+                    message: "could not parse client message".to_string(),
+                },
+            )
+            .await;
+        }
+    };
+
+    match message {
+        PageClientMessage::Subscribe { from_seq } => {
+            let batches = match load_batches_after(pool, page_id, from_seq).await {
+                Ok(batches) => batches,
+                Err(error) => {
+                    tracing::error!(error = %error, "stroke replay failed");
+                    return send_page(
+                        sender,
+                        PageServerMessage::Error {
+                            code: "replay_failed".to_string(),
+                            message: "could not load page ink".to_string(),
+                        },
+                    )
+                    .await;
+                }
+            };
+            for batch in batches {
+                if !send_page(sender, PageServerMessage::StrokeBatch(batch)).await {
+                    return false;
+                }
+            }
+            let last_seq = max_seq(pool, page_id).await.unwrap_or(from_seq);
+            send_page(sender, PageServerMessage::Synced { last_seq }).await
+        }
+        PageClientMessage::AcquireLease => {
+            match state.realtime.acquire_lease(page_id, session_id) {
+                LeaseOutcome::Granted => {
+                    state.realtime.publish_page(
+                        page_id,
+                        PageServerMessage::LeaseChanged {
+                            holder: Some(session_id.to_string()),
+                        },
+                    );
+                    send_page(sender, PageServerMessage::LeaseGranted).await
+                }
+                LeaseOutcome::Denied { holder } => {
+                    send_page(sender, PageServerMessage::LeaseDenied { holder }).await
+                }
+            }
+        }
+        PageClientMessage::ReleaseLease => {
+            if state.realtime.release_lease(page_id, session_id) {
+                state
+                    .realtime
+                    .publish_page(page_id, PageServerMessage::LeaseChanged { holder: None });
+            }
+            true
+        }
+        PageClientMessage::CommitBatch {
+            client_batch_id,
+            strokes,
+        } => {
+            // Single active editor: only the lease holder may ink. Acquiring
+            // also renews the holder's lease on each commit.
+            if let LeaseOutcome::Denied { holder } =
+                state.realtime.acquire_lease(page_id, session_id)
+            {
+                return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
+            }
+            match persist_batch(pool, page_id, &client_batch_id, &strokes).await {
+                Ok(seq) => {
+                    state.realtime.publish_page(
+                        page_id,
+                        PageServerMessage::StrokeBatch(StrokeBatch {
+                            seq,
+                            client_batch_id,
+                            strokes,
+                        }),
+                    );
+                    true
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "stroke commit failed");
+                    send_page(
+                        sender,
+                        PageServerMessage::Error {
+                            code: "commit_failed".to_string(),
+                            message: "could not persist strokes".to_string(),
+                        },
+                    )
+                    .await
+                }
+            }
+        }
+    }
+}
+
+async fn send_page(sender: &mut SplitSink<WebSocket, Message>, message: PageServerMessage) -> bool {
+    let Ok(payload) = serde_json::to_string(&message) else {
+        return false;
+    };
+    sender.send(Message::Text(payload.into())).await.is_ok()
+}
+
+async fn page_belongs_to_owner(
+    pool: &PgPool,
+    page_id: &str,
+    owner_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query("SELECT 1 FROM pages WHERE id = $1 AND owner_id = $2")
+        .bind(page_id)
+        .bind(owner_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
+}
+
+async fn max_seq(pool: &PgPool, page_id: &str) -> Result<u64, sqlx::Error> {
+    let seq: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1")
+            .bind(page_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(seq as u64)
+}
+
+#[derive(sqlx::FromRow)]
+struct StrokeBatchRow {
+    seq: i64,
+    client_batch_id: String,
+    strokes: sqlx::types::Json<Vec<Stroke>>,
+}
+
+async fn load_batches_after(
+    pool: &PgPool,
+    page_id: &str,
+    from_seq: u64,
+) -> Result<Vec<StrokeBatch>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, StrokeBatchRow>(
+        r#"
+        SELECT seq, client_batch_id, strokes
+        FROM stroke_batches
+        WHERE page_id = $1 AND seq > $2
+        ORDER BY seq
+        "#,
+    )
+    .bind(page_id)
+    .bind(from_seq as i64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| StrokeBatch {
+            seq: row.seq as u64,
+            client_batch_id: row.client_batch_id,
+            strokes: row.strokes.0,
+        })
+        .collect())
+}
+
+/// Persist a stroke batch with a per-page monotonic sequence. Idempotent by
+/// `client_batch_id` so reconnect retries return the existing seq instead of
+/// double-inserting. Bumps the page `updated_at` for recent-first library sort.
+async fn persist_batch(
+    pool: &PgPool,
+    page_id: &str,
+    client_batch_id: &str,
+    strokes: &[Stroke],
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // Serialize seq allocation for this page against concurrent commits.
+    sqlx::query("SELECT 1 FROM pages WHERE id = $1 FOR UPDATE")
+        .bind(page_id)
+        .execute(&mut *tx)
+        .await?;
+
+    if let Some(existing) = sqlx::query_scalar::<_, i64>(
+        "SELECT seq FROM stroke_batches WHERE page_id = $1 AND client_batch_id = $2",
+    )
+    .bind(page_id)
+    .bind(client_batch_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(existing as u64);
+    }
+
+    let next: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
+    )
+    .bind(page_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO stroke_batches (page_id, seq, client_batch_id, strokes) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(page_id)
+    .bind(next)
+    .bind(client_batch_id)
+    .bind(sqlx::types::Json(strokes))
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE pages SET updated_at = now() WHERE id = $1")
+        .bind(page_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(next as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_lease_grants_then_blocks_second_session() {
+        let hub = RealtimeHub::default();
+
+        // First session acquires; the holder may renew freely.
+        assert!(matches!(
+            hub.acquire_lease("page_1", "session_a"),
+            LeaseOutcome::Granted
+        ));
+        assert!(matches!(
+            hub.acquire_lease("page_1", "session_a"),
+            LeaseOutcome::Granted
+        ));
+
+        // A second session is blocked and told the current holder.
+        match hub.acquire_lease("page_1", "session_b") {
+            LeaseOutcome::Denied { holder } => assert_eq!(holder, "session_a"),
+            LeaseOutcome::Granted => panic!("second session should be blocked"),
+        }
+        assert_eq!(
+            hub.current_lease_holder("page_1").as_deref(),
+            Some("session_a")
+        );
+
+        // A non-holder cannot release the lease.
+        assert!(!hub.release_lease("page_1", "session_b"));
+
+        // The holder releases and the page frees up for the next session.
+        assert!(hub.release_lease("page_1", "session_a"));
+        assert_eq!(hub.current_lease_holder("page_1"), None);
+        assert!(matches!(
+            hub.acquire_lease("page_1", "session_b"),
+            LeaseOutcome::Granted
+        ));
+    }
 }
