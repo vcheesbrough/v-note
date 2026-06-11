@@ -129,6 +129,8 @@ pub enum PageClientMessage {
     Subscribe { from_seq: u64 },
     /// Request the single-editor edit lease before inking.
     AcquireLease,
+    /// Renew the single-editor edit lease while this page remains active.
+    RenewLease,
     /// Voluntarily release the edit lease (navigation away).
     ReleaseLease,
     /// Commit a coalesced stroke batch (idempotent by `client_batch_id`).

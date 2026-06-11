@@ -110,7 +110,7 @@ class PageInkInstrumentedTest {
         assertTrue("snapshot stroke rendered", awaitUntil { session.strokes.size == 1 })
         assertTrue("lease granted", awaitUntil { session.canEdit })
 
-        // Commit a captured stroke; it renders optimistically and is sent on the wire.
+        // Commit a captured stroke; it is sent on the wire and rendered on echo.
         session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16))))
         assertTrue("commit sent", commitLatch.await(5, TimeUnit.SECONDS))
 
@@ -118,7 +118,7 @@ class PageInkInstrumentedTest {
         assertEquals("commit-batch", commitJson.getString("type"))
         assertEquals(2, commitJson.getJSONArray("strokes").getJSONObject(0).getJSONArray("points").length())
 
-        // Optimistic add + server echo dedupe by client_batch_id => exactly two strokes.
+        // Snapshot stroke + server echo => exactly two committed strokes.
         assertTrue("no duplicate from echo", awaitUntil { session.strokes.size == 2 })
         Thread.sleep(200)
         assertEquals(2, session.strokes.size)
