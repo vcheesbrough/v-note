@@ -443,14 +443,12 @@ async fn handle_page_client_message(
                 }
             }
         }
-        PageClientMessage::RenewLease => {
-            match state.realtime.acquire_lease(page_id, session_id) {
-                LeaseOutcome::Granted => send_page(sender, PageServerMessage::LeaseGranted).await,
-                LeaseOutcome::Denied { holder } => {
-                    send_page(sender, PageServerMessage::LeaseDenied { holder }).await
-                }
+        PageClientMessage::RenewLease => match state.realtime.acquire_lease(page_id, session_id) {
+            LeaseOutcome::Granted => send_page(sender, PageServerMessage::LeaseGranted).await,
+            LeaseOutcome::Denied { holder } => {
+                send_page(sender, PageServerMessage::LeaseDenied { holder }).await
             }
-        }
+        },
         PageClientMessage::ReleaseLease => {
             if state.realtime.release_lease(page_id, session_id) {
                 state
