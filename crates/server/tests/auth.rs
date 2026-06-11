@@ -160,7 +160,9 @@ async fn mobile_callback_attempts_custom_scheme_handoff() {
     let html = String::from_utf8(body.to_vec()).expect("callback HTML should be UTF-8");
     assert!(html.contains("Returning to v-note"));
     assert!(html.contains("link.desync.vnote:/oauth2redirect?code=test-code&amp;state=test-state"));
-    assert!(html.contains("const appUrl = 'link.desync.vnote:/oauth2redirect?code=test-code&state=test-state';"));
+    assert!(html.contains(
+        "const appUrl = 'link.desync.vnote:/oauth2redirect?code=test-code&state=test-state';"
+    ));
 }
 
 #[tokio::test]
