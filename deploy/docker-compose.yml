@@ -43,7 +43,11 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_VERSION: ${APP_VERSION:-0.1.0}
-      DATABASE_URL: postgres://v_note:${POSTGRES_PASSWORD}@postgres:5432/v_note
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: v_note
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_NAME: v_note
       STATIC_DIR: /app/dist
       V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}

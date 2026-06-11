@@ -28,14 +28,19 @@ import kotlinx.coroutines.withContext
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
+import link.desync.vnote.auth.LibraryEvent
+import link.desync.vnote.auth.LibraryEventListener
 import link.desync.vnote.auth.MeProfile
+import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ui.theme.VNoteTheme
+import okhttp3.WebSocket
 
 class MainActivity : ComponentActivity() {
     private lateinit var tokenStore: TokenStore
     private lateinit var authRepository: AuthRepository
     private lateinit var apiClient: ApiClient
+    private var librarySocket: WebSocket? = null
 
     private val authLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -53,6 +58,9 @@ class MainActivity : ComponentActivity() {
 
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
+    private val pagesState = androidx.compose.runtime.mutableStateOf<List<PageSummary>>(emptyList())
+    private val selectedPageState = androidx.compose.runtime.mutableStateOf<PageSummary?>(null)
+    private val libraryErrorState = androidx.compose.runtime.mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +78,12 @@ class MainActivity : ComponentActivity() {
                         onSignIn = { signIn() },
                         onSignOut = { signOut() },
                         onReload = { reloadSession() },
+                        pages = pagesState.value,
+                        selectedPage = selectedPageState.value,
+                        libraryError = libraryErrorState.value,
+                        onCreatePage = { createPage() },
+                        onOpenPage = { selectedPageState.value = it },
+                        onDeletePage = { deletePage(it) },
                     )
                 }
             }
@@ -79,6 +93,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        librarySocket?.close(1000, "activity destroyed")
         authRepository.shutdown()
         super.onDestroy()
     }
@@ -96,6 +111,10 @@ class MainActivity : ComponentActivity() {
 
     private fun signOut() {
         val endSessionIntent = authRepository.createEndSessionIntent()
+        librarySocket?.close(1000, "signed out")
+        librarySocket = null
+        pagesState.value = emptyList()
+        selectedPageState.value = null
         authRepository.signOutLocal()
         sessionState.value = SessionState.SignedOut
         endSessionIntent?.data?.let { uri ->
@@ -112,13 +131,99 @@ class MainActivity : ComponentActivity() {
             }
             authRepository.refreshAccessTokenIfNeeded()
             apiClient.fetchMe().fold(
-                onSuccess = { profile -> sessionState.value = SessionState.SignedIn(profile) },
+                onSuccess = { profile ->
+                    sessionState.value = SessionState.SignedIn(profile)
+                    loadPages()
+                    connectLibrarySocket()
+                },
                 onFailure = { error ->
                     authRepository.signOutLocal()
                     sessionState.value =
                         SessionState.Error(error.message ?: "Session check failed")
                 },
             )
+        }
+    }
+
+    private fun loadPages() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            apiClient.listPages().fold(
+                onSuccess = { pages ->
+                    pagesState.value = pages
+                    libraryErrorState.value = null
+                },
+                onFailure = { error ->
+                    libraryErrorState.value = error.message ?: "Loading pages failed"
+                },
+            )
+        }
+    }
+
+    private fun createPage() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            apiClient.createPage().fold(
+                onSuccess = { page ->
+                    upsertPage(page)
+                    selectedPageState.value = page
+                    libraryErrorState.value = null
+                },
+                onFailure = { error ->
+                    libraryErrorState.value = error.message ?: "Creating page failed"
+                },
+            )
+        }
+    }
+
+    private fun deletePage(page: PageSummary) {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            apiClient.deletePage(page.id).fold(
+                onSuccess = {
+                    removePage(page.id)
+                    libraryErrorState.value = null
+                },
+                onFailure = { error ->
+                    libraryErrorState.value = error.message ?: "Deleting page failed"
+                },
+            )
+        }
+    }
+
+    private fun connectLibrarySocket() {
+        librarySocket?.close(1000, "reconnecting")
+        librarySocket =
+            apiClient.openLibrarySocket(
+                object : LibraryEventListener {
+                    override fun onEvent(event: LibraryEvent) {
+                        runOnUiThread {
+                            when (event) {
+                                is LibraryEvent.PageCreated -> upsertPage(event.page)
+                                is LibraryEvent.PageDeleted -> removePage(event.pageId)
+                            }
+                            libraryErrorState.value = null
+                        }
+                    }
+
+                    override fun onError(message: String) {
+                        runOnUiThread { libraryErrorState.value = message }
+                    }
+
+                    override fun onClosed() {
+                        runOnUiThread { libraryErrorState.value = "Realtime disconnected" }
+                    }
+                },
+            )
+    }
+
+    private fun upsertPage(page: PageSummary) {
+        pagesState.value =
+            (pagesState.value.filterNot { it.id == page.id } + page)
+                .sortedByDescending { it.updatedAt }
+    }
+
+    private fun removePage(pageId: String) {
+        pagesState.value = pagesState.value.filterNot { it.id == pageId }
+        if (selectedPageState.value?.id == pageId) {
+            selectedPageState.value = null
         }
     }
 }
@@ -139,6 +244,12 @@ private fun AppScreen(
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onReload: () -> Unit,
+    pages: List<PageSummary>,
+    selectedPage: PageSummary?,
+    libraryError: String?,
+    onCreatePage: () -> Unit,
+    onOpenPage: (PageSummary) -> Unit,
+    onDeletePage: (PageSummary) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val healthState = remember { mutableStateOf("Checking server health…") }
@@ -185,7 +296,23 @@ private fun AppScreen(
                 is SessionState.SignedIn -> {
                     val label = sessionState.profile.email ?: sessionState.profile.sub
                     Text("Signed in as $label", style = MaterialTheme.typography.bodyLarge)
-                    Text("sub: ${sessionState.profile.sub}")
+                    Button(onClick = onCreatePage) { Text("New page") }
+                    libraryError?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                    if (pages.isEmpty()) {
+                        Text("No pages yet.")
+                    } else {
+                        pages.forEach { page ->
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Button(onClick = { onOpenPage(page) }) { Text(page.title) }
+                                Text("updated ${page.updatedAt}")
+                                Button(onClick = { onDeletePage(page) }) { Text("Delete") }
+                            }
+                        }
+                    }
+                    selectedPage?.let { page ->
+                        Text("Open page: ${page.title}", style = MaterialTheme.typography.titleMedium)
+                        Text("Empty canvas placeholder. Ink capture lands in the next iteration.")
+                    }
                     Button(onClick = onSignOut) { Text("Sign out") }
                 }
                 is SessionState.Error -> {
