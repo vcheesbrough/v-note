@@ -62,14 +62,14 @@ pub enum LibraryEvent {
 //
 // Strokes are authored in **world/document coordinates** on the infinite
 // canvas — zoom/pan never rewrite stored geometry. MVP uses a single hardcoded
-// pen (dark green `#006400`, constant 2px logical width, no pressure). `pressure`
+// pen (dark green `#006400`, constant 4px logical width, no pressure). `pressure`
 // is reserved on each point so post-MVP pressure/tilt curves extend the schema
 // without breaking v1 strokes (see `docs/PLAN.md` → Stroke tool).
 
 /// MVP pen constants — single hardcoded tool.
 pub const PEN_TOOL: &str = "pen";
 pub const PEN_COLOR: &str = "#006400";
-pub const PEN_WIDTH: f64 = 2.0;
+pub const PEN_WIDTH: f64 = 4.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrokePoint {
@@ -88,7 +88,7 @@ pub struct Stroke {
     pub tool: String,
     /// Constant `#006400` dark green in MVP.
     pub color: String,
-    /// Constant 2.0 logical px in MVP (no pressure→width mapping).
+    /// Constant 4.0 logical px in MVP (no pressure→width mapping).
     pub width: f64,
     pub points: Vec<StrokePoint>,
 }
