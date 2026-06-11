@@ -279,7 +279,7 @@ data class Stroke(
     companion object {
         const val PEN_TOOL = "pen"
         const val PEN_COLOR = "#006400"
-        const val PEN_WIDTH = 2.0
+        const val PEN_WIDTH = 4.0
     }
 }
 

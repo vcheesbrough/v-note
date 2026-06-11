@@ -79,7 +79,7 @@ class PageInkInstrumentedTest {
                         when (JSONObject(text).getString("type")) {
                             "subscribe" -> {
                                 webSocket.send(
-                                    """{"type":"stroke-batch","seq":1,"client_batch_id":"seed","strokes":[{"tool":"pen","color":"#006400","width":2.0,"points":[{"x":1.0,"y":2.0,"t":0}]}]}""",
+                                    """{"type":"stroke-batch","seq":1,"client_batch_id":"seed","strokes":[{"tool":"pen","color":"#006400","width":4.0,"points":[{"x":1.0,"y":2.0,"t":0}]}]}""",
                                 )
                                 webSocket.send("""{"type":"synced","last_seq":1}""")
                             }
