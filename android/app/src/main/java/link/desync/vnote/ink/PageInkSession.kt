@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.PageEvent
@@ -37,6 +39,7 @@ class PageInkSession(
     private var lastSeq: Long = 0
     private val seenBatchIds = mutableSetOf<String>()
     private var socket: PageSocket? = null
+    private var leaseRenewJob: Job? = null
 
     fun connect() {
         statusBanner = CONNECTING
@@ -49,11 +52,11 @@ class PageInkSession(
                     }
 
                     override fun onError(message: String) {
-                        scope.launch { statusBanner = message }
+                        scope.launch { handleDisconnected(message) }
                     }
 
                     override fun onClosed() {
-                        scope.launch { statusBanner = DISCONNECTED }
+                        scope.launch { handleDisconnected(DISCONNECTED) }
                     }
                 },
             )
@@ -64,20 +67,19 @@ class PageInkSession(
     }
 
     fun disconnect() {
+        stopLeaseRenewal()
         socket?.releaseLease()
         socket?.close()
         socket = null
     }
 
-    // Commit a freshly captured stroke. Optimistically rendered locally, then
-    // echoed back by the server (deduped by client batch id) with its seq.
+    // Commit a freshly captured stroke; it enters committed state only once
+    // the server echoes it back with its assigned seq.
     fun commitStroke(stroke: Stroke) {
         if (!canEdit || stroke.points.isEmpty()) {
             return
         }
         val clientBatchId = "batch_${UUID.randomUUID().toString().replace("-", "")}"
-        seenBatchIds.add(clientBatchId)
-        strokes.add(stroke)
         socket?.commitBatch(clientBatchId, listOf(stroke))
     }
 
@@ -110,12 +112,14 @@ class PageInkSession(
             }
             PageEvent.LeaseGranted -> {
                 canEdit = true
+                ensureLeaseRenewal()
                 if (statusBanner == LEASE_BLOCKED) {
                     statusBanner = null
                 }
             }
             is PageEvent.LeaseDenied -> {
                 canEdit = false
+                stopLeaseRenewal()
                 statusBanner = LEASE_BLOCKED
             }
             is PageEvent.LeaseChanged -> {
@@ -125,12 +129,14 @@ class PageInkSession(
                     holder == null -> socket?.acquireLease()
                     holder == sessionId -> {
                         canEdit = true
+                        ensureLeaseRenewal()
                         if (statusBanner == LEASE_BLOCKED) {
                             statusBanner = null
                         }
                     }
                     else -> {
                         canEdit = false
+                        stopLeaseRenewal()
                         statusBanner = LEASE_BLOCKED
                     }
                 }
@@ -139,7 +145,35 @@ class PageInkSession(
         }
     }
 
+    private fun ensureLeaseRenewal() {
+        if (leaseRenewJob?.isActive == true) {
+            return
+        }
+        leaseRenewJob =
+            scope.launch {
+                while (true) {
+                    delay(LEASE_RENEW_INTERVAL_MS)
+                    if (!canEdit) {
+                        break
+                    }
+                    socket?.renewLease() ?: break
+                }
+            }
+    }
+
+    private fun stopLeaseRenewal() {
+        leaseRenewJob?.cancel()
+        leaseRenewJob = null
+    }
+
+    private fun handleDisconnected(message: String) {
+        canEdit = false
+        stopLeaseRenewal()
+        statusBanner = message
+    }
+
     companion object {
+        private const val LEASE_RENEW_INTERVAL_MS = 10_000L
         const val LEASE_BLOCKED = "Another device is editing this page"
         const val CONNECTING = "Connecting…"
         const val DISCONNECTED = "Realtime disconnected"

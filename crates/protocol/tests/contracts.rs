@@ -46,7 +46,7 @@ fn deserializes_stroke_fixtures() {
         serde_json::from_str(&fixture("stroke.json")).expect("stroke fixture should parse");
     assert_eq!(stroke.tool, "pen");
     assert_eq!(stroke.color, "#006400");
-    assert_eq!(stroke.width, 2.0);
+    assert_eq!(stroke.width, 4.0);
     assert_eq!(stroke.points.len(), 3);
     // MVP omits pressure entirely.
     assert!(stroke.points.iter().all(|point| point.pressure.is_none()));

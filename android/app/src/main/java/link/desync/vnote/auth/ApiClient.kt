@@ -326,6 +326,10 @@ class PageSocket(private val webSocket: WebSocket) {
         webSocket.send(JSONObject().put("type", "acquire-lease").toString())
     }
 
+    fun renewLease() {
+        webSocket.send(JSONObject().put("type", "renew-lease").toString())
+    }
+
     fun releaseLease() {
         webSocket.send(JSONObject().put("type", "release-lease").toString())
     }

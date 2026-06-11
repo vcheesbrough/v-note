@@ -16,7 +16,7 @@
     },
     "width": {
       "type": "number",
-      "description": "Constant 2.0 logical px in MVP."
+      "description": "Constant 4.0 logical px in MVP."
     },
     "points": {
       "type": "array",

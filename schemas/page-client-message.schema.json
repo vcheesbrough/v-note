@@ -25,6 +25,14 @@
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
+        "type": { "const": "renew-lease" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
         "type": { "const": "release-lease" }
       }
     },
