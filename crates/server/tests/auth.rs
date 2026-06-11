@@ -131,6 +131,41 @@ async fn health_is_public_when_auth_enabled() {
 }
 
 #[tokio::test]
+async fn mobile_callback_attempts_custom_scheme_handoff() {
+    let auth = test_auth_config();
+    let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
+    let app = build_router("test-version".to_string(), auth, jwks);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/mobile/callback?code=test-code&state=test-state")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should be readable");
+    let html = String::from_utf8(body.to_vec()).expect("callback HTML should be UTF-8");
+    assert!(html.contains("Returning to v-note"));
+    assert!(html.contains("link.desync.vnote:/oauth2redirect?code=test-code&amp;state=test-state"));
+    assert!(html.contains(
+        "const appUrl = 'link.desync.vnote:/oauth2redirect?code=test-code&state=test-state';"
+    ));
+}
+
+#[tokio::test]
 async fn me_with_android_bearer_returns_200() {
     let config = android_auth_config();
     let auth = Arc::new(config.clone());

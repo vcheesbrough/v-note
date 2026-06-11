@@ -33,6 +33,7 @@ import link.desync.vnote.auth.LibraryEventListener
 import link.desync.vnote.auth.MeProfile
 import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
+import link.desync.vnote.ink.PageCanvasScreen
 import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
@@ -73,18 +74,28 @@ class MainActivity : ComponentActivity() {
         setContent {
             VNoteTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    AppScreen(
-                        sessionState = sessionState.value,
-                        onSignIn = { signIn() },
-                        onSignOut = { signOut() },
-                        onReload = { reloadSession() },
-                        pages = pagesState.value,
-                        selectedPage = selectedPageState.value,
-                        libraryError = libraryErrorState.value,
-                        onCreatePage = { createPage() },
-                        onOpenPage = { selectedPageState.value = it },
-                        onDeletePage = { deletePage(it) },
-                    )
+                    val session = sessionState.value
+                    val selectedPage = selectedPageState.value
+                    if (session is SessionState.SignedIn && selectedPage != null) {
+                        // An open page takes over the whole surface — the infinite ink canvas.
+                        PageCanvasScreen(
+                            apiClient = apiClient,
+                            page = selectedPage,
+                            onBack = { selectedPageState.value = null },
+                        )
+                    } else {
+                        AppScreen(
+                            sessionState = session,
+                            onSignIn = { signIn() },
+                            onSignOut = { signOut() },
+                            onReload = { reloadSession() },
+                            pages = pagesState.value,
+                            libraryError = libraryErrorState.value,
+                            onCreatePage = { createPage() },
+                            onOpenPage = { selectedPageState.value = it },
+                            onDeletePage = { deletePage(it) },
+                        )
+                    }
                 }
             }
         }
@@ -245,7 +256,6 @@ private fun AppScreen(
     onSignOut: () -> Unit,
     onReload: () -> Unit,
     pages: List<PageSummary>,
-    selectedPage: PageSummary?,
     libraryError: String?,
     onCreatePage: () -> Unit,
     onOpenPage: (PageSummary) -> Unit,
@@ -308,10 +318,6 @@ private fun AppScreen(
                                 Button(onClick = { onDeletePage(page) }) { Text("Delete") }
                             }
                         }
-                    }
-                    selectedPage?.let { page ->
-                        Text("Open page: ${page.title}", style = MaterialTheme.typography.titleMedium)
-                        Text("Empty canvas placeholder. Ink capture lands in the next iteration.")
                     }
                     Button(onClick = onSignOut) { Text("Sign out") }
                 }

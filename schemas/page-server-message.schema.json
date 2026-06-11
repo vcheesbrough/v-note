@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/page-server-message.schema.json",
+  "title": "PageServerMessage",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "session_id", "last_seq"],
+      "properties": {
+        "type": { "const": "welcome" },
+        "session_id": { "type": "string", "minLength": 1 },
+        "last_seq": { "type": "integer", "minimum": 0 },
+        "lease_holder": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "seq", "client_batch_id", "strokes"],
+      "properties": {
+        "type": { "const": "stroke-batch" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "client_batch_id": { "type": "string", "minLength": 1 },
+        "strokes": {
+          "type": "array",
+          "items": { "$ref": "stroke.schema.json" }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "last_seq"],
+      "properties": {
+        "type": { "const": "synced" },
+        "last_seq": { "type": "integer", "minimum": 0 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "lease-granted" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "holder"],
+      "properties": {
+        "type": { "const": "lease-denied" },
+        "holder": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "lease-changed" },
+        "holder": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    }
+  ]
+}

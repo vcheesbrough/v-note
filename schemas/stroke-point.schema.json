@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/stroke-point.schema.json",
+  "title": "StrokePoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["x", "y", "t"],
+  "properties": {
+    "x": { "type": "number" },
+    "y": { "type": "number" },
+    "t": {
+      "type": "integer",
+      "description": "Milliseconds relative to the start of the stroke."
+    },
+    "pressure": {
+      "type": "number",
+      "description": "Reserved for post-MVP pressure/tilt; omitted in MVP."
+    }
+  }
+}
