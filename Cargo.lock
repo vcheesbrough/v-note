@@ -707,15 +707,17 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "console_error_panic_hook",
  "futures-util",
  "gloo-net",
  "gloo-timers",
+ "js-sys",
  "leptos",
  "protocol",
  "serde_json",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
 ]
@@ -1987,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2516,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "axum-extra",
