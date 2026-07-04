@@ -1,9 +1,10 @@
 package link.desync.vnote
 
+import android.app.PendingIntent
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,24 +39,17 @@ import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val AUTH_COMPLETED_ACTION = "link.desync.vnote.AUTH_COMPLETED"
+        private const val AUTH_CANCELED_ACTION = "link.desync.vnote.AUTH_CANCELED"
+        private const val AUTH_COMPLETED_REQUEST_CODE = 100
+        private const val AUTH_CANCELED_REQUEST_CODE = 101
+    }
+
     private lateinit var tokenStore: TokenStore
     private lateinit var authRepository: AuthRepository
     private lateinit var apiClient: ApiClient
     private var librarySocket: WebSocket? = null
-
-    private val authLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
-            scope.launch {
-                authRepository.handleAuthorizationResponse(result.data).fold(
-                    onSuccess = { reloadSession() },
-                    onFailure = { error ->
-                        sessionState.value =
-                            SessionState.Error(error.message ?: "Sign in failed")
-                    },
-                )
-            }
-        }
 
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
@@ -100,7 +94,15 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        reloadSession()
+        if (!handleAuthorizationIntent(intent)) {
+            reloadSession()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAuthorizationIntent(intent)
     }
 
     override fun onDestroy() {
@@ -112,12 +114,51 @@ class MainActivity : ComponentActivity() {
     private fun signIn() {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
             sessionState.value = SessionState.Loading
-            runCatching { authRepository.beginLogin(authLauncher) }
+            runCatching {
+                authRepository.beginLogin(
+                    completedIntent = authPendingIntent(AUTH_COMPLETED_ACTION, AUTH_COMPLETED_REQUEST_CODE),
+                    canceledIntent = authPendingIntent(AUTH_CANCELED_ACTION, AUTH_CANCELED_REQUEST_CODE),
+                )
+            }
                 .onFailure { error ->
                     sessionState.value =
                         SessionState.Error(error.message ?: "Unable to start sign in")
                 }
         }
+    }
+
+    private fun authPendingIntent(
+        action: String,
+        requestCode: Int,
+    ): PendingIntent {
+        val intent =
+            Intent(this, MainActivity::class.java)
+                .setAction(action)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return PendingIntent.getActivity(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun handleAuthorizationIntent(intent: Intent?): Boolean {
+        val action = intent?.action
+        if (action != AUTH_COMPLETED_ACTION && action != AUTH_CANCELED_ACTION) {
+            return false
+        }
+
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            authRepository.handleAuthorizationResponse(intent).fold(
+                onSuccess = { reloadSession() },
+                onFailure = { error ->
+                    sessionState.value =
+                        SessionState.Error(error.message ?: "Sign in failed")
+                },
+            )
+        }
+        return true
     }
 
     private fun signOut() {

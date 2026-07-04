@@ -1,9 +1,9 @@
 package link.desync.vnote.auth
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import androidx.activity.result.ActivityResultLauncher
 import net.openid.appauth.AuthorizationException
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationResponse
@@ -38,10 +38,11 @@ open class AuthRepository(
                         )
                 }
             }
-        }
+    }
 
     suspend fun beginLogin(
-        launcher: ActivityResultLauncher<Intent>,
+        completedIntent: PendingIntent,
+        canceledIntent: PendingIntent,
     ) {
         val serviceConfig = discoverConfiguration()
         val request =
@@ -53,7 +54,7 @@ open class AuthRepository(
                     Uri.parse(config.redirectUri),
                 ).setScopes(config.scopes.split(' ').filter { it.isNotBlank() })
                 .build()
-        launcher.launch(authService.getAuthorizationRequestIntent(request))
+        authService.performAuthorizationRequest(request, completedIntent, canceledIntent)
     }
 
     suspend fun handleAuthorizationResponse(
