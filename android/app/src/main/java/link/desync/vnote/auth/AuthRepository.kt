@@ -24,11 +24,16 @@ open class AuthRepository(
     private val context: Context,
     private val config: AuthConfig,
     private val tokenStore: TokenStore,
+    private val serviceConfigurationOverride: AuthorizationServiceConfiguration? = null,
 ) {
     private val authService = AuthorizationService(context)
     private val http = OkHttpClient()
 
     suspend fun discoverConfiguration(): AuthorizationServiceConfiguration =
+        serviceConfigurationOverride
+            ?: fetchConfiguration()
+
+    private suspend fun fetchConfiguration(): AuthorizationServiceConfiguration =
         suspendCoroutine { continuation ->
             AuthorizationServiceConfiguration.fetchFromIssuer(
                 Uri.parse(config.issuerUrl),
@@ -44,7 +49,7 @@ open class AuthRepository(
                         )
                 }
             }
-    }
+        }
 
     suspend fun beginLogin(
         completedIntent: PendingIntent,
@@ -63,9 +68,7 @@ open class AuthRepository(
         authService.performAuthorizationRequest(request, completedIntent, canceledIntent)
     }
 
-    suspend fun handleAuthorizationResponse(
-        data: Intent?,
-    ): Result<Unit> {
+    suspend fun handleAuthorizationResponse(data: Intent?): Result<Unit> {
         val intent =
             data ?: return Result.failure(IllegalStateException("Missing authorization intent"))
         val response = AuthorizationResponse.fromIntent(intent)
@@ -80,9 +83,8 @@ open class AuthRepository(
         return exchangeAuthorizationCode(response)
     }
 
-    private suspend fun exchangeAuthorizationCode(
-        response: AuthorizationResponse,
-    ): Result<Unit> = performTokenRequest(response.createTokenExchangeRequest())
+    private suspend fun exchangeAuthorizationCode(response: AuthorizationResponse): Result<Unit> =
+        performTokenRequest(response.createTokenExchangeRequest())
 
     open suspend fun refreshAccessTokenIfNeeded(force: Boolean = false): Boolean {
         val refreshToken = tokenStore.refreshToken() ?: return false
@@ -132,9 +134,10 @@ open class AuthRepository(
                     val body = response.body?.string().orEmpty()
                     val json = if (body.isBlank()) JSONObject() else JSONObject(body)
                     if (!response.isSuccessful) {
-                        val error = json.optString("error_description")
-                            .ifBlank { json.optString("error") }
-                            .ifBlank { "HTTP ${response.code}" }
+                        val error =
+                            json.optString("error_description")
+                                .ifBlank { json.optString("error") }
+                                .ifBlank { "HTTP ${response.code}" }
                         throw IllegalStateException("Token request failed: $error")
                     }
                     persistTokenResponse(json)

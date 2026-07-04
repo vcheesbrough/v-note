@@ -2,6 +2,7 @@ package link.desync.vnote
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
@@ -24,6 +25,12 @@ class PlaceholderInstrumentedTest {
         }
         composeRule
             .onNodeWithText("Sign in with Authentik to use v-note on this device.")
+            .assertIsDisplayed()
+        composeRule
+            .onNodeWithTag("version-watermark")
+            .assertIsDisplayed()
+        composeRule
+            .onNodeWithText("v${BuildConfig.VERSION_NAME} · ${BuildConfig.FLAVOR}")
             .assertIsDisplayed()
     }
 }

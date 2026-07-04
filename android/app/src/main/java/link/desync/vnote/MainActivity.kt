@@ -23,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -318,6 +319,7 @@ private fun AppRoot(content: @Composable () -> Unit) {
             modifier =
                 Modifier
                     .align(Alignment.BottomEnd)
+                    .testTag("version-watermark")
                     .padding(horizontal = 12.dp, vertical = 8.dp),
         )
     }
@@ -402,6 +404,5 @@ private fun AppScreen(
                 }
             }
         }
-
     }
 }
