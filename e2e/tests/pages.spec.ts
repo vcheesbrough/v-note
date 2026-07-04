@@ -10,7 +10,7 @@ test.describe('page library', () => {
     await page.getByRole('button', { name: 'New page' }).click();
     await expect(page.getByRole('button', { name: 'Untitled page', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Untitled page', exact: true }).click();
-    await expect(page.getByText('Empty canvas placeholder')).toBeVisible();
+    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
 
     await page.getByRole('button', { name: 'Delete Untitled page' }).click();
     await expect(page.getByRole('button', { name: 'Untitled page', exact: true })).toHaveCount(0);
@@ -42,8 +42,10 @@ test.describe('page library', () => {
       extraHTTPHeaders: {},
     });
     const pageB = await contextB.newPage();
+    const websocketB = pageB.waitForEvent('websocket');
     await pageB.goto('/', { waitUntil: 'load' });
     await expect(pageB.getByRole('heading', { name: 'Page library' })).toBeVisible();
+    await websocketB;
 
     const created = await request.post('/api/pages', { data: { title } });
     expect(created.status()).toBe(201);
@@ -67,8 +69,10 @@ test.describe('page library', () => {
       extraHTTPHeaders: {},
     });
     const pageB = await contextB.newPage();
+    const websocketB = pageB.waitForEvent('websocket');
     await pageB.goto('/', { waitUntil: 'load' });
     await expect(pageB.getByRole('heading', { name: 'Page library' })).toBeVisible();
+    await websocketB;
 
     const created = await request.post('/api/pages', { data: { title } });
     expect(created.status()).toBe(201);
