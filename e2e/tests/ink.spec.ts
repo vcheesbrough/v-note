@@ -3,8 +3,7 @@ import { expect, request, test, type APIRequestContext, type Page } from '@playw
 // Ink (page channel) e2e. Drives the per-page WSS from a real browser context
 // using a short-lived realtime ticket (the SPA auth path) — no extra npm deps.
 // Covers commit + sequencing, persistence/snapshot, gap-fill, the single-editor
-// edit lease, and owner isolation. SPA ink *replay* UI lands in #149; here the
-// browser is only a WebSocket transport.
+// edit lease, owner isolation, and SPA Canvas2D live replay.
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/', { waitUntil: 'load' });
@@ -81,6 +80,64 @@ test.describe('ink page channel', () => {
     });
     const gapBatches = gap.messages.filter((m) => m.type === 'stroke-batch');
     expect(gapBatches.map((m) => m.seq)).toEqual([2]);
+  });
+
+  test('SPA viewer renders live stroke batches without refresh', async ({ page, request }) => {
+    const title = uniqueTitle('ink-spa-live');
+    const pageId = await createPage(request, title);
+
+    await expect(page.getByRole('button', { name: title, exact: true })).toBeVisible({ timeout: 5_000 });
+    await page.getByRole('button', { name: title, exact: true }).click();
+    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+    await expect(page.getByText(/Synced · seq 0|Connected · seq 0|Live · seq 0/)).toBeVisible({ timeout: 5_000 });
+
+    const ticket = await realtimeTicket(request);
+    const result = await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 150,
+          message: {
+            type: 'commit-batch',
+            client_batch_id: 'batch_spa_live',
+            strokes: sampleViewerStrokes(),
+          },
+        },
+      ],
+      settleMs: 250,
+    });
+    expect(result.messages.some((m) => m.type === 'stroke-batch' && m.client_batch_id === 'batch_spa_live')).toBeTruthy();
+    expect(result.commitSentAt).not.toBeNull();
+
+    await page.waitForFunction(() => {
+      const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="ink-canvas"]');
+      if (!canvas) return false;
+      const context = canvas.getContext('2d');
+      if (!context) return false;
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let greenPixels = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        const red = pixels[i];
+        const green = pixels[i + 1];
+        const blue = pixels[i + 2];
+        const alpha = pixels[i + 3];
+        if (alpha > 0 && red < 20 && green > 70 && green < 130 && blue < 20) {
+          greenPixels += 1;
+        }
+      }
+      return greenPixels > 20;
+    }, null, { timeout: 1_000 });
+    const timing = await page.evaluate(() => ({
+      appliedAt: (window as any).__vNoteLastInkAppliedAt as number | undefined,
+      seq: (window as any).__vNoteLastInkSeq as number | undefined,
+    }));
+    expect(timing.seq).toBe(1);
+    expect(timing.appliedAt).toBeGreaterThan(result.commitSentAt!);
+    expect(timing.appliedAt! - result.commitSentAt!).toBeLessThan(1_000);
+    await expect(page.getByText(/Live · seq 1|Synced · seq 1/)).toBeVisible({ timeout: 1_000 });
   });
 
   test('blocks a second session from inking while the lease is held', async ({ page, request }) => {
@@ -165,11 +222,12 @@ type SocketAction = { delayMs?: number; message: Record<string, unknown> };
 async function driveSocket(
   page: Page,
   params: { pageId: string; ticket: string; actions: SocketAction[]; settleMs: number },
-): Promise<{ opened: boolean; closed: boolean; closeCode: number | null; messages: any[] }> {
+): Promise<{ opened: boolean; closed: boolean; closeCode: number | null; commitSentAt: number | null; messages: any[] }> {
   return page.evaluate(async ({ pageId, ticket, actions, settleMs }) => {
     const url = `${location.origin.replace(/^http/, 'ws')}/api/pages/${pageId}/realtime?ticket=${encodeURIComponent(ticket)}`;
     const ws = new WebSocket(url);
     const messages: any[] = [];
+    let commitSentAt: number | null = null;
     let closed = false;
     let closeCode: number | null = null;
     ws.addEventListener('message', (event) => {
@@ -194,6 +252,9 @@ async function driveSocket(
       for (const action of actions) {
         await new Promise((resolve) => setTimeout(resolve, action.delayMs ?? 0));
         if (ws.readyState === WebSocket.OPEN) {
+          if (action.message.type === 'commit-batch') {
+            commitSentAt = performance.now();
+          }
           ws.send(JSON.stringify(action.message));
         }
       }
@@ -204,7 +265,7 @@ async function driveSocket(
     } catch {
       /* already closed */
     }
-    return { opened, closed, closeCode, messages };
+    return { opened, closed, closeCode, commitSentAt, messages };
   }, params);
 }
 
@@ -217,6 +278,21 @@ function sampleStrokes() {
       points: [
         { x: 5.0, y: 6.0, t: 0 },
         { x: 7.0, y: 8.0, t: 12 },
+      ],
+    },
+  ];
+}
+
+function sampleViewerStrokes() {
+  return [
+    {
+      tool: 'pen',
+      color: '#006400',
+      width: 2.0,
+      points: [
+        { x: 40.0, y: 40.0, t: 0 },
+        { x: 90.0, y: 72.0, t: 12 },
+        { x: 150.0, y: 54.0, t: 24 },
       ],
     },
   ];

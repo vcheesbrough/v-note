@@ -1,9 +1,11 @@
 package link.desync.vnote
 
+import android.app.PendingIntent
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -38,24 +41,17 @@ import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val AUTH_COMPLETED_ACTION = "link.desync.vnote.AUTH_COMPLETED"
+        private const val AUTH_CANCELED_ACTION = "link.desync.vnote.AUTH_CANCELED"
+        private const val AUTH_COMPLETED_REQUEST_CODE = 100
+        private const val AUTH_CANCELED_REQUEST_CODE = 101
+    }
+
     private lateinit var tokenStore: TokenStore
     private lateinit var authRepository: AuthRepository
     private lateinit var apiClient: ApiClient
     private var librarySocket: WebSocket? = null
-
-    private val authLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
-            scope.launch {
-                authRepository.handleAuthorizationResponse(result.data).fold(
-                    onSuccess = { reloadSession() },
-                    onFailure = { error ->
-                        sessionState.value =
-                            SessionState.Error(error.message ?: "Sign in failed")
-                    },
-                )
-            }
-        }
 
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
@@ -74,33 +70,43 @@ class MainActivity : ComponentActivity() {
         setContent {
             VNoteTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    val session = sessionState.value
-                    val selectedPage = selectedPageState.value
-                    if (session is SessionState.SignedIn && selectedPage != null) {
-                        // An open page takes over the whole surface — the infinite ink canvas.
-                        PageCanvasScreen(
-                            apiClient = apiClient,
-                            page = selectedPage,
-                            onBack = { selectedPageState.value = null },
-                        )
-                    } else {
-                        AppScreen(
-                            sessionState = session,
-                            onSignIn = { signIn() },
-                            onSignOut = { signOut() },
-                            onReload = { reloadSession() },
-                            pages = pagesState.value,
-                            libraryError = libraryErrorState.value,
-                            onCreatePage = { createPage() },
-                            onOpenPage = { selectedPageState.value = it },
-                            onDeletePage = { deletePage(it) },
-                        )
+                    AppRoot {
+                        val session = sessionState.value
+                        val selectedPage = selectedPageState.value
+                        if (session is SessionState.SignedIn && selectedPage != null) {
+                            // An open page takes over the whole surface — the infinite ink canvas.
+                            PageCanvasScreen(
+                                apiClient = apiClient,
+                                page = selectedPage,
+                                onBack = { selectedPageState.value = null },
+                            )
+                        } else {
+                            AppScreen(
+                                sessionState = session,
+                                onSignIn = { signIn() },
+                                onSignOut = { signOut() },
+                                onReload = { reloadSession() },
+                                pages = pagesState.value,
+                                libraryError = libraryErrorState.value,
+                                onCreatePage = { createPage() },
+                                onOpenPage = { selectedPageState.value = it },
+                                onDeletePage = { deletePage(it) },
+                            )
+                        }
                     }
                 }
             }
         }
 
-        reloadSession()
+        if (!handleAuthorizationIntent(intent)) {
+            reloadSession()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAuthorizationIntent(intent)
     }
 
     override fun onDestroy() {
@@ -112,12 +118,65 @@ class MainActivity : ComponentActivity() {
     private fun signIn() {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
             sessionState.value = SessionState.Loading
-            runCatching { authRepository.beginLogin(authLauncher) }
+            runCatching {
+                authRepository.beginLogin(
+                    completedIntent = authPendingIntent(AUTH_COMPLETED_ACTION, AUTH_COMPLETED_REQUEST_CODE),
+                    canceledIntent = authPendingIntent(AUTH_CANCELED_ACTION, AUTH_CANCELED_REQUEST_CODE),
+                )
+            }
                 .onFailure { error ->
                     sessionState.value =
                         SessionState.Error(error.message ?: "Unable to start sign in")
                 }
         }
+    }
+
+    private fun authPendingIntent(
+        action: String,
+        requestCode: Int,
+    ): PendingIntent {
+        val intent =
+            Intent(this, MainActivity::class.java)
+                .setAction(action)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return PendingIntent.getActivity(
+            this,
+            requestCode,
+            intent,
+            authPendingIntentFlags(),
+        )
+    }
+
+    private fun authPendingIntentFlags(): Int {
+        val mutabilityFlag =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_MUTABLE
+            } else {
+                0
+            }
+        return PendingIntent.FLAG_UPDATE_CURRENT or mutabilityFlag
+    }
+
+    private fun handleAuthorizationIntent(intent: Intent?): Boolean {
+        val action = intent?.action
+        if (action != AUTH_COMPLETED_ACTION && action != AUTH_CANCELED_ACTION) {
+            return false
+        }
+        if (action == AUTH_CANCELED_ACTION) {
+            sessionState.value = SessionState.Error("Sign in was canceled")
+            return true
+        }
+
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            authRepository.handleAuthorizationResponse(intent).fold(
+                onSuccess = { reloadSession() },
+                onFailure = { error ->
+                    sessionState.value =
+                        SessionState.Error(error.message ?: "Sign in failed")
+                },
+            )
+        }
+        return true
     }
 
     private fun signOut() {
@@ -250,6 +309,23 @@ private sealed interface SessionState {
 }
 
 @Composable
+private fun AppRoot(content: @Composable () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        content()
+        Text(
+            text = "v${BuildConfig.VERSION_NAME} · ${BuildConfig.FLAVOR}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            modifier =
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .testTag("version-watermark")
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
+    }
+}
+
+@Composable
 private fun AppScreen(
     sessionState: SessionState,
     onSignIn: () -> Unit,
@@ -328,16 +404,5 @@ private fun AppScreen(
                 }
             }
         }
-
-        // Version watermark — persistent build identity (release · flavor) for lockstep checks.
-        Text(
-            text = "v${BuildConfig.VERSION_NAME} · ${BuildConfig.FLAVOR}",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-            modifier =
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-        )
     }
 }
