@@ -56,6 +56,7 @@ import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageCanvasScreen
 import link.desync.vnote.ui.detailLine
 import link.desync.vnote.ui.displayTitle
+import link.desync.vnote.ui.hasDisplayTitle
 import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
@@ -547,7 +548,9 @@ private fun PageTile(
             PagePreview()
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(page.displayTitle(), style = MaterialTheme.typography.titleMedium)
-                Text(page.detailLine(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                if (page.hasDisplayTitle()) {
+                    Text(page.detailLine(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                }
             }
             TextButton(onClick = onDelete) { Text("Delete") }
         }
