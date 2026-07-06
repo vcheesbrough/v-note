@@ -3,6 +3,7 @@ package link.desync.vnote.ui
 import link.desync.vnote.auth.PageSummary
 import java.time.Duration
 import java.time.Instant
+import java.time.OffsetDateTime
 
 private const val UntitledPage = "Untitled page"
 
@@ -22,7 +23,7 @@ private fun String.compactTimestamp(): String =
         .take(16)
 
 private fun String.approximateRelativeTimestamp(): String {
-    val instant = runCatching { Instant.parse(trim()) }.getOrNull() ?: return compactTimestamp()
+    val instant = parseInstant() ?: return compactTimestamp()
     val elapsedSeconds = Duration.between(instant, Instant.now()).seconds.coerceAtLeast(0)
     val amountAndUnit =
         when (elapsedSeconds) {
@@ -36,3 +37,8 @@ private fun String.approximateRelativeTimestamp(): String {
     val suffix = if (amount == 1L) "" else "s"
     return "$amount $unit$suffix ago"
 }
+
+private fun String.parseInstant(): Instant? =
+    runCatching { Instant.parse(trim()) }
+        .recoverCatching { OffsetDateTime.parse(trim()).toInstant() }
+        .getOrNull()
