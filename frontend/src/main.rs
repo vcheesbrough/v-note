@@ -37,14 +37,6 @@ fn page_display_title(page: &PageSummary) -> String {
     }
 }
 
-fn page_detail(page: &PageSummary) -> String {
-    format!(
-        "Created {} · Updated {}",
-        compact_datetime(&page.created_at),
-        compact_datetime(&page.updated_at)
-    )
-}
-
 fn compact_datetime(value: &str) -> String {
     value
         .trim_end_matches('Z')
@@ -189,9 +181,7 @@ fn App() -> impl IntoView {
                                 children=move |page| {
                                     let open_page = page.clone();
                                     let delete_page_id = page.id.clone();
-                                    let has_title = page_has_title(&page);
                                     let display_title = page_display_title(&page);
-                                    let detail = page_detail(&page);
                                     let open_label = format!("Open {display_title}");
                                     let delete_label = format!("Delete {display_title}");
                                     view! {
@@ -199,11 +189,6 @@ fn App() -> impl IntoView {
                                             <div class="page-preview" aria-hidden="true"></div>
                                             <button class="page-main" aria-label=open_label on:click=move |_| selected_page.set(Some(open_page.clone()))>
                                                 <span class="page-title">{display_title}</span>
-                                                {if has_title {
-                                                    view! { <span class="page-meta">{detail}</span> }.into_any()
-                                                } else {
-                                                    view! {}.into_any()
-                                                }}
                                             </button>
                                             <div class="tile-actions">
                                             <button class="button danger" aria-label=delete_label on:click=move |_| {
