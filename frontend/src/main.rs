@@ -125,10 +125,18 @@ fn App() -> impl IntoView {
                 {move || match me.get() {
                     None => view! { <span class="muted">"Checking session…"</span> }.into_any(),
                     Some(Some(Ok(profile))) => view! {
-                        <div class="session-actions">
+                        <div class="session-actions desktop-session-actions">
                             <span class="identity">{profile.email.clone().unwrap_or_else(|| profile.sub.clone())}</span>
                             <a class="button secondary" href="/auth/logout">"Sign out"</a>
                         </div>
+                        <details class="session-menu">
+                            <summary aria-label="Open account menu">"☰"</summary>
+                            <div class="session-menu-panel">
+                                <p class="menu-identity">{profile.email.clone().unwrap_or_else(|| profile.sub.clone())}</p>
+                                <a class="menu-link" href="/auth/logout">"Sign out"</a>
+                                <a class="menu-link" href="/dl/apk">"Download Android app (.apk)"</a>
+                            </div>
+                        </details>
                     }
                     .into_any(),
                     Some(Some(Err(401))) | Some(Some(Err(403))) => view! {
