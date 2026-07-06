@@ -419,7 +419,14 @@ private fun AppScreen(
             ) {
                 Text("v-note", style = MaterialTheme.typography.headlineMedium)
                 if (sessionState is SessionState.SignedIn) {
-                    OutlinedButton(onClick = onSignOut) { Text("Sign out") }
+                    val label = sessionState.profile.email ?: sessionState.profile.sub
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                        OutlinedButton(onClick = onSignOut) { Text("Sign out") }
+                    }
                 }
             }
             StatusBanner(healthState.value)
@@ -440,17 +447,11 @@ private fun AppScreen(
                     Button(onClick = onSignIn) { Text("Sign in") }
                 }
                 is SessionState.SignedIn -> {
-                    val label = sessionState.profile.email ?: sessionState.profile.sub
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Column {
-                            Text("Library", style = MaterialTheme.typography.labelMedium)
-                            Text("Pages", style = MaterialTheme.typography.headlineSmall)
-                            Text("Signed in as $label", style = MaterialTheme.typography.bodySmall)
-                        }
                         Button(onClick = onCreatePage) { Text("New page") }
                     }
                     libraryError?.let { StatusBanner(it, isError = true) }
