@@ -59,6 +59,69 @@ button {
   min-width: 0;
 }
 
+.session-menu {
+  display: none;
+  position: relative;
+}
+
+.session-menu summary {
+  align-items: center;
+  background: #e6e9e2;
+  border-radius: 7px;
+  color: #17201a;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 1.25rem;
+  font-weight: 720;
+  height: 40px;
+  justify-content: center;
+  list-style: none;
+  width: 44px;
+}
+
+.session-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.session-menu-panel {
+  background: #fff;
+  border: 1px solid #dde2db;
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(23, 32, 26, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: min(280px, calc(100vw - 28px));
+  padding: 8px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+}
+
+.menu-identity {
+  color: #566159;
+  font-size: 0.84rem;
+  margin: 0;
+  overflow: hidden;
+  padding: 8px 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-link {
+  border-radius: 6px;
+  color: #17201a;
+  font-weight: 680;
+  padding: 9px 10px;
+  text-decoration: none;
+}
+
+.menu-link:hover,
+.menu-link:focus {
+  background: #edf1ea;
+}
+
 .identity {
   color: #566159;
   font-size: 0.9rem;
@@ -279,14 +342,21 @@ button {
     padding: 14px;
   }
 
-  .top-bar,
-  .library-header {
-    align-items: stretch;
-    flex-direction: column;
+  .top-bar {
+    align-items: center;
+    flex-direction: row;
   }
 
-  .session-actions {
-    justify-content: space-between;
+  .desktop-session-actions {
+    display: none;
+  }
+
+  .session-menu {
+    display: block;
+  }
+
+  .apk-link {
+    display: none;
   }
 
   .page-grid {

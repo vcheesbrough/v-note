@@ -11,7 +11,7 @@ test.describe('auth — happy path', () => {
 
   test('SPA loads for an authenticated session', async ({ page }) => {
     await page.goto('/', { waitUntil: 'load' });
-    await expect(page.getByText('Sign out')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('link', { name: 'Sign out' })).toBeVisible({ timeout: 15_000 });
     await expect(page).not.toHaveURL(/\/auth\/login/);
   });
 });
