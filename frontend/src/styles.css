@@ -205,13 +205,6 @@ button {
   white-space: nowrap;
 }
 
-.page-meta {
-  color: #667067;
-  display: block;
-  font-size: 0.83rem;
-  margin-top: 4px;
-}
-
 .tile-actions {
   align-items: start;
   display: flex;

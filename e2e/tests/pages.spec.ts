@@ -41,6 +41,20 @@ test.describe('page library', () => {
     expect(ownerDelete.status()).toBe(204);
   });
 
+  test('SPA page cards do not show absolute metadata', async ({ page, request }) => {
+    const title = uniqueTitle('card-label');
+    const created = await request.post('/api/pages', { data: { title } });
+    expect(created.status()).toBe(201);
+    const pageId = (await created.json()).page.id;
+
+    await page.goto('/', { waitUntil: 'load' });
+    await expect(page.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible();
+    await expect(page.getByText(/Created .* Updated /)).toHaveCount(0);
+
+    const deleted = await request.delete(`/api/pages/${pageId}`);
+    expect(deleted.status()).toBe(204);
+  });
+
   test('library events fan out to sibling owner sessions without refresh', async ({ browser, request }) => {
     const title = uniqueTitle('fanout');
     const contextB = await browser.newContext({

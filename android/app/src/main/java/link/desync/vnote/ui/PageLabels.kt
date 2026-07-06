@@ -15,9 +15,6 @@ fun PageSummary.displayTitle(): String =
         updatedAt.approximateRelativeTimestamp()
     }
 
-fun PageSummary.detailLine(): String =
-    "Created ${createdAt.compactTimestamp()} · Updated ${updatedAt.compactTimestamp()}"
-
 private fun String.compactTimestamp(): String =
     trim()
         .removeSuffix("Z")
