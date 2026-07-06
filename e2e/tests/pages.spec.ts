@@ -2,21 +2,25 @@ import { expect, request, test, type APIRequestContext } from '@playwright/test'
 import * as path from 'path';
 
 const storageState = path.resolve(__dirname, '..', '.auth-state.json');
+const relativeUntitledPage = /(?:just now|\d+ (?:minute|hour|day|month)s? ago)/;
 
 test.describe('page library', () => {
-  test('SPA can create, open, and delete a page', async ({ page }) => {
+  test('SPA can open and delete a page', async ({ page, request }) => {
+    const created = await request.post('/api/pages', { data: {} });
+    expect(created.status()).toBe(201);
+
     await page.goto('/', { waitUntil: 'load' });
 
-    await page.getByRole('button', { name: 'New page' }).click();
+    await expect(page.getByRole('button', { name: 'New page' })).toHaveCount(0);
+    const unnamedPage = page.getByRole('button', { name: new RegExp(`^Open ${relativeUntitledPage.source}$`) }).first();
+    await expect(unnamedPage).toBeVisible();
+    await expect(page.getByText('Untitled page')).toHaveCount(0);
+    await unnamedPage.click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
     await page.getByRole('button', { name: 'Back' }).click();
 
-    const unnamedPage = page.getByRole('button', { name: /^Open Page updated / }).first();
-    await expect(unnamedPage).toBeVisible();
-    await expect(page.getByText('Untitled page')).toHaveCount(0);
-
     page.on('dialog', (dialog) => dialog.accept());
-    await page.getByRole('button', { name: /^Delete Page updated / }).first().click();
+    await page.getByRole('button', { name: new RegExp(`^Delete ${relativeUntitledPage.source}$`) }).first().click();
     await expect(unnamedPage).toHaveCount(0);
   });
 

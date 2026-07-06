@@ -5,11 +5,11 @@ use futures_util::{
 use gloo_net::http::Request;
 use gloo_net::websocket::{futures::WebSocket, Message};
 use gloo_timers::future::TimeoutFuture;
-use js_sys::Reflect;
+use js_sys::{Date, Reflect};
 use leptos::prelude::*;
 use protocol::{
-    CreatePageRequest, LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageResponse,
-    PageServerMessage, PageSummary, RealtimeTicketResponse, Stroke, StrokeBatch,
+    LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageServerMessage, PageSummary,
+    RealtimeTicketResponse, Stroke, StrokeBatch,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, PointerEvent, WheelEvent};
@@ -33,7 +33,7 @@ fn page_display_title(page: &PageSummary) -> String {
     if page_has_title(page) {
         page.title.clone()
     } else {
-        format!("Page updated {}", compact_datetime(&page.updated_at))
+        approximate_relative_datetime(&page.updated_at)
     }
 }
 
@@ -52,6 +52,24 @@ fn compact_datetime(value: &str) -> String {
         .chars()
         .take(16)
         .collect()
+}
+
+fn approximate_relative_datetime(value: &str) -> String {
+    let then = Date::parse(value);
+    if then.is_nan() {
+        return compact_datetime(value);
+    }
+
+    let elapsed_seconds = ((Date::now() - then) / 1000.0).max(0.0).round() as u64;
+    let (amount, unit) = match elapsed_seconds {
+        0..=89 => return "just now".to_string(),
+        90..=5_399 => ((elapsed_seconds + 30) / 60, "minute"),
+        5_400..=129_599 => ((elapsed_seconds + 1_800) / 3_600, "hour"),
+        129_600..=3_887_999 => ((elapsed_seconds + 43_200) / 86_400, "day"),
+        _ => ((elapsed_seconds + 1_296_000) / 2_592_000, "month"),
+    };
+    let suffix = if amount == 1 { "" } else { "s" };
+    format!("{amount} {unit}{suffix} ago")
 }
 
 #[component]
@@ -150,22 +168,6 @@ fn App() -> impl IntoView {
                         Some(page) => view! { <InkViewer page=page on_close=Callback::new(move |_| selected_page.set(None)) /> }.into_any(),
                         None => view! {
                     <section class="library-shell" aria-label="Page library">
-                        <div class="library-header">
-                            <div>
-                                <p class="eyebrow">"Library"</p>
-                                <h2 class="section-title">"Pages"</h2>
-                            </div>
-                            <button class="button primary" on:click=move |_| {
-                                wasm_bindgen_futures::spawn_local(async move {
-                                    if let Err(error) = create_page(pages, selected_page, library_error).await {
-                                        library_error.set(Some(error));
-                                    }
-                                });
-                            }>
-                                "New page"
-                            </button>
-                        </div>
-
                         {move || library_error.get().map(|error| view! {
                             <p class="alert" role="alert">{error}</p>
                         })}
@@ -187,6 +189,7 @@ fn App() -> impl IntoView {
                                 children=move |page| {
                                     let open_page = page.clone();
                                     let delete_page_id = page.id.clone();
+                                    let has_title = page_has_title(&page);
                                     let display_title = page_display_title(&page);
                                     let detail = page_detail(&page);
                                     let open_label = format!("Open {display_title}");
@@ -196,7 +199,11 @@ fn App() -> impl IntoView {
                                             <div class="page-preview" aria-hidden="true"></div>
                                             <button class="page-main" aria-label=open_label on:click=move |_| selected_page.set(Some(open_page.clone()))>
                                                 <span class="page-title">{display_title}</span>
-                                                <span class="page-meta">{detail}</span>
+                                                {if has_title {
+                                                    view! { <span class="page-meta">{detail}</span> }.into_any()
+                                                } else {
+                                                    view! {}.into_any()
+                                                }}
                                             </button>
                                             <div class="tile-actions">
                                             <button class="button danger" aria-label=delete_label on:click=move |_| {
@@ -245,7 +252,6 @@ fn App() -> impl IntoView {
                     <section class="auth-panel state-panel">
                         <p class="eyebrow">"Private notes"</p>
                         <h2 class="section-title">"Sign in to continue"</h2>
-                        <p class="muted">"Use Authentik to access your page library and live ink viewer."</p>
                         <a class="button primary" href="/auth/login">"Continue to sign in"</a>
                     </section>
                 }
@@ -284,7 +290,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
     let last_seq = RwSignal::new(0_u64);
     let offset_x = RwSignal::new(80.0_f64);
     let offset_y = RwSignal::new(80.0_f64);
-    let scale = RwSignal::new(1.0_f64);
+    let scale = RwSignal::new(0.25_f64);
     let dragging = RwSignal::new(None::<(i32, f64, f64)>);
     let page_id = page.id.clone();
     let page_title = page_display_title(&page);
@@ -377,7 +383,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                 on:wheel=move |event: WheelEvent| {
                     event.prevent_default();
                     let factor = if event.delta_y() < 0.0 { 1.1 } else { 0.9 };
-                    scale.update(|value| *value = (*value * factor).clamp(0.25, 4.0));
+                    scale.update(|value| *value = (*value * factor).clamp(0.20, 4.0));
                 }
             />
             </div>
@@ -565,30 +571,6 @@ async fn load_pages(
         .await
         .map_err(|error| format!("invalid pages response: {error}"))?;
     pages.set(body.pages);
-    library_error.set(None);
-    Ok(())
-}
-
-async fn create_page(
-    pages: RwSignal<Vec<PageSummary>>,
-    selected_page: RwSignal<Option<PageSummary>>,
-    library_error: RwSignal<Option<String>>,
-) -> Result<(), String> {
-    let response = Request::post("/api/pages")
-        .json(&CreatePageRequest { title: None })
-        .map_err(|error| format!("create request failed: {error}"))?
-        .send()
-        .await
-        .map_err(|error| format!("creating page failed: {error}"))?;
-    if !response.ok() {
-        return Err(format!("creating page failed: HTTP {}", response.status()));
-    }
-    let body = response
-        .json::<PageResponse>()
-        .await
-        .map_err(|error| format!("invalid create response: {error}"))?;
-    upsert_page(pages, body.page.clone());
-    selected_page.set(Some(body.page));
     library_error.set(None);
     Ok(())
 }
