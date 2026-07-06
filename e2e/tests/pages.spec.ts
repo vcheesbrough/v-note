@@ -8,12 +8,16 @@ test.describe('page library', () => {
     await page.goto('/', { waitUntil: 'load' });
 
     await page.getByRole('button', { name: 'New page' }).click();
-    await expect(page.getByRole('button', { name: 'Untitled page', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Untitled page', exact: true }).click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+    await page.getByRole('button', { name: 'Back' }).click();
 
-    await page.getByRole('button', { name: 'Delete Untitled page' }).click();
-    await expect(page.getByRole('button', { name: 'Untitled page', exact: true })).toHaveCount(0);
+    const unnamedPage = page.getByRole('button', { name: /^Open Page updated / }).first();
+    await expect(unnamedPage).toBeVisible();
+    await expect(page.getByText('Untitled page')).toHaveCount(0);
+
+    page.on('dialog', (dialog) => dialog.accept());
+    await page.getByRole('button', { name: /^Delete Page updated / }).first().click();
+    await expect(unnamedPage).toHaveCount(0);
   });
 
   test('REST pages are owner-scoped', async ({ request }) => {
@@ -44,17 +48,17 @@ test.describe('page library', () => {
     const pageB = await contextB.newPage();
     const websocketB = pageB.waitForEvent('websocket');
     await pageB.goto('/', { waitUntil: 'load' });
-    await expect(pageB.getByRole('heading', { name: 'Page library' })).toBeVisible();
+    await expect(pageB.getByLabel('Page library')).toBeVisible();
     await websocketB;
 
     const created = await request.post('/api/pages', { data: { title } });
     expect(created.status()).toBe(201);
     const pageId = (await created.json()).page.id;
-    await expect(pageB.getByRole('button', { name: title, exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(pageB.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible({ timeout: 5_000 });
 
     const deleted = await request.delete(`/api/pages/${pageId}`);
     expect(deleted.status()).toBe(204);
-    await expect(pageB.getByRole('button', { name: title, exact: true })).toHaveCount(0, { timeout: 5_000 });
+    await expect(pageB.getByRole('button', { name: `Open ${title}`, exact: true })).toHaveCount(0, { timeout: 5_000 });
 
     await contextB.close();
   });
@@ -71,7 +75,7 @@ test.describe('page library', () => {
     const pageB = await contextB.newPage();
     const websocketB = pageB.waitForEvent('websocket');
     await pageB.goto('/', { waitUntil: 'load' });
-    await expect(pageB.getByRole('heading', { name: 'Page library' })).toBeVisible();
+    await expect(pageB.getByLabel('Page library')).toBeVisible();
     await websocketB;
 
     const created = await request.post('/api/pages', { data: { title } });
@@ -79,7 +83,7 @@ test.describe('page library', () => {
     const pageId = (await created.json()).page.id;
 
     await pageB.waitForTimeout(750);
-    await expect(pageB.getByRole('button', { name: title, exact: true })).toHaveCount(0);
+    await expect(pageB.getByRole('button', { name: `Open ${title}`, exact: true })).toHaveCount(0);
 
     const ownerDelete = await request.delete(`/api/pages/${pageId}`);
     expect(ownerDelete.status()).toBe(204);

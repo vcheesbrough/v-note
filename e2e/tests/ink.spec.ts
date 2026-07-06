@@ -86,8 +86,8 @@ test.describe('ink page channel', () => {
     const title = uniqueTitle('ink-spa-live');
     const pageId = await createPage(request, title);
 
-    await expect(page.getByRole('button', { name: title, exact: true })).toBeVisible({ timeout: 5_000 });
-    await page.getByRole('button', { name: title, exact: true }).click();
+    await expect(page.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible({ timeout: 5_000 });
+    await page.getByRole('button', { name: `Open ${title}`, exact: true }).click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
     await expect(page.getByText(/Synced · seq 0|Connected · seq 0|Live · seq 0/)).toBeVisible({ timeout: 5_000 });
 

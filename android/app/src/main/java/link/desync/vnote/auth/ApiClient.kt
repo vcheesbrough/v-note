@@ -42,10 +42,14 @@ class ApiClient(
             }
         }
 
-    suspend fun createPage(title: String = "Untitled page"): Result<PageSummary> =
+    suspend fun createPage(title: String? = null): Result<PageSummary> =
         withContext(Dispatchers.IO) {
             executeAuthorized(retryOnUnauthorized = true) { token ->
-                val body = JSONObject().put("title", title).toString().toRequestBody(jsonMediaType)
+                val body =
+                    JSONObject()
+                        .apply { title?.let { put("title", it) } }
+                        .toString()
+                        .toRequestBody(jsonMediaType)
                 Request.Builder()
                     .url("$baseUrl/api/pages")
                     .header("Authorization", "Bearer $token")
