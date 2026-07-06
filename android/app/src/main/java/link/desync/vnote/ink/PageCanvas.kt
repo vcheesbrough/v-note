@@ -41,6 +41,7 @@ import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.Stroke
 import link.desync.vnote.auth.StrokePoint
+import link.desync.vnote.ui.displayTitle
 import androidx.compose.ui.graphics.drawscope.Stroke as StrokeStyle
 
 private val InkColor = Color(0xFF006400)
@@ -69,7 +70,7 @@ fun PageCanvasScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Button(onClick = onBack) { Text("Back") }
-            Text(page.title, style = MaterialTheme.typography.titleMedium)
+            Text(page.displayTitle(), style = MaterialTheme.typography.titleMedium)
         }
         session.statusBanner?.let { banner ->
             Text(

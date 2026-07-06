@@ -69,7 +69,7 @@ pub async fn create_page(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("Untitled page");
+        .unwrap_or("");
     let page_id = format!("page_{}", Uuid::new_v4().simple());
 
     let row = sqlx::query_as::<_, PageRow>(
