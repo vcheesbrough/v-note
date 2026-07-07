@@ -453,6 +453,15 @@ private fun AppScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.secondary,
                             )
+                            Text(
+                                healthState.value,
+                                modifier =
+                                    Modifier
+                                        .widthIn(max = 280.dp)
+                                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                            )
                             DropdownMenuItem(
                                 text = { Text("Sign out") },
                                 onClick = {
@@ -464,7 +473,6 @@ private fun AppScreen(
                     }
                 }
             }
-            StatusBanner(healthState.value)
 
             when (sessionState) {
                 SessionState.Loading ->
