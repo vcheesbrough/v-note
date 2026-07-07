@@ -276,6 +276,10 @@ fn main() {
 
 #[component]
 fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
+    const MIN_CANVAS_SCALE: f64 = 0.08;
+    const MAX_CANVAS_SCALE: f64 = 4.0;
+    const WHEEL_ZOOM_STEP: f64 = 1.05;
+
     let canvas = NodeRef::<leptos::html::Canvas>::new();
     let batches = RwSignal::new(Vec::<StrokeBatch>::new());
     let viewer_error = RwSignal::new(None::<String>);
@@ -283,7 +287,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
     let last_seq = RwSignal::new(0_u64);
     let offset_x = RwSignal::new(80.0_f64);
     let offset_y = RwSignal::new(80.0_f64);
-    let scale = RwSignal::new(0.25_f64);
+    let scale = RwSignal::new(MIN_CANVAS_SCALE);
     let dragging = RwSignal::new(None::<(i32, f64, f64)>);
     let page_id = page.id.clone();
     let page_title = page_display_title(&page);
@@ -375,9 +379,9 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                 on:pointercancel=move |_| dragging.set(None)
                 on:wheel=move |event: WheelEvent| {
                     event.prevent_default();
-                    let factor = if event.delta_y() < 0.0 { 1.1 } else { 0.9 };
+                    let factor = if event.delta_y() < 0.0 { WHEEL_ZOOM_STEP } else { 1.0 / WHEEL_ZOOM_STEP };
                     let old_scale = scale.get_untracked();
-                    let new_scale = (old_scale * factor).clamp(0.20, 4.0);
+                    let new_scale = (old_scale * factor).clamp(MIN_CANVAS_SCALE, MAX_CANVAS_SCALE);
                     if (new_scale - old_scale).abs() < f64::EPSILON {
                         return;
                     }

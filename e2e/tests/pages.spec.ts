@@ -17,9 +17,14 @@ test.describe('page library', () => {
     await expect(page.getByText('Untitled page')).toHaveCount(0);
     await unnamedPage.click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+    const frameBox = await page.locator('.canvas-frame').boundingBox();
     const canvasBox = await page.getByTestId('ink-canvas').boundingBox();
+    expect(frameBox).not.toBeNull();
     expect(canvasBox).not.toBeNull();
     expect(canvasBox!.width / canvasBox!.height).toBeCloseTo(900 / 520, 2);
+    expect(
+      Math.abs(canvasBox!.width - frameBox!.width) < 2 || Math.abs(canvasBox!.height - frameBox!.height) < 2,
+    ).toBeTruthy();
     await page.getByRole('button', { name: 'Back' }).click();
 
     page.on('dialog', (dialog) => dialog.accept());

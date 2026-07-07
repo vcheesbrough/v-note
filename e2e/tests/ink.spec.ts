@@ -132,7 +132,7 @@ test.describe('ink page channel', () => {
           greenPixels += 1;
         }
       }
-      return greenPixels > 20;
+      return greenPixels > 5;
     }, null, { timeout: 1_000 });
     const timing = await page.evaluate(() => ({
       appliedAt: (window as any).__vNoteLastInkAppliedAt as number | undefined,
