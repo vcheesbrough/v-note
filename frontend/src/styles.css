@@ -311,7 +311,6 @@ button {
 
 .canvas-frame {
   align-items: center;
-  container-type: size;
   display: flex;
   justify-content: center;
   min-height: 0;
@@ -323,11 +322,9 @@ button {
   aspect-ratio: 900 / 520;
   background: #fff;
   display: block;
-  height: min(100%, calc(100vw * 520 / 900));
-  height: min(100cqh, calc(100cqw * 520 / 900));
+  max-height: 100%;
+  max-width: 100%;
   touch-action: none;
-  width: min(100%, calc(100vh * 900 / 520));
-  width: min(100cqw, calc(100cqh * 900 / 520));
 }
 
 .version-watermark {
