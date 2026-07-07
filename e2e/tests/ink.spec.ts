@@ -292,11 +292,11 @@ function sampleViewerStrokes() {
     {
       tool: 'pen',
       color: '#006400',
-      width: 2.0,
+      width: 20.0,
       points: [
         { x: 40.0, y: 40.0, t: 0 },
-        { x: 90.0, y: 72.0, t: 12 },
-        { x: 150.0, y: 54.0, t: 24 },
+        { x: 360.0, y: 220.0, t: 12 },
+        { x: 760.0, y: 96.0, t: 24 },
       ],
     },
   ];
