@@ -582,9 +582,11 @@ fn draw_stroke(
     offset_y: f64,
     scale: f64,
 ) {
+    const MIN_RENDERED_STROKE_WIDTH: f64 = 0.75;
+
     context.begin_path();
     context.set_stroke_style_str(&stroke.color);
-    context.set_line_width(stroke.width * scale);
+    context.set_line_width((stroke.width * scale).max(MIN_RENDERED_STROKE_WIDTH));
     if let Some(first) = stroke.points.first() {
         context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
         for point in stroke.points.iter().skip(1) {
