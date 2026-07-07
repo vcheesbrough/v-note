@@ -278,7 +278,7 @@ fn main() {
 fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
     const MIN_CANVAS_SCALE: f64 = 0.08;
     const MAX_CANVAS_SCALE: f64 = 4.0;
-    const WHEEL_ZOOM_STEP: f64 = 1.05;
+    const WHEEL_ZOOM_STEP: f64 = 1.0163963568148535;
 
     let canvas = NodeRef::<leptos::html::Canvas>::new();
     let batches = RwSignal::new(Vec::<StrokeBatch>::new());
@@ -559,9 +559,11 @@ fn draw_stroke(
     offset_y: f64,
     scale: f64,
 ) {
+    const MIN_RENDERED_STROKE_WIDTH: f64 = 1.25;
+
     context.begin_path();
     context.set_stroke_style_str(&stroke.color);
-    context.set_line_width(stroke.width * scale);
+    context.set_line_width((stroke.width * scale).max(MIN_RENDERED_STROKE_WIDTH));
     if let Some(first) = stroke.points.first() {
         context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
         for point in stroke.points.iter().skip(1) {
