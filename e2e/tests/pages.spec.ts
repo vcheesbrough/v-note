@@ -17,14 +17,9 @@ test.describe('page library', () => {
     await expect(page.getByText('Untitled page')).toHaveCount(0);
     await unnamedPage.click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
-    const frameBox = await page.locator('.canvas-frame').boundingBox();
-    const canvasBox = await page.getByTestId('ink-canvas').boundingBox();
-    expect(frameBox).not.toBeNull();
-    expect(canvasBox).not.toBeNull();
-    expect(canvasBox!.width / canvasBox!.height).toBeCloseTo(900 / 520, 2);
-    expect(
-      Math.abs(canvasBox!.width - frameBox!.width) < 2 || Math.abs(canvasBox!.height - frameBox!.height) < 2,
-    ).toBeTruthy();
+    await expectCanvasFillsFrame(page);
+    await page.setViewportSize({ width: 720, height: 700 });
+    await expectCanvasFillsFrame(page);
     await page.getByRole('button', { name: 'Back' }).click();
 
     page.on('dialog', (dialog) => dialog.accept());
@@ -116,6 +111,20 @@ test.describe('page library', () => {
     await contextB.close();
   });
 });
+
+async function expectCanvasFillsFrame(page: import('@playwright/test').Page) {
+  await expect.poll(async () => {
+    const frameBox = await page.locator('.canvas-frame').boundingBox();
+    const canvasBox = await page.getByTestId('ink-canvas').boundingBox();
+    if (!frameBox || !canvasBox) {
+      return false;
+    }
+    const ratioMatches = Math.abs(canvasBox.width / canvasBox.height - 900 / 520) < 0.02;
+    const fillsOneAxis =
+      Math.abs(canvasBox.width - frameBox.width) < 2 || Math.abs(canvasBox.height - frameBox.height) < 2;
+    return ratioMatches && fillsOneAxis;
+  }).toBeTruthy();
+}
 
 function uniqueTitle(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
