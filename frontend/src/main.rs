@@ -7,6 +7,7 @@ use gloo_net::websocket::{futures::WebSocket, Message};
 use gloo_timers::future::TimeoutFuture;
 use js_sys::{Date, Reflect};
 use leptos::prelude::*;
+use leptos::{ev, leptos_dom::helpers::window_event_listener};
 use protocol::{
     LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageServerMessage, PageSummary,
     RealtimeTicketResponse, Stroke, StrokeBatch,
@@ -289,6 +290,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
     let offset_y = RwSignal::new(80.0_f64);
     let scale = RwSignal::new(MIN_CANVAS_SCALE);
     let dragging = RwSignal::new(None::<(i32, f64, f64)>);
+    let canvas_resize_tick = RwSignal::new(0_u64);
     let page_id = page.id.clone();
     let page_title = page_display_title(&page);
 
@@ -318,6 +320,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
         offset_x.track();
         offset_y.track();
         scale.track();
+        canvas_resize_tick.track();
         if let Some(canvas) = canvas.get() {
             draw_canvas(
                 &canvas,
@@ -327,6 +330,13 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                 scale.get_untracked(),
             );
         }
+    });
+
+    Effect::new(move |_| {
+        let resize_handle = window_event_listener(ev::resize, move |_| {
+            canvas_resize_tick.update(|tick| *tick = tick.wrapping_add(1));
+        });
+        on_cleanup(move || resize_handle.remove());
     });
 
     view! {
@@ -346,8 +356,6 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
             <div class="canvas-frame">
             <canvas
                 node_ref=canvas
-                width="900"
-                height="520"
                 aria-label="Read-only ink canvas"
                 data-testid="ink-canvas"
                 class="ink-canvas"
@@ -391,8 +399,8 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                         let rect_width = rect.width();
                         let rect_height = rect.height();
                         if rect_width > 0.0 && rect_height > 0.0 {
-                            let canvas_x = (event.client_x() as f64 - rect.left()) * target.width() as f64 / rect_width;
-                            let canvas_y = (event.client_y() as f64 - rect.top()) * target.height() as f64 / rect_height;
+                            let canvas_x = event.client_x() as f64 - rect.left();
+                            let canvas_y = event.client_y() as f64 - rect.top();
                             let world_x = (canvas_x - offset_x.get_untracked()) / old_scale;
                             let world_y = (canvas_y - offset_y.get_untracked()) / old_scale;
                             offset_x.set(canvas_x - world_x * new_scale);
@@ -530,16 +538,31 @@ fn draw_canvas(
     offset_y: f64,
     scale: f64,
 ) {
+    let rect = canvas.get_bounding_client_rect();
+    let css_width = rect.width().max(1.0);
+    let css_height = rect.height().max(1.0);
+    let dpr = web_sys::window()
+        .map(|window| window.device_pixel_ratio())
+        .unwrap_or(1.0)
+        .max(1.0);
+    let backing_width = (css_width * dpr).round() as u32;
+    let backing_height = (css_height * dpr).round() as u32;
+    if canvas.width() != backing_width {
+        canvas.set_width(backing_width);
+    }
+    if canvas.height() != backing_height {
+        canvas.set_height(backing_height);
+    }
+
     let Ok(Some(context)) = canvas.get_context("2d") else {
         return;
     };
     let Ok(context) = context.dyn_into::<CanvasRenderingContext2d>() else {
         return;
     };
-    let width = canvas.width() as f64;
-    let height = canvas.height() as f64;
+    let _ = context.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
     context.set_fill_style_str("#ffffff");
-    context.fill_rect(0.0, 0.0, width, height);
+    context.fill_rect(0.0, 0.0, css_width, css_height);
     context.set_line_cap("round");
     context.set_line_join("round");
 
