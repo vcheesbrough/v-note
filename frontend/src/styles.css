@@ -310,16 +310,26 @@ button {
 }
 
 .canvas-frame {
+  align-items: center;
+  container-type: size;
+  display: flex;
+  justify-content: center;
   min-height: 0;
+  overflow: hidden;
+  padding: 12px;
   position: relative;
 }
 
 .ink-canvas {
+  aspect-ratio: 900 / 520;
   background: #fff;
   display: block;
-  height: 100%;
+  height: auto;
+  max-height: 100%;
+  max-width: 100%;
   touch-action: none;
-  width: 100%;
+  width: min(100%, calc((100vh - 82px) * 900 / 520));
+  width: min(100cqw, calc(100cqh * 900 / 520));
 }
 
 .version-watermark {
