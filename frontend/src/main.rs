@@ -559,13 +559,9 @@ fn draw_stroke(
     offset_y: f64,
     scale: f64,
 ) {
-    const MIN_RENDERED_STROKE_WIDTH: f64 = 0.5;
-
-    let scaled_width = stroke.width * scale;
     context.begin_path();
     context.set_stroke_style_str(&stroke.color);
-    context.set_line_width(scaled_width.max(MIN_RENDERED_STROKE_WIDTH));
-    context.set_global_alpha((scaled_width / MIN_RENDERED_STROKE_WIDTH).min(1.0));
+    context.set_line_width(stroke.width * scale);
     if let Some(first) = stroke.points.first() {
         context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
         for point in stroke.points.iter().skip(1) {
@@ -573,7 +569,6 @@ fn draw_stroke(
         }
     }
     context.stroke();
-    context.set_global_alpha(1.0);
 }
 
 async fn load_pages(
