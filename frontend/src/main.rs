@@ -376,7 +376,26 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                 on:wheel=move |event: WheelEvent| {
                     event.prevent_default();
                     let factor = if event.delta_y() < 0.0 { 1.1 } else { 0.9 };
-                    scale.update(|value| *value = (*value * factor).clamp(0.20, 4.0));
+                    let old_scale = scale.get_untracked();
+                    let new_scale = (old_scale * factor).clamp(0.20, 4.0);
+                    if (new_scale - old_scale).abs() < f64::EPSILON {
+                        return;
+                    }
+
+                    if let Some(target) = event.target().and_then(|target| target.dyn_into::<HtmlCanvasElement>().ok()) {
+                        let rect = target.get_bounding_client_rect();
+                        let rect_width = rect.width();
+                        let rect_height = rect.height();
+                        if rect_width > 0.0 && rect_height > 0.0 {
+                            let canvas_x = (event.client_x() as f64 - rect.left()) * target.width() as f64 / rect_width;
+                            let canvas_y = (event.client_y() as f64 - rect.top()) * target.height() as f64 / rect_height;
+                            let world_x = (canvas_x - offset_x.get_untracked()) / old_scale;
+                            let world_y = (canvas_y - offset_y.get_untracked()) / old_scale;
+                            offset_x.set(canvas_x - world_x * new_scale);
+                            offset_y.set(canvas_y - world_y * new_scale);
+                        }
+                    }
+                    scale.set(new_scale);
                 }
             />
             </div>
