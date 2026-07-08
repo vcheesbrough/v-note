@@ -21,6 +21,7 @@ import org.junit.runner.RunWith
 class AuthRefreshInstrumentedTest {
     private lateinit var server: MockWebServer
     private lateinit var tokenStore: TokenStore
+    private var apiClient: ApiClient? = null
 
     @Before
     fun setUp() {
@@ -38,6 +39,7 @@ class AuthRefreshInstrumentedTest {
 
     @After
     fun tearDown() {
+        apiClient?.shutdown()
         server.shutdown()
     }
 
@@ -67,10 +69,11 @@ class AuthRefreshInstrumentedTest {
                 }
             }
 
-        val apiClient = ApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
+        val client = ApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
+        apiClient = client
 
         runBlocking {
-            val result = apiClient.fetchMe()
+            val result = client.fetchMe()
             assertTrue(result.isSuccess)
             assertEquals("user-1", result.getOrNull()?.sub)
         }

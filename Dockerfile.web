@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM rust:1.89.0@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9 AS builder
 RUN rustup target add wasm32-unknown-unknown && cargo install trunk
 WORKDIR /app
@@ -9,8 +11,16 @@ WORKDIR /app
 ARG V_NOTE_RELEASE=
 ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 COPY . .
-RUN cd frontend && trunk build --release
-RUN cargo build --release -p server
+RUN --mount=type=cache,id=v-note-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=v-note-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=v-note-cargo-target,target=/app/target \
+    --mount=type=cache,id=v-note-trunk-cache,target=/root/.cache/trunk \
+    cd frontend && trunk build --release
+RUN --mount=type=cache,id=v-note-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=v-note-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=v-note-cargo-target,target=/app/target \
+    cargo build --release -p server \
+    && cp /app/target/release/server /tmp/server
 
 FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
 
@@ -18,7 +28,7 @@ RUN apt-get update \
     && apt-get install -y ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=builder /app/target/release/server ./server
+COPY --from=builder /tmp/server ./server
 COPY --from=builder /app/frontend/dist ./dist
 RUN openssl req -x509 -newkey rsa:4096 \
         -keyout /app/key.pem \
