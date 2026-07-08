@@ -19,13 +19,21 @@
 
 ## Woodpecker deploy pipeline
 
-Triggered manually with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** (bored-aligned steps in `.woodpecker/build.yml`):
+Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** remains available (bored-aligned steps in `.woodpecker/build.yml`):
 
-1. **validate-deployment** — target is `dev` or `prod`; **prod only from `main`**
+1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
-4. **push** — `registry.desync.link/v-note:{version}` and `:{sha}` (dev)
-5. **deploy** — `docker compose -f deploy/docker-compose.yml up -d --pull always` on mini (docker socket)
+4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket)
+
+Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, `android-instrumented`, `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev` and `auto-deploy-dev` run. Prod remains manual-only and is never deployed from a push event.
+
+Operator reproduction from a Woodpecker-equivalent shell:
+
+```bash
+./scripts/deploy-v-note.sh dev
+./scripts/deploy-v-note.sh prod
+```
 
 ---
 

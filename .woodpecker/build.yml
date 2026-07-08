@@ -1,6 +1,6 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push: compute-version ∥ contract-validation ∥ build-android ∥ android-instrumented → build-web → e2e-web
-# Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release (prod)
+# Push: compute-version ∥ contract-validation ∥ build-android ∥ android-instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev
+# Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release
 
 when:
   - event: [push, deployment, manual]
@@ -203,6 +203,29 @@ steps:
         AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
           from_secret: v_note_prod_oidc_client_secret
 
+  apply-authentik-blueprint-auto-dev:
+    when:
+      - event: push
+    depends_on:
+      - contract-validation
+      - build-android
+      - android-instrumented
+      - e2e-web
+    pull: true
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
+    settings:
+      api_url: https://auth.desync.link
+      api_token:
+        from_secret: authentik_api_token
+      file: authentik/blueprint.yaml
+      instance_name: v-note
+      timeout_seconds: 900
+      vars:
+        AUTHENTIK_V_NOTE_DEV_CLIENT_SECRET:
+          from_secret: v_note_dev_oidc_client_secret
+        AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
+          from_secret: v_note_prod_oidc_client_secret
+
   deploy-dev:
     when:
       - event: deployment
@@ -225,23 +248,29 @@ steps:
       ASSETLINKS_JSON:
         from_secret: v_note_dev_assetlinks_json
     commands:
-      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker volume create v-note-dev-db
-      - docker pull registry.desync.link/v-note-android:$$(cat .release-tag)
-      - |
-        V_NOTE_IMAGE_TAG=$(cat .release-tag) APP_VERSION=$(cat .release-tag) \
-        APP_ENV=$$CI_COMMIT_BRANCH V_NOTE_HOST=v-notes-dev.desync.link \
-        V_NOTE_CONTAINER_NAME=v-note-dev DB_VOLUME=v-note-dev-db \
-        POSTGRES_PASSWORD=$$POSTGRES_PASSWORD \
-        OIDC_ISSUER_URL=https://auth.desync.link/application/o/v-note-dev/ \
-        OIDC_CLIENT_ID=v-note-browser-dev \
-        OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
-        OIDC_REDIRECT_URI=https://v-notes-dev.desync.link/auth/callback \
-        REQUIRED_SCOPE=v-note:dev:access \
-        OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-dev/end-session/ \
-        OIDC_ANDROID_CLIENT_ID=v-note-android-dev \
-        OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-dev/ \
-        docker compose -p v-note-dev -f deploy/docker-compose.yml -f deploy/docker-compose.android-apk.yml up -d
+      - ./scripts/deploy-v-note.sh dev
+
+  auto-deploy-dev:
+    when:
+      - event: push
+    depends_on:
+      - compute-version
+      - apply-authentik-blueprint-auto-dev
+    image: *docker-image
+    volumes: *docker-socket
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      OIDC_CLIENT_SECRET:
+        from_secret: v_note_dev_oidc_client_secret
+      POSTGRES_PASSWORD:
+        from_secret: v_note_dev_postgres_password
+      ASSETLINKS_JSON:
+        from_secret: v_note_dev_assetlinks_json
+    commands:
+      - ./scripts/deploy-v-note.sh dev
 
   deploy-prod:
     when:
@@ -265,22 +294,7 @@ steps:
       ASSETLINKS_JSON:
         from_secret: v_note_prod_assetlinks_json
     commands:
-      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker volume create v-note-prod-db
-      - |
-        V_NOTE_IMAGE_TAG=$(cat .release-tag) APP_VERSION=$(cat .release-tag) \
-        APP_ENV=production V_NOTE_HOST=v-notes.desync.link \
-        V_NOTE_CONTAINER_NAME=v-note DB_VOLUME=v-note-prod-db \
-        POSTGRES_PASSWORD=$$POSTGRES_PASSWORD \
-        OIDC_ISSUER_URL=https://auth.desync.link/application/o/v-note-prod/ \
-        OIDC_CLIENT_ID=v-note-browser-prod \
-        OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
-        OIDC_REDIRECT_URI=https://v-notes.desync.link/auth/callback \
-        REQUIRED_SCOPE=v-note:prod:access \
-        OIDC_END_SESSION_URL=https://auth.desync.link/application/o/v-note-prod/end-session/ \
-        OIDC_ANDROID_CLIENT_ID=v-note-android-prod \
-        OIDC_ANDROID_ISSUER_URL=https://auth.desync.link/application/o/v-note-android-prod/ \
-        docker compose -p v-note -f deploy/docker-compose.yml up -d
+      - ./scripts/deploy-v-note.sh prod
 
   tag-release-dev:
     when:
