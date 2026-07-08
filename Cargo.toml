@@ -4,7 +4,7 @@ members = ["crates/protocol", "crates/server", "frontend"]
 default-members = ["crates/protocol", "crates/server"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 

@@ -24,7 +24,7 @@ class PlaceholderInstrumentedTest {
             }.getOrDefault(false)
         }
         composeRule
-            .onNodeWithText("Sign in with Authentik to use v-note on this device.")
+            .onNodeWithText("Use Authentik to access your page library and ink canvas.")
             .assertIsDisplayed()
         composeRule
             .onNodeWithTag("version-watermark")

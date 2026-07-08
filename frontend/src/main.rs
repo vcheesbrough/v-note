@@ -5,11 +5,12 @@ use futures_util::{
 use gloo_net::http::Request;
 use gloo_net::websocket::{futures::WebSocket, Message};
 use gloo_timers::future::TimeoutFuture;
-use js_sys::Reflect;
+use js_sys::{Date, Reflect};
 use leptos::prelude::*;
+use leptos::{ev, leptos_dom::helpers::window_event_listener};
 use protocol::{
-    CreatePageRequest, LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageResponse,
-    PageServerMessage, PageSummary, RealtimeTicketResponse, Stroke, StrokeBatch,
+    LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageServerMessage, PageSummary,
+    RealtimeTicketResponse, Stroke, StrokeBatch,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, PointerEvent, WheelEvent};
@@ -20,6 +21,48 @@ fn release_version() -> &'static str {
         Some(v) if !v.is_empty() => v,
         _ => env!("CARGO_PKG_VERSION"),
     }
+}
+
+const UNTITLED_PAGE: &str = "Untitled page";
+
+fn page_has_title(page: &PageSummary) -> bool {
+    let title = page.title.trim();
+    !title.is_empty() && title != UNTITLED_PAGE
+}
+
+fn page_display_title(page: &PageSummary) -> String {
+    if page_has_title(page) {
+        page.title.clone()
+    } else {
+        approximate_relative_datetime(&page.updated_at)
+    }
+}
+
+fn compact_datetime(value: &str) -> String {
+    value
+        .trim_end_matches('Z')
+        .replace('T', " ")
+        .chars()
+        .take(16)
+        .collect()
+}
+
+fn approximate_relative_datetime(value: &str) -> String {
+    let then = Date::parse(value);
+    if then.is_nan() {
+        return compact_datetime(value);
+    }
+
+    let elapsed_seconds = ((Date::now() - then) / 1000.0).max(0.0).round() as u64;
+    let (amount, unit) = match elapsed_seconds {
+        0..=89 => return "just now".to_string(),
+        90..=5_399 => ((elapsed_seconds + 30) / 60, "minute"),
+        5_400..=129_599 => ((elapsed_seconds + 1_800) / 3_600, "hour"),
+        129_600..=3_887_999 => ((elapsed_seconds + 43_200) / 86_400, "day"),
+        _ => ((elapsed_seconds + 1_296_000) / 2_592_000, "month"),
+    };
+    let suffix = if amount == 1 { "" } else { "s" };
+    format!("{amount} {unit}{suffix} ago")
 }
 
 #[component]
@@ -72,129 +115,156 @@ fn App() -> impl IntoView {
         }
     });
 
+    let viewer_open = move || selected_page.get().is_some();
+
     view! {
-        <main style="font-family: system-ui, sans-serif; padding: 2rem; max-width: 40rem;">
-            <header style="display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
-                <h1 style="margin: 0;">"v-note"</h1>
+        <main class=move || if viewer_open() { "app-shell viewer-mode" } else { "app-shell" }>
+            {move || if !viewer_open() {
+                view! {
+            <header class="top-bar">
+                <h1 class="brand">"v-note"</h1>
                 {move || match me.get() {
-                    None => view! { <span>"Checking session…"</span> }.into_any(),
+                    None => view! { <span class="muted">"Checking session…"</span> }.into_any(),
                     Some(Some(Ok(profile))) => view! {
-                        <div style="display: flex; gap: 1rem; align-items: center;">
-                            <span>{profile.email.clone().unwrap_or_else(|| profile.sub.clone())}</span>
-                            <a href="/auth/logout">"Sign out"</a>
+                        <div class="session-actions desktop-session-actions">
+                            <span class="identity">{profile.email.clone().unwrap_or_else(|| profile.sub.clone())}</span>
+                            <a class="button secondary" href="/auth/logout">"Sign out"</a>
                         </div>
+                        <details class="session-menu">
+                            <summary aria-label="Open account menu">"☰"</summary>
+                            <div class="session-menu-panel">
+                                <p class="menu-identity">{profile.email.clone().unwrap_or_else(|| profile.sub.clone())}</p>
+                                <a class="menu-link" href="/auth/logout">"Sign out"</a>
+                                <a class="menu-link" href="/dl/apk">"Download Android app (.apk)"</a>
+                            </div>
+                        </details>
                     }
                     .into_any(),
                     Some(Some(Err(401))) | Some(Some(Err(403))) => view! {
-                        <a href="/auth/login">"Sign in"</a>
+                        <a class="button primary" href="/auth/login">"Sign in"</a>
                     }
                     .into_any(),
                     Some(Some(Err(_))) => view! {
-                        <span>"Session check failed"</span>
+                        <span class="muted">"Session check failed"</span>
                     }
                     .into_any(),
-                    Some(None) => view! { <span>"Session unavailable"</span> }.into_any(),
+                    Some(None) => view! { <span class="muted">"Session unavailable"</span> }.into_any(),
                 }}
             </header>
+                }.into_any()
+            } else {
+                view! {}.into_any()
+            }}
 
             {move || match me.get() {
-                None => view! { <p>"Loading…"</p> }.into_any(),
+                None => view! {
+                    <section class="state-panel" aria-label="Loading session">
+                        <p class="eyebrow">"Session"</p>
+                        <h2 class="section-title">"Checking access"</h2>
+                        <p class="muted">"Loading your private v-note session."</p>
+                    </section>
+                }.into_any(),
                 Some(Some(Ok(_))) => view! {
-                    <section aria-label="Page library">
-                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
-                            <h2>"Page library"</h2>
-                            <button on:click=move |_| {
-                                wasm_bindgen_futures::spawn_local(async move {
-                                    if let Err(error) = create_page(pages, selected_page, library_error).await {
-                                        library_error.set(Some(error));
-                                    }
-                                });
-                            }>
-                                "New page"
-                            </button>
-                        </div>
-
+                    {move || match selected_page.get() {
+                        Some(page) => view! { <InkViewer page=page on_close=Callback::new(move |_| selected_page.set(None)) /> }.into_any(),
+                        None => view! {
+                    <section class="library-shell" aria-label="Page library">
                         {move || library_error.get().map(|error| view! {
-                            <p role="alert">{error}</p>
+                            <p class="alert" role="alert">{error}</p>
                         })}
 
-                        <ul>
+                        {move || if pages.get().is_empty() {
+                            view! {
+                                <div class="state-panel">
+                                    <p class="eyebrow">"No pages"</p>
+                                    <h3 class="section-title">"Start with a blank ink page"</h3>
+                                    <p class="muted">"Create a page, then open it on Android to write with the S Pen."</p>
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! {
+                        <ul class="page-grid">
                             <For
                                 each=move || pages.get()
                                 key=|page| page.id.clone()
                                 children=move |page| {
                                     let open_page = page.clone();
                                     let delete_page_id = page.id.clone();
-                                    let delete_page_title = page.title.clone();
+                                    let display_title = page_display_title(&page);
+                                    let open_label = format!("Open {display_title}");
+                                    let delete_label = format!("Delete {display_title}");
                                     view! {
-                                        <li style="display: flex; gap: 0.75rem; align-items: center; margin: 0.5rem 0;">
-                                            <button on:click=move |_| selected_page.set(Some(open_page.clone()))>
-                                                {page.title.clone()}
+                                        <li class="page-tile">
+                                            <div class="page-preview" aria-hidden="true"></div>
+                                            <button class="page-main" aria-label=open_label on:click=move |_| selected_page.set(Some(open_page.clone()))>
+                                                <span class="page-title">{display_title}</span>
                                             </button>
-                                            <small>{format!("updated {}", page.updated_at)}</small>
-                                            <button aria-label=format!("Delete {}", delete_page_title) on:click=move |_| {
+                                            <div class="tile-actions">
+                                            <button class="button danger" aria-label=delete_label on:click=move |_| {
                                                 let page_id = delete_page_id.clone();
-                                                wasm_bindgen_futures::spawn_local(async move {
-                                                    if let Err(error) = delete_page(page_id, pages, selected_page, library_error).await {
-                                                        library_error.set(Some(error));
-                                                    }
-                                                });
+                                                if web_sys::window()
+                                                    .and_then(|window| window.confirm_with_message("Delete this page permanently?").ok())
+                                                    .unwrap_or(false)
+                                                {
+                                                    wasm_bindgen_futures::spawn_local(async move {
+                                                        if let Err(error) = delete_page(page_id, pages, selected_page, library_error).await {
+                                                            library_error.set(Some(error));
+                                                        }
+                                                    });
+                                                }
                                             }>
                                                 "Delete"
                                             </button>
+                                            </div>
                                         </li>
                                     }
                                 }
                             />
                         </ul>
-
-                        {move || match selected_page.get() {
-                            Some(page) => view! { <InkViewer page=page /> }.into_any(),
-                            None => view! {
-                                <p>"Open a page to view its canvas."</p>
-                            }.into_any(),
+                            }.into_any()
                         }}
 
                         {move || match meta.get() {
-                            None => view! { <p>"Loading metadata…"</p> }.into_any(),
+                            None => view! { <p class="muted">"Loading metadata…"</p> }.into_any(),
                             Some(Ok(info)) => view! {
-                                <p>{format!("Version {}", info.app_version)}</p>
-                                <p>{format!("Protocol {}", info.protocol_version)}</p>
+                                <p class="muted">{format!("Version {} · Protocol {}", info.app_version, info.protocol_version)}</p>
                             }
                             .into_any(),
                             Some(Err(error)) => view! {
-                                <p>{format!("Failed to load metadata: {error}")}</p>
+                                <p class="alert" role="alert">{format!("Failed to load metadata: {error}")}</p>
                             }
                             .into_any(),
                         }}
+
+                        <p class="apk-link"><a class="button secondary" href="/dl/apk">"Download Android app (.apk)"</a></p>
                     </section>
+                        }.into_any(),
+                    }}
                 }
                 .into_any(),
                 Some(Some(Err(401))) | Some(Some(Err(403))) => view! {
-                    <section>
-                        <p>"Sign in with Authentik to use v-note."</p>
-                        <p><a href="/auth/login">"Continue to sign in"</a></p>
+                    <section class="auth-panel state-panel">
+                        <p class="eyebrow">"Private notes"</p>
+                        <h2 class="section-title">"Sign in to continue"</h2>
+                        <a class="button primary" href="/auth/login">"Continue to sign in"</a>
                     </section>
                 }
                 .into_any(),
                 _ => view! {
-                    <p>"Unable to determine authentication state."</p>
+                    <section class="state-panel" role="alert">
+                        <p class="eyebrow">"Session"</p>
+                        <h2 class="section-title">"Unable to determine authentication state"</h2>
+                    </section>
                 }
                 .into_any(),
             }}
-
-            <footer style="margin-top: 2rem; font-size: 0.875rem;">
-                <a href="/dl/apk">"Download Android app (.apk)"</a>
-            </footer>
         </main>
 
         // Version watermark — compile-time build version, rendered on every screen
         // (including the pre-login front screen) with no dependency on /api/meta.
         // CI injects the computed release tag via V_NOTE_RELEASE so this matches the
         // deployed image + /api/meta; local builds fall back to the cargo version.
-        <div style="position: fixed; bottom: 0.5rem; right: 0.75rem; opacity: 0.35; \
-            font-size: 0.75rem; pointer-events: none; user-select: none; \
-            font-family: system-ui, sans-serif;">
+        <div class="version-watermark">
             {format!("v{}", release_version())}
         </div>
     }
@@ -206,7 +276,11 @@ fn main() {
 }
 
 #[component]
-fn InkViewer(page: PageSummary) -> impl IntoView {
+fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
+    const MIN_CANVAS_SCALE: f64 = 0.08;
+    const MAX_CANVAS_SCALE: f64 = 4.0;
+    const WHEEL_ZOOM_STEP: f64 = 1.0163963568148535;
+
     let canvas = NodeRef::<leptos::html::Canvas>::new();
     let batches = RwSignal::new(Vec::<StrokeBatch>::new());
     let viewer_error = RwSignal::new(None::<String>);
@@ -214,10 +288,11 @@ fn InkViewer(page: PageSummary) -> impl IntoView {
     let last_seq = RwSignal::new(0_u64);
     let offset_x = RwSignal::new(80.0_f64);
     let offset_y = RwSignal::new(80.0_f64);
-    let scale = RwSignal::new(1.0_f64);
+    let scale = RwSignal::new(MIN_CANVAS_SCALE);
     let dragging = RwSignal::new(None::<(i32, f64, f64)>);
+    let canvas_resize_tick = RwSignal::new(0_u64);
     let page_id = page.id.clone();
-    let page_title = page.title.clone();
+    let page_title = page_display_title(&page);
 
     Effect::new(move |_| {
         batches.set(Vec::new());
@@ -245,6 +320,7 @@ fn InkViewer(page: PageSummary) -> impl IntoView {
         offset_x.track();
         offset_y.track();
         scale.track();
+        canvas_resize_tick.track();
         if let Some(canvas) = canvas.get() {
             draw_canvas(
                 &canvas,
@@ -256,26 +332,33 @@ fn InkViewer(page: PageSummary) -> impl IntoView {
         }
     });
 
+    Effect::new(move |_| {
+        let resize_handle = window_event_listener(ev::resize, move |_| {
+            canvas_resize_tick.update(|tick| *tick = tick.wrapping_add(1));
+        });
+        on_cleanup(move || resize_handle.remove());
+    });
+
     view! {
-        <section aria-label="Open page" style="margin-top: 1.5rem;">
-            <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;">
-                <h3>{page_title}</h3>
-                <small aria-live="polite">
+        <section class="canvas-shell" aria-label="Open page">
+            <div class="canvas-header">
+                <button class="button secondary" on:click=move |_| on_close.run(())>"Back"</button>
+                <h2 class="canvas-title">{page_title}</h2>
+                <span class="live-status" aria-live="polite">
                     {move || format!("{} · seq {}", viewer_status.get(), last_seq.get())}
-                </small>
+                </span>
             </div>
 
             {move || viewer_error.get().map(|error| view! {
-                <p role="alert">{error}</p>
+                <p class="alert" role="alert">{error}</p>
             })}
 
+            <div class="canvas-frame">
             <canvas
                 node_ref=canvas
-                width="900"
-                height="520"
                 aria-label="Read-only ink canvas"
                 data-testid="ink-canvas"
-                style="width: 100%; height: min(58vh, 520px); border: 1px solid #c9c9c9; background: #fff; touch-action: none; display: block;"
+                class="ink-canvas"
                 on:pointerdown=move |event: PointerEvent| {
                     dragging.set(Some((event.pointer_id(), event.client_x() as f64, event.client_y() as f64)));
                     if let Some(target) = event.target().and_then(|target| target.dyn_into::<HtmlCanvasElement>().ok()) {
@@ -304,10 +387,30 @@ fn InkViewer(page: PageSummary) -> impl IntoView {
                 on:pointercancel=move |_| dragging.set(None)
                 on:wheel=move |event: WheelEvent| {
                     event.prevent_default();
-                    let factor = if event.delta_y() < 0.0 { 1.1 } else { 0.9 };
-                    scale.update(|value| *value = (*value * factor).clamp(0.25, 4.0));
+                    let factor = if event.delta_y() < 0.0 { WHEEL_ZOOM_STEP } else { 1.0 / WHEEL_ZOOM_STEP };
+                    let old_scale = scale.get_untracked();
+                    let new_scale = (old_scale * factor).clamp(MIN_CANVAS_SCALE, MAX_CANVAS_SCALE);
+                    if (new_scale - old_scale).abs() < f64::EPSILON {
+                        return;
+                    }
+
+                    if let Some(target) = event.target().and_then(|target| target.dyn_into::<HtmlCanvasElement>().ok()) {
+                        let rect = target.get_bounding_client_rect();
+                        let rect_width = rect.width();
+                        let rect_height = rect.height();
+                        if rect_width > 0.0 && rect_height > 0.0 {
+                            let canvas_x = event.client_x() as f64 - rect.left();
+                            let canvas_y = event.client_y() as f64 - rect.top();
+                            let world_x = (canvas_x - offset_x.get_untracked()) / old_scale;
+                            let world_y = (canvas_y - offset_y.get_untracked()) / old_scale;
+                            offset_x.set(canvas_x - world_x * new_scale);
+                            offset_y.set(canvas_y - world_y * new_scale);
+                        }
+                    }
+                    scale.set(new_scale);
                 }
             />
+            </div>
         </section>
     }
 }
@@ -435,16 +538,31 @@ fn draw_canvas(
     offset_y: f64,
     scale: f64,
 ) {
+    let rect = canvas.get_bounding_client_rect();
+    let css_width = rect.width().max(1.0);
+    let css_height = rect.height().max(1.0);
+    let dpr = web_sys::window()
+        .map(|window| window.device_pixel_ratio())
+        .unwrap_or(1.0)
+        .max(1.0);
+    let backing_width = (css_width * dpr).round() as u32;
+    let backing_height = (css_height * dpr).round() as u32;
+    if canvas.width() != backing_width {
+        canvas.set_width(backing_width);
+    }
+    if canvas.height() != backing_height {
+        canvas.set_height(backing_height);
+    }
+
     let Ok(Some(context)) = canvas.get_context("2d") else {
         return;
     };
     let Ok(context) = context.dyn_into::<CanvasRenderingContext2d>() else {
         return;
     };
-    let width = canvas.width() as f64;
-    let height = canvas.height() as f64;
+    let _ = context.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
     context.set_fill_style_str("#ffffff");
-    context.fill_rect(0.0, 0.0, width, height);
+    context.fill_rect(0.0, 0.0, css_width, css_height);
     context.set_line_cap("round");
     context.set_line_join("round");
 
@@ -464,9 +582,11 @@ fn draw_stroke(
     offset_y: f64,
     scale: f64,
 ) {
+    const MIN_RENDERED_STROKE_WIDTH: f64 = 0.75;
+
     context.begin_path();
     context.set_stroke_style_str(&stroke.color);
-    context.set_line_width(2.0);
+    context.set_line_width((stroke.width * scale).max(MIN_RENDERED_STROKE_WIDTH));
     if let Some(first) = stroke.points.first() {
         context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
         for point in stroke.points.iter().skip(1) {
@@ -492,32 +612,6 @@ async fn load_pages(
         .await
         .map_err(|error| format!("invalid pages response: {error}"))?;
     pages.set(body.pages);
-    library_error.set(None);
-    Ok(())
-}
-
-async fn create_page(
-    pages: RwSignal<Vec<PageSummary>>,
-    selected_page: RwSignal<Option<PageSummary>>,
-    library_error: RwSignal<Option<String>>,
-) -> Result<(), String> {
-    let response = Request::post("/api/pages")
-        .json(&CreatePageRequest {
-            title: Some("Untitled page".to_string()),
-        })
-        .map_err(|error| format!("create request failed: {error}"))?
-        .send()
-        .await
-        .map_err(|error| format!("creating page failed: {error}"))?;
-    if !response.ok() {
-        return Err(format!("creating page failed: HTTP {}", response.status()));
-    }
-    let body = response
-        .json::<PageResponse>()
-        .await
-        .map_err(|error| format!("invalid create response: {error}"))?;
-    upsert_page(pages, body.page.clone());
-    selected_page.set(Some(body.page));
     library_error.set(None);
     Ok(())
 }
