@@ -11,8 +11,8 @@ ARG V_NOTE_RELEASE=
 ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 WORKDIR /workspace
 COPY . .
-RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle \
-    --mount=type=cache,id=v-note-gradle-project,target=/workspace/android/.gradle \
+RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked \
+    --mount=type=cache,id=v-note-gradle-project,target=/workspace/android/.gradle,sharing=locked \
     ./scripts/sync-version.sh \
     && cd android \
     && chmod +x ./gradlew \

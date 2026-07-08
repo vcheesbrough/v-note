@@ -7,6 +7,8 @@
 ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
 FROM ${ANDROID_BUILD_BOX_IMAGE}
 
+ARG V_NOTE_RELEASE=
+ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV PATH=/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:${PATH}
@@ -21,4 +23,12 @@ RUN chmod +x scripts/run-android-instrumented-ci.sh
 RUN cd android \
     && chmod +x ./gradlew \
     && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk --version
+RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked \
+    --mount=type=cache,id=v-note-gradle-project,target=/workspace/android/.gradle,sharing=locked \
+    ./scripts/sync-version.sh \
+    && cd android \
+    && chmod +x ./gradlew \
+    && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \
+        :app:assembleDevDebug \
+        :app:assembleDevDebugAndroidTest
 CMD ["bash", "scripts/run-android-instrumented-ci.sh"]

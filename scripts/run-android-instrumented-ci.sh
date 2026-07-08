@@ -10,6 +10,9 @@ export ADB_INSTALL_TIMEOUT=120
 AVD_NAME="${AVD_NAME:-vnote-ci}"
 SYSTEM_IMAGE="${SYSTEM_IMAGE:-system-images;android-35;google_apis;x86_64}"
 BOOT_TIMEOUT_SEC="${BOOT_TIMEOUT_SEC:-900}"
+APP_APK="${APP_APK:-/workspace/android/app/build/outputs/apk/dev/debug/app-dev-debug.apk}"
+TEST_APK="${TEST_APK:-/workspace/android/app/build/outputs/apk/androidTest/dev/debug/app-dev-debug-androidTest.apk}"
+TEST_RUNNER="${TEST_RUNNER:-link.desync.vnote.dev.test/androidx.test.runner.AndroidJUnitRunner}"
 
 ensure_avd() {
   if avdmanager list avd 2>/dev/null | grep -q "Name: ${AVD_NAME}"; then
@@ -83,5 +86,15 @@ wait_for_emulator
 
 cd android
 chmod +x ./gradlew
-./gradlew --no-daemon --console=plain -Pandroid.sdk.dir="$ANDROID_HOME" \
-  :app:connectedDevDebugAndroidTest
+if [ -f "$APP_APK" ] && [ -f "$TEST_APK" ]; then
+  echo "Installing prebuilt app APK: $APP_APK"
+  adb install -r -t "$APP_APK"
+  echo "Installing prebuilt test APK: $TEST_APK"
+  adb install -r -t "$TEST_APK"
+  echo "Running instrumentation: $TEST_RUNNER"
+  adb shell am instrument -w "$TEST_RUNNER"
+else
+  echo "Prebuilt APKs not found; falling back to Gradle connected test" >&2
+  ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir="$ANDROID_HOME" \
+    :app:connectedDevDebugAndroidTest
+fi
