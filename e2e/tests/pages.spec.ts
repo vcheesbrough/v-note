@@ -18,7 +18,9 @@ test.describe('page library', () => {
     await unnamedPage.click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
     await expectCanvasFillsFrame(page);
-    await page.setViewportSize({ width: 720, height: 700 });
+    await page.setViewportSize({ width: 720, height: 520 });
+    await expectCanvasFillsFrame(page);
+    await page.setViewportSize({ width: 1100, height: 700 });
     await expectCanvasFillsFrame(page);
     await page.getByRole('button', { name: 'Back' }).click();
 
@@ -119,10 +121,7 @@ async function expectCanvasFillsFrame(page: import('@playwright/test').Page) {
     if (!frameBox || !canvasBox) {
       return false;
     }
-    const ratioMatches = Math.abs(canvasBox.width / canvasBox.height - 900 / 520) < 0.02;
-    const fillsOneAxis =
-      Math.abs(canvasBox.width - frameBox.width) < 2 || Math.abs(canvasBox.height - frameBox.height) < 2;
-    return ratioMatches && fillsOneAxis;
+    return Math.abs(canvasBox.width - frameBox.width) < 2 && Math.abs(canvasBox.height - frameBox.height) < 2;
   }).toBeTruthy();
 }
 
