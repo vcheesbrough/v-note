@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # CI-only: Android devDebug instrumented tests (Woodpecker android-instrumented).
 # Requires --privileged and /dev/kvm on the Woodpecker agent.
 # Emulator + system image are baked here so runtime does not re-download SDK packages.
@@ -16,4 +18,7 @@ RUN yes | sdkmanager --licenses >/dev/null 2>&1 || true \
 WORKDIR /workspace
 COPY . .
 RUN chmod +x scripts/run-android-instrumented-ci.sh
+RUN cd android \
+    && chmod +x ./gradlew \
+    && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk --version
 CMD ["bash", "scripts/run-android-instrumented-ci.sh"]
