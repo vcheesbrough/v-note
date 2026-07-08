@@ -310,21 +310,17 @@ button {
 }
 
 .canvas-frame {
-  align-items: center;
-  display: flex;
-  justify-content: center;
   min-height: 0;
   overflow: hidden;
   position: relative;
 }
 
 .ink-canvas {
-  aspect-ratio: 900 / 520;
   background: #fff;
   display: block;
-  max-height: 100%;
-  max-width: 100%;
+  height: 100%;
   touch-action: none;
+  width: 100%;
 }
 
 .version-watermark {

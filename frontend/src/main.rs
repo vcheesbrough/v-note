@@ -277,12 +277,10 @@ fn main() {
 
 #[component]
 fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
-    const CANVAS_ASPECT_RATIO: f64 = 900.0 / 520.0;
     const MIN_CANVAS_SCALE: f64 = 0.08;
     const MAX_CANVAS_SCALE: f64 = 4.0;
     const WHEEL_ZOOM_STEP: f64 = 1.0163963568148535;
 
-    let canvas_frame = NodeRef::<leptos::html::Div>::new();
     let canvas = NodeRef::<leptos::html::Canvas>::new();
     let batches = RwSignal::new(Vec::<StrokeBatch>::new());
     let viewer_error = RwSignal::new(None::<String>);
@@ -293,7 +291,6 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
     let scale = RwSignal::new(MIN_CANVAS_SCALE);
     let dragging = RwSignal::new(None::<(i32, f64, f64)>);
     let canvas_resize_tick = RwSignal::new(0_u64);
-    let canvas_size = RwSignal::new((1.0_f64, 1.0_f64));
     let page_id = page.id.clone();
     let page_title = page_display_title(&page);
 
@@ -323,7 +320,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
         offset_x.track();
         offset_y.track();
         scale.track();
-        canvas_size.track();
+        canvas_resize_tick.track();
         if let Some(canvas) = canvas.get() {
             draw_canvas(
                 &canvas,
@@ -332,21 +329,6 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                 offset_y.get_untracked(),
                 scale.get_untracked(),
             );
-        }
-    });
-
-    Effect::new(move |_| {
-        canvas_resize_tick.track();
-        if let Some(frame) = canvas_frame.get() {
-            let rect = frame.get_bounding_client_rect();
-            let frame_width = rect.width().max(1.0);
-            let frame_height = rect.height().max(1.0);
-            let (width, height) = if frame_width / frame_height > CANVAS_ASPECT_RATIO {
-                (frame_height * CANVAS_ASPECT_RATIO, frame_height)
-            } else {
-                (frame_width, frame_width / CANVAS_ASPECT_RATIO)
-            };
-            canvas_size.set((width, height));
         }
     });
 
@@ -371,16 +353,12 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                 <p class="alert" role="alert">{error}</p>
             })}
 
-            <div class="canvas-frame" node_ref=canvas_frame>
+            <div class="canvas-frame">
             <canvas
                 node_ref=canvas
                 aria-label="Read-only ink canvas"
                 data-testid="ink-canvas"
                 class="ink-canvas"
-                style=move || {
-                    let (width, height) = canvas_size.get();
-                    format!("width: {width}px; height: {height}px;")
-                }
                 on:pointerdown=move |event: PointerEvent| {
                     dragging.set(Some((event.pointer_id(), event.client_x() as f64, event.client_y() as f64)));
                     if let Some(target) = event.target().and_then(|target| target.dyn_into::<HtmlCanvasElement>().ok()) {
