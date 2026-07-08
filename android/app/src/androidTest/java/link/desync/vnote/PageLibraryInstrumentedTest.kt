@@ -50,6 +50,7 @@ class PageLibraryInstrumentedTest {
 
     @After
     fun tearDown() {
+        apiClient.shutdown()
         tokenStore.clear()
         server.shutdown()
     }

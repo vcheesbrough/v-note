@@ -54,6 +54,7 @@ class PageInkInstrumentedTest {
 
     @After
     fun tearDown() {
+        apiClient.shutdown()
         tokenStore.clear()
         server.shutdown()
     }
@@ -84,6 +85,7 @@ class PageInkInstrumentedTest {
                                 webSocket.send("""{"type":"synced","last_seq":1}""")
                             }
                             "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                            "release-lease" -> webSocket.close(1000, "lease released")
                             "commit-batch" -> {
                                 committed.set(text)
                                 val obj = JSONObject(text)
@@ -144,8 +146,9 @@ class PageInkInstrumentedTest {
                         webSocket: WebSocket,
                         text: String,
                     ) {
-                        if (JSONObject(text).getString("type") == "subscribe") {
-                            webSocket.send("""{"type":"synced","last_seq":0}""")
+                        when (JSONObject(text).getString("type")) {
+                            "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                            "release-lease" -> webSocket.close(1000, "lease released")
                         }
                     }
                 },

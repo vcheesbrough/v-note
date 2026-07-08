@@ -92,7 +92,23 @@ if [ -f "$APP_APK" ] && [ -f "$TEST_APK" ]; then
   echo "Installing prebuilt test APK: $TEST_APK"
   adb install -r -t "$TEST_APK"
   echo "Running instrumentation: $TEST_RUNNER"
-  adb shell am instrument -w "$TEST_RUNNER"
+  INSTRUMENTATION_OUTPUT=$(mktemp)
+  set +e
+  adb shell am instrument -r -w "$TEST_RUNNER" 2>&1 | tee "$INSTRUMENTATION_OUTPUT"
+  INSTRUMENTATION_RC=${PIPESTATUS[0]}
+  set -e
+  if [ "$INSTRUMENTATION_RC" -ne 0 ]; then
+    echo "Instrumentation command failed with exit code ${INSTRUMENTATION_RC}" >&2
+    exit "$INSTRUMENTATION_RC"
+  fi
+  if grep -Eq '^INSTRUMENTATION_STATUS_CODE: -[0-9]+' "$INSTRUMENTATION_OUTPUT"; then
+    echo "Instrumentation reported failed tests" >&2
+    exit 1
+  fi
+  if ! grep -qx 'INSTRUMENTATION_CODE: -1' "$INSTRUMENTATION_OUTPUT"; then
+    echo "Instrumentation did not report successful completion" >&2
+    exit 1
+  fi
 else
   echo "Prebuilt APKs not found; falling back to Gradle connected test" >&2
   ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir="$ANDROID_HOME" \
