@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # CI-only: Android devDebug instrumented tests (Woodpecker android-instrumented).
 # Requires --privileged and /dev/kvm on the Woodpecker agent.
 # Emulator + system image are baked here so runtime does not re-download SDK packages.
@@ -13,7 +15,20 @@ RUN yes | sdkmanager --licenses >/dev/null 2>&1 || true \
     && sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64" \
     && echo no | avdmanager create avd -n vnote-ci -k "system-images;android-35;google_apis;x86_64" -d pixel_6 --force
 
+ARG V_NOTE_RELEASE=
+ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 WORKDIR /workspace
 COPY . .
 RUN chmod +x scripts/run-android-instrumented-ci.sh
+RUN cd android \
+    && chmod +x ./gradlew \
+    && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk --version
+RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked \
+    --mount=type=cache,id=v-note-gradle-project,target=/workspace/android/.gradle,sharing=locked \
+    ./scripts/sync-version.sh \
+    && cd android \
+    && chmod +x ./gradlew \
+    && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \
+        :app:assembleDevDebug \
+        :app:assembleDevDebugAndroidTest
 CMD ["bash", "scripts/run-android-instrumented-ci.sh"]

@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # CI-only: Android devDebug APK + unit tests (Woodpecker build-android).
 # Stage 1 builds the APK; stage 2 (nginx:alpine) delivers it over HTTP for sideloading.
 # Base image pin: scripts/android-build-box-image.ref (override via --build-arg in CI).
@@ -9,7 +11,9 @@ ARG V_NOTE_RELEASE=
 ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 WORKDIR /workspace
 COPY . .
-RUN ./scripts/sync-version.sh \
+RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked \
+    --mount=type=cache,id=v-note-gradle-project,target=/workspace/android/.gradle,sharing=locked \
+    ./scripts/sync-version.sh \
     && cd android \
     && chmod +x ./gradlew \
     && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \

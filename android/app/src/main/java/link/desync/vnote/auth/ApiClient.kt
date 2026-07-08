@@ -153,6 +153,12 @@ class ApiClient(
         return PageSocket(webSocket)
     }
 
+    fun shutdown() {
+        http.dispatcher.executorService.shutdown()
+        http.connectionPool.evictAll()
+        http.cache?.close()
+    }
+
     private fun wsBaseUrl(): String =
         when {
             baseUrl.startsWith("https://") -> baseUrl.replaceFirst("https://", "wss://")
