@@ -7,23 +7,47 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -37,6 +61,7 @@ import link.desync.vnote.auth.MeProfile
 import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageCanvasScreen
+import link.desync.vnote.ui.displayTitle
 import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
@@ -339,6 +364,7 @@ private fun AppScreen(
 ) {
     val scope = rememberCoroutineScope()
     val healthState = remember { mutableStateOf("Checking server health…") }
+    var pendingDelete by remember { mutableStateOf<PageSummary?>(null) }
 
     LaunchedEffect(Unit) {
         // okhttp execute() is blocking — must run off the main thread or it throws
@@ -365,44 +391,236 @@ private fun AppScreen(
             }
     }
 
+    pendingDelete?.let { page ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete page?") },
+            text = { Text("This permanently removes ${page.displayTitle()}.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDelete = null
+                        onDeletePage(page)
+                    },
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxSize().padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("v-note", style = MaterialTheme.typography.headlineMedium)
-            Text(healthState.value, style = MaterialTheme.typography.bodyMedium)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("v-note", style = MaterialTheme.typography.headlineMedium)
+                if (sessionState is SessionState.SignedIn) {
+                    val label = sessionState.profile.email ?: sessionState.profile.sub
+                    var accountMenuExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(
+                            modifier =
+                                Modifier
+                                    .testTag("account-menu-button")
+                                    .semantics { contentDescription = "Open account menu" },
+                            onClick = { accountMenuExpanded = true },
+                        ) {
+                            Text("☰", style = MaterialTheme.typography.headlineSmall)
+                        }
+                        DropdownMenu(
+                            expanded = accountMenuExpanded,
+                            onDismissRequest = { accountMenuExpanded = false },
+                        ) {
+                            Text(
+                                label,
+                                modifier =
+                                    Modifier
+                                        .widthIn(max = 280.dp)
+                                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                            )
+                            Text(
+                                healthState.value,
+                                modifier =
+                                    Modifier
+                                        .widthIn(max = 280.dp)
+                                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sign out") },
+                                onClick = {
+                                    accountMenuExpanded = false
+                                    onSignOut()
+                                },
+                            )
+                        }
+                    }
+                }
+            }
 
             when (sessionState) {
-                SessionState.Loading -> Text("Checking session…")
+                SessionState.Loading ->
+                    StatePanel(
+                        eyebrow = "Session",
+                        title = "Checking access",
+                        body = "Loading your private v-note session.",
+                    )
                 SessionState.SignedOut -> {
-                    Text("Sign in with Authentik to use v-note on this device.")
+                    StatePanel(
+                        eyebrow = "Private notes",
+                        title = "Sign in to continue",
+                        body = "Use Authentik to access your page library and ink canvas.",
+                    )
                     Button(onClick = onSignIn) { Text("Sign in") }
                 }
                 is SessionState.SignedIn -> {
-                    val label = sessionState.profile.email ?: sessionState.profile.sub
-                    Text("Signed in as $label", style = MaterialTheme.typography.bodyLarge)
-                    Button(onClick = onCreatePage) { Text("New page") }
-                    libraryError?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Button(onClick = onCreatePage) { Text("New page") }
+                    }
+                    libraryError?.let { StatusBanner(it, isError = true) }
                     if (pages.isEmpty()) {
-                        Text("No pages yet.")
+                        StatePanel(
+                            eyebrow = "No pages",
+                            title = "Start with a blank ink page",
+                            body = "Create a page, then write with the S Pen.",
+                        )
                     } else {
-                        pages.forEach { page ->
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Button(onClick = { onOpenPage(page) }) { Text(page.title) }
-                                Text("updated ${page.updatedAt}")
-                                Button(onClick = { onDeletePage(page) }) { Text("Delete") }
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            items(pages, key = { it.id }) { page ->
+                                PageTile(
+                                    page = page,
+                                    onOpen = { onOpenPage(page) },
+                                    onDelete = { pendingDelete = page },
+                                )
                             }
                         }
                     }
-                    Button(onClick = onSignOut) { Text("Sign out") }
                 }
                 is SessionState.Error -> {
-                    Text(sessionState.message, style = MaterialTheme.typography.bodyMedium)
+                    StatusBanner(sessionState.message, isError = true)
                     Button(onClick = { scope.launch { onReload() } }) { Text("Retry") }
-                    Button(onClick = onSignIn) { Text("Sign in") }
+                    OutlinedButton(onClick = onSignIn) { Text("Sign in") }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun StatePanel(
+    eyebrow: String,
+    title: String,
+    body: String,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(eyebrow, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
+            Text(title, style = MaterialTheme.typography.titleLarge)
+            Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
+        }
+    }
+}
+
+@Composable
+private fun StatusBanner(
+    message: String,
+    isError: Boolean = false,
+) {
+    val color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
+    Surface(
+        color = if (isError) Color(0xFFF5E3DF) else MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(7.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            message,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+        )
+    }
+}
+
+@Composable
+private fun PageTile(
+    page: PageSummary,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PagePreview()
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(page.displayTitle(), style = MaterialTheme.typography.titleMedium)
+            }
+            TextButton(onClick = onDelete) { Text("Delete") }
+        }
+    }
+}
+
+@Composable
+private fun PagePreview() {
+    Box(
+        modifier =
+            Modifier
+                .size(width = 42.dp, height = 56.dp)
+                .drawBehind {
+                    drawRect(Color.White)
+                    val step = 8.dp.toPx()
+                    var y = step
+                    while (y < size.height) {
+                        drawLine(
+                            color = Color(0xFFE2E7E1),
+                            start = Offset(6.dp.toPx(), y),
+                            end = Offset(size.width - 6.dp.toPx(), y),
+                            strokeWidth = 1.dp.toPx(),
+                        )
+                        y += step
+                    }
+                    drawLine(
+                        color = Color(0xFFD2D9D1),
+                        start = Offset.Zero,
+                        end = Offset(size.width, 0f),
+                        strokeWidth = 1.dp.toPx(),
+                    )
+                },
+    )
 }

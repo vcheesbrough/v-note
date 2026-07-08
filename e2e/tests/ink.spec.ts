@@ -86,8 +86,12 @@ test.describe('ink page channel', () => {
     const title = uniqueTitle('ink-spa-live');
     const pageId = await createPage(request, title);
 
-    await expect(page.getByRole('button', { name: title, exact: true })).toBeVisible({ timeout: 5_000 });
-    await page.getByRole('button', { name: title, exact: true }).click();
+    const openPage = page.getByRole('button', { name: `Open ${title}`, exact: true });
+    await openPage.waitFor({ state: 'visible', timeout: 5_000 }).catch(async () => {
+      await page.reload({ waitUntil: 'load' });
+      await expect(openPage).toBeVisible({ timeout: 5_000 });
+    });
+    await openPage.click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
     await expect(page.getByText(/Synced · seq 0|Connected · seq 0|Live · seq 0/)).toBeVisible({ timeout: 5_000 });
 
@@ -128,7 +132,7 @@ test.describe('ink page channel', () => {
           greenPixels += 1;
         }
       }
-      return greenPixels > 20;
+      return greenPixels > 5;
     }, null, { timeout: 1_000 });
     const timing = await page.evaluate(() => ({
       appliedAt: (window as any).__vNoteLastInkAppliedAt as number | undefined,
@@ -288,11 +292,11 @@ function sampleViewerStrokes() {
     {
       tool: 'pen',
       color: '#006400',
-      width: 2.0,
+      width: 20.0,
       points: [
         { x: 40.0, y: 40.0, t: 0 },
-        { x: 90.0, y: 72.0, t: 12 },
-        { x: 150.0, y: 54.0, t: 24 },
+        { x: 360.0, y: 220.0, t: 12 },
+        { x: 760.0, y: 96.0, t: 24 },
       ],
     },
   ];

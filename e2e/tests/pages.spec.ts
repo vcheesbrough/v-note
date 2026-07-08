@@ -2,18 +2,31 @@ import { expect, request, test, type APIRequestContext } from '@playwright/test'
 import * as path from 'path';
 
 const storageState = path.resolve(__dirname, '..', '.auth-state.json');
+const relativeUntitledPage = /(?:just now|\d+ (?:minute|hour|day|month)s? ago)/;
 
 test.describe('page library', () => {
-  test('SPA can create, open, and delete a page', async ({ page }) => {
+  test('SPA can open and delete a page', async ({ page, request }) => {
+    const created = await request.post('/api/pages', { data: {} });
+    expect(created.status()).toBe(201);
+
     await page.goto('/', { waitUntil: 'load' });
 
-    await page.getByRole('button', { name: 'New page' }).click();
-    await expect(page.getByRole('button', { name: 'Untitled page', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Untitled page', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'New page' })).toHaveCount(0);
+    const unnamedPage = page.getByRole('button', { name: new RegExp(`^Open ${relativeUntitledPage.source}$`) }).first();
+    await expect(unnamedPage).toBeVisible();
+    await expect(page.getByText('Untitled page')).toHaveCount(0);
+    await unnamedPage.click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+    await expectCanvasFillsFrame(page);
+    await page.setViewportSize({ width: 720, height: 520 });
+    await expectCanvasFillsFrame(page);
+    await page.setViewportSize({ width: 1100, height: 700 });
+    await expectCanvasFillsFrame(page);
+    await page.getByRole('button', { name: 'Back' }).click();
 
-    await page.getByRole('button', { name: 'Delete Untitled page' }).click();
-    await expect(page.getByRole('button', { name: 'Untitled page', exact: true })).toHaveCount(0);
+    page.on('dialog', (dialog) => dialog.accept());
+    await page.getByRole('button', { name: new RegExp(`^Delete ${relativeUntitledPage.source}$`) }).first().click();
+    await expect(unnamedPage).toHaveCount(0);
   });
 
   test('REST pages are owner-scoped', async ({ request }) => {
@@ -33,6 +46,20 @@ test.describe('page library', () => {
     expect(ownerDelete.status()).toBe(204);
   });
 
+  test('SPA page cards do not show absolute metadata', async ({ page, request }) => {
+    const title = uniqueTitle('card-label');
+    const created = await request.post('/api/pages', { data: { title } });
+    expect(created.status()).toBe(201);
+    const pageId = (await created.json()).page.id;
+
+    await page.goto('/', { waitUntil: 'load' });
+    await expect(page.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible();
+    await expect(page.getByText(/Created .* Updated /)).toHaveCount(0);
+
+    const deleted = await request.delete(`/api/pages/${pageId}`);
+    expect(deleted.status()).toBe(204);
+  });
+
   test('library events fan out to sibling owner sessions without refresh', async ({ browser, request }) => {
     const title = uniqueTitle('fanout');
     const contextB = await browser.newContext({
@@ -44,17 +71,17 @@ test.describe('page library', () => {
     const pageB = await contextB.newPage();
     const websocketB = pageB.waitForEvent('websocket');
     await pageB.goto('/', { waitUntil: 'load' });
-    await expect(pageB.getByRole('heading', { name: 'Page library' })).toBeVisible();
+    await expect(pageB.getByLabel('Page library')).toBeVisible();
     await websocketB;
 
     const created = await request.post('/api/pages', { data: { title } });
     expect(created.status()).toBe(201);
     const pageId = (await created.json()).page.id;
-    await expect(pageB.getByRole('button', { name: title, exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(pageB.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible({ timeout: 5_000 });
 
     const deleted = await request.delete(`/api/pages/${pageId}`);
     expect(deleted.status()).toBe(204);
-    await expect(pageB.getByRole('button', { name: title, exact: true })).toHaveCount(0, { timeout: 5_000 });
+    await expect(pageB.getByRole('button', { name: `Open ${title}`, exact: true })).toHaveCount(0, { timeout: 5_000 });
 
     await contextB.close();
   });
@@ -71,7 +98,7 @@ test.describe('page library', () => {
     const pageB = await contextB.newPage();
     const websocketB = pageB.waitForEvent('websocket');
     await pageB.goto('/', { waitUntil: 'load' });
-    await expect(pageB.getByRole('heading', { name: 'Page library' })).toBeVisible();
+    await expect(pageB.getByLabel('Page library')).toBeVisible();
     await websocketB;
 
     const created = await request.post('/api/pages', { data: { title } });
@@ -79,13 +106,24 @@ test.describe('page library', () => {
     const pageId = (await created.json()).page.id;
 
     await pageB.waitForTimeout(750);
-    await expect(pageB.getByRole('button', { name: title, exact: true })).toHaveCount(0);
+    await expect(pageB.getByRole('button', { name: `Open ${title}`, exact: true })).toHaveCount(0);
 
     const ownerDelete = await request.delete(`/api/pages/${pageId}`);
     expect(ownerDelete.status()).toBe(204);
     await contextB.close();
   });
 });
+
+async function expectCanvasFillsFrame(page: import('@playwright/test').Page) {
+  await expect.poll(async () => {
+    const frameBox = await page.locator('.canvas-frame').boundingBox();
+    const canvasBox = await page.getByTestId('ink-canvas').boundingBox();
+    if (!frameBox || !canvasBox) {
+      return false;
+    }
+    return Math.abs(canvasBox.width - frameBox.width) < 2 && Math.abs(canvasBox.height - frameBox.height) < 2;
+  }).toBeTruthy();
+}
 
 function uniqueTitle(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
