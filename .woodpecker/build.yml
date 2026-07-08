@@ -85,6 +85,7 @@ steps:
         START=$$(date +%s)
         docker build -f Dockerfile.android-instrumented \
           --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
           --label org.opencontainers.image.title=v-note-android-instrumented \
           --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
