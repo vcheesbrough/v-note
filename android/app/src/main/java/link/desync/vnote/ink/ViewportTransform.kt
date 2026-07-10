@@ -4,8 +4,9 @@ import androidx.compose.ui.geometry.Offset
 
 private const val MIN_SCALE = 0.2f
 private const val MAX_SCALE = 8f
-private const val MOMENTUM_DECELERATION = 2_400f
-private const val MOMENTUM_MAX_VELOCITY = 1_400f
+private const val MOMENTUM_DECELERATION = 8_000f
+private const val MOMENTUM_RELEASE_MULTIPLIER = 2f
+private const val MOMENTUM_MAX_VELOCITY = 4_000f
 internal const val MOMENTUM_STOP_VELOCITY = 18f
 
 internal data class ViewportTransform(
@@ -108,7 +109,7 @@ internal class ViewportGestureTracker {
         if (!pointerCountChanged && pointerCount == 1 && panDelta != Offset.Zero) {
             previousEventTimeMillis?.let { previous ->
                 val deltaSeconds = ((eventTimeMillis - previous).coerceAtLeast(1L)) / 1000f
-                latestVelocity = capMomentumVelocity(panDelta / deltaSeconds)
+                latestVelocity = capMomentumVelocity((panDelta / deltaSeconds) * MOMENTUM_RELEASE_MULTIPLIER)
                 movedWithSingleFinger = true
             }
         } else if (pointerCount != 1) {
