@@ -37,14 +37,19 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.withFrameNanos
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.Stroke
 import link.desync.vnote.auth.StrokePoint
 import link.desync.vnote.ui.displayTitle
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.drawscope.Stroke as StrokeStyle
 
 private val InkColor = Color(0xFF006400)
+private const val NANOS_PER_SECOND = 1_000_000_000f
 
 // Full-screen ink editor for one open page: top bar with back + title, an
 // optional status banner (e.g. blocked-by-another-editor), and the infinite
@@ -98,9 +103,13 @@ private fun InkCanvas(
 ) {
     // View transform on the infinite canvas. Stored ink never mutates when the
     // viewport pans/zooms — only this transform changes (see PLAN → Canvas & navigation).
-    var scale by remember { mutableStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
+    var viewport by remember { mutableStateOf(ViewportTransform()) }
+    val scope = rememberCoroutineScope()
+    var momentumJob by remember { mutableStateOf<Job?>(null) }
     val liveStroke = remember { mutableStateListOf<StrokePoint>() }
+    DisposableEffect(Unit) {
+        onDispose { momentumJob?.cancel() }
+    }
 
     Canvas(
         modifier =
@@ -109,10 +118,12 @@ private fun InkCanvas(
                 .background(Color.White)
                 .pointerInput(canEdit) {
                     awaitEachGesture {
+                        momentumJob?.cancel()
+                        momentumJob = null
                         val down = awaitFirstDown(requireUnconsumed = false)
                         if (down.type == PointerType.Stylus && canEdit) {
                             // Stylus draws; touch is reserved for viewport navigation.
-                            captureStroke(down, scale, offset, liveStroke) {
+                            captureStroke(down, viewport, liveStroke) {
                                 val captured = liveStroke.toList()
                                 liveStroke.clear()
                                 if (captured.isNotEmpty()) {
@@ -120,20 +131,25 @@ private fun InkCanvas(
                                 }
                             }
                         } else {
-                            handleViewport { panDelta, zoom, centroid ->
-                                offset += panDelta
-                                if (zoom != 1f) {
-                                    offset = centroid - (centroid - offset) * zoom
-                                    scale *= zoom
+                            val gesture =
+                                handleViewport { panDelta, zoom, centroid ->
+                                    viewport = viewport.applyGesture(panDelta, zoom, centroid)
                                 }
+                            if (gesture.launchMomentum) {
+                                momentumJob =
+                                    scope.launch {
+                                        runPanMomentum(gesture.velocity) { delta ->
+                                            viewport = viewport.pan(delta)
+                                        }
+                                    }
                             }
                         }
                     }
                 },
     ) {
         withTransform({
-            translate(offset.x, offset.y)
-            scale(scale, scale, pivot = Offset.Zero)
+            translate(viewport.offset.x, viewport.offset.y)
+            scale(viewport.scale, viewport.scale, pivot = Offset.Zero)
         }) {
             for (stroke in strokes) {
                 drawInk(stroke.points, stroke.width.toFloat())
@@ -148,14 +164,13 @@ private fun InkCanvas(
 // Collect one stylus stroke as world-space samples until the pointer lifts.
 private suspend fun AwaitPointerEventScope.captureStroke(
     first: PointerInputChange,
-    scale: Float,
-    offset: Offset,
+    viewport: ViewportTransform,
     liveStroke: SnapshotStateList<StrokePoint>,
     onFinished: () -> Unit,
 ) {
     val startTime = System.currentTimeMillis()
     liveStroke.clear()
-    liveStroke.add(toWorldPoint(first.position, scale, offset, startTime))
+    liveStroke.add(toWorldPoint(first.position, viewport, startTime))
     first.consume()
     while (true) {
         val event = awaitPointerEvent()
@@ -164,34 +179,61 @@ private suspend fun AwaitPointerEventScope.captureStroke(
             change.consume()
             break
         }
-        liveStroke.add(toWorldPoint(change.position, scale, offset, startTime))
+        liveStroke.add(toWorldPoint(change.position, viewport, startTime))
         change.consume()
     }
     onFinished()
 }
 
 // Single-finger pan + two-finger pinch zoom; reports incremental transforms.
-private suspend fun AwaitPointerEventScope.handleViewport(onTransform: (panDelta: Offset, zoom: Float, centroid: Offset) -> Unit) {
-    var previousCentroid: Offset? = null
-    var previousSpread = 0f
+private suspend fun AwaitPointerEventScope.handleViewport(
+    onTransform: (panDelta: Offset, zoom: Float, centroid: Offset) -> Unit,
+): ViewportGestureResult {
+    val tracker = ViewportGestureTracker()
     while (true) {
         val event = awaitPointerEvent()
         val pressed = event.changes.filter { it.pressed }
         if (pressed.isEmpty()) {
-            break
+            return ViewportGestureResult(
+                velocity = tracker.velocity(),
+                launchMomentum = tracker.shouldLaunchMomentum(),
+            )
         }
         val centroid =
             pressed.fold(Offset.Zero) { acc, change -> acc + change.position } /
                 pressed.size.toFloat()
         val spread = if (pressed.size >= 2) averageSpread(pressed, centroid) else 0f
-        val zoom = if (spread > 0f && previousSpread > 0f) spread / previousSpread else 1f
-        val panDelta = previousCentroid?.let { centroid - it } ?: Offset.Zero
-        if (panDelta != Offset.Zero || zoom != 1f) {
-            onTransform(panDelta, zoom, centroid)
+        val step =
+            tracker.update(
+                pointerCount = pressed.size,
+                centroid = centroid,
+                spread = spread,
+                eventTimeMillis = event.changes.maxOf { it.uptimeMillis },
+            )
+        if (step.panDelta != Offset.Zero || step.zoom != 1f) {
+            onTransform(step.panDelta, step.zoom, step.centroid)
         }
-        previousCentroid = centroid
-        previousSpread = spread
         pressed.forEach { it.consume() }
+    }
+}
+
+private data class ViewportGestureResult(
+    val velocity: Offset,
+    val launchMomentum: Boolean,
+)
+
+private suspend fun runPanMomentum(
+    initialVelocity: Offset,
+    onPan: (Offset) -> Unit,
+) {
+    var velocity = initialVelocity
+    var previousFrame = withFrameNanos { it }
+    while (kotlin.coroutines.coroutineContext.isActive && shouldContinueMomentum(velocity)) {
+        val frame = withFrameNanos { it }
+        val deltaSeconds = (frame - previousFrame) / NANOS_PER_SECOND
+        previousFrame = frame
+        onPan(velocity * deltaSeconds)
+        velocity = dampVelocity(velocity, deltaSeconds)
     }
 }
 
@@ -211,15 +253,16 @@ private fun averageSpread(
 
 private fun toWorldPoint(
     position: Offset,
-    scale: Float,
-    offset: Offset,
+    viewport: ViewportTransform,
     startTime: Long,
-): StrokePoint =
-    StrokePoint(
-        x = ((position.x - offset.x) / scale).toDouble(),
-        y = ((position.y - offset.y) / scale).toDouble(),
+): StrokePoint {
+    val world = viewport.toWorld(position)
+    return StrokePoint(
+        x = world.x.toDouble(),
+        y = world.y.toDouble(),
         t = System.currentTimeMillis() - startTime,
     )
+}
 
 private fun DrawScope.drawInk(
     points: List<StrokePoint>,
