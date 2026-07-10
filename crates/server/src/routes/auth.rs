@@ -8,6 +8,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
 use rand::RngCore;
 use serde::Deserialize;
+use tracing::Instrument as _;
 
 use crate::auth::{Claims, AUTH_COOKIE, STATE_COOKIE};
 use crate::AppState;
@@ -15,6 +16,7 @@ use crate::AppState;
 const STATE_COOKIE_MAX_AGE_SECS: i64 = 300;
 const AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24;
 
+#[tracing::instrument(skip_all)]
 pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     let auth = &state.auth;
 
@@ -66,6 +68,7 @@ struct TokenResponse {
     access_token: String,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn callback(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -107,6 +110,11 @@ pub async fn callback(
             ("client_secret", &auth.client_secret),
         ])
         .send()
+        .instrument(tracing::info_span!(
+            "http.client",
+            http.method = "POST",
+            url = %auth.token_url(),
+        ))
         .await
     {
         Ok(resp) => match resp.error_for_status() {
@@ -159,6 +167,7 @@ pub async fn callback(
     (jar.add(session).add(clear_state), Redirect::to("/")).into_response()
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
     let clear = Cookie::build((AUTH_COOKIE, ""))
         .path("/")
@@ -178,10 +187,12 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
     (jar, Redirect::to(&target)).into_response()
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn me(Extension(claims): Extension<Claims>) -> Json<protocol::MeResponse> {
     Json(claims.to_me_response())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn mobile_callback(OriginalUri(uri): OriginalUri) -> Html<String> {
     let custom_scheme_url = match uri.query() {
         Some(query) if !query.is_empty() => {
@@ -213,6 +224,7 @@ pub async fn mobile_callback(OriginalUri(uri): OriginalUri) -> Html<String> {
     ))
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn assetlinks() -> Response {
     match std::env::var("ASSETLINKS_JSON") {
         Ok(json) if !json.is_empty() => (
