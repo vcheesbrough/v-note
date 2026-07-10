@@ -6,6 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use protocol::{CreatePageRequest, LibraryEvent, ListPagesResponse, PageResponse, PageSummary};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::auth::Claims;
@@ -37,6 +38,7 @@ fn db(state: &AppState) -> Result<&sqlx::PgPool, Response> {
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "database not configured").into_response())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn list_pages(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -51,6 +53,12 @@ pub async fn list_pages(
     )
     .bind(claims.sub.clone())
     .fetch_all(db(&state)?)
+    .instrument(tracing::info_span!(
+        "db.query",
+        db.system = "postgresql",
+        db.operation = "SELECT",
+        db.query_name = "list_pages",
+    ))
     .await
     .map_err(server_error)?;
 
@@ -59,6 +67,7 @@ pub async fn list_pages(
     }))
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn create_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -83,6 +92,12 @@ pub async fn create_page(
     .bind(claims.sub.clone())
     .bind(title)
     .fetch_one(db(&state)?)
+    .instrument(tracing::info_span!(
+        "db.query",
+        db.system = "postgresql",
+        db.operation = "INSERT",
+        db.query_name = "create_page",
+    ))
     .await
     .map_err(|error| {
         crate::observability::metrics().record_page_mutation("create_page", "error");
@@ -98,6 +113,7 @@ pub async fn create_page(
     Ok((StatusCode::CREATED, Json(PageResponse { page })))
 }
 
+#[tracing::instrument(skip_all, fields(page_id = %page_id))]
 pub async fn get_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -113,6 +129,12 @@ pub async fn get_page(
     .bind(page_id)
     .bind(claims.sub)
     .fetch_optional(db(&state)?)
+    .instrument(tracing::info_span!(
+        "db.query",
+        db.system = "postgresql",
+        db.operation = "SELECT",
+        db.query_name = "get_page",
+    ))
     .await
     .map_err(server_error)?;
 
@@ -124,6 +146,7 @@ pub async fn get_page(
     }
 }
 
+#[tracing::instrument(skip_all, fields(page_id = %page_id))]
 pub async fn delete_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -138,6 +161,12 @@ pub async fn delete_page(
     .bind(page_id.clone())
     .bind(claims.sub.clone())
     .execute(db(&state)?)
+    .instrument(tracing::info_span!(
+        "db.query",
+        db.system = "postgresql",
+        db.operation = "DELETE",
+        db.query_name = "delete_page",
+    ))
     .await
     .map_err(|error| {
         crate::observability::metrics().record_page_mutation("delete_page", "error");

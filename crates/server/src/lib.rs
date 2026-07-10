@@ -150,12 +150,14 @@ pub fn build_router_with_db(
     router.layer(middleware::from_fn(request_observability_middleware))
 }
 
+#[tracing::instrument(skip_all)]
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
     })
 }
 
+#[tracing::instrument(skip_all)]
 async fn meta(axum::extract::State(state): axum::extract::State<AppState>) -> Json<MetaResponse> {
     Json(MetaResponse {
         app_name: "v-note".to_string(),
