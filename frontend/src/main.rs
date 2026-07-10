@@ -24,6 +24,7 @@ fn release_version() -> &'static str {
 }
 
 const UNTITLED_PAGE: &str = "Untitled page";
+const REQUEST_ID_HEADER: &str = "X-Request-Id";
 
 fn page_has_title(page: &PageSummary) -> bool {
     let title = page.title.trim();
@@ -36,6 +37,12 @@ fn page_display_title(page: &PageSummary) -> String {
     } else {
         approximate_relative_datetime(&page.updated_at)
     }
+}
+
+fn request_id() -> String {
+    let now = Date::now().round() as u64;
+    let random = (js_sys::Math::random() * 1_000_000_000_000.0).round() as u64;
+    format!("spa_{now:x}_{random:x}")
 }
 
 fn compact_datetime(value: &str) -> String {
@@ -77,6 +84,7 @@ fn App() -> impl IntoView {
         wasm_bindgen_futures::spawn_local(async move {
             let meta_result = async {
                 let response = Request::get("/api/meta")
+                    .header(REQUEST_ID_HEADER, &request_id())
                     .send()
                     .await
                     .map_err(|error| format!("request failed: {error}"))?;
@@ -88,7 +96,10 @@ fn App() -> impl IntoView {
             .await;
             meta.set(Some(meta_result));
 
-            let me_result = Request::get("/api/me").send().await;
+            let me_result = Request::get("/api/me")
+                .header(REQUEST_ID_HEADER, &request_id())
+                .send()
+                .await;
             me.set(Some(match me_result {
                 Ok(response) if response.ok() => match response.json::<MeResponse>().await {
                     Ok(profile) => Some(Ok(profile)),
@@ -442,6 +453,7 @@ async fn page_realtime_once(
     last_seq: RwSignal<u64>,
 ) -> Result<(), String> {
     let ticket_response = Request::post("/api/realtime-ticket")
+        .header(REQUEST_ID_HEADER, &request_id())
         .send()
         .await
         .map_err(|error| format!("page realtime ticket failed: {error}"))?;
@@ -601,6 +613,7 @@ async fn load_pages(
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
     let response = Request::get("/api/pages")
+        .header(REQUEST_ID_HEADER, &request_id())
         .send()
         .await
         .map_err(|error| format!("loading pages failed: {error}"))?;
@@ -623,6 +636,7 @@ async fn delete_page(
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
     let response = Request::delete(&format!("/api/pages/{page_id}"))
+        .header(REQUEST_ID_HEADER, &request_id())
         .send()
         .await
         .map_err(|error| format!("deleting page failed: {error}"))?;
@@ -653,6 +667,7 @@ async fn library_realtime_once(
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
     let ticket_response = Request::post("/api/realtime-ticket")
+        .header(REQUEST_ID_HEADER, &request_id())
         .send()
         .await
         .map_err(|error| format!("realtime ticket failed: {error}"))?;

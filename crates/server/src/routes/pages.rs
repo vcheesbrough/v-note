@@ -6,6 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use protocol::{CreatePageRequest, LibraryEvent, ListPagesResponse, PageResponse, PageSummary};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::auth::Claims;
@@ -37,6 +38,16 @@ fn db(state: &AppState) -> Result<&sqlx::PgPool, Response> {
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "database not configured").into_response())
 }
 
+fn db_query_span(operation: &'static str, query_name: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        "db.query",
+        db.system = "postgresql",
+        db.operation = operation,
+        db.query_name = query_name,
+    )
+}
+
+#[tracing::instrument(skip_all)]
 pub async fn list_pages(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -51,6 +62,7 @@ pub async fn list_pages(
     )
     .bind(claims.sub.clone())
     .fetch_all(db(&state)?)
+    .instrument(db_query_span("SELECT", "list_pages"))
     .await
     .map_err(server_error)?;
 
@@ -59,6 +71,7 @@ pub async fn list_pages(
     }))
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn create_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -83,17 +96,23 @@ pub async fn create_page(
     .bind(claims.sub.clone())
     .bind(title)
     .fetch_one(db(&state)?)
+    .instrument(db_query_span("INSERT", "create_page"))
     .await
-    .map_err(server_error)?;
+    .map_err(|error| {
+        crate::observability::metrics().record_page_mutation("create_page", "error");
+        server_error(error)
+    })?;
 
     let page = PageSummary::from(row);
     state.realtime.publish_library_event(
         &claims.sub,
         LibraryEvent::PageCreated { page: page.clone() },
     );
+    crate::observability::metrics().record_page_mutation("create_page", "success");
     Ok((StatusCode::CREATED, Json(PageResponse { page })))
 }
 
+#[tracing::instrument(skip_all, fields(page_id = %page_id))]
 pub async fn get_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -109,6 +128,7 @@ pub async fn get_page(
     .bind(page_id)
     .bind(claims.sub)
     .fetch_optional(db(&state)?)
+    .instrument(db_query_span("SELECT", "get_page"))
     .await
     .map_err(server_error)?;
 
@@ -120,6 +140,7 @@ pub async fn get_page(
     }
 }
 
+#[tracing::instrument(skip_all, fields(page_id = %page_id))]
 pub async fn delete_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -134,16 +155,22 @@ pub async fn delete_page(
     .bind(page_id.clone())
     .bind(claims.sub.clone())
     .execute(db(&state)?)
+    .instrument(db_query_span("DELETE", "delete_page"))
     .await
-    .map_err(server_error)?;
+    .map_err(|error| {
+        crate::observability::metrics().record_page_mutation("delete_page", "error");
+        server_error(error)
+    })?;
 
     if result.rows_affected() == 0 {
+        crate::observability::metrics().record_page_mutation("delete_page", "not_found");
         return Err((StatusCode::FORBIDDEN, "page not found").into_response());
     }
 
     state
         .realtime
         .publish_library_event(&claims.sub, LibraryEvent::PageDeleted { page_id });
+    crate::observability::metrics().record_page_mutation("delete_page", "success");
     Ok(StatusCode::NO_CONTENT)
 }
 
