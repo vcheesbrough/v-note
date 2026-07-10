@@ -6,6 +6,8 @@ This file is the single source of truth for AI agents and assistants working in 
 
 If you change a rule below, change it here — there is no parallel copy.
 
+
+
 ---
 
 ## Repository context
@@ -103,6 +105,7 @@ Cards in **TODO / backlog** are **spec only** until the card moves to **In progr
 **Full push/deploy CI:** lands with **#145** — [`.woodpecker/build.yml`](.woodpecker/build.yml), deploy compose, contract-validation, e2e (see [`docs/PLAN.md`](docs/PLAN.md) **Engineering workflows**). Until that scaffold exists, do **not** add pipeline files unless the user requests that slice.
 
 - **E2E policy (locked):** Every **user-facing feature** in an iteration card must have **automated e2e tests in CI** before that card merges — see [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**. Contract/unit tests supplement; they do not replace e2e. No manual-only or runbook-only acceptance for product behaviour.
+- **Observability policy:** For every future implementation ticket, consider whether the change needs updates to **metrics, logs, spans/traces, trace-log correlation, labels, dashboards, alerts, or runbook/docs**. If no observability change is needed, that should be an intentional decision, not an omission.
 - Until push CI exists, run **local** sanity checks when you touch code (`cargo check`, `trunk build`, Gradle tasks, etc.) — only after those trees exist.
 
 ### Monitor builds (agent obligation)

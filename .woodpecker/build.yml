@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push: compute-version ∥ contract-validation ∥ build-android ∥ android-instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev
+# Push: compute-version ∥ contract-validation ∥ build-android ∥ android-instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
 # Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release
 
 when:
@@ -271,6 +271,19 @@ steps:
         from_secret: v_note_dev_assetlinks_json
     commands:
       - ./scripts/deploy-v-note.sh dev
+
+  tag-release-auto-dev:
+    when:
+      - event: push
+    depends_on:
+      - auto-deploy-dev
+    pull: true
+    image: *version-plugin
+    settings:
+      mode: push-tag
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
 
   deploy-prod:
     when:

@@ -19,6 +19,7 @@ services:
     container_name: ${V_NOTE_CONTAINER_NAME:-v-note-local}
     ports:
       - "${V_NOTE_PORT:-8443}:443"
+      - "${V_NOTE_METRICS_PORT:-9090}:9090"
     networks: !override
       - v-note-net
     labels: !override

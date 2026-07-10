@@ -25,8 +25,9 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
 4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket)
+5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
-Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, `android-instrumented`, `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev` and `auto-deploy-dev` run. Prod remains manual-only and is never deployed from a push event.
+Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, `android-instrumented`, `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
 
 Operator reproduction from a Woodpecker-equivalent shell:
 
@@ -86,10 +87,22 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 | `OIDC_ANDROID_CLIENT_ID` | Android app client (`v-note-android-{dev,prod}`) |
 | `OIDC_ANDROID_ISSUER_URL` | Android Authentik provider issuer URL |
 | `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Defaults to `http://monitor-alloy:4317` in deploy; override only if mini-config changes |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` |
+| `METRICS_ADDR` | `0.0.0.0:9090` internal listener scraped by Alloy |
 
 **OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
 
 Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for deploy** — Woodpecker injects minified JSON from OpenBao keys `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` (step `environment:` → `docker compose` reads `${ASSETLINKS_JSON}`). Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do not commit real fingerprints).
+
+## Observability
+
+v-note integrates with the mini-config monitoring stack on `proxy-backend`:
+
+- **Metrics:** the app serves Prometheus text on internal port `9090` at `/metrics`. Alloy discovers it through Docker labels on the `v-note` service: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.metrics.scheme=http`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
+- **Traces:** `scripts/deploy-v-note.sh` sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://monitor-alloy:4317`, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, and `OTEL_SERVICE_NAME=v-note` unless explicitly overridden.
+- **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
+- **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
 **Seed Woodpecker App Links secrets** (operator, on mini or with write access to `secret/woodpecker/repos/vcheesbrough/v-note`):
 

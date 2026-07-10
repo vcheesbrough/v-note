@@ -10,6 +10,7 @@ use axum_extra::extract::cookie::CookieJar;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tracing::Instrument as _;
 
 pub const AUTH_COOKIE: &str = "auth";
 pub const STATE_COOKIE: &str = "auth_state";
@@ -108,7 +109,14 @@ impl AuthConfig {
         let url = format!("{base}/.well-known/openid-configuration");
         let mut last_err = String::new();
         for attempt in 1..=10 {
-            match reqwest::get(&url).await {
+            match reqwest::get(&url)
+                .instrument(tracing::info_span!(
+                    "http.client",
+                    http.method = "GET",
+                    url = %url,
+                ))
+                .await
+            {
                 Ok(resp) => match resp.error_for_status() {
                     Ok(resp) => match resp.json::<DiscoveryDoc>().await {
                         Ok(doc) => return Ok(doc),
@@ -174,6 +182,11 @@ impl JwksCache {
             .http
             .get(&self.jwks_url)
             .send()
+            .instrument(tracing::info_span!(
+                "http.client",
+                http.method = "GET",
+                url = %self.jwks_url,
+            ))
             .await
             .map_err(|error| format!("fetching JWKS: {error}"))?
             .error_for_status()
@@ -235,6 +248,7 @@ pub enum TokenValidationError {
     MissingScope,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn validate_jwt(
     token: &str,
     config: &AuthConfig,
@@ -291,25 +305,32 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let auth_span = tracing::info_span!("auth.middleware");
     let token = extract_bearer(&headers).or_else(|| {
         cookies
             .get(AUTH_COOKIE)
             .map(|cookie| cookie.value().to_string())
     });
     let Some(token) = token else {
+        crate::observability::metrics().record_auth_failure("missing_token");
         return (StatusCode::UNAUTHORIZED, "missing token").into_response();
     };
 
-    match validate_jwt(&token, &state.auth, &state.jwks_cache).await {
+    match validate_jwt(&token, &state.auth, &state.jwks_cache)
+        .instrument(auth_span)
+        .await
+    {
         Ok(claims) => {
             req.extensions_mut().insert(claims);
             next.run(req).await
         }
         Err(TokenValidationError::MissingScope) => {
+            crate::observability::metrics().record_auth_failure("missing_scope");
             tracing::warn!("auth middleware rejected request: missing required scope");
             (StatusCode::FORBIDDEN, "missing required scope").into_response()
         }
         Err(TokenValidationError::Invalid(reason)) => {
+            crate::observability::metrics().record_auth_failure("invalid_token");
             tracing::warn!(reason, "auth middleware rejected request");
             (StatusCode::UNAUTHORIZED, reason).into_response()
         }

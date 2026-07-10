@@ -232,9 +232,11 @@ See **[`docs/DEPLOY.md`](DEPLOY.md)** — Woodpecker auto-dev deploy after green
 
 ### Observability (MVP baseline)
 
-- **Structured logging** (JSON or key=value) on server + worker; **correlation id** on failed commits / sync errors.
-- **`GET /health`** — process up; **`GET /ready`** (or health subcheck) — Postgres reachable when wired.
-- **Metrics/tracing** (Prometheus, Grafana, Loki on mini) — **#152** ops hardening; not required for walking skeleton.
+- **Structured logging:** server emits JSON logs with request/correlation IDs; clients send `X-Request-Id` on REST calls. Android also sends it on WSS handshakes; browser WSS uses the short-lived ticket path because native WebSocket headers are unavailable.
+- **Metrics:** `GET /metrics` exposes Prometheus text for HTTP, auth failures, page/ink mutations, realtime events, active realtime connections, and build/protocol metadata. Deploy labels use mini-config Alloy Docker discovery: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
+- **Tracing:** server exports OTLP traces to Alloy when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; deploy defaults to `http://monitor-alloy:4317` on `proxy-backend`.
+- **Logs:** stdout/stderr are structured JSON for Docker scraping. Environment, release, and protocol metadata come from Docker labels, while high-cardinality details stay in log fields.
+- **Health:** `GET /health` is process-up; readiness subchecks may be added when needed.
 
 ### Dependency & security hygiene
 

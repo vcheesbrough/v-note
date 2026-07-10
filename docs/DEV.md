@@ -62,10 +62,25 @@ Environment:
 | `OIDC_ANDROID_CLIENT_ID` | optional | Android Authentik app client id (`v-note-android-{dev,prod}`) |
 | `OIDC_ANDROID_ISSUER_URL` | optional | Android provider issuer (separate Authentik app) |
 | `ASSETLINKS_JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json` |
+| `METRICS_ADDR` | `0.0.0.0:9090` | internal Prometheus listener; set `disabled` to turn it off |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | when set, exports OTLP traces to Alloy, e.g. `http://monitor-alloy:4317` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | only gRPC is supported |
+| `OTEL_SERVICE_NAME` | `v-note` | trace service name |
 
 **OIDC is mandatory:** the server refuses to start without `OIDC_ISSUER_URL` and related vars. Local dev and CI use **mock OIDC** (`deploy/docker-compose.local.yml`, `e2e/docker-compose.test.yml`) — not auth-disabled anonymous mode.
 
 **E2e auth:** `e2e/docker-compose.test.yml` runs mock OIDC; Playwright `global-setup.ts` seeds the `auth` cookie. See `e2e/tests/auth.spec.ts`.
+
+### Observability
+
+Server logs are JSON on stdout/stderr. REST responses echo `X-Request-Id` and `X-Correlation-Id`; the SPA sends `X-Request-Id` on HTTP calls, and Android sends it on HTTP plus WSS handshakes.
+
+Metrics are served as Prometheus text on the internal metrics listener (`METRICS_ADDR`, default `0.0.0.0:9090`). The main app router does not expose `/metrics` through Traefik. Local checks:
+
+```bash
+METRICS_ADDR=127.0.0.1:9090 cargo run -p server
+curl http://127.0.0.1:9090/metrics
+```
 
 ---
 
@@ -182,6 +197,7 @@ Non-secret compose defaults are in **`deploy/compose.env`** (committed). Secrets
 Or: `./scripts/fetch-compose-env.sh` then `docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build`
 
 - **API + SPA:** `https://localhost:8443` (self-signed — use `curl -k`)
+- **Metrics:** `http://localhost:9090/metrics`
 - **Postgres:** internal only (`postgres:5432`)
 
 Mini deploy uses `deploy/docker-compose.yml` only (Traefik `proxy-backend`, `lan-vpn-only@docker`). Local dev adds `deploy/docker-compose.local.yml` (mock OIDC on `:18080`, published `:8443`, Traefik off). The server talks to **`mock-oidc:8080`** on the compose network; the browser sign-in redirect uses **`http://localhost:18080`** via optional **`OIDC_AUTHORIZE_URL`**.

@@ -1,5 +1,6 @@
 package link.desync.vnote.auth
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -10,6 +11,11 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.util.UUID
+
+private const val REQUEST_ID_HEADER = "X-Request-Id"
+private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
+private const val LOG_TAG = "VNoteApi"
 
 class ApiClient(
     private val baseUrl: String,
@@ -27,9 +33,7 @@ class ApiClient(
     suspend fun listPages(): Result<List<PageSummary>> =
         withContext(Dispatchers.IO) {
             executeAuthorized(retryOnUnauthorized = true) { token ->
-                Request.Builder()
-                    .url("$baseUrl/api/pages")
-                    .header("Authorization", "Bearer $token")
+                authorizedRequest("$baseUrl/api/pages", token)
                     .get()
                     .build()
             }.mapCatching { body ->
@@ -50,9 +54,7 @@ class ApiClient(
                         .apply { title?.let { put("title", it) } }
                         .toString()
                         .toRequestBody(jsonMediaType)
-                Request.Builder()
-                    .url("$baseUrl/api/pages")
-                    .header("Authorization", "Bearer $token")
+                authorizedRequest("$baseUrl/api/pages", token)
                     .post(body)
                     .build()
             }.mapCatching { body -> parsePage(JSONObject(body).getJSONObject("page")) }
@@ -61,9 +63,7 @@ class ApiClient(
     suspend fun deletePage(pageId: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             executeAuthorized(retryOnUnauthorized = true) { token ->
-                Request.Builder()
-                    .url("$baseUrl/api/pages/$pageId")
-                    .header("Authorization", "Bearer $token")
+                authorizedRequest("$baseUrl/api/pages/$pageId", token)
                     .delete()
                     .build()
             }.map { }
@@ -72,9 +72,7 @@ class ApiClient(
     fun openLibrarySocket(listener: LibraryEventListener): WebSocket? {
         val token = tokenStore.accessToken() ?: return null
         val request =
-            Request.Builder()
-                .url("${wsBaseUrl()}/api/realtime")
-                .header("Authorization", "Bearer $token")
+            authorizedRequest("${wsBaseUrl()}/api/realtime", token)
                 .build()
         return http.newWebSocket(
             request,
@@ -93,7 +91,13 @@ class ApiClient(
                     t: Throwable,
                     response: Response?,
                 ) {
-                    listener.onError(t.message ?: "Realtime connection failed")
+                    logWebSocketFailure("library realtime", response, t)
+                    listener.onError(
+                        requestFailureMessage(
+                            t.message ?: "Realtime connection failed",
+                            response,
+                        ),
+                    )
                 }
 
                 override fun onClosed(
@@ -116,9 +120,7 @@ class ApiClient(
     ): PageSocket? {
         val token = tokenStore.accessToken() ?: return null
         val request =
-            Request.Builder()
-                .url("${wsBaseUrl()}/api/pages/$pageId/realtime")
-                .header("Authorization", "Bearer $token")
+            authorizedRequest("${wsBaseUrl()}/api/pages/$pageId/realtime", token)
                 .build()
         val webSocket =
             http.newWebSocket(
@@ -138,7 +140,13 @@ class ApiClient(
                         t: Throwable,
                         response: Response?,
                     ) {
-                        listener.onError(t.message ?: "Page connection failed")
+                        logWebSocketFailure("page realtime", response, t)
+                        listener.onError(
+                            requestFailureMessage(
+                                t.message ?: "Page connection failed",
+                                response,
+                            ),
+                        )
                     }
 
                     override fun onClosed(
@@ -172,9 +180,7 @@ class ApiClient(
                 ?: return Result.failure(IllegalStateException("Not signed in"))
 
         val request =
-            Request.Builder()
-                .url("$baseUrl/api/me")
-                .header("Authorization", "Bearer $accessToken")
+            authorizedRequest("$baseUrl/api/me", accessToken)
                 .get()
                 .build()
 
@@ -187,8 +193,9 @@ class ApiClient(
                 return Result.failure(IllegalStateException("Session expired"))
             }
             if (!response.isSuccessful) {
+                logHttpFailure("GET /api/me", response)
                 return Result.failure(
-                    IllegalStateException("GET /api/me failed: HTTP ${response.code}"),
+                    IllegalStateException(requestFailureMessage("GET /api/me failed", response)),
                 )
             }
             val body = response.body?.string().orEmpty()
@@ -219,13 +226,57 @@ class ApiClient(
                 return Result.failure(IllegalStateException("Session expired"))
             }
             if (!response.isSuccessful) {
+                logHttpFailure("API request", response)
                 return Result.failure(
-                    IllegalStateException("API request failed: HTTP ${response.code}"),
+                    IllegalStateException(requestFailureMessage("API request failed", response)),
                 )
             }
             return Result.success(response.body?.string().orEmpty())
         }
     }
+
+    private fun authorizedRequest(
+        url: String,
+        token: String,
+    ): Request.Builder =
+        Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $token")
+            .header(REQUEST_ID_HEADER, requestId())
+
+    private fun requestFailureMessage(
+        prefix: String,
+        response: Response?,
+    ): String {
+        val status = response?.code?.let { ": HTTP $it" }.orEmpty()
+        val requestId = response?.requestId()?.let { " request_id=$it" }.orEmpty()
+        return "$prefix$status$requestId"
+    }
+
+    private fun logHttpFailure(
+        context: String,
+        response: Response,
+    ) {
+        Log.w(LOG_TAG, "$context failed: HTTP ${response.code} request_id=${response.requestId().orEmpty()}")
+    }
+
+    private fun logWebSocketFailure(
+        context: String,
+        response: Response?,
+        throwable: Throwable,
+    ) {
+        Log.w(
+            LOG_TAG,
+            "$context failed request_id=${response?.requestId().orEmpty()}",
+            throwable,
+        )
+    }
+
+    private fun Response.requestId(): String? =
+        header(REQUEST_ID_HEADER)
+            ?: header(CORRELATION_ID_HEADER)
+
+    private fun requestId(): String = "android_${UUID.randomUUID()}"
 }
 
 data class MeProfile(
