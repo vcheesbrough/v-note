@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "console_error_panic_hook",
  "futures-util",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "axum",
  "axum-extra",
