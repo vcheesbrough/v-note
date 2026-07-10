@@ -118,9 +118,9 @@ private fun InkCanvas(
                 .background(Color.White)
                 .pointerInput(canEdit) {
                     awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
                         momentumJob?.cancel()
                         momentumJob = null
-                        val down = awaitFirstDown(requireUnconsumed = false)
                         if (down.type == PointerType.Stylus && canEdit) {
                             // Stylus draws; touch is reserved for viewport navigation.
                             captureStroke(down, viewport, liveStroke) {
