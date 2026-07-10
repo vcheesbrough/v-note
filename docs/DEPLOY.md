@@ -25,8 +25,9 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
 4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket)
+5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
-Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, `android-instrumented`, `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev` and `auto-deploy-dev` run. Prod remains manual-only and is never deployed from a push event.
+Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, `android-instrumented`, `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
 
 Operator reproduction from a Woodpecker-equivalent shell:
 
