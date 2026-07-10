@@ -86,10 +86,22 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 | `OIDC_ANDROID_CLIENT_ID` | Android app client (`v-note-android-{dev,prod}`) |
 | `OIDC_ANDROID_ISSUER_URL` | Android Authentik provider issuer URL |
 | `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Defaults to `http://monitor-alloy:4317` in deploy; override only if mini-config changes |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` |
+| `METRICS_ADDR` | `0.0.0.0:9090` internal listener scraped by Alloy |
 
 **OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
 
 Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for deploy** — Woodpecker injects minified JSON from OpenBao keys `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` (step `environment:` → `docker compose` reads `${ASSETLINKS_JSON}`). Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do not commit real fingerprints).
+
+## Observability
+
+v-note integrates with the mini-config monitoring stack on `proxy-backend`:
+
+- **Metrics:** the app serves Prometheus text on internal port `9090` at `/metrics`. Alloy discovers it through Docker labels on the `v-note` service: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.metrics.scheme=http`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
+- **Traces:** `scripts/deploy-v-note.sh` sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://monitor-alloy:4317`, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, and `OTEL_SERVICE_NAME=v-note` unless explicitly overridden.
+- **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
+- **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
 **Seed Woodpecker App Links secrets** (operator, on mini or with write access to `secret/woodpecker/repos/vcheesbrough/v-note`):
 

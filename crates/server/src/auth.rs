@@ -297,6 +297,7 @@ pub async fn auth_middleware(
             .map(|cookie| cookie.value().to_string())
     });
     let Some(token) = token else {
+        crate::observability::metrics().record_auth_failure("missing_token");
         return (StatusCode::UNAUTHORIZED, "missing token").into_response();
     };
 
@@ -306,10 +307,12 @@ pub async fn auth_middleware(
             next.run(req).await
         }
         Err(TokenValidationError::MissingScope) => {
+            crate::observability::metrics().record_auth_failure("missing_scope");
             tracing::warn!("auth middleware rejected request: missing required scope");
             (StatusCode::FORBIDDEN, "missing required scope").into_response()
         }
         Err(TokenValidationError::Invalid(reason)) => {
+            crate::observability::metrics().record_auth_failure("invalid_token");
             tracing::warn!(reason, "auth middleware rejected request");
             (StatusCode::UNAUTHORIZED, reason).into_response()
         }

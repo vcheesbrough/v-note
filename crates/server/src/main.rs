@@ -2,6 +2,7 @@ use std::env;
 use std::net::SocketAddr;
 
 use axum_server::tls_rustls::RustlsConfig;
+use server::observability::{init_tracing, run_metrics_server};
 use server::router_from_env;
 
 #[tokio::main]
@@ -10,14 +11,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("failed to install rustls ring crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            env::var("RUST_LOG")
-                .unwrap_or_else(|_| "server=info,tower_http=info,axum=info".to_string()),
-        )
-        .init();
+    let _telemetry_guard = init_tracing();
 
     let app = router_from_env().await;
+    tokio::spawn(async {
+        if let Err(error) = run_metrics_server().await {
+            tracing::error!(error = %error, "internal metrics listener stopped");
+        }
+    });
 
     match (env::var("TLS_CERT").ok(), env::var("TLS_KEY").ok()) {
         (Some(cert_path), Some(key_path)) => {

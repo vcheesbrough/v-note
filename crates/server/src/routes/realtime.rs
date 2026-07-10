@@ -216,7 +216,10 @@ pub async fn realtime_socket(
 ) -> Response {
     let owner_id = match authenticate_realtime(&state, &headers, query.ticket.as_deref()).await {
         Ok(owner_id) => owner_id,
-        Err(status) => return (status, "realtime authentication failed").into_response(),
+        Err(status) => {
+            crate::observability::metrics().record_auth_failure("realtime_auth");
+            return (status, "realtime authentication failed").into_response();
+        }
     };
 
     ws.on_upgrade(move |socket| async move {
@@ -247,6 +250,8 @@ async fn authenticate_realtime(
 }
 
 async fn handle_library_socket(state: AppState, owner_id: String, socket: WebSocket) {
+    let _connection_guard = crate::observability::metrics().realtime_connection_guard();
+    crate::observability::metrics().record_realtime_event("library", "connected");
     let mut receiver = state.realtime.subscribe_library(&owner_id);
     let (mut sender, mut inbound) = socket.split();
 
@@ -260,14 +265,21 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: WebSoc
                     continue;
                 };
                 if sender.send(Message::Text(payload.into())).await.is_err() {
+                    crate::observability::metrics().record_realtime_event("library", "send_error");
                     break;
                 }
             }
             message = inbound.next() => {
                 match message {
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) | None => {
+                        crate::observability::metrics().record_realtime_event("library", "closed");
+                        break;
+                    }
                     Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
+                    Some(Err(_)) => {
+                        crate::observability::metrics().record_realtime_event("library", "recv_error");
+                        break;
+                    }
                 }
             }
         }
@@ -303,7 +315,10 @@ pub async fn page_socket(
 ) -> Response {
     let owner_id = match authenticate_realtime(&state, &headers, query.ticket.as_deref()).await {
         Ok(owner_id) => owner_id,
-        Err(status) => return (status, "realtime authentication failed").into_response(),
+        Err(status) => {
+            crate::observability::metrics().record_auth_failure("realtime_auth");
+            return (status, "realtime authentication failed").into_response();
+        }
     };
 
     let Some(pool) = state.db.clone() else {
@@ -325,6 +340,8 @@ pub async fn page_socket(
 }
 
 async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, socket: WebSocket) {
+    let _connection_guard = crate::observability::metrics().realtime_connection_guard();
+    crate::observability::metrics().record_realtime_event("page", "connected");
     let session_id = format!("session_{}", random_hex(16));
     let mut receiver = state.realtime.subscribe_page(&page_id);
     let (mut sender, mut inbound) = socket.split();
@@ -337,6 +354,7 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
         lease_holder,
     };
     if !send_page(&mut sender, welcome).await {
+        crate::observability::metrics().record_realtime_event("page", "send_error");
         return;
     }
 
@@ -346,6 +364,7 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
                 match event {
                     Ok(message) => {
                         if !send_page(&mut sender, message).await {
+                            crate::observability::metrics().record_realtime_event("page", "send_error");
                             break;
                         }
                     }
@@ -364,9 +383,15 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
                             break;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) | None => {
+                        crate::observability::metrics().record_realtime_event("page", "closed");
+                        break;
+                    }
                     Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
+                    Some(Err(_)) => {
+                        crate::observability::metrics().record_realtime_event("page", "recv_error");
+                        break;
+                    }
                 }
             }
         }
@@ -409,6 +434,7 @@ async fn handle_page_client_message(
                 Ok(batches) => batches,
                 Err(error) => {
                     tracing::error!(error = %error, "stroke replay failed");
+                    crate::observability::metrics().record_realtime_event("page", "replay_error");
                     return send_page(
                         sender,
                         PageServerMessage::Error {
@@ -439,6 +465,7 @@ async fn handle_page_client_message(
                     send_page(sender, PageServerMessage::LeaseGranted).await
                 }
                 LeaseOutcome::Denied { holder } => {
+                    crate::observability::metrics().record_realtime_event("page", "lease_denied");
                     send_page(sender, PageServerMessage::LeaseDenied { holder }).await
                 }
             }
@@ -446,6 +473,7 @@ async fn handle_page_client_message(
         PageClientMessage::RenewLease => match state.realtime.acquire_lease(page_id, session_id) {
             LeaseOutcome::Granted => send_page(sender, PageServerMessage::LeaseGranted).await,
             LeaseOutcome::Denied { holder } => {
+                crate::observability::metrics().record_realtime_event("page", "lease_denied");
                 send_page(sender, PageServerMessage::LeaseDenied { holder }).await
             }
         },
@@ -466,10 +494,12 @@ async fn handle_page_client_message(
             if let LeaseOutcome::Denied { holder } =
                 state.realtime.acquire_lease(page_id, session_id)
             {
+                crate::observability::metrics().record_realtime_event("page", "lease_denied");
                 return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
             }
             match persist_batch(pool, page_id, &client_batch_id, &strokes).await {
                 Ok(seq) => {
+                    crate::observability::metrics().record_page_mutation("commit_batch", "success");
                     state.realtime.publish_page(
                         page_id,
                         PageServerMessage::StrokeBatch(StrokeBatch {
@@ -482,6 +512,7 @@ async fn handle_page_client_message(
                 }
                 Err(error) => {
                     tracing::error!(error = %error, "stroke commit failed");
+                    crate::observability::metrics().record_page_mutation("commit_batch", "error");
                     send_page(
                         sender,
                         PageServerMessage::Error {

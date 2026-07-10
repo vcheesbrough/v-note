@@ -6,6 +6,7 @@ use axum::http::{Request, StatusCode};
 use protocol::HealthResponse;
 use server::auth::{AuthConfig, JwksCache};
 use server::build_router;
+use server::observability::{metrics_handler, CORRELATION_ID_HEADER, REQUEST_ID_HEADER};
 use tower::util::ServiceExt;
 
 fn test_router() -> axum::Router {
@@ -49,4 +50,68 @@ async fn health_returns_ok_payload() {
         serde_json::from_slice(&body).expect("health response should deserialize");
 
     assert_eq!(payload.status, "ok");
+}
+
+#[tokio::test]
+async fn health_response_includes_request_correlation_headers() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(REQUEST_ID_HEADER, "test-request-123")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("request id header should be present"),
+        "test-request-123",
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(CORRELATION_ID_HEADER)
+            .expect("correlation id header should be present"),
+        "test-request-123",
+    );
+}
+
+#[tokio::test]
+async fn metrics_endpoint_exposes_build_and_http_metrics() {
+    let app = test_router();
+
+    let health_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("health request should succeed");
+    assert_eq!(health_response.status(), StatusCode::OK);
+
+    let response = metrics_handler().await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should be readable");
+    let text = String::from_utf8(body.to_vec()).expect("metrics should be UTF-8");
+
+    assert!(text.contains("v_note_build_info"));
+    assert!(text.contains("protocol=\"1\""));
+    assert!(text.contains("version=\""));
+    assert!(text.contains("v_note_http_requests_total"));
+    assert!(text.contains("route=\"/health\""));
+    assert!(text.contains("status=\"200\""));
 }

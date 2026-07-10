@@ -84,13 +84,17 @@ pub async fn create_page(
     .bind(title)
     .fetch_one(db(&state)?)
     .await
-    .map_err(server_error)?;
+    .map_err(|error| {
+        crate::observability::metrics().record_page_mutation("create_page", "error");
+        server_error(error)
+    })?;
 
     let page = PageSummary::from(row);
     state.realtime.publish_library_event(
         &claims.sub,
         LibraryEvent::PageCreated { page: page.clone() },
     );
+    crate::observability::metrics().record_page_mutation("create_page", "success");
     Ok((StatusCode::CREATED, Json(PageResponse { page })))
 }
 
@@ -135,15 +139,20 @@ pub async fn delete_page(
     .bind(claims.sub.clone())
     .execute(db(&state)?)
     .await
-    .map_err(server_error)?;
+    .map_err(|error| {
+        crate::observability::metrics().record_page_mutation("delete_page", "error");
+        server_error(error)
+    })?;
 
     if result.rows_affected() == 0 {
+        crate::observability::metrics().record_page_mutation("delete_page", "not_found");
         return Err((StatusCode::FORBIDDEN, "page not found").into_response());
     }
 
     state
         .realtime
         .publish_library_event(&claims.sub, LibraryEvent::PageDeleted { page_id });
+    crate::observability::metrics().record_page_mutation("delete_page", "success");
     Ok(StatusCode::NO_CONTENT)
 }
 

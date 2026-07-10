@@ -12,6 +12,11 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures-util = "0.3"
 jsonwebtoken = "9"
+once_cell = "1.21.4"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic", "trace"] }
+opentelemetry_sdk = "0.32.1"
+prometheus = "0.14.0"
 protocol = { path = "../protocol" }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -22,9 +27,10 @@ sqlx = { version = "0.8", default-features = false, features = ["chrono", "deriv
 time = "0.3"
 tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = "0.33.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
