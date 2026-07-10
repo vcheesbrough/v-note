@@ -1,5 +1,6 @@
 use std::env;
 use std::net::SocketAddr;
+use std::time::Duration;
 use std::time::Instant;
 
 use axum::extract::Request;
@@ -316,6 +317,7 @@ fn build_tracer_provider() -> Result<Option<SdkTracerProvider>, String> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)
+        .with_timeout(otel_export_timeout())
         .build()
         .map_err(|error| error.to_string())?;
     let resource = opentelemetry_sdk::Resource::builder()
@@ -330,10 +332,18 @@ fn build_tracer_provider() -> Result<Option<SdkTracerProvider>, String> {
         ])
         .build();
     let provider = SdkTracerProvider::builder()
-        .with_simple_exporter(exporter)
+        .with_batch_exporter(exporter)
         .with_resource(resource)
         .build();
     Ok(Some(provider))
+}
+
+fn otel_export_timeout() -> Duration {
+    env::var("OTEL_EXPORTER_OTLP_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(2))
 }
 
 fn request_id_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
