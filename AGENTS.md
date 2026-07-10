@@ -6,6 +6,8 @@ This file is the single source of truth for AI agents and assistants working in 
 
 If you change a rule below, change it here — there is no parallel copy.
 
+
+
 ---
 
 ## Repository context
