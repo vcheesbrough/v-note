@@ -49,23 +49,33 @@ class ViewportTransformTest {
         velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         val afterFirstFrame = velocity.getDistance()
 
-        repeat(10) {
+        repeat(5) {
             velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         }
         val afterShortGlide = velocity.getDistance()
 
-        repeat(20) {
+        repeat(6) {
             velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         }
 
-        assertTrue(afterFirstFrame in 850f..900f)
-        assertTrue(afterShortGlide in 430f..520f)
+        assertTrue(afterFirstFrame in 750f..800f)
+        assertTrue(afterShortGlide in 130f..180f)
         assertFalse(shouldContinueMomentum(velocity))
     }
 
     @Test
     fun momentumVelocityIsCappedForFastFlicks() {
-        assertEquals(1_400f, capMomentumVelocity(Offset(3_000f, 0f)).getDistance(), 0.0001f)
+        assertEquals(4_000f, capMomentumVelocity(Offset(6_000f, 0f)).getDistance(), 0.0001f)
+    }
+
+    @Test
+    fun panVelocityIsBoostedBeforeMomentumStarts() {
+        val tracker = ViewportGestureTracker()
+
+        tracker.update(pointerCount = 1, centroid = Offset(100f, 100f), spread = 0f, eventTimeMillis = 0)
+        val pan = tracker.update(pointerCount = 1, centroid = Offset(116f, 100f), spread = 0f, eventTimeMillis = 16)
+
+        assertEquals(2_000f, pan.velocity.getDistance(), 0.01f)
     }
 
     @Test
