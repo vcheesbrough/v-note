@@ -85,6 +85,38 @@ async fn health_response_includes_request_correlation_headers() {
 }
 
 #[tokio::test]
+async fn health_response_preserves_correlation_id_without_request_id() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(CORRELATION_ID_HEADER, "upstream-correlation-123")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("request id header should be present"),
+        "upstream-correlation-123",
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(CORRELATION_ID_HEADER)
+            .expect("correlation id header should be present"),
+        "upstream-correlation-123",
+    );
+}
+
+#[tokio::test]
 async fn metrics_endpoint_exposes_build_and_http_metrics() {
     let app = test_router();
 
@@ -114,4 +146,29 @@ async fn metrics_endpoint_exposes_build_and_http_metrics() {
     assert!(text.contains("v_note_http_requests_total"));
     assert!(text.contains("route=\"/health\""));
     assert!(text.contains("status=\"200\""));
+}
+
+#[tokio::test]
+async fn metrics_bucket_unknown_paths_to_static_route() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/unknown/random-cardinality-path")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("fallback request should succeed");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = metrics_handler().await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should be readable");
+    let text = String::from_utf8(body.to_vec()).expect("metrics should be UTF-8");
+
+    assert!(text.contains("route=\"/static/*\""));
+    assert!(!text.contains("route=\"/unknown/random-cardinality-path\""));
 }

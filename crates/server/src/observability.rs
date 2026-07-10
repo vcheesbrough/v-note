@@ -372,7 +372,10 @@ fn otel_export_timeout() -> Duration {
 
 fn request_id_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
     for header in [REQUEST_ID_HEADER, CORRELATION_ID_HEADER] {
-        let value = headers.get(header)?.to_str().ok()?.trim();
+        let Some(value) = headers.get(header).and_then(|value| value.to_str().ok()) else {
+            continue;
+        };
+        let value = value.trim();
         if is_safe_request_id(value) {
             return Some(value.to_string());
         }
@@ -430,5 +433,5 @@ fn normalized_route(path: &str) -> String {
     if path.starts_with("/.well-known/") {
         return "/.well-known/*".to_string();
     }
-    path.to_string()
+    "/static/*".to_string()
 }
