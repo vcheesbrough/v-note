@@ -49,17 +49,17 @@ class ViewportTransformTest {
         velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         val afterFirstFrame = velocity.getDistance()
 
-        repeat(10) {
+        repeat(30) {
             velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         }
         val afterShortGlide = velocity.getDistance()
 
-        repeat(20) {
+        repeat(45) {
             velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         }
 
-        assertTrue(afterFirstFrame in 850f..900f)
-        assertTrue(afterShortGlide in 430f..520f)
+        assertTrue(afterFirstFrame in 875f..900f)
+        assertTrue(afterShortGlide in 480f..540f)
         assertFalse(shouldContinueMomentum(velocity))
     }
 
