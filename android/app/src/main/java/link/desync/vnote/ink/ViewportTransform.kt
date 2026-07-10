@@ -1,12 +1,12 @@
 package link.desync.vnote.ink
 
 import androidx.compose.ui.geometry.Offset
-import kotlin.math.pow
 
 private const val MIN_SCALE = 0.2f
 private const val MAX_SCALE = 8f
-private const val MOMENTUM_DECAY_SECONDS = 0.45f
-internal const val MOMENTUM_STOP_VELOCITY = 6f
+private const val MOMENTUM_DECELERATION = 2_400f
+private const val MOMENTUM_MAX_VELOCITY = 1_400f
+internal const val MOMENTUM_STOP_VELOCITY = 18f
 
 internal data class ViewportTransform(
     val scale: Float = 1f,
@@ -49,11 +49,26 @@ internal fun dampVelocity(
     if (deltaSeconds <= 0f) {
         return velocity
     }
-    val factor = 0.001f.pow(deltaSeconds / MOMENTUM_DECAY_SECONDS)
-    return velocity * factor
+    val speed = velocity.getDistance()
+    if (speed <= MOMENTUM_STOP_VELOCITY) {
+        return Offset.Zero
+    }
+    val nextSpeed = (speed - MOMENTUM_DECELERATION * deltaSeconds).coerceAtLeast(0f)
+    if (nextSpeed <= MOMENTUM_STOP_VELOCITY) {
+        return Offset.Zero
+    }
+    return velocity * (nextSpeed / speed)
 }
 
 internal fun shouldContinueMomentum(velocity: Offset): Boolean = velocity.getDistance() >= MOMENTUM_STOP_VELOCITY
+
+internal fun capMomentumVelocity(velocity: Offset): Offset {
+    val speed = velocity.getDistance()
+    if (speed <= MOMENTUM_MAX_VELOCITY) {
+        return velocity
+    }
+    return velocity * (MOMENTUM_MAX_VELOCITY / speed)
+}
 
 internal data class ViewportGestureStep(
     val panDelta: Offset,
@@ -93,7 +108,7 @@ internal class ViewportGestureTracker {
         if (!pointerCountChanged && pointerCount == 1 && panDelta != Offset.Zero) {
             previousEventTimeMillis?.let { previous ->
                 val deltaSeconds = ((eventTimeMillis - previous).coerceAtLeast(1L)) / 1000f
-                latestVelocity = panDelta / deltaSeconds
+                latestVelocity = capMomentumVelocity(panDelta / deltaSeconds)
                 movedWithSingleFinger = true
             }
         } else if (pointerCount != 1) {

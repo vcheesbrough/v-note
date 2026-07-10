@@ -4,6 +4,7 @@ import androidx.compose.ui.geometry.Offset
 import link.desync.vnote.ink.ViewportGestureTracker
 import link.desync.vnote.ink.ViewportTransform
 import link.desync.vnote.ink.applyGesture
+import link.desync.vnote.ink.capMomentumVelocity
 import link.desync.vnote.ink.dampVelocity
 import link.desync.vnote.ink.pan
 import link.desync.vnote.ink.shouldContinueMomentum
@@ -48,12 +49,23 @@ class ViewportTransformTest {
         velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         val afterFirstFrame = velocity.getDistance()
 
-        repeat(45) {
+        repeat(10) {
+            velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
+        }
+        val afterShortGlide = velocity.getDistance()
+
+        repeat(20) {
             velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         }
 
-        assertTrue(afterFirstFrame in 600f..900f)
+        assertTrue(afterFirstFrame in 850f..900f)
+        assertTrue(afterShortGlide in 430f..520f)
         assertFalse(shouldContinueMomentum(velocity))
+    }
+
+    @Test
+    fun momentumVelocityIsCappedForFastFlicks() {
+        assertEquals(1_400f, capMomentumVelocity(Offset(3_000f, 0f)).getDistance(), 0.0001f)
     }
 
     @Test
