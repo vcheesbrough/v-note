@@ -4,7 +4,7 @@ import androidx.compose.ui.geometry.Offset
 
 private const val MIN_SCALE = 0.2f
 private const val MAX_SCALE = 8f
-private const val MOMENTUM_DECELERATION = 50f
+private const val MOMENTUM_DECELERATION = 1f
 private const val MOMENTUM_MAX_VELOCITY = 1_400f
 internal const val MOMENTUM_STOP_VELOCITY = 18f
 
