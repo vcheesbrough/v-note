@@ -71,6 +71,10 @@ docker pull "registry.desync.link/v-note:$release_tag"
 V_NOTE_IMAGE_TAG="$release_tag" \
 APP_VERSION="$release_tag" \
 APP_ENV="$app_env" \
+OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://monitor-alloy:4317}" \
+OTEL_EXPORTER_OTLP_PROTOCOL="${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}" \
+OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-v-note}" \
+VNOTE_PROTOCOL_VERSION="${VNOTE_PROTOCOL_VERSION:-1}" \
 V_NOTE_HOST="$v_note_host" \
 V_NOTE_CONTAINER_NAME="$v_note_container_name" \
 DB_VOLUME="$db_volume" \

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod observability;
 mod routes;
 
 use std::env;
@@ -14,6 +15,7 @@ use sqlx::PgPool;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{auth_middleware, AuthConfig, JwksCache};
+use crate::observability::request_observability_middleware;
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, list_pages};
 use crate::routes::realtime::{page_socket, realtime_socket, realtime_ticket, RealtimeHub};
@@ -145,7 +147,7 @@ pub fn build_router_with_db(
         router = router.fallback_service(spa_service);
     }
 
-    router
+    router.layer(middleware::from_fn(request_observability_middleware))
 }
 
 async fn health() -> Json<HealthResponse> {

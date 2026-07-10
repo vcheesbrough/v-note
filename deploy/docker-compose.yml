@@ -42,7 +42,7 @@ services:
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-dev}
-      APP_VERSION: ${APP_VERSION:-0.1.0}
+      APP_VERSION: ${APP_VERSION:-0.11.0}
       DATABASE_HOST: postgres
       DATABASE_PORT: 5432
       DATABASE_USER: v_note
@@ -60,6 +60,12 @@ services:
       OIDC_ANDROID_CLIENT_ID: ${OIDC_ANDROID_CLIENT_ID:-}
       OIDC_ANDROID_ISSUER_URL: ${OIDC_ANDROID_ISSUER_URL:-}
       ASSETLINKS_JSON: ${ASSETLINKS_JSON:-}
+      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-v-note}
+      VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-1}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-1}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,6 +81,14 @@ services:
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,crowdsec@docker,security-headers@docker
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.scheme=https
+      - observability.metrics.scrape=true
+      - observability.metrics.port=9090
+      - observability.metrics.path=/metrics
+      - observability.metrics.scheme=http
+      - observability.service=v-note
+      - observability.env=${APP_ENV:-dev}
+      - observability.release=${APP_VERSION:-0.11.0}
+      - observability.protocol=${VNOTE_PROTOCOL_VERSION:-1}
 
 volumes:
   v-note-db:
