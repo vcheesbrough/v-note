@@ -44,25 +44,23 @@ class ViewportTransformTest {
     }
 
     @Test
-    fun momentumVelocityDecaysSlowly() {
+    fun momentumVelocityDecaysAndStops() {
         var velocity = Offset(900f, 0f)
         velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         val afterFirstFrame = velocity.getDistance()
 
-        repeat(80) {
+        repeat(10) {
             velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         }
         val afterShortGlide = velocity.getDistance()
 
-        repeat(95) {
+        repeat(20) {
             velocity = dampVelocity(velocity, deltaSeconds = 0.016f)
         }
-        val afterLongerGlide = velocity.getDistance()
 
-        assertTrue(afterFirstFrame in 899f..900f)
-        assertTrue(afterShortGlide in 898f..900f)
-        assertTrue(afterLongerGlide in 897f..900f)
-        assertFalse(shouldContinueMomentum(Offset(10f, 0f)))
+        assertTrue(afterFirstFrame in 850f..900f)
+        assertTrue(afterShortGlide in 430f..520f)
+        assertFalse(shouldContinueMomentum(velocity))
     }
 
     @Test
