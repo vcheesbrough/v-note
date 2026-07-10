@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use once_cell::sync::Lazy;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -19,6 +19,7 @@ use prometheus::{
 };
 use rand::RngCore;
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -193,10 +194,11 @@ pub async fn request_observability_middleware(mut req: Request, next: Next) -> R
         request_id = %request_id,
     );
     let started = Instant::now();
-    let mut response = next.run(req).instrument(span).await;
+    let mut response = next.run(req).instrument(span.clone()).await;
     let elapsed = started.elapsed().as_secs_f64();
     let status = response.status();
     metrics().record_http(method.as_str(), &route, status, elapsed);
+    let trace_context = trace_context_from_span(&span);
 
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response
@@ -213,10 +215,32 @@ pub async fn request_observability_middleware(mut req: Request, next: Next) -> R
         status = status.as_u16(),
         latency_ms = (elapsed * 1000.0),
         request_id = %request_id,
+        trace_id = trace_context
+            .as_ref()
+            .map(|context| context.trace_id.as_str())
+            .unwrap_or(""),
+        span_id = trace_context
+            .as_ref()
+            .map(|context| context.span_id.as_str())
+            .unwrap_or(""),
         "http request completed",
     );
 
     response
+}
+
+struct TraceLogContext {
+    trace_id: String,
+    span_id: String,
+}
+
+fn trace_context_from_span(span: &tracing::Span) -> Option<TraceLogContext> {
+    let context = span.context();
+    let span_context = context.span().span_context().clone();
+    span_context.is_valid().then(|| TraceLogContext {
+        trace_id: span_context.trace_id().to_string(),
+        span_id: span_context.span_id().to_string(),
+    })
 }
 
 pub async fn metrics_handler() -> Response {
