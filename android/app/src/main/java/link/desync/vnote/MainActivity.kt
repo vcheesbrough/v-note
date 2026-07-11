@@ -9,8 +9,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.lifecycle.lifecycleScope
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -105,7 +107,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             VNoteTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) {
                     AppRoot {
                         val session = sessionState.value
                         val selectedPage = selectedPageState.value
@@ -543,7 +548,7 @@ private fun AppScreen(
                         )
                     } else {
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 160.dp),
+                            columns = GridCells.Adaptive(minSize = 210.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.weight(1f),
@@ -622,6 +627,8 @@ private fun PageTile(
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = BorderStroke(1.dp, Color(0xFFDDE2DB)),
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -648,10 +655,22 @@ private fun PageTile(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(page.displayLibraryTitle(), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(page.displayLibraryTitle(), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(page.displayUpdatedAge(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                 }
-                TextButton(onClick = onDelete) { Text("Delete", style = MaterialTheme.typography.labelMedium) }
+                IconButton(
+                    modifier =
+                        Modifier
+                            .size(32.dp)
+                            .semantics { contentDescription = "Delete ${page.displayLibraryTitle()}" },
+                    onClick = onDelete,
+                ) {
+                    Text(
+                        "×",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
     }
@@ -691,6 +710,12 @@ private fun PagePreview(
                         color = Color(0xFFD2D9D1),
                         start = Offset.Zero,
                         end = Offset(size.width, 0f),
+                        strokeWidth = 1.dp.toPx(),
+                    )
+                    drawLine(
+                        color = Color(0xFFD7DDD5),
+                        start = Offset(0f, size.height),
+                        end = Offset(size.width, size.height),
                         strokeWidth = 1.dp.toPx(),
                     )
                 },
