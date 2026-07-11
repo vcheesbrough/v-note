@@ -129,6 +129,117 @@ class PageInkInstrumentedTest {
     }
 
     @Test
+    fun keepsCompletedStrokeVisibleUntilDelayedEchoWithoutDuplication() {
+        val commitReceived = CountDownLatch(1)
+        val releaseEcho = CountDownLatch(1)
+        val echoesSent = CountDownLatch(1)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                    }
+
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        when (JSONObject(text).getString("type")) {
+                            "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                            "release-lease" -> webSocket.close(1000, "lease released")
+                            "commit-batch" -> {
+                                val commit = JSONObject(text)
+                                commitReceived.countDown()
+                                releaseEcho.await(5, TimeUnit.SECONDS)
+                                val echo =
+                                    JSONObject()
+                                        .put("type", "stroke-batch")
+                                        .put("seq", 1)
+                                        .put("client_batch_id", commit.getString("client_batch_id"))
+                                        .put("strokes", commit.getJSONArray("strokes"))
+                                        .toString()
+                                webSocket.send(echo)
+                                webSocket.send(echo)
+                                echoesSent.countDown()
+                            }
+                        }
+                    }
+                },
+            ),
+        )
+
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val stroke = Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16)))
+        session.connect()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+
+        session.commitStroke(stroke)
+        assertTrue("commit sent", commitReceived.await(5, TimeUnit.SECONDS))
+        assertEquals("local pending ink remains visible", listOf(stroke), session.strokes)
+        assertEquals("one local batch awaits its echo", 1, session.pendingBatchCount)
+
+        releaseEcho.countDown()
+        assertTrue("echoes sent", echoesSent.await(5, TimeUnit.SECONDS))
+        assertTrue("local batch promoted by echo", awaitUntil { session.pendingBatchCount == 0 })
+        assertEquals("confirmed stroke rendered once", listOf(stroke), session.strokes)
+        Thread.sleep(200)
+        assertEquals("duplicate echo does not duplicate ink", listOf(stroke), session.strokes)
+
+        session.disconnect()
+    }
+
+    @Test
+    fun clearsPendingInkWhenServerRejectsCommit() {
+        val commitReceived = CountDownLatch(1)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                    }
+
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        when (JSONObject(text).getString("type")) {
+                            "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                            "release-lease" -> webSocket.close(1000, "lease released")
+                            "commit-batch" -> {
+                                commitReceived.countDown()
+                                webSocket.send(
+                                    """{"type":"error","code":"commit_failed","message":"Commit failed"}""",
+                                )
+                            }
+                        }
+                    }
+                },
+            ),
+        )
+
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        session.connect()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+
+        session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0))))
+        assertTrue("commit sent", commitReceived.await(5, TimeUnit.SECONDS))
+        assertTrue("rejection clears pending ink", awaitUntil { session.pendingBatchCount == 0 })
+        assertEquals("uncommitted ink is not rendered", emptyList<Stroke>(), session.strokes)
+        assertEquals("commit failure shown", "Commit failed", session.statusBanner)
+        assertEquals("input blocked", false, session.canEdit)
+
+        session.disconnect()
+    }
+
+    @Test
     fun blocksInkWhenAnotherSessionHoldsLease() {
         server.enqueue(
             MockResponse().withWebSocketUpgrade(
