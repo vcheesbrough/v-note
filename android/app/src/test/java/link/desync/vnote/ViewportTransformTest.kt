@@ -111,6 +111,23 @@ class ViewportTransformTest {
         assertEquals(1f, backToPan.zoom, 0.0001f)
     }
 
+    @Test
+    fun pinchTransitionBackToOneFingerDoesNotLaunchMomentum() {
+        val tracker = ViewportGestureTracker()
+
+        tracker.update(pointerCount = 2, centroid = Offset(100f, 100f), spread = 40f, eventTimeMillis = 0)
+        tracker.update(pointerCount = 2, centroid = Offset(100f, 100f), spread = 60f, eventTimeMillis = 16)
+        val oneFingerAfterPinch =
+            tracker.update(pointerCount = 1, centroid = Offset(130f, 100f), spread = 0f, eventTimeMillis = 32)
+        val movedOneFingerAfterPinch =
+            tracker.update(pointerCount = 1, centroid = Offset(160f, 100f), spread = 0f, eventTimeMillis = 48)
+
+        assertOffsetEquals(Offset.Zero, oneFingerAfterPinch.panDelta)
+        assertOffsetEquals(Offset(30f, 0f), movedOneFingerAfterPinch.panDelta)
+        assertEquals(0f, movedOneFingerAfterPinch.velocity.getDistance(), 0.0001f)
+        assertFalse(tracker.shouldLaunchMomentum())
+    }
+
     private fun assertOffsetEquals(
         expected: Offset,
         actual: Offset,
