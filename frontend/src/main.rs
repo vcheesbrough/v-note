@@ -47,14 +47,6 @@ fn page_display_title(page: &PageSummary) -> String {
     }
 }
 
-fn page_library_title(page: &PageSummary) -> String {
-    if page_has_title(page) {
-        page.title.clone()
-    } else {
-        UNTITLED_PAGE.to_string()
-    }
-}
-
 fn request_id() -> String {
     let now = Date::now().round() as u64;
     let random = (js_sys::Math::random() * 1_000_000_000_000.0).round() as u64;
@@ -220,10 +212,16 @@ fn App() -> impl IntoView {
                                 children=move |page| {
                                     let preview_page = page.clone();
                                     let delete_page_id = page.id.clone();
-                                    let display_title = page_library_title(&page);
+                                    let display_title = page_has_title(&page).then(|| page.title.clone());
                                     let page_age = approximate_relative_datetime(&page.updated_at);
-                                    let open_label = format!("Open {display_title}");
-                                    let delete_label = format!("Delete {display_title}");
+                                    let open_label = display_title.as_ref().map_or_else(
+                                        || "Open page".to_string(),
+                                        |title| format!("Open {title}"),
+                                    );
+                                    let delete_label = display_title.as_ref().map_or_else(
+                                        || "Delete page".to_string(),
+                                        |title| format!("Delete {title}"),
+                                    );
                                     let thumbnail = page.thumbnail.clone();
                                     let thumbnail_unavailable = library_error.get_untracked().is_some();
                                     view! {
@@ -246,10 +244,12 @@ fn App() -> impl IntoView {
                                                     <div class="page-preview thumbnail-empty" aria-label="Empty page"></div>
                                                 }.into_any(),
                                             }}
+                                            {display_title.clone().map(|title| view! {
+                                                <span class="page-thumbnail-title">{title}</span>
+                                            })}
                                             </button>
                                             <div class="page-tile-footer">
                                             <div class="page-main">
-                                                <span class="page-title">{display_title}</span>
                                                 <span class="page-age">{page_age}</span>
                                             </div>
                                             <button class="page-delete" aria-label=delete_label on:click=move |_| {

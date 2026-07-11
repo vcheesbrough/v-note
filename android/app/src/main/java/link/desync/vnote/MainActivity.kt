@@ -71,9 +71,9 @@ import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.auth.ThumbnailMetadata
 import link.desync.vnote.ink.PageCanvasScreen
-import link.desync.vnote.ui.displayLibraryTitle
 import link.desync.vnote.ui.displayTitle
 import link.desync.vnote.ui.displayUpdatedAge
+import link.desync.vnote.ui.hasDisplayTitle
 import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
@@ -648,21 +648,40 @@ private fun PageTile(
                     unavailable = thumbnailUnavailable,
                     modifier = Modifier.fillMaxSize(),
                 )
+                if (page.hasDisplayTitle()) {
+                    Surface(
+                        color = Color.White.copy(alpha = 0.92f),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp).widthIn(max = 180.dp),
+                    ) {
+                        Text(
+                            page.title,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(page.displayLibraryTitle(), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(page.displayUpdatedAge(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
-                }
+                Text(
+                    page.displayUpdatedAge(),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
                 IconButton(
                     modifier =
                         Modifier
                             .size(32.dp)
-                            .semantics { contentDescription = "Delete ${page.displayLibraryTitle()}" },
+                            .semantics {
+                                contentDescription = if (page.hasDisplayTitle()) "Delete ${page.title}" else "Delete page"
+                            },
                     onClick = onDelete,
                 ) {
                     Text(
