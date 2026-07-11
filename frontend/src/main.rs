@@ -27,6 +27,10 @@ fn apk_download_filename() -> String {
     format!("v-note-{}-dev-debug.apk", release_version())
 }
 
+fn apk_download_url() -> String {
+    format!("/dl/apk?release={}", release_version())
+}
+
 const UNTITLED_PAGE: &str = "Untitled page";
 const REQUEST_ID_HEADER: &str = "X-Request-Id";
 
@@ -150,7 +154,7 @@ fn App() -> impl IntoView {
                             <div class="session-menu-panel">
                                 <p class="menu-identity">{profile.email.clone().unwrap_or_else(|| profile.sub.clone())}</p>
                                 <a class="menu-link" href="/auth/logout">"Sign out"</a>
-                                <a class="menu-link" href="/dl/apk" download=apk_download_filename()>"Download Android app (.apk)"</a>
+                                <a class="menu-link" href=apk_download_url() download=apk_download_filename()>"Download Android app (.apk)"</a>
                             </div>
                         </details>
                     }
@@ -251,7 +255,7 @@ fn App() -> impl IntoView {
                             .into_any(),
                         }}
 
-                        <p class="apk-link"><a class="button secondary" href="/dl/apk" download=apk_download_filename()>"Download Android app (.apk)"</a></p>
+                        <p class="apk-link"><a class="button secondary" href=apk_download_url() download=apk_download_filename()>"Download Android app (.apk)"</a></p>
                     </section>
                         }.into_any(),
                     }}
