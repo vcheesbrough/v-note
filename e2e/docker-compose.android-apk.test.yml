@@ -5,8 +5,12 @@ services:
   v-note-android-apk:
     build:
       context: .
+      args:
+        V_NOTE_RELEASE: 0.13.1
       dockerfile_inline: |
         FROM nginx:alpine@sha256:8b1e78743a03dbb2c95171cc58639fef29abc8816598e27fb910ed2e621e589a
+        ARG V_NOTE_RELEASE
+        RUN test -n "$$V_NOTE_RELEASE"
         RUN mkdir -p /usr/share/nginx/html/dl \
             && echo 'fake-apk-fixture' > /usr/share/nginx/html/dl/apk \
             && printf '%s\n' \
@@ -16,7 +20,7 @@ services:
                 '    location = /dl/apk {' \
                 '        root /usr/share/nginx/html;' \
                 '        default_type application/vnd.android.package-archive;' \
-                '        add_header Content-Disposition "attachment; filename=v-note.apk";' \
+                "        add_header Content-Disposition \"attachment; filename=\\\"v-note-$${V_NOTE_RELEASE}-dev-debug.apk\\\"\";" \
                 '        add_header Cache-Control "no-store";' \
                 '        etag off;' \
                 '        if_modified_since off;' \

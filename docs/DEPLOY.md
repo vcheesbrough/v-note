@@ -228,13 +228,13 @@ After a successful dev deploy, the `dev` APK is served at:
 https://v-notes-dev.desync.link/dl/apk
 ```
 
-The SPA links to it ("Download Android app"). Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + Path(/dl/apk)` rule. `Content-Disposition` saves it as `v-note.apk`.
+The SPA links to it ("Download Android app"). Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + Path(/dl/apk)` rule. The stable URL returns `Content-Disposition: attachment; filename="v-note-{release}-dev-debug.apk"` (for example, `v-note-0.13.1-dev-debug.apk`).
 
 Download on the device browser and enable "Install from unknown sources", or:
 
 ```bash
-curl -L -o v-note.apk https://v-notes-dev.desync.link/dl/apk
-adb install v-note.apk
+curl -L -OJ https://v-notes-dev.desync.link/dl/apk
+adb install v-note-{release}-dev-debug.apk
 ```
 
 The `dev` flavor connects to `https://v-notes-dev.desync.link` — no `adb reverse` needed. For laptop dev with a local server, use the `devLocal` APK (see [`DEV.md`](DEV.md)).
