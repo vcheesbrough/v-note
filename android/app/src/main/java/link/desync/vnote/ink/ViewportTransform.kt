@@ -85,6 +85,7 @@ internal class ViewportGestureTracker {
     private var previousEventTimeMillis: Long? = null
     private var latestVelocity = Offset.Zero
     private var movedWithSingleFinger = false
+    private var sawMultiplePointers = false
 
     fun update(
         pointerCount: Int,
@@ -92,6 +93,9 @@ internal class ViewportGestureTracker {
         spread: Float,
         eventTimeMillis: Long,
     ): ViewportGestureStep {
+        if (pointerCount > 1) {
+            sawMultiplePointers = true
+        }
         val pointerCountChanged = pointerCount != previousPointerCount
         val zoom =
             if (!pointerCountChanged && spread > 0f && previousSpread != null && previousSpread!! > 0f) {
@@ -106,13 +110,13 @@ internal class ViewportGestureTracker {
                 Offset.Zero
             }
 
-        if (!pointerCountChanged && pointerCount == 1) {
+        if (!sawMultiplePointers && !pointerCountChanged && pointerCount == 1) {
             previousEventTimeMillis?.let { previous ->
                 val deltaSeconds = ((eventTimeMillis - previous).coerceAtLeast(1L)) / 1000f
                 latestVelocity = capMomentumVelocity((panDelta / deltaSeconds) * MOMENTUM_RELEASE_MULTIPLIER)
                 movedWithSingleFinger = true
             }
-        } else if (pointerCount != 1) {
+        } else if (pointerCount != 1 || sawMultiplePointers) {
             latestVelocity = Offset.Zero
             movedWithSingleFinger = false
         }
