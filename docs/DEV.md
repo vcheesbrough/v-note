@@ -140,6 +140,11 @@ Download the `dev` APK from the deployed dev stack after a CI push (the SPA link
 https://v-notes-dev.desync.link/dl/apk
 ```
 
+The canonical URL stays stable. SPA links append the current release as a query value so Android
+Chrome does not reuse an earlier release's download entry. The response header supplies the CI
+release filename, for example `v-note-0.13.1-dev-debug.apk`; use
+`curl -LOJ https://v-notes-dev.desync.link/dl/apk` to retain it.
+
 Or build locally and sideload:
 
 ```bash

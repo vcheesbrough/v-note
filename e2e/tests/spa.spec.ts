@@ -5,6 +5,14 @@ test('spa loads and renders metadata', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'v-note' })).toBeVisible();
   await expect(page.getByText(/Protocol\s+1/)).toBeVisible();
+
+  const release = (await page.locator('.version-watermark').innerText()).replace(/^v/, '');
+  const downloadLink = page.locator('.apk-link a');
+  await expect(downloadLink).toHaveAttribute(
+    'download',
+    `v-note-${release}-dev-debug.apk`,
+  );
+  await expect(downloadLink).toHaveAttribute('href', `/dl/apk?release=${release}`);
 });
 
 test('spa narrow header uses an account menu with apk download', async ({ page }) => {
@@ -19,5 +27,9 @@ test('spa narrow header uses an account menu with apk download', async ({ page }
   await menuButton.click();
 
   await expect(page.getByRole('link', { name: 'Sign out' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Download Android app (.apk)' })).toBeVisible();
+  const downloadLink = page.getByRole('link', { name: 'Download Android app (.apk)' });
+  const release = (await page.locator('.version-watermark').innerText()).replace(/^v/, '');
+  await expect(downloadLink).toBeVisible();
+  await expect(downloadLink).toHaveAttribute('download', `v-note-${release}-dev-debug.apk`);
+  await expect(downloadLink).toHaveAttribute('href', `/dl/apk?release=${release}`);
 });
