@@ -1,12 +1,15 @@
 use protocol::{LibraryEvent, Stroke, ThumbnailMetadata, PEN_COLOR, PEN_WIDTH};
 use sqlx::PgPool;
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Stroke as SkiaStroke, Transform};
+use tiny_skia::{
+    Color, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkiaStroke, Transform,
+};
 
 use crate::AppState;
 
 const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
 const PADDING: f32 = 12.0;
+const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 3.0;
 
 pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u64) {
     tokio::spawn(async move {
@@ -104,7 +107,10 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
     let mut paint = Paint::default();
     paint.set_color_rgba8(0x00, 0x64, 0x00, 0xff);
     let pen = SkiaStroke {
-        width: (PEN_WIDTH as f32 * scale).max(1.0),
+        // Fitting wide world-space ink must not turn the preview into hairlines.
+        width: (PEN_WIDTH as f32 * scale).max(MIN_THUMBNAIL_STROKE_WIDTH),
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
         ..Default::default()
     };
     for stroke in strokes {

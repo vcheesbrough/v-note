@@ -47,6 +47,14 @@ fn page_display_title(page: &PageSummary) -> String {
     }
 }
 
+fn page_library_title(page: &PageSummary) -> String {
+    if page_has_title(page) {
+        page.title.clone()
+    } else {
+        UNTITLED_PAGE.to_string()
+    }
+}
+
 fn request_id() -> String {
     let now = Date::now().round() as u64;
     let random = (js_sys::Math::random() * 1_000_000_000_000.0).round() as u64;
@@ -210,15 +218,17 @@ fn App() -> impl IntoView {
                                 }
                                 key=|page| (page.id.clone(), thumbnail_seq(&page.thumbnail))
                                 children=move |page| {
-                                    let open_page = page.clone();
+                                    let preview_page = page.clone();
                                     let delete_page_id = page.id.clone();
-                                    let display_title = page_display_title(&page);
+                                    let display_title = page_library_title(&page);
+                                    let page_age = approximate_relative_datetime(&page.updated_at);
                                     let open_label = format!("Open {display_title}");
                                     let delete_label = format!("Delete {display_title}");
                                     let thumbnail = page.thumbnail.clone();
                                     let thumbnail_unavailable = library_error.get_untracked().is_some();
                                     view! {
                                         <li class="page-tile">
+                                            <button class="page-preview-button" aria-label=open_label.clone() on:click=move |_| selected_page.set(Some(preview_page.clone()))>
                                             {match (thumbnail_unavailable, thumbnail) {
                                                 (true, _) => view! {
                                                     <div class="page-preview thumbnail-failed" aria-label="Thumbnail unavailable while realtime is disconnected"></div>
@@ -236,11 +246,13 @@ fn App() -> impl IntoView {
                                                     <div class="page-preview thumbnail-empty" aria-label="Empty page"></div>
                                                 }.into_any(),
                                             }}
-                                            <button class="page-main" aria-label=open_label on:click=move |_| selected_page.set(Some(open_page.clone()))>
-                                                <span class="page-title">{display_title}</span>
                                             </button>
-                                            <div class="tile-actions">
-                                            <button class="button danger" aria-label=delete_label on:click=move |_| {
+                                            <div class="page-tile-footer">
+                                            <div class="page-main">
+                                                <span class="page-title">{display_title}</span>
+                                                <span class="page-age">{page_age}</span>
+                                            </div>
+                                            <button class="page-delete" aria-label=delete_label on:click=move |_| {
                                                 let page_id = delete_page_id.clone();
                                                 if web_sys::window()
                                                     .and_then(|window| window.confirm_with_message("Delete this page permanently?").ok())

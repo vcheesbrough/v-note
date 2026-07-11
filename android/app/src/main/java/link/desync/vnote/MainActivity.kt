@@ -12,16 +12,17 @@ import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -68,7 +69,9 @@ import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.auth.ThumbnailMetadata
 import link.desync.vnote.ink.PageCanvasScreen
+import link.desync.vnote.ui.displayLibraryTitle
 import link.desync.vnote.ui.displayTitle
+import link.desync.vnote.ui.displayUpdatedAge
 import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
@@ -539,7 +542,9 @@ private fun AppScreen(
                             body = "Create a page, then write with the S Pen.",
                         )
                     } else {
-                        LazyColumn(
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 160.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.weight(1f),
                         ) {
@@ -618,24 +623,47 @@ private fun PageTile(
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            PagePreview(apiClient, page.thumbnail, thumbnailUnavailable)
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(page.displayTitle(), style = MaterialTheme.typography.titleMedium)
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1.5f)
+                        .clickable(onClick = onOpen),
+            ) {
+                PagePreview(
+                    apiClient = apiClient,
+                    thumbnail = page.thumbnail,
+                    unavailable = thumbnailUnavailable,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
-            TextButton(onClick = onDelete) { Text("Delete") }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(page.displayLibraryTitle(), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(page.displayUpdatedAge(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                }
+                TextButton(onClick = onDelete) { Text("Delete", style = MaterialTheme.typography.labelMedium) }
+            }
         }
     }
 }
 
 @Composable
-private fun PagePreview(apiClient: ApiClient, thumbnail: ThumbnailMetadata, unavailable: Boolean) {
+private fun PagePreview(
+    apiClient: ApiClient,
+    thumbnail: ThumbnailMetadata,
+    unavailable: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = thumbnail) {
         value = if (!unavailable && thumbnail is ThumbnailMetadata.Available) {
             apiClient.fetchThumbnail(thumbnail.url).getOrNull()?.let { bytes ->
@@ -645,8 +673,7 @@ private fun PagePreview(apiClient: ApiClient, thumbnail: ThumbnailMetadata, unav
     }
     Box(
         modifier =
-            Modifier
-                .size(width = 42.dp, height = 56.dp)
+            modifier
                 .drawBehind {
                     drawRect(if (unavailable || thumbnail is ThumbnailMetadata.Failed) Color(0xFFF5E3DF) else Color.White)
                     val step = 8.dp.toPx()

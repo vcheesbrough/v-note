@@ -16,6 +16,10 @@ fun PageSummary.displayTitle(): String =
         updatedAt.approximateRelativeTimestamp()
     }
 
+fun PageSummary.displayLibraryTitle(): String = if (hasDisplayTitle()) title else UntitledPage
+
+fun PageSummary.displayUpdatedAge(): String = updatedAt.approximateRelativeTimestamp()
+
 private fun String.compactTimestamp(): String =
     trim()
         .removeSuffix("Z")
