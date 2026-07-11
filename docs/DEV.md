@@ -140,6 +140,9 @@ Download the `dev` APK from the deployed dev stack after a CI push (the SPA link
 https://v-notes-dev.desync.link/dl/apk
 ```
 
+The URL stays stable. Its download header supplies the CI release filename, for example
+`v-note-0.13.1-dev-debug.apk`; use `curl -LOJ https://v-notes-dev.desync.link/dl/apk` to retain it.
+
 Or build locally and sideload:
 
 ```bash
