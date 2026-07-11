@@ -272,7 +272,7 @@ steps:
     commands:
       - ./scripts/deploy-v-note.sh dev
 
-  tag-release-auto-dev:
+  tag-release-auto-dev-0.13.0:
     when:
       - event: push
     depends_on:
