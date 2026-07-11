@@ -351,7 +351,7 @@ private fun parsePage(json: JSONObject): PageSummary =
         title = json.getString("title"),
         createdAt = json.getString("created_at"),
         updatedAt = json.getString("updated_at"),
-        thumbnail = parseThumbnail(json.getJSONObject("thumbnail")),
+        thumbnail = json.optJSONObject("thumbnail")?.let(::parseThumbnail) ?: ThumbnailMetadata.Empty,
     )
 
 private fun parseThumbnail(json: JSONObject): ThumbnailMetadata =
