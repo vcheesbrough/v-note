@@ -27,6 +27,16 @@ pub struct PageSummary {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
+    pub thumbnail: ThumbnailMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ThumbnailMetadata {
+    Empty,
+    Generating { source_seq: u64 },
+    Available { source_seq: u64, url: String },
+    Failed { source_seq: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,8 +64,16 @@ pub struct RealtimeTicketResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum LibraryEvent {
-    PageCreated { page: PageSummary },
-    PageDeleted { page_id: String },
+    PageCreated {
+        page: PageSummary,
+    },
+    PageDeleted {
+        page_id: String,
+    },
+    PageThumbnailUpdated {
+        page_id: String,
+        thumbnail: ThumbnailMetadata,
+    },
 }
 
 // ---- Canonical ink (stroke geometry) -------------------------------------
