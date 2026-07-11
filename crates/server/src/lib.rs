@@ -102,6 +102,7 @@ pub fn build_router_with_db(
         db,
         realtime: Arc::new(RealtimeHub::default()),
     };
+    thumbnails::recover_pending(state.clone());
 
     let public_api = Router::new()
         .route("/meta", get(meta))

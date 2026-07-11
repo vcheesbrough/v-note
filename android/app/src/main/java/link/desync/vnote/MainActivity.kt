@@ -702,7 +702,7 @@ private fun PagePreview(
     unavailable: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = thumbnail) {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = thumbnail, key2 = unavailable) {
         value = if (!unavailable && thumbnail is ThumbnailMetadata.Available) {
             apiClient.fetchThumbnail(thumbnail.url).getOrNull()?.let { bytes ->
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
