@@ -106,7 +106,7 @@ internal class ViewportGestureTracker {
                 Offset.Zero
             }
 
-        if (!pointerCountChanged && pointerCount == 1 && panDelta != Offset.Zero) {
+        if (!pointerCountChanged && pointerCount == 1) {
             previousEventTimeMillis?.let { previous ->
                 val deltaSeconds = ((eventTimeMillis - previous).coerceAtLeast(1L)) / 1000f
                 latestVelocity = capMomentumVelocity((panDelta / deltaSeconds) * MOMENTUM_RELEASE_MULTIPLIER)

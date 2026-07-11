@@ -79,6 +79,18 @@ class ViewportTransformTest {
     }
 
     @Test
+    fun stationaryFingerBeforeReleaseClearsMomentumVelocity() {
+        val tracker = ViewportGestureTracker()
+
+        tracker.update(pointerCount = 1, centroid = Offset(100f, 100f), spread = 0f, eventTimeMillis = 0)
+        tracker.update(pointerCount = 1, centroid = Offset(116f, 100f), spread = 0f, eventTimeMillis = 16)
+        val stationary = tracker.update(pointerCount = 1, centroid = Offset(116f, 100f), spread = 0f, eventTimeMillis = 32)
+
+        assertEquals(0f, stationary.velocity.getDistance(), 0.0001f)
+        assertFalse(tracker.shouldLaunchMomentum())
+    }
+
+    @Test
     fun pointerCountChangesDoNotReusePreviousPanOrSpread() {
         val tracker = ViewportGestureTracker()
 
