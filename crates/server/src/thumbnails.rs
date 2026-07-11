@@ -1,5 +1,6 @@
 use protocol::{LibraryEvent, Stroke, ThumbnailMetadata, PEN_COLOR, PEN_WIDTH};
 use sqlx::PgPool;
+use std::time::Instant;
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkiaStroke, Transform,
 };
@@ -27,12 +28,15 @@ pub fn recover_pending(state: AppState) {
         let pending = match pending {
             Ok(pending) => pending,
             Err(error) => {
+                crate::observability::metrics().record_thumbnail_recovery("error");
                 tracing::error!(%error, "could not recover pending thumbnail generation");
                 return;
             }
         };
         for (page_id, owner_id, source_seq) in pending {
             let source_seq = source_seq as u64;
+            crate::observability::metrics().record_thumbnail_recovery("queued");
+            crate::observability::metrics().thumbnail_generation_queued();
             state.realtime.publish_library_event(
                 &owner_id,
                 LibraryEvent::PageThumbnailUpdated {
@@ -50,11 +54,14 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
         let Some(pool) = state.db.as_ref() else {
             return;
         };
+        let started = Instant::now();
         let result = generate(pool, &page_id, source_seq).await;
         let thumbnail = match result {
             Ok(()) => {
                 crate::observability::metrics()
                     .record_page_mutation("generate_thumbnail", "success");
+                crate::observability::metrics()
+                    .record_thumbnail_generation("success", started.elapsed().as_secs_f64());
                 ThumbnailMetadata::Available {
                     source_seq,
                     url: thumbnail_url(&page_id, source_seq),
@@ -62,6 +69,8 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
             }
             Err(error) => {
                 crate::observability::metrics().record_page_mutation("generate_thumbnail", "error");
+                crate::observability::metrics()
+                    .record_thumbnail_generation("error", started.elapsed().as_secs_f64());
                 tracing::error!(%error, %page_id, source_seq, "thumbnail generation failed");
                 let _ = sqlx::query(
                     "UPDATE page_thumbnails SET status = 'failed', png = NULL WHERE page_id = $1 AND source_seq = $2",
@@ -73,6 +82,7 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
                 ThumbnailMetadata::Failed { source_seq }
             }
         };
+        crate::observability::metrics().thumbnail_generation_finished();
         state.realtime.publish_library_event(
             &owner_id,
             LibraryEvent::PageThumbnailUpdated { page_id, thumbnail },
@@ -95,6 +105,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .map_err(|error| error.to_string())?;
     let strokes: Vec<Stroke> = batches.into_iter().flat_map(|batch| batch.0).collect();
     let png = render(&strokes)?;
+    let png_bytes = png.len();
     sqlx::query(
         "UPDATE page_thumbnails SET status = 'available', png = $3 WHERE page_id = $1 AND source_seq = $2",
     )
@@ -104,6 +115,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .execute(pool)
     .await
     .map_err(|error| error.to_string())?;
+    crate::observability::metrics().observe_thumbnail_artifact_bytes(png_bytes);
     cleanup(pool, page_id)
         .await
         .map_err(|error| error.to_string())

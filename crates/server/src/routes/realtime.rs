@@ -527,6 +527,7 @@ async fn handle_page_client_message(
                             .execute(&pool)
                             .await;
                             if inserted.is_ok_and(|result| result.rows_affected() == 1) {
+                                crate::observability::metrics().thumbnail_generation_queued();
                                 state.realtime.publish_library_event(
                                     &owner_id,
                                     LibraryEvent::PageThumbnailUpdated {

@@ -15,7 +15,8 @@ use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry, TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
+    TextEncoder,
 };
 use rand::RngCore;
 use tracing::Instrument;
@@ -40,6 +41,10 @@ pub struct Metrics {
     http_request_duration_seconds: HistogramVec,
     auth_failures_total: IntCounterVec,
     page_mutations_total: IntCounterVec,
+    thumbnail_generation_duration_seconds: HistogramVec,
+    thumbnail_queue_depth: IntGauge,
+    thumbnail_recoveries_total: IntCounterVec,
+    thumbnail_artifact_bytes: Histogram,
     realtime_events_total: IntCounterVec,
     realtime_active_connections: IntGauge,
     _build_info: IntGauge,
@@ -80,6 +85,37 @@ impl Metrics {
             &["operation", "result"],
         )
         .expect("page mutation counter should build");
+        let thumbnail_generation_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "v_note_thumbnail_generation_duration_seconds",
+                "Thumbnail generation duration by result",
+            ),
+            &["result"],
+        )
+        .expect("thumbnail generation histogram should build");
+        let thumbnail_queue_depth = IntGauge::new(
+            "v_note_thumbnail_queue_depth",
+            "Thumbnail generations awaiting completion",
+        )
+        .expect("thumbnail queue gauge should build");
+        let thumbnail_recoveries_total = IntCounterVec::new(
+            Opts::new(
+                "v_note_thumbnail_recoveries_total",
+                "Thumbnail generation recovery attempts by result",
+            ),
+            &["result"],
+        )
+        .expect("thumbnail recovery counter should build");
+        let thumbnail_artifact_bytes = Histogram::with_opts(
+            HistogramOpts::new(
+                "v_note_thumbnail_artifact_bytes",
+                "Stored thumbnail PNG size in bytes",
+            )
+            .buckets(vec![
+                256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
+            ]),
+        )
+        .expect("thumbnail artifact histogram should build");
         let realtime_events_total = IntCounterVec::new(
             Opts::new(
                 "v_note_realtime_events_total",
@@ -106,6 +142,10 @@ impl Metrics {
             Box::new(http_request_duration_seconds.clone()),
             Box::new(auth_failures_total.clone()),
             Box::new(page_mutations_total.clone()),
+            Box::new(thumbnail_generation_duration_seconds.clone()),
+            Box::new(thumbnail_queue_depth.clone()),
+            Box::new(thumbnail_recoveries_total.clone()),
+            Box::new(thumbnail_artifact_bytes.clone()),
             Box::new(realtime_events_total.clone()),
             Box::new(realtime_active_connections.clone()),
             Box::new(build_info.clone()),
@@ -121,6 +161,10 @@ impl Metrics {
             http_request_duration_seconds,
             auth_failures_total,
             page_mutations_total,
+            thumbnail_generation_duration_seconds,
+            thumbnail_queue_depth,
+            thumbnail_recoveries_total,
+            thumbnail_artifact_bytes,
             realtime_events_total,
             realtime_active_connections,
             _build_info: build_info,
@@ -135,6 +179,30 @@ impl Metrics {
         self.page_mutations_total
             .with_label_values(&[operation, result])
             .inc();
+    }
+
+    pub fn record_thumbnail_generation(&self, result: &'static str, elapsed_seconds: f64) {
+        self.thumbnail_generation_duration_seconds
+            .with_label_values(&[result])
+            .observe(elapsed_seconds);
+    }
+
+    pub fn thumbnail_generation_queued(&self) {
+        self.thumbnail_queue_depth.inc();
+    }
+
+    pub fn thumbnail_generation_finished(&self) {
+        self.thumbnail_queue_depth.dec();
+    }
+
+    pub fn record_thumbnail_recovery(&self, result: &'static str) {
+        self.thumbnail_recoveries_total
+            .with_label_values(&[result])
+            .inc();
+    }
+
+    pub fn observe_thumbnail_artifact_bytes(&self, bytes: usize) {
+        self.thumbnail_artifact_bytes.observe(bytes as f64);
     }
 
     pub fn record_realtime_event(&self, channel: &'static str, result: &'static str) {
