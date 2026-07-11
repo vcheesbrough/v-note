@@ -65,8 +65,8 @@ services:
       OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
       OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-2000}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-v-note}
-      VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-1}
-      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-1}}
+      VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-2}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-2}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,7 +89,7 @@ services:
       - observability.service=v-note
       - observability.env=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-0.11.0}
-      - observability.protocol=${VNOTE_PROTOCOL_VERSION:-1}
+      - observability.protocol=${VNOTE_PROTOCOL_VERSION:-2}
 
 volumes:
   v-note-db:

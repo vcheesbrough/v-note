@@ -208,7 +208,7 @@ fn App() -> impl IntoView {
                                     library_error.track();
                                     pages.get()
                                 }
-                                key=|page| (page.id.clone(), thumbnail_seq(&page.thumbnail))
+                                key=|page| (page.id.clone(), thumbnail_key(&page.thumbnail))
                                 children=move |page| {
                                     let preview_page = page.clone();
                                     let delete_page_id = page.id.clone();
@@ -788,6 +788,15 @@ fn thumbnail_seq(thumbnail: &ThumbnailMetadata) -> u64 {
         ThumbnailMetadata::Generating { source_seq }
         | ThumbnailMetadata::Available { source_seq, .. }
         | ThumbnailMetadata::Failed { source_seq } => *source_seq,
+    }
+}
+
+fn thumbnail_key(thumbnail: &ThumbnailMetadata) -> String {
+    match thumbnail {
+        ThumbnailMetadata::Empty => "empty".to_string(),
+        ThumbnailMetadata::Generating { source_seq } => format!("generating:{source_seq}"),
+        ThumbnailMetadata::Available { source_seq, url } => format!("available:{source_seq}:{url}"),
+        ThumbnailMetadata::Failed { source_seq } => format!("failed:{source_seq}"),
     }
 }
 

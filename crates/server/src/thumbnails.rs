@@ -1,7 +1,7 @@
 use protocol::{LibraryEvent, Stroke, ThumbnailMetadata, PEN_COLOR, PEN_WIDTH};
 use sqlx::PgPool;
 use tiny_skia::{
-    Color, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkiaStroke, Transform,
+    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkiaStroke, Transform,
 };
 
 use crate::AppState;
@@ -10,6 +10,40 @@ const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
 const PADDING: f32 = 12.0;
 const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 20.0;
+
+pub fn recover_pending(state: AppState) {
+    let Some(pool) = state.db.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let pending = sqlx::query_as::<_, (String, String, i64)>(
+            r#"SELECT t.page_id, p.owner_id, t.source_seq
+               FROM page_thumbnails t
+               JOIN pages p ON p.id = t.page_id
+               WHERE t.status = 'generating'"#,
+        )
+        .fetch_all(&pool)
+        .await;
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::error!(%error, "could not recover pending thumbnail generation");
+                return;
+            }
+        };
+        for (page_id, owner_id, source_seq) in pending {
+            let source_seq = source_seq as u64;
+            state.realtime.publish_library_event(
+                &owner_id,
+                LibraryEvent::PageThumbnailUpdated {
+                    page_id: page_id.clone(),
+                    thumbnail: ThumbnailMetadata::Generating { source_seq },
+                },
+            );
+            enqueue(state.clone(), page_id, owner_id, source_seq);
+        }
+    });
+}
 
 pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u64) {
     tokio::spawn(async move {
@@ -114,7 +148,17 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         ..Default::default()
     };
     for stroke in strokes {
-        if stroke.color != PEN_COLOR || stroke.points.len() < 2 {
+        if stroke.color != PEN_COLOR || stroke.points.is_empty() {
+            continue;
+        }
+        let transform = Transform::from_scale(scale, scale).post_translate(offset_x, offset_y);
+        if stroke.points.len() == 1 {
+            let point = &stroke.points[0];
+            if let Some(dot) =
+                PathBuilder::from_circle(point.x as f32, point.y as f32, pen.width / (2.0 * scale))
+            {
+                pixmap.fill_path(&dot, &paint, FillRule::Winding, transform, None);
+            }
             continue;
         }
         let mut path = PathBuilder::new();
@@ -123,13 +167,7 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
             path.line_to(point.x as f32, point.y as f32);
         }
         if let Some(path) = path.finish() {
-            pixmap.stroke_path(
-                &path,
-                &paint,
-                &pen,
-                Transform::from_scale(scale, scale).post_translate(offset_x, offset_y),
-                None,
-            );
+            pixmap.stroke_path(&path, &paint, &pen, transform, None);
         }
     }
     pixmap.encode_png().map_err(|error| error.to_string())
@@ -186,5 +224,26 @@ mod tests {
         .expect("thumbnail should render");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         assert!(bytes.len() > 100);
+    }
+
+    #[test]
+    fn renders_single_point_strokes_as_dots() {
+        let bytes = render(&[Stroke {
+            tool: PEN_TOOL.to_string(),
+            color: PEN_COLOR.to_string(),
+            width: PEN_WIDTH,
+            points: vec![StrokePoint {
+                x: 50.0,
+                y: 50.0,
+                t: 0,
+                pressure: None,
+            }],
+        }])
+        .expect("thumbnail should render");
+        let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
+        let center = pixmap
+            .pixel(WIDTH / 2, HEIGHT / 2)
+            .expect("center pixel should exist");
+        assert_eq!((center.red(), center.green(), center.blue()), (0, 100, 0));
     }
 }
