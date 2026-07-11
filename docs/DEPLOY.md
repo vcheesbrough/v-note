@@ -228,7 +228,7 @@ After a successful dev deploy, the `dev` APK is served at:
 https://v-notes-dev.desync.link/dl/apk
 ```
 
-The SPA links to it ("Download Android app") with the same versioned filename in its `download` attribute, so the browser can perform duplicate-download handling before the response arrives. Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + Path(/dl/apk)` rule. The stable URL also returns `Content-Disposition: attachment; filename="v-note-{release}-dev-debug.apk"` (for example, `v-note-0.13.1-dev-debug.apk`).
+The canonical URL remains stable. SPA links add `?release={release}` and the same versioned filename in their `download` attribute, giving Android Chrome a distinct download identity before the response arrives. Nginx ignores the query for route matching and serves the same `/dl/apk` resource. Served by `registry.desync.link/v-note-android:{release}` (nginx:alpine) via `deploy/docker-compose.android-apk.yml`, Traefik `Host + Path(/dl/apk)` rule. The response also returns `Content-Disposition: attachment; filename="v-note-{release}-dev-debug.apk"` (for example, `v-note-0.13.1-dev-debug.apk`).
 
 Download on the device browser and enable "Install from unknown sources", or:
 

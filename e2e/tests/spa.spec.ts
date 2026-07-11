@@ -7,10 +7,12 @@ test('spa loads and renders metadata', async ({ page }) => {
   await expect(page.getByText(/Protocol\s+1/)).toBeVisible();
 
   const release = (await page.locator('.version-watermark').innerText()).replace(/^v/, '');
-  await expect(page.locator('.apk-link a')).toHaveAttribute(
+  const downloadLink = page.locator('.apk-link a');
+  await expect(downloadLink).toHaveAttribute(
     'download',
     `v-note-${release}-dev-debug.apk`,
   );
+  await expect(downloadLink).toHaveAttribute('href', `/dl/apk?release=${release}`);
 });
 
 test('spa narrow header uses an account menu with apk download', async ({ page }) => {
@@ -29,4 +31,5 @@ test('spa narrow header uses an account menu with apk download', async ({ page }
   const release = (await page.locator('.version-watermark').innerText()).replace(/^v/, '');
   await expect(downloadLink).toBeVisible();
   await expect(downloadLink).toHaveAttribute('download', `v-note-${release}-dev-debug.apk`);
+  await expect(downloadLink).toHaveAttribute('href', `/dl/apk?release=${release}`);
 });
