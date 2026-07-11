@@ -130,11 +130,15 @@ button {
   white-space: nowrap;
 }
 
-.library-shell,
 .auth-panel,
 .state-panel {
   margin: 0 auto;
   max-width: 1120px;
+}
+
+.library-shell {
+  margin: 0;
+  max-width: none;
 }
 
 .library-header {
@@ -259,6 +263,7 @@ button {
   background: transparent;
   display: block;
   padding: 0;
+  position: relative;
   width: 100%;
 }
 
@@ -286,12 +291,21 @@ button {
   width: 100%;
 }
 
-.page-title {
+.page-thumbnail-title {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 4px;
+  color: #17201a;
   display: block;
   font-size: 0.95rem;
   font-weight: 600;
+  left: 8px;
+  max-width: calc(100% - 16px);
   overflow: hidden;
+  padding: 4px 8px;
+  position: absolute;
+  text-align: left;
   text-overflow: ellipsis;
+  top: 8px;
   white-space: nowrap;
 }
 

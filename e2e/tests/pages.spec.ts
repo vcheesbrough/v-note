@@ -6,13 +6,14 @@ test.describe('page library', () => {
   test('SPA can open and delete a page', async ({ page, request }) => {
     const created = await request.post('/api/pages', { data: {} });
     expect(created.status()).toBe(201);
+    const createdPageId = (await created.json()).page.id;
 
     await page.goto('/', { waitUntil: 'load' });
 
     await expect(page.getByRole('button', { name: 'New page' })).toHaveCount(0);
-    const unnamedPage = page.getByRole('button', { name: 'Open Untitled page', exact: true }).first();
+    const unnamedPage = page.getByRole('button', { name: 'Open page', exact: true }).first();
     await expect(unnamedPage).toBeVisible();
-    await expect(page.getByText('Untitled page')).toBeVisible();
+    await expect(page.getByText('Untitled page')).toHaveCount(0);
     await unnamedPage.click();
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
     await expectCanvasFillsFrame(page);
@@ -23,8 +24,11 @@ test.describe('page library', () => {
     await page.getByRole('button', { name: 'Back' }).click();
 
     page.on('dialog', (dialog) => dialog.accept());
-    await page.getByRole('button', { name: 'Delete Untitled page', exact: true }).first().click();
-    await expect(unnamedPage).toHaveCount(0);
+    await page.getByRole('button', { name: 'Delete page', exact: true }).first().click();
+    await expect.poll(async () => {
+      const pages = await request.get('/api/pages');
+      return (await pages.json()).pages.some((page: { id: string }) => page.id === createdPageId);
+    }).toBe(false);
   });
 
   test('REST pages are owner-scoped', async ({ request }) => {
