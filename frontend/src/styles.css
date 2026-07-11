@@ -288,7 +288,8 @@ button {
 
 .page-title {
   display: block;
-  font-weight: 720;
+  font-size: 0.95rem;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -296,15 +297,22 @@ button {
 
 .page-age {
   color: #68736b;
-  font-size: 0.78rem;
-  font-weight: 500;
+  font-size: 0.75rem;
+  font-weight: 400;
 }
 
 .page-delete {
   background: transparent;
-  color: #8a4c43;
-  font-size: 0.78rem;
-  padding: 5px 2px;
+  align-items: center;
+  color: #8b1e12;
+  display: inline-flex;
+  font-size: 1.25rem;
+  font-weight: 400;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: 32px;
 }
 
 .canvas-shell {
@@ -395,7 +403,7 @@ button {
   }
 
   .page-grid {
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   }
 
   .canvas-header {

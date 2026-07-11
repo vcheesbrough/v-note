@@ -264,8 +264,8 @@ fn App() -> impl IntoView {
                                                         }
                                                     });
                                                 }
-                                            }>
-                                                "Delete"
+                                            } title="Delete page">
+                                                "×"
                                             </button>
                                             </div>
                                         </li>
