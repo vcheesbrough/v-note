@@ -9,7 +9,7 @@ use crate::AppState;
 const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
 const PADDING: f32 = 12.0;
-const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 4.5;
+const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 20.0;
 
 pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u64) {
     tokio::spawn(async move {
