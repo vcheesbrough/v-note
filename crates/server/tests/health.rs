@@ -6,7 +6,7 @@ use axum::http::{Request, StatusCode};
 use protocol::HealthResponse;
 use server::auth::{AuthConfig, JwksCache};
 use server::build_router;
-use server::observability::{metrics_handler, CORRELATION_ID_HEADER, REQUEST_ID_HEADER};
+use server::observability::{metrics, metrics_handler, CORRELATION_ID_HEADER, REQUEST_ID_HEADER};
 use tower::util::ServiceExt;
 
 fn test_router() -> axum::Router {
@@ -132,6 +132,12 @@ async fn metrics_endpoint_exposes_build_and_http_metrics() {
         .expect("health request should succeed");
     assert_eq!(health_response.status(), StatusCode::OK);
 
+    metrics().record_thumbnail_generation("success", 0.01);
+    metrics().thumbnail_generation_queued();
+    metrics().thumbnail_generation_finished();
+    metrics().record_thumbnail_recovery("queued");
+    metrics().observe_thumbnail_artifact_bytes(1024);
+
     let response = metrics_handler().await;
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -142,6 +148,10 @@ async fn metrics_endpoint_exposes_build_and_http_metrics() {
 
     assert!(text.contains("v_note_build_info"));
     assert!(text.contains("protocol=\"2\""));
+    assert!(text.contains("v_note_thumbnail_generation_duration_seconds"));
+    assert!(text.contains("v_note_thumbnail_queue_depth"));
+    assert!(text.contains("v_note_thumbnail_recoveries_total"));
+    assert!(text.contains("v_note_thumbnail_artifact_bytes"));
     assert!(text.contains("version=\""));
     assert!(text.contains("v_note_http_requests_total"));
     assert!(text.contains("route=\"/health\""));
