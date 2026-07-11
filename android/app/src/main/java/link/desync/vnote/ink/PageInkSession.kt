@@ -1,7 +1,6 @@
 package link.desync.vnote.ink
 
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
@@ -24,8 +23,13 @@ class PageInkSession(
     private val pageId: String,
     private val scope: CoroutineScope,
 ) {
-    // Committed strokes in commit order; drives the canvas render.
-    val strokes = mutableStateListOf<Stroke>()
+    // Rendered strokes: confirmed server batches followed by locally submitted
+    // batches that are awaiting their matching server echo.
+    var strokes by mutableStateOf<List<Stroke>>(emptyList())
+        private set
+
+    internal val pendingBatchCount: Int
+        get() = pendingBatches.size
 
     // True only while this session holds the edit lease.
     var canEdit by mutableStateOf(false)
@@ -38,6 +42,8 @@ class PageInkSession(
     private var sessionId: String? = null
     private var lastSeq: Long = 0
     private val seenBatchIds = mutableSetOf<String>()
+    private val confirmedStrokes = mutableListOf<Stroke>()
+    private val pendingBatches = linkedMapOf<String, List<Stroke>>()
     private var socket: PageSocket? = null
     private var leaseRenewJob: Job? = null
 
@@ -80,7 +86,11 @@ class PageInkSession(
             return
         }
         val clientBatchId = "batch_${UUID.randomUUID().toString().replace("-", "")}"
-        socket?.commitBatch(clientBatchId, listOf(stroke))
+        val submitted = listOf(stroke)
+        val activeSocket = socket ?: return
+        pendingBatches[clientBatchId] = submitted
+        publishRenderableStrokes()
+        activeSocket.commitBatch(clientBatchId, submitted)
     }
 
     private fun handle(event: PageEvent) {
@@ -99,7 +109,11 @@ class PageInkSession(
             }
             is PageEvent.StrokeBatch -> {
                 if (seenBatchIds.add(event.clientBatchId)) {
-                    strokes.addAll(event.strokes)
+                    confirmedStrokes.addAll(event.strokes)
+                    pendingBatches.remove(event.clientBatchId)
+                    // One state assignment swaps optimistic ink for the
+                    // confirmed batch, so Compose cannot render a blank gap.
+                    publishRenderableStrokes()
                 }
                 if (event.seq > lastSeq) {
                     lastSeq = event.seq
@@ -120,6 +134,7 @@ class PageInkSession(
             is PageEvent.LeaseDenied -> {
                 canEdit = false
                 stopLeaseRenewal()
+                discardPendingBatches()
                 statusBanner = LEASE_BLOCKED
             }
             is PageEvent.LeaseChanged -> {
@@ -141,7 +156,12 @@ class PageInkSession(
                     }
                 }
             }
-            is PageEvent.Failure -> statusBanner = event.message
+            is PageEvent.Failure -> {
+                canEdit = false
+                stopLeaseRenewal()
+                discardPendingBatches()
+                statusBanner = event.message
+            }
         }
     }
 
@@ -164,6 +184,17 @@ class PageInkSession(
     private fun stopLeaseRenewal() {
         leaseRenewJob?.cancel()
         leaseRenewJob = null
+    }
+
+    private fun publishRenderableStrokes() {
+        strokes = confirmedStrokes + pendingBatches.values.flatten()
+    }
+
+    private fun discardPendingBatches() {
+        if (pendingBatches.isNotEmpty()) {
+            pendingBatches.clear()
+            publishRenderableStrokes()
+        }
     }
 
     private fun handleDisconnected(message: String) {
