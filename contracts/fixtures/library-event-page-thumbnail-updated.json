@@ -1,0 +1,9 @@
+{
+  "type": "page-thumbnail-updated",
+  "page_id": "page_01j00000000000000000000000",
+  "thumbnail": {
+    "status": "available",
+    "source_seq": 4,
+    "url": "/api/pages/page_01j00000000000000000000000/thumbnails/4"
+  }
+}
