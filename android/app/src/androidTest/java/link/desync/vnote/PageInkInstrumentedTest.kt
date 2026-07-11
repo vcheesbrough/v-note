@@ -193,6 +193,53 @@ class PageInkInstrumentedTest {
     }
 
     @Test
+    fun clearsPendingInkWhenServerRejectsCommit() {
+        val commitReceived = CountDownLatch(1)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                    }
+
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        when (JSONObject(text).getString("type")) {
+                            "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                            "release-lease" -> webSocket.close(1000, "lease released")
+                            "commit-batch" -> {
+                                commitReceived.countDown()
+                                webSocket.send(
+                                    """{"type":"error","code":"commit_failed","message":"Commit failed"}""",
+                                )
+                            }
+                        }
+                    }
+                },
+            ),
+        )
+
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        session.connect()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+
+        session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0))))
+        assertTrue("commit sent", commitReceived.await(5, TimeUnit.SECONDS))
+        assertTrue("rejection clears pending ink", awaitUntil { session.pendingBatchCount == 0 })
+        assertEquals("uncommitted ink is not rendered", emptyList<Stroke>(), session.strokes)
+        assertEquals("commit failure shown", "Commit failed", session.statusBanner)
+        assertEquals("input blocked", false, session.canEdit)
+
+        session.disconnect()
+    }
+
+    @Test
     fun blocksInkWhenAnotherSessionHoldsLease() {
         server.enqueue(
             MockResponse().withWebSocketUpgrade(

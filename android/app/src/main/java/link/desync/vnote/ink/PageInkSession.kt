@@ -134,6 +134,7 @@ class PageInkSession(
             is PageEvent.LeaseDenied -> {
                 canEdit = false
                 stopLeaseRenewal()
+                discardPendingBatches()
                 statusBanner = LEASE_BLOCKED
             }
             is PageEvent.LeaseChanged -> {
@@ -155,7 +156,12 @@ class PageInkSession(
                     }
                 }
             }
-            is PageEvent.Failure -> statusBanner = event.message
+            is PageEvent.Failure -> {
+                canEdit = false
+                stopLeaseRenewal()
+                discardPendingBatches()
+                statusBanner = event.message
+            }
         }
     }
 
@@ -182,6 +188,13 @@ class PageInkSession(
 
     private fun publishRenderableStrokes() {
         strokes = confirmedStrokes + pendingBatches.values.flatten()
+    }
+
+    private fun discardPendingBatches() {
+        if (pendingBatches.isNotEmpty()) {
+            pendingBatches.clear()
+            publishRenderableStrokes()
+        }
     }
 
     private fun handleDisconnected(message: String) {
