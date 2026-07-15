@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
@@ -84,10 +84,72 @@ pub enum LibraryEvent {
 // is reserved on each point so post-MVP pressure/tilt curves extend the schema
 // without breaking v1 strokes (see `docs/PLAN.md` → Stroke tool).
 
-/// MVP pen constants — single hardcoded tool.
-pub const PEN_TOOL: &str = "pen";
-pub const PEN_COLOR: &str = "#006400";
-pub const PEN_WIDTH: f64 = 4.0;
+/// The only style accepted by protocol v3. Stored styles deliberately carry a
+/// discriminator and version so later rendering models cannot reinterpret
+/// historical ink.
+pub const SOLID_ROUND_TOOL: &str = "solid_round";
+pub const SOLID_ROUND_STYLE_VERSION: u32 = 1;
+pub const DEFAULT_PEN_COLOR: &str = "#006400";
+pub const DEFAULT_PEN_WIDTH: f64 = 4.0;
+pub const MIN_PEN_WIDTH: f64 = 1.0;
+pub const MAX_PEN_WIDTH: f64 = 32.0;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SolidRoundParameters {
+    pub color: String,
+    pub width: f64,
+    pub cap_style: String,
+    pub join_style: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StrokeStyle {
+    pub tool_kind: String,
+    pub style_version: u32,
+    pub parameters: SolidRoundParameters,
+}
+
+impl StrokeStyle {
+    pub fn default_solid_round() -> Self {
+        Self {
+            tool_kind: SOLID_ROUND_TOOL.to_string(),
+            style_version: SOLID_ROUND_STYLE_VERSION,
+            parameters: SolidRoundParameters {
+                color: DEFAULT_PEN_COLOR.to_string(),
+                width: DEFAULT_PEN_WIDTH,
+                cap_style: "round".to_string(),
+                join_style: "round".to_string(),
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.tool_kind != SOLID_ROUND_TOOL || self.style_version != SOLID_ROUND_STYLE_VERSION {
+            return Err("unsupported style");
+        }
+        let parameters = &self.parameters;
+        if parameters.cap_style != "round" || parameters.join_style != "round" {
+            return Err("solid_round requires round cap and join");
+        }
+        let color = &parameters.color;
+        if color.len() != 7
+            || !color.starts_with('#')
+            || !color[1..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+        {
+            return Err("color must be uppercase #RRGGBB");
+        }
+        let width = parameters.width;
+        if !width.is_finite()
+            || !(MIN_PEN_WIDTH..=MAX_PEN_WIDTH).contains(&width)
+            || ((width * 2.0).round() - width * 2.0).abs() > f64::EPSILON
+        {
+            return Err("width must be 1.0..32.0 in 0.5 increments");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrokePoint {
@@ -102,12 +164,10 @@ pub struct StrokePoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Stroke {
-    /// Constant `"pen"` in MVP (single hardcoded tool).
-    pub tool: String,
-    /// Constant `#006400` dark green in MVP.
-    pub color: String,
-    /// Constant 4.0 logical px in MVP (no pressure→width mapping).
-    pub width: f64,
+    /// Client-assigned immutable identity. Tombstones target this id.
+    pub id: String,
+    /// Immutable style snapshot captured at stylus-down.
+    pub style: StrokeStyle,
     pub points: Vec<StrokePoint>,
 }
 
@@ -119,6 +179,20 @@ pub struct StrokeBatch {
     /// Client-generated idempotency key; lets reconnect retries dedupe.
     pub client_batch_id: String,
     pub strokes: Vec<Stroke>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TombstoneBatch {
+    pub revision: u64,
+    pub client_mutation_id: String,
+    pub stroke_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolPreset {
+    pub id: String,
+    pub revision: u64,
+    pub style: StrokeStyle,
 }
 
 /// Full ordered replay of a page's ink (snapshot). Used as the golden
@@ -156,6 +230,11 @@ pub enum PageClientMessage {
         client_batch_id: String,
         strokes: Vec<Stroke>,
     },
+    /// Permanently hide complete strokes by their stable ids.
+    CommitTombstones {
+        client_mutation_id: String,
+        stroke_ids: Vec<String>,
+    },
 }
 
 /// Server → client messages on the page channel.
@@ -172,6 +251,7 @@ pub enum PageServerMessage {
     },
     /// A sequenced stroke batch (gap-fill replay, snapshot, or live fan-out).
     StrokeBatch(StrokeBatch),
+    TombstoneBatch(TombstoneBatch),
     /// End of gap-fill replay; this session is caught up to `last_seq`.
     Synced { last_seq: u64 },
     /// This session now holds the edit lease.

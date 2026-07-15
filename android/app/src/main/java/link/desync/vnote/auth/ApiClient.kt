@@ -383,16 +383,28 @@ data class StrokePoint(
     val t: Long,
 )
 
-// One captured stroke. MVP uses a single hardcoded pen (see companion).
+// One captured stroke uses an immutable style snapshot captured at stylus-down.
+// The server accepts only the v3 solid_round style, but the discriminated shape
+// keeps historical ink unambiguous when future tools arrive.
+data class SolidRoundParameters(
+    val color: String = "#006400",
+    val width: Double = 4.0,
+    val capStyle: String = "round",
+    val joinStyle: String = "round",
+)
+
+data class StrokeStyle(
+    val toolKind: String = "solid_round",
+    val styleVersion: Int = 1,
+    val parameters: SolidRoundParameters = SolidRoundParameters(),
+)
+
 data class Stroke(
     val points: List<StrokePoint>,
-    val tool: String = PEN_TOOL,
-    val color: String = PEN_COLOR,
-    val width: Double = PEN_WIDTH,
+    val id: String = "stroke_${UUID.randomUUID().toString().replace("-", "")}",
+    val style: StrokeStyle = StrokeStyle(),
 ) {
     companion object {
-        const val PEN_TOOL = "pen"
-        const val PEN_COLOR = "#006400"
         const val PEN_WIDTH = 4.0
     }
 }
@@ -412,6 +424,8 @@ sealed interface PageEvent {
     ) : PageEvent
 
     data class Synced(val lastSeq: Long) : PageEvent
+
+    data class TombstoneBatch(val revision: Long, val strokeIds: List<String>) : PageEvent
 
     data object LeaseGranted : PageEvent
 
@@ -455,6 +469,16 @@ class PageSocket(private val webSocket: WebSocket) {
         webSocket.send(encodeCommitBatch(clientBatchId, strokes))
     }
 
+    fun commitTombstones(clientMutationId: String, strokeIds: List<String>) {
+        webSocket.send(
+            JSONObject()
+                .put("type", "commit-tombstones")
+                .put("client_mutation_id", clientMutationId)
+                .put("stroke_ids", org.json.JSONArray(strokeIds))
+                .toString(),
+        )
+    }
+
     fun close() {
         webSocket.close(1000, "page closed")
     }
@@ -475,6 +499,12 @@ private fun parsePageEvent(json: JSONObject): PageEvent? =
                 strokes = parseStrokes(json.getJSONArray("strokes")),
             )
         "synced" -> PageEvent.Synced(json.getLong("last_seq"))
+        "tombstone-batch" -> PageEvent.TombstoneBatch(
+            json.getLong("revision"),
+            json.getJSONArray("stroke_ids").let { ids ->
+                buildList { for (index in 0 until ids.length()) add(ids.getString(index)) }
+            },
+        )
         "lease-granted" -> PageEvent.LeaseGranted
         "lease-denied" -> PageEvent.LeaseDenied(json.getString("holder"))
         "lease-changed" -> PageEvent.LeaseChanged(json.optString("holder").ifBlank { null })
@@ -507,11 +537,37 @@ private fun parseStroke(json: JSONObject): Stroke {
         }
     return Stroke(
         points = points,
-        tool = json.optString("tool", Stroke.PEN_TOOL),
-        color = json.optString("color", Stroke.PEN_COLOR),
-        width = json.optDouble("width", Stroke.PEN_WIDTH),
+        id = json.getString("id"),
+        style = parseStrokeStyle(json.getJSONObject("style")),
     )
 }
+
+private fun parseStrokeStyle(json: JSONObject): StrokeStyle {
+    val parameters = json.getJSONObject("parameters")
+    return StrokeStyle(
+        toolKind = json.getString("tool_kind"),
+        styleVersion = json.getInt("style_version"),
+        parameters = SolidRoundParameters(
+            color = parameters.getString("color"),
+            width = parameters.getDouble("width"),
+            capStyle = parameters.getString("cap_style"),
+            joinStyle = parameters.getString("join_style"),
+        ),
+    )
+}
+
+private fun encodeStrokeStyle(style: StrokeStyle): JSONObject =
+    JSONObject()
+        .put("tool_kind", style.toolKind)
+        .put("style_version", style.styleVersion)
+        .put(
+            "parameters",
+            JSONObject()
+                .put("color", style.parameters.color)
+                .put("width", style.parameters.width)
+                .put("cap_style", style.parameters.capStyle)
+                .put("join_style", style.parameters.joinStyle),
+        )
 
 private fun encodeCommitBatch(
     clientBatchId: String,
@@ -530,9 +586,8 @@ private fun encodeCommitBatch(
         }
         strokesArray.put(
             JSONObject()
-                .put("tool", stroke.tool)
-                .put("color", stroke.color)
-                .put("width", stroke.width)
+                .put("id", stroke.id)
+                .put("style", encodeStrokeStyle(stroke.style))
                 .put("points", pointsArray),
         )
     }

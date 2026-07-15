@@ -93,6 +93,17 @@ class PageInkSession(
         activeSocket.commitBatch(clientBatchId, submitted)
     }
 
+    fun eraseStrokes(strokeIds: Collection<String>) {
+        if (!canEdit || strokeIds.isEmpty()) return
+        confirmedStrokes.removeAll { it.id in strokeIds }
+        pendingBatches.entries.removeAll { (_, strokes) -> strokes.any { it.id in strokeIds } }
+        publishRenderableStrokes()
+        socket?.commitTombstones(
+            "erase_${UUID.randomUUID().toString().replace("-", "")}",
+            strokeIds.toList(),
+        )
+    }
+
     private fun handle(event: PageEvent) {
         when (event) {
             is PageEvent.Welcome -> {
@@ -123,6 +134,11 @@ class PageInkSession(
                 if (event.lastSeq > lastSeq) {
                     lastSeq = event.lastSeq
                 }
+            }
+            is PageEvent.TombstoneBatch -> {
+                confirmedStrokes.removeAll { it.id in event.strokeIds }
+                pendingBatches.entries.removeAll { (_, strokes) -> strokes.any { it.id in event.strokeIds } }
+                publishRenderableStrokes()
             }
             PageEvent.LeaseGranted -> {
                 canEdit = true

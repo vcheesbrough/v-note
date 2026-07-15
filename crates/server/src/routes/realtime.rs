@@ -15,6 +15,7 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
     LibraryEvent, PageClientMessage, PageServerMessage, RealtimeTicketResponse, Stroke, StrokeBatch,
+    TombstoneBatch,
 };
 use rand::RngCore;
 use serde::Deserialize;
@@ -497,6 +498,12 @@ async fn handle_page_client_message(
                 crate::observability::metrics().record_realtime_event("page", "lease_denied");
                 return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
             }
+            if strokes.iter().any(|stroke| stroke.id.is_empty() || stroke.style.validate().is_err()) {
+                return send_page(sender, PageServerMessage::Error {
+                    code: "invalid_stroke_style".to_string(),
+                    message: "strokes require a supported immutable solid_round style".to_string(),
+                }).await;
+            }
             match persist_batch(pool, page_id, &client_batch_id, &strokes).await {
                 Ok(persisted) => {
                     let seq = persisted.seq;
@@ -517,11 +524,11 @@ async fn handle_page_client_message(
                             LibraryEvent::PageThumbnailUpdated {
                                 page_id: page_id.clone(),
                                 thumbnail: protocol::ThumbnailMetadata::Generating {
-                                    source_seq: seq,
+                                    source_seq: persisted.revision,
                                 },
                             },
                         );
-                        crate::thumbnails::enqueue(state.clone(), page_id, persisted.owner_id, seq);
+                        crate::thumbnails::enqueue(state.clone(), page_id, persisted.owner_id, persisted.revision);
                     }
                     true
                 }
@@ -536,6 +543,35 @@ async fn handle_page_client_message(
                         },
                     )
                     .await
+                }
+            }
+        }
+        PageClientMessage::CommitTombstones { client_mutation_id, stroke_ids } => {
+            if let LeaseOutcome::Denied { holder } = state.realtime.acquire_lease(page_id, session_id) {
+                return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
+            }
+            match persist_tombstones(pool, page_id, &client_mutation_id, &stroke_ids).await {
+                Ok(persisted) => {
+                    let event = TombstoneBatch {
+                        revision: persisted.revision,
+                        client_mutation_id,
+                        stroke_ids: persisted.stroke_ids,
+                    };
+                    state.realtime.publish_page(page_id, PageServerMessage::TombstoneBatch(event));
+                    if persisted.thumbnail_job_created {
+                        state.realtime.publish_library_event(&persisted.owner_id, LibraryEvent::PageThumbnailUpdated {
+                            page_id: page_id.to_string(),
+                            thumbnail: protocol::ThumbnailMetadata::Generating { source_seq: persisted.revision },
+                        });
+                        crate::thumbnails::enqueue(state.clone(), page_id.to_string(), persisted.owner_id, persisted.revision);
+                    }
+                    crate::observability::metrics().record_page_mutation("commit_tombstones", "success");
+                    true
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "tombstone commit failed");
+                    crate::observability::metrics().record_page_mutation("commit_tombstones", "error");
+                    send_page(sender, PageServerMessage::Error { code: "tombstone_failed".to_string(), message: "could not persist deleted strokes".to_string() }).await
                 }
             }
         }
@@ -612,6 +648,7 @@ async fn load_batches_after(
 /// persist their thumbnail job before the commit is acknowledged.
 struct PersistedBatch {
     seq: u64,
+    revision: u64,
     owner_id: String,
     thumbnail_job_created: bool,
 }
@@ -625,8 +662,8 @@ async fn persist_batch(
     let mut tx = pool.begin().await?;
 
     // Serialize seq allocation for this page against concurrent commits.
-    let owner_id =
-        sqlx::query_scalar::<_, String>("SELECT owner_id FROM pages WHERE id = $1 FOR UPDATE")
+    let (owner_id, current_revision) =
+        sqlx::query_as::<_, (String, i64)>("SELECT owner_id, ink_revision FROM pages WHERE id = $1 FOR UPDATE")
             .bind(page_id)
             .fetch_one(&mut *tx)
             .await?;
@@ -658,18 +695,19 @@ async fn persist_batch(
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query("UPDATE pages SET updated_at = now() WHERE id = $1")
+        sqlx::query("UPDATE pages SET updated_at = now(), ink_revision = ink_revision + 1 WHERE id = $1")
             .bind(page_id)
             .execute(&mut *tx)
             .await?;
         next
     };
 
+    let revision = if existing.is_some() { current_revision } else { current_revision + 1 };
     let thumbnail_job_created = sqlx::query(
         "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",
     )
     .bind(page_id)
-    .bind(seq)
+    .bind(revision)
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -678,9 +716,71 @@ async fn persist_batch(
     tx.commit().await?;
     Ok(PersistedBatch {
         seq: seq as u64,
+        revision: revision as u64,
         owner_id,
         thumbnail_job_created,
     })
+}
+
+struct PersistedTombstones {
+    revision: u64,
+    owner_id: String,
+    stroke_ids: Vec<String>,
+    thumbnail_job_created: bool,
+}
+
+async fn persist_tombstones(
+    pool: &PgPool,
+    page_id: &str,
+    client_mutation_id: &str,
+    requested_ids: &[String],
+) -> Result<PersistedTombstones, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let (owner_id, current_revision) = sqlx::query_as::<_, (String, i64)>(
+        "SELECT owner_id, ink_revision FROM pages WHERE id = $1 FOR UPDATE",
+    )
+    .bind(page_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if let Some((revision, ids)) = sqlx::query_as::<_, (i64, sqlx::types::Json<Vec<String>>)>(
+        "SELECT revision, stroke_ids FROM tombstone_batches WHERE page_id = $1 AND client_mutation_id = $2",
+    )
+    .bind(page_id)
+    .bind(client_mutation_id)
+    .fetch_optional(&mut *tx)
+    .await? {
+        tx.commit().await?;
+        return Ok(PersistedTombstones { revision: revision as u64, owner_id, stroke_ids: ids.0, thumbnail_job_created: false });
+    }
+
+    let mut ids = requested_ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1 AND stroke_id = ANY($2)",
+    )
+    .bind(page_id)
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    ids.retain(|id| !existing.contains(id));
+    let revision = if ids.is_empty() { current_revision } else { current_revision + 1 };
+    for id in &ids {
+        sqlx::query("INSERT INTO stroke_tombstones (page_id, stroke_id, deleted_revision) VALUES ($1, $2, $3)")
+            .bind(page_id).bind(id).bind(revision).execute(&mut *tx).await?;
+    }
+    sqlx::query("INSERT INTO tombstone_batches (page_id, client_mutation_id, revision, stroke_ids) VALUES ($1, $2, $3, $4)")
+        .bind(page_id).bind(client_mutation_id).bind(revision).bind(sqlx::types::Json(&ids)).execute(&mut *tx).await?;
+    if !ids.is_empty() {
+        sqlx::query("UPDATE pages SET updated_at = now(), ink_revision = ink_revision + 1 WHERE id = $1")
+            .bind(page_id).execute(&mut *tx).await?;
+    }
+    let thumbnail_job_created = if ids.is_empty() { false } else {
+        sqlx::query("INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING")
+            .bind(page_id).bind(revision).execute(&mut *tx).await?.rows_affected() == 1
+    };
+    tx.commit().await?;
+    Ok(PersistedTombstones { revision: revision as u64, owner_id, stroke_ids: ids, thumbnail_job_created })
 }
 
 #[cfg(test)]

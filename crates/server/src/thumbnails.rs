@@ -1,4 +1,4 @@
-use protocol::{LibraryEvent, Stroke, ThumbnailMetadata, PEN_COLOR, PEN_WIDTH};
+use protocol::{LibraryEvent, Stroke, ThumbnailMetadata};
 use sqlx::PgPool;
 use std::time::Instant;
 use tiny_skia::{
@@ -96,14 +96,26 @@ pub fn thumbnail_url(page_id: &str, source_seq: u64) -> String {
 
 async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), String> {
     let batches = sqlx::query_scalar::<_, sqlx::types::Json<Vec<Stroke>>>(
-        "SELECT strokes FROM stroke_batches WHERE page_id = $1 AND seq <= $2 ORDER BY seq",
+        "SELECT strokes FROM stroke_batches WHERE page_id = $1 ORDER BY seq",
     )
     .bind(page_id)
-    .bind(source_seq as i64)
     .fetch_all(pool)
     .await
     .map_err(|error| error.to_string())?;
-    let strokes: Vec<Stroke> = batches.into_iter().flat_map(|batch| batch.0).collect();
+    let tombstones: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1",
+    )
+    .bind(page_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .collect();
+    let strokes: Vec<Stroke> = batches
+        .into_iter()
+        .flat_map(|batch| batch.0)
+        .filter(|stroke| !tombstones.contains(&stroke.id))
+        .collect();
     let png = render(&strokes)?;
     let png_bytes = png.len();
     sqlx::query(
@@ -167,19 +179,23 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         };
     let offset_x = (WIDTH as f32 - content_w * scale) / 2.0 - content_min_x * scale;
     let offset_y = (HEIGHT as f32 - content_h * scale) / 2.0 - content_min_y * scale;
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(0x00, 0x64, 0x00, 0xff);
-    let pen = SkiaStroke {
-        // Fitting wide world-space ink must not turn the preview into hairlines.
-        width: (PEN_WIDTH as f32 * scale).max(MIN_THUMBNAIL_STROKE_WIDTH),
-        line_cap: LineCap::Round,
-        line_join: LineJoin::Round,
-        ..Default::default()
-    };
     for stroke in strokes {
-        if stroke.color != PEN_COLOR || stroke.points.is_empty() {
+        if stroke.style.validate().is_err() || stroke.points.is_empty() {
             continue;
         }
+        let color = &stroke.style.parameters.color;
+        let red = u8::from_str_radix(&color[1..3], 16).map_err(|error| error.to_string())?;
+        let green = u8::from_str_radix(&color[3..5], 16).map_err(|error| error.to_string())?;
+        let blue = u8::from_str_radix(&color[5..7], 16).map_err(|error| error.to_string())?;
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(red, green, blue, 0xff);
+        let pen = SkiaStroke {
+            // Fitting wide world-space ink must not turn the preview into hairlines.
+            width: (stroke.style.parameters.width as f32 * scale).max(MIN_THUMBNAIL_STROKE_WIDTH),
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Default::default()
+        };
         let transform = Transform::from_scale(scale, scale).post_translate(offset_x, offset_y);
         if stroke.points.len() == 1 {
             let point = &stroke.points[0];
@@ -206,12 +222,12 @@ async fn cleanup(pool: &PgPool, page_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"DELETE FROM page_thumbnails
            WHERE page_id = $1
-             AND source_seq <> (SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1)
+             AND source_seq <> (SELECT ink_revision FROM pages WHERE id = $1)
              AND (
              created_at < now() - interval '7 days' OR source_seq NOT IN (
                SELECT source_seq FROM page_thumbnails
                WHERE page_id = $1
-                 AND source_seq <> (SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1)
+             AND source_seq <> (SELECT ink_revision FROM pages WHERE id = $1)
                  AND created_at >= now() - interval '7 days'
                ORDER BY source_seq DESC LIMIT 10
              )
@@ -237,7 +253,7 @@ async fn cleanup_best_effort(pool: &PgPool, page_id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use protocol::{StrokePoint, PEN_TOOL};
+    use protocol::{StrokePoint, StrokeStyle};
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
@@ -245,9 +261,8 @@ mod tests {
     #[test]
     fn renders_png_with_canonical_ink_colour() {
         let bytes = render(&[Stroke {
-            tool: PEN_TOOL.to_string(),
-            color: PEN_COLOR.to_string(),
-            width: PEN_WIDTH,
+            id: "stroke_1".to_string(),
+            style: StrokeStyle::default_solid_round(),
             points: vec![
                 StrokePoint {
                     x: 0.0,
@@ -271,9 +286,8 @@ mod tests {
     #[test]
     fn renders_single_point_strokes_as_dots() {
         let bytes = render(&[Stroke {
-            tool: PEN_TOOL.to_string(),
-            color: PEN_COLOR.to_string(),
-            width: PEN_WIDTH,
+            id: "stroke_1".to_string(),
+            style: StrokeStyle::default_solid_round(),
             points: vec![StrokePoint {
                 x: 50.0,
                 y: 50.0,
