@@ -116,9 +116,8 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .await
     .map_err(|error| error.to_string())?;
     crate::observability::metrics().observe_thumbnail_artifact_bytes(png_bytes);
-    cleanup(pool, page_id)
-        .await
-        .map_err(|error| error.to_string())
+    cleanup_best_effort(pool, page_id).await;
+    Ok(())
 }
 
 fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
@@ -144,12 +143,30 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
     );
     let mut pixmap = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
     pixmap.fill(Color::WHITE);
-    let content_w = (max_x - min_x).max(1.0) as f32;
-    let content_h = (max_y - min_y).max(1.0) as f32;
-    let scale = ((WIDTH as f32 - PADDING * 2.0) / content_w)
-        .min((HEIGHT as f32 - PADDING * 2.0) / content_h);
-    let offset_x = (WIDTH as f32 - content_w * scale) / 2.0 - min_x as f32 * scale;
-    let offset_y = (HEIGHT as f32 - content_h * scale) / 2.0 - min_y as f32 * scale;
+    let bounds_w = (max_x - min_x) as f32;
+    let bounds_h = (max_y - min_y) as f32;
+    let content_w = bounds_w.max(1.0);
+    let content_h = bounds_h.max(1.0);
+    let scale = if bounds_w == 0.0 && bounds_h == 0.0 {
+        1.0
+    } else {
+        ((WIDTH as f32 - PADDING * 2.0) / content_w)
+            .min((HEIGHT as f32 - PADDING * 2.0) / content_h)
+    };
+    let content_min_x = min_x as f32
+        - if bounds_w == 0.0 {
+            content_w / 2.0
+        } else {
+            0.0
+        };
+    let content_min_y = min_y as f32
+        - if bounds_h == 0.0 {
+            content_h / 2.0
+        } else {
+            0.0
+        };
+    let offset_x = (WIDTH as f32 - content_w * scale) / 2.0 - content_min_x * scale;
+    let offset_y = (HEIGHT as f32 - content_h * scale) / 2.0 - content_min_y * scale;
     let mut paint = Paint::default();
     paint.set_color_rgba8(0x00, 0x64, 0x00, 0xff);
     let pen = SkiaStroke {
@@ -206,9 +223,22 @@ async fn cleanup(pool: &PgPool, page_id: &str) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+async fn cleanup_best_effort(pool: &PgPool, page_id: &str) {
+    match cleanup(pool, page_id).await {
+        Ok(()) => {
+            crate::observability::metrics().record_page_mutation("cleanup_thumbnails", "success");
+        }
+        Err(error) => {
+            crate::observability::metrics().record_page_mutation("cleanup_thumbnails", "error");
+            tracing::warn!(%error, %page_id, "thumbnail retention cleanup failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use protocol::{StrokePoint, PEN_TOOL};
+    use sqlx::postgres::PgPoolOptions;
 
     use super::*;
 
@@ -253,9 +283,41 @@ mod tests {
         }])
         .expect("thumbnail should render");
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
-        let center = pixmap
-            .pixel(WIDTH / 2, HEIGHT / 2)
-            .expect("center pixel should exist");
-        assert_eq!((center.red(), center.green(), center.blue()), (0, 100, 0));
+        let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
+        assert!((18..=22).contains(&(max_x - min_x + 1)));
+        assert!((18..=22).contains(&(max_y - min_y + 1)));
+        assert!((min_x + max_x).abs_diff(WIDTH - 1) <= 1);
+        assert!((min_y + max_y).abs_diff(HEIGHT - 1) <= 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_is_non_fatal() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/v_note")
+            .expect("test pool URL should parse");
+        pool.close().await;
+
+        cleanup_best_effort(&pool, "page_cleanup_failure").await;
+    }
+
+    fn ink_bounds(pixmap: &Pixmap) -> (u32, u32, u32, u32) {
+        let mut min_x = WIDTH;
+        let mut max_x = 0;
+        let mut min_y = HEIGHT;
+        let mut max_y = 0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+                if pixel.green() > pixel.red() && pixel.green() > pixel.blue() {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(min_x <= max_x, "thumbnail should contain canonical ink");
+        assert!(min_y <= max_y, "thumbnail should contain canonical ink");
+        (min_x, max_x, min_y, max_y)
     }
 }

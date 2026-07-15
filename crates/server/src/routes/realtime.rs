@@ -498,7 +498,8 @@ async fn handle_page_client_message(
                 return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
             }
             match persist_batch(pool, page_id, &client_batch_id, &strokes).await {
-                Ok(seq) => {
+                Ok(persisted) => {
+                    let seq = persisted.seq;
                     crate::observability::metrics().record_page_mutation("commit_batch", "success");
                     state.realtime.publish_page(
                         page_id,
@@ -508,39 +509,20 @@ async fn handle_page_client_message(
                             strokes,
                         }),
                     );
-                    let state = state.clone();
-                    let pool = pool.clone();
-                    let page_id = page_id.to_string();
-                    tokio::spawn(async move {
-                        let owner_id = sqlx::query_scalar::<_, String>(
-                            "SELECT owner_id FROM pages WHERE id = $1",
-                        )
-                        .bind(&page_id)
-                        .fetch_optional(&pool)
-                        .await;
-                        if let Ok(Some(owner_id)) = owner_id {
-                            let inserted = sqlx::query(
-                                "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",
-                            )
-                            .bind(&page_id)
-                            .bind(seq as i64)
-                            .execute(&pool)
-                            .await;
-                            if inserted.is_ok_and(|result| result.rows_affected() == 1) {
-                                crate::observability::metrics().thumbnail_generation_queued();
-                                state.realtime.publish_library_event(
-                                    &owner_id,
-                                    LibraryEvent::PageThumbnailUpdated {
-                                        page_id: page_id.clone(),
-                                        thumbnail: protocol::ThumbnailMetadata::Generating {
-                                            source_seq: seq,
-                                        },
-                                    },
-                                );
-                                crate::thumbnails::enqueue(state, page_id, owner_id, seq);
-                            }
-                        }
-                    });
+                    if persisted.thumbnail_job_created {
+                        let page_id = page_id.to_string();
+                        crate::observability::metrics().thumbnail_generation_queued();
+                        state.realtime.publish_library_event(
+                            &persisted.owner_id,
+                            LibraryEvent::PageThumbnailUpdated {
+                                page_id: page_id.clone(),
+                                thumbnail: protocol::ThumbnailMetadata::Generating {
+                                    source_seq: seq,
+                                },
+                            },
+                        );
+                        crate::thumbnails::enqueue(state.clone(), page_id, persisted.owner_id, seq);
+                    }
                     true
                 }
                 Err(error) => {
@@ -626,57 +608,79 @@ async fn load_batches_after(
 
 /// Persist a stroke batch with a per-page monotonic sequence. Idempotent by
 /// `client_batch_id` so reconnect retries return the existing seq instead of
-/// double-inserting. Bumps the page `updated_at` for recent-first library sort.
+/// double-inserting. New batches atomically bump the page `updated_at` and
+/// persist their thumbnail job before the commit is acknowledged.
+struct PersistedBatch {
+    seq: u64,
+    owner_id: String,
+    thumbnail_job_created: bool,
+}
+
 async fn persist_batch(
     pool: &PgPool,
     page_id: &str,
     client_batch_id: &str,
     strokes: &[Stroke],
-) -> Result<u64, sqlx::Error> {
+) -> Result<PersistedBatch, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     // Serialize seq allocation for this page against concurrent commits.
-    sqlx::query("SELECT 1 FROM pages WHERE id = $1 FOR UPDATE")
-        .bind(page_id)
-        .execute(&mut *tx)
-        .await?;
+    let owner_id =
+        sqlx::query_scalar::<_, String>("SELECT owner_id FROM pages WHERE id = $1 FOR UPDATE")
+            .bind(page_id)
+            .fetch_one(&mut *tx)
+            .await?;
 
-    if let Some(existing) = sqlx::query_scalar::<_, i64>(
+    let existing = sqlx::query_scalar::<_, i64>(
         "SELECT seq FROM stroke_batches WHERE page_id = $1 AND client_batch_id = $2",
     )
     .bind(page_id)
     .bind(client_batch_id)
     .fetch_optional(&mut *tx)
-    .await?
-    {
-        tx.commit().await?;
-        return Ok(existing as u64);
-    }
-
-    let next: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
-    )
-    .bind(page_id)
-    .fetch_one(&mut *tx)
     .await?;
-
-    sqlx::query(
-        "INSERT INTO stroke_batches (page_id, seq, client_batch_id, strokes) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(page_id)
-    .bind(next)
-    .bind(client_batch_id)
-    .bind(sqlx::types::Json(strokes))
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query("UPDATE pages SET updated_at = now() WHERE id = $1")
+    let seq = if let Some(existing) = existing {
+        existing
+    } else {
+        let next: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
+        )
         .bind(page_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO stroke_batches (page_id, seq, client_batch_id, strokes) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(page_id)
+        .bind(next)
+        .bind(client_batch_id)
+        .bind(sqlx::types::Json(strokes))
         .execute(&mut *tx)
         .await?;
 
+        sqlx::query("UPDATE pages SET updated_at = now() WHERE id = $1")
+            .bind(page_id)
+            .execute(&mut *tx)
+            .await?;
+        next
+    };
+
+    let thumbnail_job_created = sqlx::query(
+        "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",
+    )
+    .bind(page_id)
+    .bind(seq)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+
     tx.commit().await?;
-    Ok(next as u64)
+    Ok(PersistedBatch {
+        seq: seq as u64,
+        owner_id,
+        thumbnail_job_created,
+    })
 }
 
 #[cfg(test)]
