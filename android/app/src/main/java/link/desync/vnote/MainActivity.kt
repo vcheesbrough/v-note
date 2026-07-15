@@ -83,6 +83,9 @@ class MainActivity : ComponentActivity() {
         private const val AUTH_CANCELED_ACTION = "link.desync.vnote.AUTH_CANCELED"
         private const val AUTH_COMPLETED_REQUEST_CODE = 100
         private const val AUTH_CANCELED_REQUEST_CODE = 101
+
+        @Volatile
+        internal var apiClientFactory: ((TokenStore, AuthRepository) -> ApiClient)? = null
     }
 
     private lateinit var tokenStore: TokenStore
@@ -103,7 +106,9 @@ class MainActivity : ComponentActivity() {
         tokenStore = TokenStore(applicationContext)
         val authConfig = AuthConfig.fromBuildConfig()
         authRepository = AuthRepository(applicationContext, authConfig, tokenStore)
-        apiClient = ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+        apiClient =
+            apiClientFactory?.invoke(tokenStore, authRepository)
+                ?: ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
 
         setContent {
             VNoteTheme {
@@ -645,6 +650,7 @@ private fun PageTile(
                     Modifier
                         .fillMaxWidth()
                         .aspectRatio(1.5f)
+                        .testTag("page-tile-${page.id}")
                         .clickable(onClick = onOpen),
             ) {
                 PagePreview(
