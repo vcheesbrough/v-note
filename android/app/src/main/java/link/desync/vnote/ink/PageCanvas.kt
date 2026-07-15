@@ -152,10 +152,10 @@ private fun InkCanvas(
             scale(viewport.scale, viewport.scale, pivot = Offset.Zero)
         }) {
             for (stroke in strokes) {
-                drawInk(stroke.points, stroke.width.toFloat())
+                drawInk(stroke.points, stroke.style.parameters.width.toFloat(), Color(android.graphics.Color.parseColor(stroke.style.parameters.color)))
             }
             if (liveStroke.isNotEmpty()) {
-                drawInk(liveStroke, Stroke.PEN_WIDTH.toFloat())
+                drawInk(liveStroke, Stroke.PEN_WIDTH.toFloat(), InkColor)
             }
         }
     }
@@ -267,13 +267,14 @@ private fun toWorldPoint(
 private fun DrawScope.drawInk(
     points: List<StrokePoint>,
     width: Float,
+    color: Color,
 ) {
     if (points.isEmpty()) {
         return
     }
     if (points.size == 1) {
         drawCircle(
-            color = InkColor,
+            color = color,
             radius = width / 2f,
             center = Offset(points[0].x.toFloat(), points[0].y.toFloat()),
         )
@@ -286,7 +287,7 @@ private fun DrawScope.drawInk(
     }
     drawPath(
         path = path,
-        color = InkColor,
+        color = color,
         style = StrokeStyle(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round),
     )
 }

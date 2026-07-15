@@ -44,9 +44,10 @@ fn deserializes_me_fixture() {
 fn deserializes_stroke_fixtures() {
     let stroke: Stroke =
         serde_json::from_str(&fixture("stroke.json")).expect("stroke fixture should parse");
-    assert_eq!(stroke.tool, "pen");
-    assert_eq!(stroke.color, "#006400");
-    assert_eq!(stroke.width, 4.0);
+    assert_eq!(stroke.id, "stroke_fixture_1");
+    assert_eq!(stroke.style.parameters.color, "#006400");
+    assert_eq!(stroke.style.parameters.width, 4.0);
+    assert!(stroke.style.validate().is_ok());
     assert_eq!(stroke.points.len(), 3);
     // MVP omits pressure entirely.
     assert!(stroke.points.iter().all(|point| point.pressure.is_none()));
