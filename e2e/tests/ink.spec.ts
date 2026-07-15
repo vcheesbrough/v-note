@@ -352,9 +352,12 @@ async function driveSocket(
 function sampleStrokes() {
   return [
     {
-      tool: 'pen',
-      color: '#006400',
-      width: 2.0,
+      id: `stroke-${crypto.randomUUID()}`,
+      style: {
+        tool_kind: 'solid_round',
+        style_version: 1,
+        parameters: { color: '#006400', width: 2.0, cap_style: 'round', join_style: 'round' },
+      },
       points: [
         { x: 5.0, y: 6.0, t: 0 },
         { x: 7.0, y: 8.0, t: 12 },
@@ -366,9 +369,12 @@ function sampleStrokes() {
 function sampleViewerStrokes() {
   return [
     {
-      tool: 'pen',
-      color: '#006400',
-      width: 20.0,
+      id: `stroke-${crypto.randomUUID()}`,
+      style: {
+        tool_kind: 'solid_round',
+        style_version: 1,
+        parameters: { color: '#006400', width: 20.0, cap_style: 'round', join_style: 'round' },
+      },
       points: [
         { x: 40.0, y: 40.0, t: 0 },
         { x: 360.0, y: 220.0, t: 12 },
