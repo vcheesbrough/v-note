@@ -119,7 +119,7 @@ class MainActivity : ComponentActivity() {
                             PageCanvasScreen(
                                 apiClient = apiClient,
                                 page = selectedPage,
-                                onBack = { selectedPageState.value = null },
+                                onBack = { closePage() },
                             )
                         } else {
                             AppScreen(
@@ -299,6 +299,11 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+    }
+
+    private fun closePage() {
+        selectedPageState.value = null
+        loadPages()
     }
 
     private fun connectLibrarySocket() {
