@@ -16,6 +16,8 @@ fun PageSummary.displayTitle(): String =
         updatedAt.approximateRelativeTimestamp()
     }
 
+fun PageSummary.displayUpdatedAge(): String = updatedAt.approximateRelativeTimestamp()
+
 private fun String.compactTimestamp(): String =
     trim()
         .removeSuffix("Z")

@@ -155,4 +155,12 @@ fn deserializes_realtime_fixtures() {
     let deleted: LibraryEvent = serde_json::from_str(&fixture("library-event-page-deleted.json"))
         .expect("page-deleted event fixture should parse");
     assert!(matches!(deleted, LibraryEvent::PageDeleted { .. }));
+
+    let thumbnail: LibraryEvent =
+        serde_json::from_str(&fixture("library-event-page-thumbnail-updated.json"))
+            .expect("thumbnail event fixture should parse");
+    assert!(matches!(
+        thumbnail,
+        LibraryEvent::PageThumbnailUpdated { .. }
+    ));
 }

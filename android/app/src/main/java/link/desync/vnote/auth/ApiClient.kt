@@ -12,6 +12,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 private const val REQUEST_ID_HEADER = "X-Request-Id"
 private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
@@ -24,6 +25,7 @@ class ApiClient(
 ) {
     private val http = OkHttpClient()
     private val jsonMediaType = "application/json".toMediaType()
+    private val thumbnailCache = ConcurrentHashMap<String, ByteArray>()
 
     suspend fun fetchMe(): Result<MeProfile> =
         withContext(Dispatchers.IO) {
@@ -32,7 +34,7 @@ class ApiClient(
 
     suspend fun listPages(): Result<List<PageSummary>> =
         withContext(Dispatchers.IO) {
-            executeAuthorized(retryOnUnauthorized = true) { token ->
+            makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 authorizedRequest("$baseUrl/api/pages", token)
                     .get()
                     .build()
@@ -48,7 +50,7 @@ class ApiClient(
 
     suspend fun createPage(title: String? = null): Result<PageSummary> =
         withContext(Dispatchers.IO) {
-            executeAuthorized(retryOnUnauthorized = true) { token ->
+            makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 val body =
                     JSONObject()
                         .apply { title?.let { put("title", it) } }
@@ -62,11 +64,19 @@ class ApiClient(
 
     suspend fun deletePage(pageId: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            executeAuthorized(retryOnUnauthorized = true) { token ->
+            makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 authorizedRequest("$baseUrl/api/pages/$pageId", token)
                     .delete()
                     .build()
             }.map { }
+        }
+
+    suspend fun fetchThumbnail(url: String): Result<ByteArray> =
+        withContext(Dispatchers.IO) {
+            thumbnailCache[url]?.let { return@withContext Result.success(it) }
+            makeAuthorizedApiRequestForBytes(retryOnUnauthorized = true) { token ->
+                authorizedRequest("$baseUrl$url", token).get().build()
+            }.onSuccess { bytes -> thumbnailCache[url] = bytes }
         }
 
     fun openLibrarySocket(listener: LibraryEventListener): WebSocket? {
@@ -209,7 +219,7 @@ class ApiClient(
         }
     }
 
-    private suspend fun executeAuthorized(
+    private suspend fun makeAuthorizedApiRequest(
         retryOnUnauthorized: Boolean,
         buildRequest: (String) -> Request,
     ): Result<String> {
@@ -221,7 +231,7 @@ class ApiClient(
             if (response.code == 401 && retryOnUnauthorized) {
                 val refreshed = authRepository.refreshAccessTokenIfNeeded(force = true)
                 if (refreshed) {
-                    return executeAuthorized(retryOnUnauthorized = false, buildRequest)
+                    return makeAuthorizedApiRequest(retryOnUnauthorized = false, buildRequest)
                 }
                 return Result.failure(IllegalStateException("Session expired"))
             }
@@ -232,6 +242,27 @@ class ApiClient(
                 )
             }
             return Result.success(response.body?.string().orEmpty())
+        }
+    }
+
+    private suspend fun makeAuthorizedApiRequestForBytes(
+        retryOnUnauthorized: Boolean,
+        buildRequest: (String) -> Request,
+    ): Result<ByteArray> {
+        val accessToken = tokenStore.accessToken()
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        http.newCall(buildRequest(accessToken)).execute().use { response ->
+            if (response.code == 401 && retryOnUnauthorized) {
+                if (authRepository.refreshAccessTokenIfNeeded(force = true)) {
+                    return makeAuthorizedApiRequestForBytes(false, buildRequest)
+                }
+                return Result.failure(IllegalStateException("Session expired"))
+            }
+            if (!response.isSuccessful) {
+                logHttpFailure("thumbnail request", response)
+                return Result.failure(IllegalStateException(requestFailureMessage("Thumbnail request failed", response)))
+            }
+            return Result.success(response.body?.bytes() ?: byteArrayOf())
         }
     }
 
@@ -289,12 +320,21 @@ data class PageSummary(
     val title: String,
     val createdAt: String,
     val updatedAt: String,
+    val thumbnail: ThumbnailMetadata = ThumbnailMetadata.Empty,
 )
+
+sealed interface ThumbnailMetadata {
+    data object Empty : ThumbnailMetadata
+    data class Generating(val sourceSeq: Long) : ThumbnailMetadata
+    data class Available(val sourceSeq: Long, val url: String) : ThumbnailMetadata
+    data class Failed(val sourceSeq: Long) : ThumbnailMetadata
+}
 
 sealed interface LibraryEvent {
     data class PageCreated(val page: PageSummary) : LibraryEvent
 
     data class PageDeleted(val pageId: String) : LibraryEvent
+    data class PageThumbnailUpdated(val pageId: String, val thumbnail: ThumbnailMetadata) : LibraryEvent
 }
 
 interface LibraryEventListener {
@@ -311,12 +351,25 @@ private fun parsePage(json: JSONObject): PageSummary =
         title = json.getString("title"),
         createdAt = json.getString("created_at"),
         updatedAt = json.getString("updated_at"),
+        thumbnail = json.optJSONObject("thumbnail")?.let(::parseThumbnail) ?: ThumbnailMetadata.Empty,
     )
+
+private fun parseThumbnail(json: JSONObject): ThumbnailMetadata =
+    when (json.getString("status")) {
+        "empty" -> ThumbnailMetadata.Empty
+        "generating" -> ThumbnailMetadata.Generating(json.getLong("source_seq"))
+        "available" -> ThumbnailMetadata.Available(json.getLong("source_seq"), json.getString("url"))
+        "failed" -> ThumbnailMetadata.Failed(json.getLong("source_seq"))
+        else -> error("Unknown thumbnail status")
+    }
 
 private fun parseLibraryEvent(json: JSONObject): LibraryEvent =
     when (val type = json.getString("type")) {
         "page-created" -> LibraryEvent.PageCreated(parsePage(json.getJSONObject("page")))
         "page-deleted" -> LibraryEvent.PageDeleted(json.getString("page_id"))
+        "page-thumbnail-updated" -> LibraryEvent.PageThumbnailUpdated(
+            json.getString("page_id"), parseThumbnail(json.getJSONObject("thumbnail")),
+        )
         else -> error("Unknown realtime event type: $type")
     }
 

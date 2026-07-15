@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use leptos::{ev, leptos_dom::helpers::window_event_listener};
 use protocol::{
     LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageServerMessage, PageSummary,
-    RealtimeTicketResponse, Stroke, StrokeBatch,
+    RealtimeTicketResponse, Stroke, StrokeBatch, ThumbnailMetadata,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, PointerEvent, WheelEvent};
@@ -204,22 +204,55 @@ fn App() -> impl IntoView {
                             view! {
                         <ul class="page-grid">
                             <For
-                                each=move || pages.get()
-                                key=|page| page.id.clone()
+                                each=move || {
+                                    library_error.track();
+                                    pages.get()
+                                }
+                                key=|page| (page.id.clone(), thumbnail_key(&page.thumbnail))
                                 children=move |page| {
-                                    let open_page = page.clone();
+                                    let preview_page = page.clone();
                                     let delete_page_id = page.id.clone();
-                                    let display_title = page_display_title(&page);
-                                    let open_label = format!("Open {display_title}");
-                                    let delete_label = format!("Delete {display_title}");
+                                    let display_title = page_has_title(&page).then(|| page.title.clone());
+                                    let page_age = approximate_relative_datetime(&page.updated_at);
+                                    let open_label = display_title.as_ref().map_or_else(
+                                        || "Open page".to_string(),
+                                        |title| format!("Open {title}"),
+                                    );
+                                    let delete_label = display_title.as_ref().map_or_else(
+                                        || "Delete page".to_string(),
+                                        |title| format!("Delete {title}"),
+                                    );
+                                    let thumbnail = page.thumbnail.clone();
+                                    let thumbnail_unavailable = library_error.get_untracked().is_some();
                                     view! {
                                         <li class="page-tile">
-                                            <div class="page-preview" aria-hidden="true"></div>
-                                            <button class="page-main" aria-label=open_label on:click=move |_| selected_page.set(Some(open_page.clone()))>
-                                                <span class="page-title">{display_title}</span>
+                                            <button class="page-preview-button" aria-label=open_label.clone() on:click=move |_| selected_page.set(Some(preview_page.clone()))>
+                                            {match (thumbnail_unavailable, thumbnail) {
+                                                (true, _) => view! {
+                                                    <div class="page-preview thumbnail-failed" aria-label="Thumbnail unavailable while realtime is disconnected"></div>
+                                                }.into_any(),
+                                                (false, ThumbnailMetadata::Available { url, .. }) => view! {
+                                                    <img class="page-preview" src=url alt="" />
+                                                }.into_any(),
+                                                (false, ThumbnailMetadata::Generating { .. }) => view! {
+                                                    <div class="page-preview thumbnail-generating" aria-label="Thumbnail generating"></div>
+                                                }.into_any(),
+                                                (false, ThumbnailMetadata::Failed { .. }) => view! {
+                                                    <div class="page-preview thumbnail-failed" aria-label="Thumbnail unavailable"></div>
+                                                }.into_any(),
+                                                (false, ThumbnailMetadata::Empty) => view! {
+                                                    <div class="page-preview thumbnail-empty" aria-label="Empty page"></div>
+                                                }.into_any(),
+                                            }}
+                                            {display_title.clone().map(|title| view! {
+                                                <span class="page-thumbnail-title">{title}</span>
+                                            })}
                                             </button>
-                                            <div class="tile-actions">
-                                            <button class="button danger" aria-label=delete_label on:click=move |_| {
+                                            <div class="page-tile-footer">
+                                            <div class="page-main">
+                                                <span class="page-age">{page_age}</span>
+                                            </div>
+                                            <button class="page-delete" aria-label=delete_label on:click=move |_| {
                                                 let page_id = delete_page_id.clone();
                                                 if web_sys::window()
                                                     .and_then(|window| window.confirm_with_message("Delete this page permanently?").ok())
@@ -231,8 +264,8 @@ fn App() -> impl IntoView {
                                                         }
                                                     });
                                                 }
-                                            }>
-                                                "Delete"
+                                            } title="Delete page">
+                                                "×"
                                             </button>
                                             </div>
                                         </li>
@@ -737,6 +770,33 @@ fn apply_event(
     match event {
         LibraryEvent::PageCreated { page } => upsert_page(pages, page),
         LibraryEvent::PageDeleted { page_id } => remove_page(pages, selected_page, &page_id),
+        LibraryEvent::PageThumbnailUpdated { page_id, thumbnail } => {
+            pages.update(|items| {
+                if let Some(page) = items.iter_mut().find(|page| page.id == page_id) {
+                    if thumbnail_seq(&thumbnail) >= thumbnail_seq(&page.thumbnail) {
+                        page.thumbnail = thumbnail;
+                    }
+                }
+            });
+        }
+    }
+}
+
+fn thumbnail_seq(thumbnail: &ThumbnailMetadata) -> u64 {
+    match thumbnail {
+        ThumbnailMetadata::Empty => 0,
+        ThumbnailMetadata::Generating { source_seq }
+        | ThumbnailMetadata::Available { source_seq, .. }
+        | ThumbnailMetadata::Failed { source_seq } => *source_seq,
+    }
+}
+
+fn thumbnail_key(thumbnail: &ThumbnailMetadata) -> String {
+    match thumbnail {
+        ThumbnailMetadata::Empty => "empty".to_string(),
+        ThumbnailMetadata::Generating { source_seq } => format!("generating:{source_seq}"),
+        ThumbnailMetadata::Available { source_seq, url } => format!("available:{source_seq}:{url}"),
+        ThumbnailMetadata::Failed { source_seq } => format!("failed:{source_seq}"),
     }
 }
 

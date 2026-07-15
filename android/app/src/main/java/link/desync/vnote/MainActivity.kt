@@ -2,13 +2,18 @@ package link.desync.vnote
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.lifecycle.lifecycleScope
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,8 +22,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -37,6 +43,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,12 +51,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import link.desync.vnote.auth.ApiClient
@@ -60,8 +69,11 @@ import link.desync.vnote.auth.LibraryEventListener
 import link.desync.vnote.auth.MeProfile
 import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
+import link.desync.vnote.auth.ThumbnailMetadata
 import link.desync.vnote.ink.PageCanvasScreen
 import link.desync.vnote.ui.displayTitle
+import link.desync.vnote.ui.displayUpdatedAge
+import link.desync.vnote.ui.hasDisplayTitle
 import link.desync.vnote.ui.theme.VNoteTheme
 import okhttp3.WebSocket
 
@@ -71,12 +83,16 @@ class MainActivity : ComponentActivity() {
         private const val AUTH_CANCELED_ACTION = "link.desync.vnote.AUTH_CANCELED"
         private const val AUTH_COMPLETED_REQUEST_CODE = 100
         private const val AUTH_CANCELED_REQUEST_CODE = 101
+
+        @Volatile
+        internal var apiClientFactory: ((TokenStore, AuthRepository) -> ApiClient)? = null
     }
 
     private lateinit var tokenStore: TokenStore
     private lateinit var authRepository: AuthRepository
     private lateinit var apiClient: ApiClient
     private var librarySocket: WebSocket? = null
+    private var libraryConnectionGeneration = 0
 
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
@@ -90,11 +106,16 @@ class MainActivity : ComponentActivity() {
         tokenStore = TokenStore(applicationContext)
         val authConfig = AuthConfig.fromBuildConfig()
         authRepository = AuthRepository(applicationContext, authConfig, tokenStore)
-        apiClient = ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+        apiClient =
+            apiClientFactory?.invoke(tokenStore, authRepository)
+                ?: ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
 
         setContent {
             VNoteTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) {
                     AppRoot {
                         val session = sessionState.value
                         val selectedPage = selectedPageState.value
@@ -103,10 +124,11 @@ class MainActivity : ComponentActivity() {
                             PageCanvasScreen(
                                 apiClient = apiClient,
                                 page = selectedPage,
-                                onBack = { selectedPageState.value = null },
+                                onBack = { closePage() },
                             )
                         } else {
                             AppScreen(
+                                apiClient = apiClient,
                                 sessionState = session,
                                 onSignIn = { signIn() },
                                 onSignOut = { signOut() },
@@ -208,6 +230,7 @@ class MainActivity : ComponentActivity() {
         val endSessionIntent = authRepository.createEndSessionIntent()
         librarySocket?.close(1000, "signed out")
         librarySocket = null
+        libraryConnectionGeneration += 1
         pagesState.value = emptyList()
         selectedPageState.value = null
         authRepository.signOutLocal()
@@ -283,7 +306,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun closePage() {
+        selectedPageState.value = null
+        loadPages()
+    }
+
     private fun connectLibrarySocket() {
+        val generation = ++libraryConnectionGeneration
         librarySocket?.close(1000, "reconnecting")
         librarySocket =
             apiClient.openLibrarySocket(
@@ -293,6 +322,13 @@ class MainActivity : ComponentActivity() {
                             when (event) {
                                 is LibraryEvent.PageCreated -> upsertPage(event.page)
                                 is LibraryEvent.PageDeleted -> removePage(event.pageId)
+                                is LibraryEvent.PageThumbnailUpdated -> {
+                                    pagesState.value = pagesState.value.map { page ->
+                                        if (page.id == event.pageId && event.thumbnail.sourceSeq() >= page.thumbnail.sourceSeq()) {
+                                            page.copy(thumbnail = event.thumbnail)
+                                        } else page
+                                    }
+                                }
                             }
                             libraryErrorState.value = null
                         }
@@ -303,7 +339,14 @@ class MainActivity : ComponentActivity() {
                     }
 
                     override fun onClosed() {
+                        if (generation != libraryConnectionGeneration || sessionState.value !is SessionState.SignedIn) return
                         runOnUiThread { libraryErrorState.value = "Realtime disconnected" }
+                        lifecycleScope.launch {
+                            delay(1_000)
+                            if (generation != libraryConnectionGeneration || sessionState.value !is SessionState.SignedIn) return@launch
+                            loadPages()
+                            connectLibrarySocket()
+                        }
                     }
                 },
             )
@@ -322,6 +365,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+private fun ThumbnailMetadata.sourceSeq(): Long =
+    when (this) {
+        ThumbnailMetadata.Empty -> 0
+        is ThumbnailMetadata.Generating -> sourceSeq
+        is ThumbnailMetadata.Available -> sourceSeq
+        is ThumbnailMetadata.Failed -> sourceSeq
+    }
 
 private sealed interface SessionState {
     data object Loading : SessionState
@@ -352,6 +403,7 @@ private fun AppRoot(content: @Composable () -> Unit) {
 
 @Composable
 private fun AppScreen(
+    apiClient: ApiClient,
     sessionState: SessionState,
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
@@ -505,13 +557,17 @@ private fun AppScreen(
                             body = "Create a page, then write with the S Pen.",
                         )
                     } else {
-                        LazyColumn(
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 210.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.weight(1f),
                         ) {
                             items(pages, key = { it.id }) { page ->
                                 PageTile(
+                                    apiClient = apiClient,
                                     page = page,
+                                    thumbnailUnavailable = libraryError != null,
                                     onOpen = { onOpenPage(page) },
                                     onDelete = { pendingDelete = page },
                                 )
@@ -573,37 +629,102 @@ private fun StatusBanner(
 
 @Composable
 private fun PageTile(
+    apiClient: ApiClient,
     page: PageSummary,
+    thumbnailUnavailable: Boolean,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = BorderStroke(1.dp, Color(0xFFDDE2DB)),
         shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            PagePreview()
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(page.displayTitle(), style = MaterialTheme.typography.titleMedium)
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1.5f)
+                        .testTag("page-tile-${page.id}")
+                        .clickable(onClick = onOpen),
+            ) {
+                PagePreview(
+                    apiClient = apiClient,
+                    thumbnail = page.thumbnail,
+                    unavailable = thumbnailUnavailable,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                if (page.hasDisplayTitle()) {
+                    Surface(
+                        color = Color.White.copy(alpha = 0.92f),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp).widthIn(max = 180.dp),
+                    ) {
+                        Text(
+                            page.title,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
-            TextButton(onClick = onDelete) { Text("Delete") }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    page.displayUpdatedAge(),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+                IconButton(
+                    modifier =
+                        Modifier
+                            .size(32.dp)
+                            .semantics {
+                                contentDescription = if (page.hasDisplayTitle()) "Delete ${page.title}" else "Delete page"
+                            },
+                    onClick = onDelete,
+                ) {
+                    Text(
+                        "×",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun PagePreview() {
+private fun PagePreview(
+    apiClient: ApiClient,
+    thumbnail: ThumbnailMetadata,
+    unavailable: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = thumbnail, key2 = unavailable) {
+        value = if (!unavailable && thumbnail is ThumbnailMetadata.Available) {
+            apiClient.fetchThumbnail(thumbnail.url).getOrNull()?.let { bytes ->
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }
+        } else null
+    }
     Box(
         modifier =
-            Modifier
-                .size(width = 42.dp, height = 56.dp)
+            modifier
                 .drawBehind {
-                    drawRect(Color.White)
+                    drawRect(if (unavailable || thumbnail is ThumbnailMetadata.Failed) Color(0xFFF5E3DF) else Color.White)
                     val step = 8.dp.toPx()
                     var y = step
                     while (y < size.height) {
@@ -621,6 +742,19 @@ private fun PagePreview() {
                         end = Offset(size.width, 0f),
                         strokeWidth = 1.dp.toPx(),
                     )
+                    drawLine(
+                        color = Color(0xFFD7DDD5),
+                        start = Offset(0f, size.height),
+                        end = Offset(size.width, size.height),
+                        strokeWidth = 1.dp.toPx(),
+                    )
                 },
-    )
+        contentAlignment = Alignment.Center,
+    ) {
+        if (bitmap != null) {
+            Image(bitmap = bitmap!!.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize())
+        } else if (thumbnail is ThumbnailMetadata.Generating) {
+            Text("...", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5F6B62))
+        }
+    }
 }
