@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod observability;
 mod routes;
+mod thumbnails;
 
 use std::env;
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::auth::{auth_middleware, AuthConfig, JwksCache};
 use crate::observability::request_observability_middleware;
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
-use crate::routes::pages::{create_page, delete_page, get_page, list_pages};
+use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
 use crate::routes::realtime::{page_socket, realtime_socket, realtime_ticket, RealtimeHub};
 
 #[derive(Clone)]
@@ -101,6 +102,7 @@ pub fn build_router_with_db(
         db,
         realtime: Arc::new(RealtimeHub::default()),
     };
+    thumbnails::recover_pending(state.clone());
 
     let public_api = Router::new()
         .route("/meta", get(meta))
@@ -110,6 +112,10 @@ pub fn build_router_with_db(
         .route("/me", get(me))
         .route("/pages", get(list_pages).post(create_page))
         .route("/pages/{page_id}", get(get_page).delete(delete_page))
+        .route(
+            "/pages/{page_id}/thumbnails/{source_seq}",
+            get(get_thumbnail),
+        )
         .route("/realtime-ticket", post(realtime_ticket))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

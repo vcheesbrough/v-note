@@ -1,11 +1,14 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
 use chrono::{DateTime, Utc};
-use protocol::{CreatePageRequest, LibraryEvent, ListPagesResponse, PageResponse, PageSummary};
+use protocol::{
+    CreatePageRequest, LibraryEvent, ListPagesResponse, PageResponse, PageSummary,
+    ThumbnailMetadata,
+};
 use tracing::Instrument as _;
 use uuid::Uuid;
 
@@ -18,15 +21,32 @@ struct PageRow {
     title: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    thumbnail_status: Option<String>,
+    thumbnail_seq: Option<i64>,
 }
 
 impl From<PageRow> for PageSummary {
     fn from(row: PageRow) -> Self {
+        let id = row.id;
+        let thumbnail = match (row.thumbnail_status.as_deref(), row.thumbnail_seq) {
+            (Some("generating"), Some(seq)) => ThumbnailMetadata::Generating {
+                source_seq: seq as u64,
+            },
+            (Some("available"), Some(seq)) => ThumbnailMetadata::Available {
+                source_seq: seq as u64,
+                url: crate::thumbnails::thumbnail_url(&id, seq as u64),
+            },
+            (Some("failed"), Some(seq)) => ThumbnailMetadata::Failed {
+                source_seq: seq as u64,
+            },
+            _ => ThumbnailMetadata::Empty,
+        };
         Self {
-            id: row.id,
+            id,
             title: row.title,
             created_at: row.created_at.to_rfc3339(),
             updated_at: row.updated_at.to_rfc3339(),
+            thumbnail,
         }
     }
 }
@@ -54,10 +74,15 @@ pub async fn list_pages(
 ) -> Result<Json<ListPagesResponse>, Response> {
     let rows = sqlx::query_as::<_, PageRow>(
         r#"
-        SELECT id, title, created_at, updated_at
-        FROM pages
-        WHERE owner_id = $1
-        ORDER BY updated_at DESC, created_at DESC
+        SELECT p.id, p.title, p.created_at, p.updated_at,
+               t.status AS thumbnail_status, t.source_seq AS thumbnail_seq
+        FROM pages p
+        LEFT JOIN LATERAL (
+          SELECT status, source_seq FROM page_thumbnails
+          WHERE page_id = p.id ORDER BY source_seq DESC LIMIT 1
+        ) t ON true
+        WHERE p.owner_id = $1
+        ORDER BY p.updated_at DESC, p.created_at DESC
         "#,
     )
     .bind(claims.sub.clone())
@@ -89,7 +114,7 @@ pub async fn create_page(
         r#"
         INSERT INTO pages (id, owner_id, title)
         VALUES ($1, $2, $3)
-        RETURNING id, title, created_at, updated_at
+        RETURNING id, title, created_at, updated_at, NULL::text AS thumbnail_status, NULL::bigint AS thumbnail_seq
         "#,
     )
     .bind(page_id)
@@ -120,9 +145,14 @@ pub async fn get_page(
 ) -> Result<Json<PageResponse>, Response> {
     let row = sqlx::query_as::<_, PageRow>(
         r#"
-        SELECT id, title, created_at, updated_at
-        FROM pages
-        WHERE id = $1 AND owner_id = $2
+        SELECT p.id, p.title, p.created_at, p.updated_at,
+               t.status AS thumbnail_status, t.source_seq AS thumbnail_seq
+        FROM pages p
+        LEFT JOIN LATERAL (
+          SELECT status, source_seq FROM page_thumbnails
+          WHERE page_id = p.id ORDER BY source_seq DESC LIMIT 1
+        ) t ON true
+        WHERE p.id = $1 AND p.owner_id = $2
         "#,
     )
     .bind(page_id)
@@ -137,6 +167,46 @@ pub async fn get_page(
             page: PageSummary::from(row),
         })),
         None => Err((StatusCode::FORBIDDEN, "page not found").into_response()),
+    }
+}
+
+#[tracing::instrument(skip_all, fields(page_id = %page_id, source_seq))]
+pub async fn get_thumbnail(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path((page_id, source_seq)): Path<(String, u64)>,
+) -> Result<Response, Response> {
+    let owned: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND owner_id = $2)")
+            .bind(&page_id)
+            .bind(&claims.sub)
+            .fetch_one(db(&state)?)
+            .await
+            .map_err(server_error)?;
+    if !owned {
+        return Err((StatusCode::FORBIDDEN, "page not found").into_response());
+    }
+    let png = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT png FROM page_thumbnails WHERE page_id = $1 AND source_seq = $2 AND status = 'available'",
+    )
+    .bind(&page_id)
+    .bind(source_seq as i64)
+    .fetch_optional(db(&state)?)
+    .await
+    .map_err(server_error)?;
+    match png {
+        Some(bytes) => Ok((
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable",
+                ),
+            ],
+            bytes,
+        )
+            .into_response()),
+        None => Err((StatusCode::GONE, "thumbnail revision no longer available").into_response()),
     }
 }
 

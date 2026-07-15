@@ -10,6 +10,82 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('ink page channel', () => {
+  test('generates revisioned thumbnails and updates the SPA library', async ({ page, request }) => {
+    const title = uniqueTitle('thumbnail');
+    const pageId = await createPage(request, title);
+    await page.reload({ waitUntil: 'load' });
+    await expect(page.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible();
+
+    const ticket = await realtimeTicket(request);
+    await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'thumb-1', strokes: sampleViewerStrokes() } },
+      ],
+      settleMs: 500,
+    });
+
+    await expect.poll(async () => {
+      const response = await request.get('/api/pages');
+      const summary = (await response.json()).pages.find((item: any) => item.id === pageId);
+      return summary?.thumbnail?.status;
+    }).toBe('available');
+    const firstSummary = (await (await request.get('/api/pages')).json()).pages.find((item: any) => item.id === pageId);
+    expect(firstSummary.thumbnail.source_seq).toBe(1);
+    await expect(page.locator(`img.page-preview[src="${firstSummary.thumbnail.url}"]`)).toBeVisible();
+
+    const firstImage = await request.get(firstSummary.thumbnail.url);
+    expect(firstImage.status()).toBe(200);
+    expect(firstImage.headers()['content-type']).toBe('image/png');
+    expect(firstImage.headers()['cache-control']).toContain('immutable');
+    expect((await firstImage.body()).subarray(1, 4).toString()).toBe('PNG');
+
+    const other = await otherOwnerContext();
+    expect((await other.get(firstSummary.thumbnail.url)).status()).toBe(403);
+    await other.dispose();
+
+    const ticket2 = await realtimeTicket(request);
+    await driveSocket(page, {
+      pageId,
+      ticket: ticket2,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'thumb-2', strokes: sampleStrokes() } },
+      ],
+      settleMs: 500,
+    });
+    await expect.poll(async () => {
+      const summary = (await (await request.get('/api/pages')).json()).pages.find((item: any) => item.id === pageId);
+      return summary?.thumbnail?.source_seq;
+    }).toBe(2);
+    expect((await request.get(firstSummary.thumbnail.url)).status()).toBe(200);
+
+    const ticket3 = await realtimeTicket(request);
+    await driveSocket(page, {
+      pageId,
+      ticket: ticket3,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        ...Array.from({ length: 10 }, (_, index) => ({
+          delayMs: 60,
+          message: {
+            type: 'commit-batch',
+            client_batch_id: `thumb-${index + 3}`,
+            strokes: sampleStrokes(),
+          },
+        })),
+      ],
+      settleMs: 1_000,
+    });
+    await expect.poll(async () => {
+      const summary = (await (await request.get('/api/pages')).json()).pages.find((item: any) => item.id === pageId);
+      return summary?.thumbnail?.source_seq;
+    }).toBe(12);
+    expect((await request.get(firstSummary.thumbnail.url)).status()).toBe(410);
+  });
+
   test('commits a stroke batch and assigns a monotonic sequence', async ({ page, request }) => {
     const pageId = await createPage(request, uniqueTitle('ink-commit'));
     const ticket = await realtimeTicket(request);

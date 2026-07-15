@@ -4,7 +4,7 @@
   "title": "PageSummary",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "title", "created_at", "updated_at"],
+  "required": ["id", "title", "created_at", "updated_at", "thumbnail"],
   "properties": {
     "id": {
       "type": "string",
@@ -20,6 +20,13 @@
     "updated_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "thumbnail": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "empty" } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "source_seq"], "properties": { "status": { "enum": ["generating", "failed"] }, "source_seq": { "type": "integer", "minimum": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "source_seq", "url"], "properties": { "status": { "const": "available" }, "source_seq": { "type": "integer", "minimum": 1 }, "url": { "type": "string", "minLength": 1 } } }
+      ]
     }
   }
 }

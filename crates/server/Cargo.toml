@@ -19,6 +19,7 @@ opentelemetry_sdk = "0.32.1"
 prometheus = "0.14.0"
 protocol = { path = "../protocol" }
 rand = "0.8"
+tiny-skia = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = { version = "0.23", features = ["ring"] }
 serde.workspace = true

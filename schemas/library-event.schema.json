@@ -29,6 +29,22 @@
           "minLength": 1
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "page_id", "thumbnail"],
+      "properties": {
+        "type": { "const": "page-thumbnail-updated" },
+        "page_id": { "type": "string", "minLength": 1 },
+        "thumbnail": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "empty" } } },
+            { "type": "object", "additionalProperties": false, "required": ["status", "source_seq"], "properties": { "status": { "enum": ["generating", "failed"] }, "source_seq": { "type": "integer", "minimum": 1 } } },
+            { "type": "object", "additionalProperties": false, "required": ["status", "source_seq", "url"], "properties": { "status": { "const": "available" }, "source_seq": { "type": "integer", "minimum": 1 }, "url": { "type": "string", "minLength": 1 } } }
+          ]
+        }
+      }
     }
   ]
 }
