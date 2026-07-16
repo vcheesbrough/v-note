@@ -7,8 +7,10 @@ import kotlinx.coroutines.Dispatchers
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
+import link.desync.vnote.auth.SolidRoundParameters
 import link.desync.vnote.auth.Stroke
 import link.desync.vnote.auth.StrokePoint
+import link.desync.vnote.auth.StrokeStyle
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
 import okhttp3.WebSocket
@@ -26,6 +28,29 @@ import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+
+private val seedStrokeMessage =
+    """
+    {
+      "type": "stroke-batch",
+      "seq": 1,
+      "client_batch_id": "seed",
+      "strokes": [{
+        "id": "seed-stroke",
+        "style": {
+          "tool_kind": "solid_round",
+          "style_version": 1,
+          "parameters": {
+            "color": "#006400",
+            "width": 4.0,
+            "cap_style": "round",
+            "join_style": "round"
+          }
+        },
+        "points": [{"x": 1.0, "y": 2.0, "t": 0}]
+      }]
+    }
+    """.trimIndent()
 
 @RunWith(AndroidJUnit4::class)
 class PageInkInstrumentedTest {
@@ -79,9 +104,7 @@ class PageInkInstrumentedTest {
                     ) {
                         when (JSONObject(text).getString("type")) {
                             "subscribe" -> {
-                                webSocket.send(
-                                    """{"type":"stroke-batch","seq":1,"client_batch_id":"seed","strokes":[{"id":"seed-stroke","style":{"tool_kind":"solid_round","style_version":1,"parameters":{"color":"#006400","width":4.0,"cap_style":"round","join_style":"round"}},"points":[{"x":1.0,"y":2.0,"t":0}]}]}""",
-                                )
+                                webSocket.send(seedStrokeMessage)
                                 webSocket.send("""{"type":"synced","last_seq":1}""")
                             }
                             "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
@@ -113,12 +136,24 @@ class PageInkInstrumentedTest {
         assertTrue("lease granted", awaitUntil { session.canEdit })
 
         // Commit a captured stroke; it is sent on the wire and rendered on echo.
-        session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16))))
+        session.commitStroke(
+            Stroke(
+                points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16)),
+                style =
+                    StrokeStyle(
+                        parameters = SolidRoundParameters(color = "#C62828", width = 8.5),
+                    ),
+            ),
+        )
         assertTrue("commit sent", commitLatch.await(5, TimeUnit.SECONDS))
 
         val commitJson = JSONObject(committed.get())
         assertEquals("commit-batch", commitJson.getString("type"))
         assertEquals(2, commitJson.getJSONArray("strokes").getJSONObject(0).getJSONArray("points").length())
+        val style = commitJson.getJSONArray("strokes").getJSONObject(0).getJSONObject("style")
+        assertEquals("solid_round", style.getString("tool_kind"))
+        assertEquals("#C62828", style.getJSONObject("parameters").getString("color"))
+        assertEquals(8.5, style.getJSONObject("parameters").getDouble("width"), 0.0)
 
         // Snapshot stroke + server echo => exactly two committed strokes.
         assertTrue("no duplicate from echo", awaitUntil { session.strokes.size == 2 })
@@ -235,6 +270,58 @@ class PageInkInstrumentedTest {
         assertEquals("uncommitted ink is not rendered", emptyList<Stroke>(), session.strokes)
         assertEquals("commit failure shown", "Commit failed", session.statusBanner)
         assertEquals("input blocked", false, session.canEdit)
+
+        session.disconnect()
+    }
+
+    @Test
+    fun erasingVisibleStrokeHidesItImmediatelyAndCommitsTombstone() {
+        val tombstone = AtomicReference<String>()
+        val tombstoneLatch = CountDownLatch(1)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":1}""")
+                    }
+
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        when (JSONObject(text).getString("type")) {
+                            "subscribe" -> {
+                                webSocket.send(seedStrokeMessage)
+                                webSocket.send("""{"type":"synced","last_seq":1}""")
+                            }
+                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                            "commit-tombstones" -> {
+                                tombstone.set(text)
+                                tombstoneLatch.countDown()
+                            }
+                            "release-lease" -> webSocket.close(1000, "lease released")
+                        }
+                    }
+                },
+            ),
+        )
+
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        session.connect()
+        assertTrue("stroke loaded", awaitUntil { session.strokes.singleOrNull()?.id == "seed-stroke" })
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+
+        session.eraseStrokes(listOf("seed-stroke", "seed-stroke"))
+
+        assertEquals("stroke hidden before acknowledgement", emptyList<Stroke>(), session.strokes)
+        assertTrue("tombstone sent", tombstoneLatch.await(5, TimeUnit.SECONDS))
+        val message = JSONObject(tombstone.get())
+        assertEquals("commit-tombstones", message.getString("type"))
+        assertEquals(1, message.getJSONArray("stroke_ids").length())
+        assertEquals("seed-stroke", message.getJSONArray("stroke_ids").getString(0))
 
         session.disconnect()
     }

@@ -1,0 +1,68 @@
+package link.desync.vnote.ink
+
+import link.desync.vnote.auth.SolidRoundParameters
+import link.desync.vnote.auth.Stroke
+import link.desync.vnote.auth.StrokePoint
+import link.desync.vnote.auth.StrokeStyle
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class PageCanvasTest {
+    @Test
+    fun sweptEraserFindsFastCrossingAndEveryOverlappingStroke() {
+        val horizontal = stroke("horizontal", 0.0, 50.0, 100.0, 50.0)
+        val vertical = stroke("vertical", 50.0, 0.0, 50.0, 100.0)
+        val distant = stroke("distant", 0.0, 150.0, 100.0, 150.0)
+
+        val hits =
+            findIntersectedStrokes(
+                listOf(horizontal, vertical, distant),
+                listOf(point(0.0, 0.0), point(100.0, 100.0)),
+                eraserRadius = 12f,
+            )
+
+        assertEquals(setOf("horizontal", "vertical"), hits)
+    }
+
+    @Test
+    fun strokeWidthContributesToWholeStrokeHitArea() {
+        val wide =
+            Stroke(
+                id = "wide",
+                style = StrokeStyle(parameters = SolidRoundParameters(width = 32.0)),
+                points = listOf(point(0.0, 30.0), point(100.0, 30.0)),
+            )
+
+        assertEquals(
+            setOf("wide"),
+            findIntersectedStrokes(
+                listOf(wide),
+                listOf(point(0.0, 0.0), point(100.0, 0.0)),
+                eraserRadius = 14f,
+            ),
+        )
+    }
+
+    @Test
+    fun singlePointEraserGestureHitsSinglePointStroke() {
+        val dot = Stroke(id = "dot", points = listOf(point(10.0, 10.0)))
+
+        assertEquals(
+            setOf("dot"),
+            findIntersectedStrokes(listOf(dot), listOf(point(20.0, 10.0)), eraserRadius = 8f),
+        )
+    }
+
+    private fun stroke(
+        id: String,
+        x1: Double,
+        y1: Double,
+        x2: Double,
+        y2: Double,
+    ): Stroke = Stroke(id = id, points = listOf(point(x1, y1), point(x2, y2)))
+
+    private fun point(
+        x: Double,
+        y: Double,
+    ): StrokePoint = StrokePoint(x, y, 0)
+}

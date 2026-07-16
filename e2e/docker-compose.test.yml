@@ -91,6 +91,39 @@ services:
     networks:
       - e2e-net
 
+  legacy-migration-fixture:
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    environment:
+      PGPASSWORD: test-password
+    command:
+      - sh
+      - -ec
+      - |
+        until psql -h postgres -U v_note -d v_note -tAc "SELECT to_regclass('public.stroke_batches') IS NOT NULL" | grep -q t; do sleep 1; done
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /fixtures/legacy-stroke.sql
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/backfill.sql
+        first_id="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT strokes->0->>'id' FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/backfill.sql
+        second_id="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT strokes->0->>'id' FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
+        test -n "$$first_id" && test "$$first_id" = "$$second_id"
+        touch /tmp/fixture-ready
+        exec tail -f /dev/null
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/fixture-ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - ./fixtures/legacy-stroke.sql:/fixtures/legacy-stroke.sql:ro
+      - ../crates/server/migrations/20260716003000_backfill_legacy_strokes.sql:/migrations/backfill.sql:ro
+    depends_on:
+      app:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks:
+      - e2e-net
+
   playwright:
     image: v-note-e2e-playwright:${OCI_IMAGE_VERSION:-local}
     build:
@@ -125,8 +158,12 @@ services:
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
-      - app
-      - mock-oidc
+      app:
+        condition: service_started
+      mock-oidc:
+        condition: service_started
+      legacy-migration-fixture:
+        condition: service_healthy
     networks:
       - e2e-net
 

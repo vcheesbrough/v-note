@@ -253,16 +253,23 @@ pub enum PageServerMessage {
     StrokeBatch(StrokeBatch),
     TombstoneBatch(TombstoneBatch),
     /// End of gap-fill replay; this session is caught up to `last_seq`.
-    Synced { last_seq: u64 },
+    Synced {
+        last_seq: u64,
+    },
     /// This session now holds the edit lease.
     LeaseGranted,
     /// The edit lease is held by another session; ink is blocked.
-    LeaseDenied { holder: String },
+    LeaseDenied {
+        holder: String,
+    },
     /// Broadcast when the page's lease holder changes (or clears → omitted).
     LeaseChanged {
         #[serde(skip_serializing_if = "Option::is_none")]
         holder: Option<String>,
     },
     /// Recoverable error envelope (e.g. rejected commit).
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
 }
