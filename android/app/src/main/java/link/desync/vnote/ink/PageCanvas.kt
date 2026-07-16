@@ -1,5 +1,6 @@
 package link.desync.vnote.ink
 
+import android.view.MotionEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -35,9 +36,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
@@ -51,6 +52,8 @@ import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -90,7 +93,7 @@ private val ToolColors =
         "#EF6C00",
     )
 
-private enum class CanvasTool { Drawing, Eraser }
+internal enum class CanvasTool { Drawing, Eraser }
 
 // Full-screen ink editor for one open page: top bar with back + title, an
 // optional status banner (e.g. blocked-by-another-editor), and the infinite
@@ -99,14 +102,17 @@ private enum class CanvasTool { Drawing, Eraser }
 fun PageCanvasScreen(
     apiClient: ApiClient,
     page: PageSummary,
+    userId: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val toolPreferences = remember(userId) { DrawingToolPreferences(context, userId) }
     val session = remember(page.id) { PageInkSession(apiClient, page.id, scope) }
     var selectedTool by remember(page.id) { mutableStateOf(CanvasTool.Drawing) }
     var paletteOpen by remember(page.id) { mutableStateOf(false) }
-    var drawingStyle by remember(page.id) { mutableStateOf(StrokeStyle()) }
+    var drawingStyle by remember(userId) { mutableStateOf(toolPreferences.load()) }
     DisposableEffect(page.id) {
         session.connect()
         onDispose { session.disconnect() }
@@ -141,7 +147,10 @@ fun PageCanvasScreen(
                     }
                 },
                 onPaletteDismiss = { paletteOpen = false },
-                onStyleChange = { drawingStyle = it },
+                onStyleChange = { style ->
+                    drawingStyle = style
+                    toolPreferences.save(style)
+                },
             )
             FilledTonalIconToggleButton(
                 checked = selectedTool == CanvasTool.Eraser,
@@ -318,6 +327,7 @@ private fun ToolStrokePreview(
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 private fun InkCanvas(
     strokes: List<Stroke>,
     canEdit: Boolean,
@@ -334,6 +344,12 @@ private fun InkCanvas(
     var momentumJob by remember { mutableStateOf<Job?>(null) }
     val liveStroke = remember { mutableStateListOf<StrokePoint>() }
     val liveEraserPath = remember { mutableStateListOf<StrokePoint>() }
+    var activeStylusTool by remember { mutableStateOf<CanvasTool?>(null) }
+    var capturedDrawingStyle by remember { mutableStateOf<StrokeStyle?>(null) }
+    var stylusStartTime by remember { mutableStateOf(0L) }
+    val erasedThisGesture = remember { mutableSetOf<String>() }
+    var hoverEraserPoint by remember { mutableStateOf<StrokePoint?>(null) }
+    var hoverShowsEraser by remember { mutableStateOf(false) }
     val eraserRadiusPx = with(LocalDensity.current) { 12.dp.toPx() }
     DisposableEffect(Unit) {
         onDispose { momentumJob?.cancel() }
@@ -345,44 +361,143 @@ private fun InkCanvas(
                 .clipToBounds()
                 .background(Color.White)
                 .testTag("ink-canvas")
-                .pointerInput(canEdit, selectedTool, drawingStyle) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        momentumJob?.cancel()
-                        momentumJob = null
-                        if (down.type == PointerType.Stylus && canEdit) {
-                            // Stylus draws; touch is reserved for viewport navigation.
-                            if (selectedTool == CanvasTool.Drawing) {
-                                val capturedStyle = drawingStyle
-                                captureStylusPath(down, viewport, liveStroke) { captured ->
-                                    if (captured.isNotEmpty()) {
-                                        onStrokeFinished(Stroke(points = captured, style = capturedStyle))
-                                    }
+                .pointerInteropFilter { event ->
+                    if (!event.isStylusEvent()) {
+                        return@pointerInteropFilter false
+                    }
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_HOVER_ENTER,
+                        MotionEvent.ACTION_HOVER_MOVE,
+                        -> {
+                            val hoverTool =
+                                effectiveCanvasTool(
+                                    selectedTool,
+                                    event.getToolType(event.actionIndex),
+                                    event.buttonState,
+                                )
+                            hoverShowsEraser = hoverTool == CanvasTool.Eraser
+                            hoverEraserPoint =
+                                if (hoverShowsEraser) {
+                                    event.toWorldPoint(viewport, event.eventTime)
+                                } else {
+                                    null
+                                }
+                            true
+                        }
+                        MotionEvent.ACTION_HOVER_EXIT -> {
+                            hoverShowsEraser = false
+                            hoverEraserPoint = null
+                            true
+                        }
+                        MotionEvent.ACTION_DOWN -> {
+                            if (!canEdit) {
+                                return@pointerInteropFilter false
+                            }
+                            momentumJob?.cancel()
+                            momentumJob = null
+                            stylusStartTime = event.eventTime
+                            activeStylusTool =
+                                effectiveCanvasTool(
+                                    selectedTool,
+                                    event.getToolType(event.actionIndex),
+                                    event.buttonState,
+                                )
+                            capturedDrawingStyle =
+                                drawingStyle.takeIf { activeStylusTool == CanvasTool.Drawing }
+                            liveStroke.clear()
+                            liveEraserPath.clear()
+                            erasedThisGesture.clear()
+                            val point = event.toWorldPoint(viewport, stylusStartTime)
+                            if (activeStylusTool == CanvasTool.Drawing) {
+                                liveStroke.add(point)
+                            } else {
+                                eraseAtPoint(
+                                    point,
+                                    liveEraserPath,
+                                    strokes,
+                                    erasedThisGesture,
+                                    eraserRadiusPx / viewport.scale,
+                                    onStrokesErased,
+                                )
+                            }
+                            true
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            if (activeStylusTool == null) {
+                                return@pointerInteropFilter false
+                            }
+                            val point = event.toWorldPoint(viewport, stylusStartTime)
+                            if (activeStylusTool == CanvasTool.Drawing) {
+                                liveStroke.add(point)
+                            } else {
+                                eraseAtPoint(
+                                    point,
+                                    liveEraserPath,
+                                    strokes,
+                                    erasedThisGesture,
+                                    eraserRadiusPx / viewport.scale,
+                                    onStrokesErased,
+                                )
+                            }
+                            true
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            val tool = activeStylusTool ?: return@pointerInteropFilter false
+                            val point = event.toWorldPoint(viewport, stylusStartTime)
+                            if (tool == CanvasTool.Drawing) {
+                                liveStroke.add(point)
+                                val captured = liveStroke.toList()
+                                val style = capturedDrawingStyle
+                                if (captured.isNotEmpty() && style != null) {
+                                    onStrokeFinished(Stroke(points = captured, style = style))
                                 }
                             } else {
-                                captureStylusPath(down, viewport, liveEraserPath) { path ->
-                                    onStrokesErased(
-                                        findIntersectedStrokes(
-                                            strokes,
-                                            path,
-                                            eraserRadiusPx / viewport.scale,
-                                        ),
-                                    )
-                                }
+                                eraseAtPoint(
+                                    point,
+                                    liveEraserPath,
+                                    strokes,
+                                    erasedThisGesture,
+                                    eraserRadiusPx / viewport.scale,
+                                    onStrokesErased,
+                                )
                             }
-                        } else {
-                            val gesture =
-                                handleViewport { panDelta, zoom, centroid ->
-                                    viewport = viewport.applyGesture(panDelta, zoom, centroid)
-                                }
-                            if (gesture.launchMomentum) {
-                                momentumJob =
-                                    scope.launch {
-                                        runPanMomentum(gesture.velocity) { delta ->
-                                            viewport = viewport.pan(delta)
-                                        }
+                            liveStroke.clear()
+                            liveEraserPath.clear()
+                            activeStylusTool = null
+                            capturedDrawingStyle = null
+                            erasedThisGesture.clear()
+                            true
+                        }
+                        MotionEvent.ACTION_CANCEL -> {
+                            liveStroke.clear()
+                            liveEraserPath.clear()
+                            activeStylusTool = null
+                            capturedDrawingStyle = null
+                            erasedThisGesture.clear()
+                            true
+                        }
+                        else -> activeStylusTool != null
+                    }
+                }
+                .pointerInput(canEdit) {
+                    awaitEachGesture {
+                        val firstDown = awaitFirstDown(requireUnconsumed = false)
+                        if (firstDown.type == PointerType.Stylus || firstDown.type == PointerType.Eraser) {
+                            return@awaitEachGesture
+                        }
+                        momentumJob?.cancel()
+                        momentumJob = null
+                        val gesture =
+                            handleViewport { panDelta, zoom, centroid ->
+                                viewport = viewport.applyGesture(panDelta, zoom, centroid)
+                            }
+                        if (gesture.launchMomentum) {
+                            momentumJob =
+                                scope.launch {
+                                    runPanMomentum(gesture.velocity) { delta ->
+                                        viewport = viewport.pan(delta)
                                     }
-                            }
+                                }
                         }
                     }
                 },
@@ -399,18 +514,19 @@ private fun InkCanvas(
                 )
             }
             if (liveStroke.isNotEmpty()) {
+                val liveStyle = capturedDrawingStyle ?: drawingStyle
                 drawInk(
                     liveStroke,
-                    drawingStyle.parameters.width.toFloat(),
-                    parseColor(drawingStyle.parameters.color),
+                    liveStyle.parameters.width.toFloat(),
+                    parseColor(liveStyle.parameters.color),
                 )
             }
-            if (liveEraserPath.isNotEmpty()) {
-                val cursor = liveEraserPath.last()
+            val eraserCursor = liveEraserPath.lastOrNull() ?: hoverEraserPoint.takeIf { hoverShowsEraser }
+            if (eraserCursor != null) {
                 drawCircle(
                     color = Color.Black,
                     radius = eraserRadiusPx / viewport.scale,
-                    center = Offset(cursor.x.toFloat(), cursor.y.toFloat()),
+                    center = Offset(eraserCursor.x.toFloat(), eraserCursor.y.toFloat()),
                     style = DrawStroke(width = 1.dp.toPx() / viewport.scale),
                 )
             }
@@ -418,30 +534,55 @@ private fun InkCanvas(
     }
 }
 
-// Collect one stylus stroke as world-space samples until the pointer lifts.
-private suspend fun AwaitPointerEventScope.captureStylusPath(
-    first: PointerInputChange,
-    viewport: ViewportTransform,
-    livePath: SnapshotStateList<StrokePoint>,
-    onFinished: (List<StrokePoint>) -> Unit,
-) {
-    val startTime = System.currentTimeMillis()
-    livePath.clear()
-    livePath.add(toWorldPoint(first.position, viewport, startTime))
-    first.consume()
-    while (true) {
-        val event = awaitPointerEvent()
-        val change = event.changes.firstOrNull { it.id == first.id } ?: break
-        if (!change.pressed) {
-            change.consume()
-            break
-        }
-        livePath.add(toWorldPoint(change.position, viewport, startTime))
-        change.consume()
+private fun MotionEvent.isStylusEvent(): Boolean {
+    val toolType = getToolType(actionIndex.coerceAtLeast(0))
+    return toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+}
+
+internal fun effectiveCanvasTool(
+    selectedTool: CanvasTool,
+    toolType: Int,
+    buttonState: Int,
+): CanvasTool {
+    val stylusButtonMask =
+        MotionEvent.BUTTON_STYLUS_PRIMARY or
+            MotionEvent.BUTTON_STYLUS_SECONDARY or
+            MotionEvent.BUTTON_SECONDARY or
+            MotionEvent.BUTTON_TERTIARY
+    return if (
+        selectedTool == CanvasTool.Eraser ||
+        toolType == MotionEvent.TOOL_TYPE_ERASER ||
+        buttonState and stylusButtonMask != 0
+    ) {
+        CanvasTool.Eraser
+    } else {
+        CanvasTool.Drawing
     }
-    val captured = livePath.toList()
-    livePath.clear()
-    onFinished(captured)
+}
+
+private fun MotionEvent.toWorldPoint(
+    viewport: ViewportTransform,
+    startTime: Long,
+): StrokePoint {
+    val world = viewport.toWorld(Offset(x, y))
+    return StrokePoint(world.x.toDouble(), world.y.toDouble(), eventTime - startTime)
+}
+
+private fun eraseAtPoint(
+    point: StrokePoint,
+    livePath: MutableList<StrokePoint>,
+    strokes: List<Stroke>,
+    erasedThisGesture: MutableSet<String>,
+    eraserRadius: Float,
+    onStrokesErased: (Collection<String>) -> Unit,
+) {
+    val sweep = livePath.lastOrNull()?.let { previous -> listOf(previous, point) } ?: listOf(point)
+    livePath.add(point)
+    val newHits = findIntersectedStrokes(strokes, sweep, eraserRadius) - erasedThisGesture
+    if (newHits.isNotEmpty()) {
+        erasedThisGesture.addAll(newHits)
+        onStrokesErased(newHits)
+    }
 }
 
 // Single-finger pan + two-finger pinch zoom; reports incremental transforms.
