@@ -122,7 +122,7 @@ class PageLibraryOrderingInstrumentedTest {
 
     @Test
     fun pageEditorExposesDrawingEraserAndInteractivePalette() {
-        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
+        openPage("page_old")
 
         composeRule.onNodeWithTag("drawing-tool").assertIsDisplayed().assertIsSelected()
         composeRule.onNodeWithTag("eraser-tool").assertIsDisplayed().assertIsNotSelected()
@@ -172,7 +172,7 @@ class PageLibraryOrderingInstrumentedTest {
 
     @Test
     fun drawingSettingsPersistAcrossPagesAndActivityRecreation() {
-        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
+        openPage("page_old")
         composeRule.onNodeWithTag("drawing-tool").performClick()
         composeRule.onNodeWithTag("swatch-#C62828").performClick().assertIsSelected()
         composeRule
@@ -183,11 +183,11 @@ class PageLibraryOrderingInstrumentedTest {
         assertSelectedStyle("#C62828", "8.5")
 
         closePaletteAndReturnToLibrary()
-        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
+        openPage("page_old")
         openPaletteAndAssertSelectedStyle("#C62828", "8.5")
 
         closePaletteAndReturnToLibrary()
-        composeRule.onNodeWithTag("page-tile-page_new", useUnmergedTree = true).performClick()
+        openPage("page_new")
         openPaletteAndAssertSelectedStyle("#C62828", "8.5")
 
         closePaletteAndReturnToLibrary()
@@ -202,6 +202,18 @@ class PageLibraryOrderingInstrumentedTest {
         }
         composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
         openPaletteAndAssertSelectedStyle("#C62828", "8.5")
+    }
+
+    private fun openPage(pageId: String) {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("page-tile-$pageId", useUnmergedTree = true)
+                    .assertIsDisplayed()
+                true
+            }.getOrDefault(false)
+        }
+        composeRule.onNodeWithTag("page-tile-$pageId", useUnmergedTree = true).performClick()
     }
 
     private fun openPaletteAndAssertSelectedStyle(

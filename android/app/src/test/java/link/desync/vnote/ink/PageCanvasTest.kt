@@ -47,6 +47,43 @@ class PageCanvasTest {
             CanvasTool.Eraser,
             effectiveCanvasTool(CanvasTool.Drawing, MotionEvent.TOOL_TYPE_ERASER, 0),
         )
+        assertEquals(
+            CanvasTool.Eraser,
+            effectiveCanvasTool(
+                CanvasTool.Drawing,
+                MotionEvent.TOOL_TYPE_STYLUS,
+                0,
+                hoverButtonEraserArmed = true,
+            ),
+        )
+    }
+
+    @Test
+    fun hoverButtonLatchCoversTipDownWhenHardwareDropsButtonState() {
+        val latchUntil =
+            hoverButtonEraserLatchUntil(
+                CanvasTool.Eraser,
+                MotionEvent.BUTTON_STYLUS_PRIMARY,
+                eventTime = 1_000L,
+            )
+
+        assertEquals(1_500L, latchUntil)
+        assertEquals(true, isHoverButtonEraserLatchActive(1_499L, latchUntil))
+        assertEquals(
+            CanvasTool.Eraser,
+            effectiveCanvasTool(
+                CanvasTool.Drawing,
+                MotionEvent.TOOL_TYPE_STYLUS,
+                buttonState = 0,
+                hoverButtonEraserArmed = isHoverButtonEraserLatchActive(1_499L, latchUntil),
+            ),
+        )
+        assertEquals(false, isHoverButtonEraserLatchActive(1_501L, latchUntil))
+        assertEquals(
+            0L,
+            hoverButtonEraserLatchUntil(CanvasTool.Drawing, MotionEvent.BUTTON_STYLUS_PRIMARY, 1_000L),
+        )
+        assertEquals(0L, hoverButtonEraserLatchUntil(CanvasTool.Eraser, buttonState = 0, 1_000L))
     }
 
     @Test
