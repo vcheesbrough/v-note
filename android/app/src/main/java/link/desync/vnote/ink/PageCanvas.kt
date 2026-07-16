@@ -81,6 +81,7 @@ private const val NANOS_PER_SECOND = 1_000_000_000f
 private const val MIN_WIDTH = 1f
 private const val MAX_WIDTH = 32f
 private const val WIDTH_INCREMENT = 0.5f
+private const val HOVER_BUTTON_ERASER_LATCH_MS = 500L
 private val ToolColors =
     listOf(
         "#000000",
@@ -350,6 +351,7 @@ private fun InkCanvas(
     val erasedThisGesture = remember { mutableSetOf<String>() }
     var hoverEraserPoint by remember { mutableStateOf<StrokePoint?>(null) }
     var hoverShowsEraser by remember { mutableStateOf(false) }
+    var hoverButtonEraserLatchUntil by remember { mutableStateOf(0L) }
     val eraserRadiusPx = with(LocalDensity.current) { 12.dp.toPx() }
     DisposableEffect(Unit) {
         onDispose { momentumJob?.cancel() }
@@ -376,6 +378,12 @@ private fun InkCanvas(
                                     event.buttonState,
                                 )
                             hoverShowsEraser = hoverTool == CanvasTool.Eraser
+                            hoverButtonEraserLatchUntil =
+                                hoverButtonEraserLatchUntil(
+                                    hoverTool,
+                                    event.buttonState,
+                                    event.eventTime,
+                                )
                             hoverEraserPoint =
                                 if (hoverShowsEraser) {
                                     event.toWorldPoint(viewport, event.eventTime)
@@ -401,6 +409,11 @@ private fun InkCanvas(
                                     selectedTool,
                                     event.getToolType(event.actionIndex),
                                     event.buttonState,
+                                    hoverButtonEraserArmed =
+                                        isHoverButtonEraserLatchActive(
+                                            event.eventTime,
+                                            hoverButtonEraserLatchUntil,
+                                        ),
                                 )
                             capturedDrawingStyle =
                                 drawingStyle.takeIf { activeStylusTool == CanvasTool.Drawing }
@@ -411,6 +424,8 @@ private fun InkCanvas(
                             if (activeStylusTool == CanvasTool.Drawing) {
                                 liveStroke.add(point)
                             } else {
+                                hoverShowsEraser = false
+                                hoverEraserPoint = null
                                 eraseAtPoint(
                                     point,
                                     liveEraserPath,
@@ -466,6 +481,7 @@ private fun InkCanvas(
                             activeStylusTool = null
                             capturedDrawingStyle = null
                             erasedThisGesture.clear()
+                            hoverButtonEraserLatchUntil = 0L
                             true
                         }
                         MotionEvent.ACTION_CANCEL -> {
@@ -474,6 +490,7 @@ private fun InkCanvas(
                             activeStylusTool = null
                             capturedDrawingStyle = null
                             erasedThisGesture.clear()
+                            hoverButtonEraserLatchUntil = 0L
                             true
                         }
                         else -> activeStylusTool != null
@@ -543,22 +560,44 @@ internal fun effectiveCanvasTool(
     selectedTool: CanvasTool,
     toolType: Int,
     buttonState: Int,
+    hoverButtonEraserArmed: Boolean = false,
 ): CanvasTool {
-    val stylusButtonMask =
-        MotionEvent.BUTTON_STYLUS_PRIMARY or
-            MotionEvent.BUTTON_STYLUS_SECONDARY or
-            MotionEvent.BUTTON_SECONDARY or
-            MotionEvent.BUTTON_TERTIARY
     return if (
         selectedTool == CanvasTool.Eraser ||
         toolType == MotionEvent.TOOL_TYPE_ERASER ||
-        buttonState and stylusButtonMask != 0
+        buttonState and STYLUS_ERASER_BUTTON_MASK != 0 ||
+        hoverButtonEraserArmed
     ) {
         CanvasTool.Eraser
     } else {
         CanvasTool.Drawing
     }
 }
+
+private const val STYLUS_ERASER_BUTTON_MASK =
+    MotionEvent.BUTTON_STYLUS_PRIMARY or
+        MotionEvent.BUTTON_STYLUS_SECONDARY or
+        MotionEvent.BUTTON_SECONDARY or
+        MotionEvent.BUTTON_TERTIARY
+
+private fun MotionEvent.hasStylusButtonPressed(): Boolean =
+    buttonState and STYLUS_ERASER_BUTTON_MASK != 0
+
+internal fun hoverButtonEraserLatchUntil(
+    hoverTool: CanvasTool,
+    buttonState: Int,
+    eventTime: Long,
+): Long =
+    if (hoverTool == CanvasTool.Eraser && buttonState and STYLUS_ERASER_BUTTON_MASK != 0) {
+        eventTime + HOVER_BUTTON_ERASER_LATCH_MS
+    } else {
+        0L
+    }
+
+internal fun isHoverButtonEraserLatchActive(
+    eventTime: Long,
+    latchUntil: Long,
+): Boolean = latchUntil > 0L && eventTime <= latchUntil
 
 private fun MotionEvent.toWorldPoint(
     viewport: ViewportTransform,
