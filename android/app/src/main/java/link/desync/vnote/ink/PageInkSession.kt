@@ -95,12 +95,13 @@ class PageInkSession(
 
     fun eraseStrokes(strokeIds: Collection<String>) {
         if (!canEdit || strokeIds.isEmpty()) return
-        confirmedStrokes.removeAll { it.id in strokeIds }
-        pendingBatches.entries.removeAll { (_, strokes) -> strokes.any { it.id in strokeIds } }
+        val uniqueIds = strokeIds.toSet()
+        confirmedStrokes.removeAll { it.id in uniqueIds }
+        pendingBatches.entries.removeAll { (_, strokes) -> strokes.any { it.id in uniqueIds } }
         publishRenderableStrokes()
         socket?.commitTombstones(
             "erase_${UUID.randomUUID().toString().replace("-", "")}",
-            strokeIds.toList(),
+            uniqueIds.toList(),
         )
     }
 

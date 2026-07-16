@@ -10,6 +10,36 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('ink page channel', () => {
+  test('opens a pre-v3 page after deterministic legacy-stroke migration', async ({ page, request }) => {
+    const pageId = 'page_legacy_v2';
+    const ticket = await realtimeTicket(request);
+    const snapshot = await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
+      settleMs: 500,
+    });
+    const migrated = snapshot.messages.find((message) => message.type === 'stroke-batch');
+    expect(migrated, 'legacy batch loads through the v3 page channel').toBeTruthy();
+    expect(migrated.strokes[0].id).toMatch(/^stroke_legacy_[0-9a-f]{32}$/);
+    expect(migrated.strokes[0].style).toEqual({
+      tool_kind: 'solid_round',
+      style_version: 1,
+      parameters: {
+        color: '#006400',
+        width: 4.0,
+        cap_style: 'round',
+        join_style: 'round',
+      },
+    });
+
+    const openPage = page.getByRole('button', { name: 'Open Legacy protocol 2 page', exact: true });
+    await expect(openPage).toBeVisible();
+    await openPage.click();
+    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+    await expect(page.getByText(/Live · seq 1|Synced · seq 1/)).toBeVisible({ timeout: 5_000 });
+  });
+
   test('generates revisioned thumbnails and updates the SPA library', async ({ page, request }) => {
     const title = uniqueTitle('thumbnail');
     const pageId = await createPage(request, title);

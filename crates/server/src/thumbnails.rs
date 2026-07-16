@@ -102,15 +102,14 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .fetch_all(pool)
     .await
     .map_err(|error| error.to_string())?;
-    let tombstones: std::collections::HashSet<String> = sqlx::query_scalar(
-        "SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1",
-    )
-    .bind(page_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| error.to_string())?
-    .into_iter()
-    .collect();
+    let tombstones: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1")
+            .bind(page_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
     let strokes: Vec<Stroke> = batches
         .into_iter()
         .flat_map(|batch| batch.0)
