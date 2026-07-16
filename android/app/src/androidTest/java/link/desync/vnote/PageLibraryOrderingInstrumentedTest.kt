@@ -17,6 +17,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.TokenStore
+import link.desync.vnote.ink.DrawingToolPreferences
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.mockwebserver.Dispatcher
@@ -32,6 +33,8 @@ import org.junit.rules.RuleChain
 import org.junit.rules.TestRule
 import org.junit.runner.RunWith
 import java.net.InetAddress
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -44,6 +47,7 @@ class PageLibraryOrderingInstrumentedTest {
     private val edited = AtomicBoolean(false)
     private val pageListRequests = AtomicInteger(0)
     private val librarySocket = AtomicReference<WebSocket>()
+    private val leaseGranted = CountDownLatch(1)
 
     private val environmentRule =
         object : ExternalResource() {
@@ -55,6 +59,7 @@ class PageLibraryOrderingInstrumentedTest {
 
                 tokenStore =
                     TokenStore(InstrumentationRegistry.getInstrumentation().targetContext)
+                DrawingToolPreferences.clear(InstrumentationRegistry.getInstrumentation().targetContext)
                 tokenStore.clear()
                 tokenStore.saveTokens(
                     accessToken = "access-token",
@@ -78,6 +83,7 @@ class PageLibraryOrderingInstrumentedTest {
                 if (::tokenStore.isInitialized) {
                     tokenStore.clear()
                 }
+                DrawingToolPreferences.clear(InstrumentationRegistry.getInstrumentation().targetContext)
                 if (::server.isInitialized) {
                     server.shutdown()
                 }
@@ -95,7 +101,7 @@ class PageLibraryOrderingInstrumentedTest {
             pageListRequests.get() >= 1 && pageIsBefore("page_new", "page_old")
         }
 
-        composeRule.onNodeWithTag("page-tile-page_old").performClick()
+        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
         composeRule.onNodeWithContentDescription("Back to pages").assertIsDisplayed()
 
         composeRule.waitUntil(timeoutMillis = 5_000) { librarySocket.get() != null }
@@ -116,10 +122,12 @@ class PageLibraryOrderingInstrumentedTest {
 
     @Test
     fun pageEditorExposesDrawingEraserAndInteractivePalette() {
-        composeRule.onNodeWithTag("page-tile-page_old").performClick()
+        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
 
         composeRule.onNodeWithTag("drawing-tool").assertIsDisplayed().assertIsSelected()
         composeRule.onNodeWithTag("eraser-tool").assertIsDisplayed().assertIsNotSelected()
+        assertTrue("editor lease granted", leaseGranted.await(5, TimeUnit.SECONDS))
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag("tool-palette").assertDoesNotExist()
         assertEquals(48.dp, composeRule.onNodeWithTag("drawing-tool").getUnclippedBoundsInRoot().width())
         assertEquals(48.dp, composeRule.onNodeWithTag("eraser-tool").getUnclippedBoundsInRoot().width())
@@ -162,6 +170,63 @@ class PageLibraryOrderingInstrumentedTest {
         composeRule.onNodeWithTag("tool-palette").assertIsDisplayed()
     }
 
+    @Test
+    fun drawingSettingsPersistAcrossPagesAndActivityRecreation() {
+        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule.onNodeWithTag("swatch-#C62828").performClick().assertIsSelected()
+        composeRule
+            .onNodeWithTag("tool-width-slider")
+            .performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->
+                setProgress(8.5f)
+            }
+        assertSelectedStyle("#C62828", "8.5")
+
+        closePaletteAndReturnToLibrary()
+        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
+        openPaletteAndAssertSelectedStyle("#C62828", "8.5")
+
+        closePaletteAndReturnToLibrary()
+        composeRule.onNodeWithTag("page-tile-page_new", useUnmergedTree = true).performClick()
+        openPaletteAndAssertSelectedStyle("#C62828", "8.5")
+
+        closePaletteAndReturnToLibrary()
+        composeRule.activityRule.scenario.recreate()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("page-tile-page_old", useUnmergedTree = true)
+                    .assertIsDisplayed()
+                true
+            }.getOrDefault(false)
+        }
+        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
+        openPaletteAndAssertSelectedStyle("#C62828", "8.5")
+    }
+
+    private fun openPaletteAndAssertSelectedStyle(
+        color: String,
+        width: String,
+    ) {
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        assertSelectedStyle(color, width)
+    }
+
+    private fun assertSelectedStyle(
+        color: String,
+        width: String,
+    ) {
+        composeRule.onNodeWithTag("tool-palette").assertIsDisplayed()
+        composeRule.onNodeWithTag("swatch-$color").assertIsSelected()
+        composeRule.onNodeWithTag("tool-width-value").assertTextEquals(width)
+    }
+
+    private fun closePaletteAndReturnToLibrary() {
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule.onNodeWithTag("tool-palette").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Back to pages").performClick()
+    }
+
     private fun pageIsBefore(
         firstId: String,
         secondId: String,
@@ -200,7 +265,9 @@ class PageLibraryOrderingInstrumentedTest {
                                 }
                             },
                         )
-                    "/api/pages/page_old/realtime" -> pageSocketResponse()
+                    "/api/pages/page_old/realtime",
+                    "/api/pages/page_new/realtime",
+                    -> pageSocketResponse()
                     else -> MockResponse().setResponseCode(404)
                 }
         }
@@ -222,8 +289,10 @@ class PageLibraryOrderingInstrumentedTest {
                     when {
                         text.contains("\"type\":\"subscribe\"") ->
                             webSocket.send("""{"type":"synced","last_seq":0}""")
-                        text.contains("\"type\":\"acquire-lease\"") ->
+                        text.contains("\"type\":\"acquire-lease\"") -> {
                             webSocket.send("""{"type":"lease-granted"}""")
+                            leaseGranted.countDown()
+                        }
                         text.contains("\"type\":\"release-lease\"") ->
                             webSocket.close(1000, "lease released")
                     }

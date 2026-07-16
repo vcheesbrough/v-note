@@ -1,5 +1,6 @@
 package link.desync.vnote.ink
 
+import android.view.MotionEvent
 import link.desync.vnote.auth.SolidRoundParameters
 import link.desync.vnote.auth.Stroke
 import link.desync.vnote.auth.StrokePoint
@@ -8,6 +9,46 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PageCanvasTest {
+    @Test
+    fun effectiveToolUsesExplicitButtonAndEraserEndInputs() {
+        assertEquals(
+            CanvasTool.Drawing,
+            effectiveCanvasTool(CanvasTool.Drawing, MotionEvent.TOOL_TYPE_STYLUS, 0),
+        )
+        assertEquals(
+            CanvasTool.Eraser,
+            effectiveCanvasTool(CanvasTool.Eraser, MotionEvent.TOOL_TYPE_STYLUS, 0),
+        )
+        assertEquals(
+            CanvasTool.Eraser,
+            effectiveCanvasTool(
+                CanvasTool.Drawing,
+                MotionEvent.TOOL_TYPE_STYLUS,
+                MotionEvent.BUTTON_STYLUS_PRIMARY,
+            ),
+        )
+        assertEquals(
+            CanvasTool.Eraser,
+            effectiveCanvasTool(
+                CanvasTool.Drawing,
+                MotionEvent.TOOL_TYPE_STYLUS,
+                MotionEvent.BUTTON_STYLUS_SECONDARY,
+            ),
+        )
+        assertEquals(
+            CanvasTool.Eraser,
+            effectiveCanvasTool(
+                CanvasTool.Drawing,
+                MotionEvent.TOOL_TYPE_STYLUS,
+                MotionEvent.BUTTON_SECONDARY,
+            ),
+        )
+        assertEquals(
+            CanvasTool.Eraser,
+            effectiveCanvasTool(CanvasTool.Drawing, MotionEvent.TOOL_TYPE_ERASER, 0),
+        )
+    }
+
     @Test
     fun sweptEraserFindsFastCrossingAndEveryOverlappingStroke() {
         val horizontal = stroke("horizontal", 0.0, 50.0, 100.0, 50.0)

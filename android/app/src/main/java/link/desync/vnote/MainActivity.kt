@@ -124,6 +124,7 @@ class MainActivity : ComponentActivity() {
                             PageCanvasScreen(
                                 apiClient = apiClient,
                                 page = selectedPage,
+                                userId = session.profile.sub,
                                 onBack = { closePage() },
                             )
                         } else {
