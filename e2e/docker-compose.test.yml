@@ -92,7 +92,15 @@ services:
       - e2e-net
 
   legacy-migration-fixture:
-    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    image: v-note-e2e-legacy-migration-fixture:${OCI_IMAGE_VERSION:-local}
+    build:
+      context: .
+      additional_contexts:
+        server-migrations: ../crates/server/migrations
+      dockerfile_inline: |
+        FROM postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+        COPY fixtures/legacy-stroke.sql /fixtures/legacy-stroke.sql
+        COPY --from=server-migrations 20260716003000_backfill_legacy_strokes.sql /migrations/20260716003000_backfill_legacy_strokes.sql
     environment:
       PGPASSWORD: test-password
     command:
@@ -113,9 +121,6 @@ services:
       interval: 1s
       timeout: 2s
       retries: 20
-    volumes:
-      - ./fixtures:/fixtures:ro
-      - ../crates/server/migrations:/migrations:ro
     depends_on:
       app:
         condition: service_started
