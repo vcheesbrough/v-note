@@ -101,9 +101,9 @@ services:
       - |
         until psql -h postgres -U v_note -d v_note -tAc "SELECT to_regclass('public.stroke_batches') IS NOT NULL" | grep -q t; do sleep 1; done
         psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /fixtures/legacy-stroke.sql
-        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/backfill.sql
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260716003000_backfill_legacy_strokes.sql
         first_id="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT strokes->0->>'id' FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
-        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/backfill.sql
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260716003000_backfill_legacy_strokes.sql
         second_id="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT strokes->0->>'id' FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
         test -n "$$first_id" && test "$$first_id" = "$$second_id"
         touch /tmp/fixture-ready
@@ -114,8 +114,8 @@ services:
       timeout: 2s
       retries: 20
     volumes:
-      - ./fixtures/legacy-stroke.sql:/fixtures/legacy-stroke.sql:ro
-      - ../crates/server/migrations/20260716003000_backfill_legacy_strokes.sql:/migrations/backfill.sql:ro
+      - ./fixtures:/fixtures:ro
+      - ../crates/server/migrations:/migrations:ro
     depends_on:
       app:
         condition: service_started
