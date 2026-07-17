@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push: compute-version ∥ contract-validation ∥ build-android ∥ android-instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
+# Push: compute-version ∥ contract-validation ∥ build-android ∥ Android API 29/36 instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
 # Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release
 
 when:
@@ -71,23 +71,26 @@ steps:
         docker push "$$IMAGE"
         echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
 
-  android-instrumented:
+  android-instrumented-api-29:
     when:
       - event: [push, manual]
     depends_on:
       - compute-version
     image: *docker-image
     volumes: *docker-socket
-    commands:
+    environment:
+      ANDROID_API_LEVEL: "29"
+    commands: &android-instrumented-commands
       - |
         RELEASE_TAG=$$(cat .release-tag)
-        IMAGE=v-note-android-instrumented:$$CI_COMMIT_SHA
+        IMAGE=v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
         START=$$(date +%s)
         docker build -f Dockerfile.android-instrumented \
           --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --build-arg ANDROID_API_LEVEL="$$ANDROID_API_LEVEL" \
           --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
           --label org.opencontainers.image.title=v-note-android-instrumented \
-          --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
+          --label "org.opencontainers.image.description=v-note Android API $$ANDROID_API_LEVEL CI image (devDebug instrumented tests + emulator)" \
           --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
           --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
           --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
@@ -102,11 +105,22 @@ steps:
       - |
         START=$$(date +%s)
         if [ -c /dev/kvm ]; then
-          docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA
+          docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
         else
-          docker run --rm --privileged v-note-android-instrumented:$$CI_COMMIT_SHA
+          docker run --rm --privileged v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
         fi
-        echo "timing: android instrumented docker run took $$(( $$(date +%s) - $$START ))s"
+        echo "timing: Android API $$ANDROID_API_LEVEL instrumented docker run took $$(( $$(date +%s) - $$START ))s"
+
+  android-instrumented-api-36:
+    when:
+      - event: [push, manual]
+    depends_on:
+      - compute-version
+    image: *docker-image
+    volumes: *docker-socket
+    environment:
+      ANDROID_API_LEVEL: "36"
+    commands: *android-instrumented-commands
 
   build-web:
     when:
@@ -209,7 +223,8 @@ steps:
     depends_on:
       - contract-validation
       - build-android
-      - android-instrumented
+      - android-instrumented-api-29
+      - android-instrumented-api-36
       - e2e-web
     pull: true
     image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975

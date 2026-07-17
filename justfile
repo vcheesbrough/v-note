@@ -25,13 +25,14 @@ build-android-docker:
     docker run --rm -e GRADLE_USER_HOME=/workspace/android/.gradle-user -v "{{justfile_directory()}}:/workspace" -w /workspace/android {{android_build_box_image}} bash -lc './gradlew --project-cache-dir /workspace/android/.gradle-user/project-cache -Pandroid.sdk.dir=/opt/android-sdk :app:assembleDevDebug :app:testDevDebugUnitTest'
 
 # CI-parity instrumented tests (emulator inside container; needs --privileged + /dev/kvm).
-android-instrumented-docker:
+android-instrumented-docker api="36":
     ./scripts/sync-version.sh
     CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" SHA="$(git rev-parse HEAD)" && \
     docker build -f Dockerfile.android-instrumented \
       --build-arg ANDROID_BUILD_BOX_IMAGE={{android_build_box_image}} \
+      --build-arg ANDROID_API_LEVEL={{api}} \
       --label org.opencontainers.image.title=v-note-android-instrumented \
-      --label "org.opencontainers.image.description=v-note Android CI image (devDebug instrumented tests + emulator)" \
+      --label "org.opencontainers.image.description=v-note Android API {{api}} CI image (devDebug instrumented tests + emulator)" \
       --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
       --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
       --label org.opencontainers.image.authors="Vincent Cheesbrough" \
@@ -43,11 +44,11 @@ android-instrumented-docker:
       --label org.opencontainers.image.revision="$SHA" \
       --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
       --label org.opencontainers.image.created="$CREATED" \
-      -t v-note-android-instrumented:local .
+      -t v-note-android-instrumented:local-api{{api}} .
     if [ -c /dev/kvm ]; then
-      docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:local
+      docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:local-api{{api}}
     else
-      docker run --rm --privileged v-note-android-instrumented:local
+      docker run --rm --privileged v-note-android-instrumented:local-api{{api}}
     fi
 
 # Forward device/emulator port 8080 → host server (run once per adb device).

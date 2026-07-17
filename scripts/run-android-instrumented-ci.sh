@@ -7,8 +7,9 @@ export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
 export ADB_INSTALL_TIMEOUT=120
 
-AVD_NAME="${AVD_NAME:-vnote-ci}"
-SYSTEM_IMAGE="${SYSTEM_IMAGE:-system-images;android-35;google_apis;x86_64}"
+ANDROID_API_LEVEL="${ANDROID_API_LEVEL:-36}"
+AVD_NAME="${AVD_NAME:-vnote-ci-api-${ANDROID_API_LEVEL}}"
+SYSTEM_IMAGE="${SYSTEM_IMAGE:-system-images;android-${ANDROID_API_LEVEL};google_apis;x86_64}"
 BOOT_TIMEOUT_SEC="${BOOT_TIMEOUT_SEC:-900}"
 APP_APK="${APP_APK:-/workspace/android/app/build/outputs/apk/dev/debug/app-dev-debug.apk}"
 TEST_APK="${TEST_APK:-/workspace/android/app/build/outputs/apk/androidTest/dev/debug/app-dev-debug-androidTest.apk}"
