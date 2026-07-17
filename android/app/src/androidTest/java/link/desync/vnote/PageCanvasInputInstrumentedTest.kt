@@ -142,17 +142,24 @@ class PageCanvasInputInstrumentedTest {
     }
 
     @Test
-    fun sPenButtonOwnsOlderOsMisclassifiedContactStream() {
+    fun sPenButtonOwnsOlderOsMouseClassifiedContactStream() {
         openEditor()
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
 
         val downTime = android.os.SystemClock.uptimeMillis()
         sendStylus(
+            MotionEvent.ACTION_HOVER_MOVE,
+            300f,
+            FIRST_STROKE_Y,
+            buttonState = SPEN_BUTTON_STATE,
+            downTime = downTime,
+        )
+        sendStylus(
             MotionEvent.ACTION_DOWN,
             300f,
             FIRST_STROKE_Y,
             toolType = MotionEvent.TOOL_TYPE_FINGER,
-            buttonState = SPEN_BUTTON_STATE,
+            source = InputDevice.SOURCE_MOUSE,
             downTime = downTime,
         )
         assertTombstoneBeforeLift("seed-first")
@@ -161,6 +168,7 @@ class PageCanvasInputInstrumentedTest {
             300f,
             FIRST_STROKE_Y,
             toolType = MotionEvent.TOOL_TYPE_FINGER,
+            source = InputDevice.SOURCE_MOUSE,
             downTime = downTime,
         )
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
@@ -218,6 +226,7 @@ class PageCanvasInputInstrumentedTest {
         localY: Float,
         toolType: Int = MotionEvent.TOOL_TYPE_STYLUS,
         buttonState: Int = 0,
+        source: Int = InputDevice.SOURCE_STYLUS,
         downTime: Long,
     ) {
         val canvas = composeRule.onNodeWithTag("ink-canvas").getUnclippedBoundsInRoot()
@@ -258,7 +267,7 @@ class PageCanvasInputInstrumentedTest {
                 1f,
                 0,
                 0,
-                InputDevice.SOURCE_STYLUS,
+                source,
                 0,
             )
         val decor = composeRule.activity.window.decorView
@@ -266,7 +275,19 @@ class PageCanvasInputInstrumentedTest {
         decor.getLocationOnScreen(decorLocation)
         event.offsetLocation(-decorLocation[0].toFloat(), -decorLocation[1].toFloat())
         composeRule.runOnUiThread {
-            assertTrue("app window consumed stylus event", decor.dispatchTouchEvent(event))
+            val consumed =
+                if (
+                    action == MotionEvent.ACTION_HOVER_ENTER ||
+                    action == MotionEvent.ACTION_HOVER_MOVE ||
+                    action == MotionEvent.ACTION_HOVER_EXIT ||
+                    action == MotionEvent.ACTION_BUTTON_PRESS ||
+                    action == MotionEvent.ACTION_BUTTON_RELEASE
+                ) {
+                    decor.dispatchGenericMotionEvent(event)
+                } else {
+                    decor.dispatchTouchEvent(event)
+                }
+            assertTrue("app window consumed stylus event", consumed)
         }
         event.recycle()
         android.os.SystemClock.sleep(16)

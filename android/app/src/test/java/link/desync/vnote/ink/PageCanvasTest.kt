@@ -59,31 +59,68 @@ class PageCanvasTest {
     }
 
     @Test
-    fun hoverButtonLatchCoversTipDownWhenHardwareDropsButtonState() {
-        val latchUntil =
-            hoverButtonEraserLatchUntil(
-                CanvasTool.Eraser,
-                MotionEvent.BUTTON_STYLUS_PRIMARY,
-                eventTime = 1_000L,
+    fun hoverButtonStaysArmedUntilHardwareReportsRelease() {
+        val armed =
+            nextHoverButtonEraserArmed(
+                currentlyArmed = false,
+                selectedTool = CanvasTool.Drawing,
+                action = MotionEvent.ACTION_HOVER_MOVE,
+                toolType = MotionEvent.TOOL_TYPE_STYLUS,
+                buttonState = MotionEvent.BUTTON_STYLUS_PRIMARY,
             )
 
-        assertEquals(1_500L, latchUntil)
-        assertEquals(true, isHoverButtonEraserLatchActive(1_499L, latchUntil))
+        assertEquals(true, armed)
+        assertEquals(
+            true,
+            nextHoverButtonEraserArmed(
+                currentlyArmed = false,
+                selectedTool = CanvasTool.Drawing,
+                action = MotionEvent.ACTION_BUTTON_PRESS,
+                toolType = MotionEvent.TOOL_TYPE_STYLUS,
+                buttonState = 0,
+                actionButton = MotionEvent.BUTTON_STYLUS_PRIMARY,
+            ),
+        )
         assertEquals(
             CanvasTool.Eraser,
             effectiveCanvasTool(
                 CanvasTool.Drawing,
                 MotionEvent.TOOL_TYPE_STYLUS,
                 buttonState = 0,
-                hoverButtonEraserArmed = isHoverButtonEraserLatchActive(1_499L, latchUntil),
+                hoverButtonEraserArmed = armed,
             ),
         )
-        assertEquals(false, isHoverButtonEraserLatchActive(1_501L, latchUntil))
         assertEquals(
-            0L,
-            hoverButtonEraserLatchUntil(CanvasTool.Drawing, MotionEvent.BUTTON_STYLUS_PRIMARY, 1_000L),
+            true,
+            nextHoverButtonEraserArmed(
+                currentlyArmed = armed,
+                selectedTool = CanvasTool.Drawing,
+                action = MotionEvent.ACTION_DOWN,
+                toolType = MotionEvent.TOOL_TYPE_FINGER,
+                buttonState = 0,
+            ),
         )
-        assertEquals(0L, hoverButtonEraserLatchUntil(CanvasTool.Eraser, buttonState = 0, 1_000L))
+        assertEquals(
+            false,
+            nextHoverButtonEraserArmed(
+                currentlyArmed = armed,
+                selectedTool = CanvasTool.Drawing,
+                action = MotionEvent.ACTION_BUTTON_RELEASE,
+                toolType = MotionEvent.TOOL_TYPE_STYLUS,
+                buttonState = 0,
+                actionButton = MotionEvent.BUTTON_STYLUS_PRIMARY,
+            ),
+        )
+        assertEquals(
+            false,
+            nextHoverButtonEraserArmed(
+                currentlyArmed = true,
+                selectedTool = CanvasTool.Eraser,
+                action = MotionEvent.ACTION_HOVER_MOVE,
+                toolType = MotionEvent.TOOL_TYPE_ERASER,
+                buttonState = MotionEvent.BUTTON_STYLUS_PRIMARY,
+            ),
+        )
     }
 
     @Test
