@@ -4,9 +4,12 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -180,7 +183,12 @@ class PageCanvasInputInstrumentedTest {
             "edit lease granted; requests=$requestPaths messages=$pageMessages",
             leaseGranted.await(5, TimeUnit.SECONDS),
         )
-        composeRule.waitForIdle()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching {
+                val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+                pixels[SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()] != Color.White
+            }.getOrDefault(false)
+        }
     }
 
     private fun assertTombstoneBeforeLift(expectedStrokeId: String) {
@@ -332,6 +340,7 @@ class PageCanvasInputInstrumentedTest {
     companion object {
         private const val FIRST_STROKE_Y = 200f
         private const val SECOND_STROKE_Y = 400f
+        private const val SEED_ASSERTION_X = 300
         private const val SPEN_BUTTON_STATE = MotionEvent.BUTTON_STYLUS_PRIMARY
     }
 }
