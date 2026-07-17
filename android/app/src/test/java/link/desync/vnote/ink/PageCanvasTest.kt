@@ -87,6 +87,56 @@ class PageCanvasTest {
     }
 
     @Test
+    fun armedHoverOwnsMisclassifiedContactUntilLift() {
+        assertEquals(
+            true,
+            shouldHandleCanvasMotion(
+                toolType = MotionEvent.TOOL_TYPE_FINGER,
+                action = MotionEvent.ACTION_DOWN,
+                activeStylusGesture = false,
+                hoverButtonEraserArmed = true,
+            ),
+        )
+        assertEquals(
+            true,
+            shouldHandleCanvasMotion(
+                toolType = MotionEvent.TOOL_TYPE_FINGER,
+                action = MotionEvent.ACTION_MOVE,
+                activeStylusGesture = true,
+                hoverButtonEraserArmed = false,
+            ),
+        )
+        assertEquals(
+            true,
+            shouldHandleCanvasMotion(
+                toolType = MotionEvent.TOOL_TYPE_UNKNOWN,
+                action = MotionEvent.ACTION_UP,
+                activeStylusGesture = true,
+                hoverButtonEraserArmed = false,
+            ),
+        )
+        assertEquals(
+            true,
+            shouldHandleCanvasMotion(
+                toolType = MotionEvent.TOOL_TYPE_FINGER,
+                action = MotionEvent.ACTION_DOWN,
+                activeStylusGesture = false,
+                hoverButtonEraserArmed = false,
+                stylusButtonPressed = true,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldHandleCanvasMotion(
+                toolType = MotionEvent.TOOL_TYPE_FINGER,
+                action = MotionEvent.ACTION_DOWN,
+                activeStylusGesture = false,
+                hoverButtonEraserArmed = false,
+            ),
+        )
+    }
+
+    @Test
     fun sweptEraserFindsFastCrossingAndEveryOverlappingStroke() {
         val horizontal = stroke("horizontal", 0.0, 50.0, 100.0, 50.0)
         val vertical = stroke("vertical", 50.0, 0.0, 50.0, 100.0)
