@@ -364,7 +364,20 @@ private fun InkCanvas(
                 .background(Color.White)
                 .testTag("ink-canvas")
                 .pointerInteropFilter { event ->
-                    if (!event.isStylusEvent()) {
+                    val hoverButtonEraserArmed =
+                        isHoverButtonEraserLatchActive(
+                            event.eventTime,
+                            hoverButtonEraserLatchUntil,
+                        )
+                    if (
+                        !shouldHandleCanvasMotion(
+                            toolType = event.getToolType(event.actionIndex.coerceAtLeast(0)),
+                            action = event.actionMasked,
+                            activeStylusGesture = activeStylusTool != null,
+                            hoverButtonEraserArmed = hoverButtonEraserArmed,
+                            stylusButtonPressed = event.hasStylusButtonPressed(),
+                        )
+                    ) {
                         return@pointerInteropFilter false
                     }
                     when (event.actionMasked) {
@@ -409,11 +422,7 @@ private fun InkCanvas(
                                     selectedTool,
                                     event.getToolType(event.actionIndex),
                                     event.buttonState,
-                                    hoverButtonEraserArmed =
-                                        isHoverButtonEraserLatchActive(
-                                            event.eventTime,
-                                            hoverButtonEraserLatchUntil,
-                                        ),
+                                    hoverButtonEraserArmed = hoverButtonEraserArmed,
                                 )
                             capturedDrawingStyle =
                                 drawingStyle.takeIf { activeStylusTool == CanvasTool.Drawing }
@@ -551,9 +560,24 @@ private fun InkCanvas(
     }
 }
 
-private fun MotionEvent.isStylusEvent(): Boolean {
-    val toolType = getToolType(actionIndex.coerceAtLeast(0))
-    return toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+internal fun shouldHandleCanvasMotion(
+    toolType: Int,
+    action: Int,
+    activeStylusGesture: Boolean,
+    hoverButtonEraserArmed: Boolean,
+    stylusButtonPressed: Boolean = false,
+): Boolean {
+    val isStylus =
+        toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+    return when {
+        isStylus -> true
+        action == MotionEvent.ACTION_DOWN -> hoverButtonEraserArmed || stylusButtonPressed
+        else ->
+            activeStylusGesture &&
+                (action == MotionEvent.ACTION_MOVE ||
+                    action == MotionEvent.ACTION_UP ||
+                    action == MotionEvent.ACTION_CANCEL)
+    }
 }
 
 internal fun effectiveCanvasTool(

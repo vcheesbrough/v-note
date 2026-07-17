@@ -138,6 +138,31 @@ class PageCanvasInputInstrumentedTest {
         assertNull("finger contact never creates tombstones", awaitMutation("commit-tombstones", 350))
     }
 
+    @Test
+    fun sPenButtonOwnsOlderOsMisclassifiedContactStream() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(
+            MotionEvent.ACTION_DOWN,
+            300f,
+            FIRST_STROKE_Y,
+            toolType = MotionEvent.TOOL_TYPE_FINGER,
+            buttonState = SPEN_BUTTON_STATE,
+            downTime = downTime,
+        )
+        assertTombstoneBeforeLift("seed-first")
+        sendStylus(
+            MotionEvent.ACTION_UP,
+            300f,
+            FIRST_STROKE_Y,
+            toolType = MotionEvent.TOOL_TYPE_FINGER,
+            downTime = downTime,
+        )
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+    }
+
     private fun openEditor() {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             runCatching {
