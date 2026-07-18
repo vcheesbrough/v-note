@@ -5,6 +5,8 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
+import android.view.InputDevice
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.browser.customtabs.CustomTabsIntent
@@ -71,6 +73,7 @@ import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.auth.ThumbnailMetadata
 import link.desync.vnote.ink.PageCanvasScreen
+import link.desync.vnote.ink.normalizedSamsungSpenAction
 import link.desync.vnote.ui.displayTitle
 import link.desync.vnote.ui.displayUpdatedAge
 import link.desync.vnote.ui.hasDisplayTitle
@@ -99,6 +102,21 @@ class MainActivity : ComponentActivity() {
     private val pagesState = androidx.compose.runtime.mutableStateOf<List<PageSummary>>(emptyList())
     private val selectedPageState = androidx.compose.runtime.mutableStateOf<PageSummary?>(null)
     private val libraryErrorState = androidx.compose.runtime.mutableStateOf<String?>(null)
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val normalizedAction = normalizedSamsungSpenAction(event.actionMasked)
+        if (normalizedAction == event.actionMasked || !event.isFromSource(InputDevice.SOURCE_STYLUS)) {
+            return super.dispatchTouchEvent(event)
+        }
+
+        val normalizedEvent = MotionEvent.obtain(event)
+        normalizedEvent.action = normalizedAction
+        return try {
+            super.dispatchTouchEvent(normalizedEvent)
+        } finally {
+            normalizedEvent.recycle()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

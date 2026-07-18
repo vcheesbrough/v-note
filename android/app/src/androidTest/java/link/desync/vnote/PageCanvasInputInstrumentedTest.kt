@@ -174,6 +174,38 @@ class PageCanvasInputInstrumentedTest {
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
     }
 
+    @Test
+    fun note9ButtonHeldActionsEraseBeforeSamsungPenUp() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(
+            NOTE9_SPEN_ACTION_DOWN,
+            300f,
+            FIRST_STROKE_Y,
+            buttonState = SPEN_BUTTON_STATE,
+            downTime = downTime,
+        )
+        sendStylus(
+            NOTE9_SPEN_ACTION_MOVE,
+            320f,
+            FIRST_STROKE_Y,
+            buttonState = SPEN_BUTTON_STATE,
+            downTime = downTime,
+        )
+        assertTombstoneBeforeLift("seed-first")
+        sendStylus(
+            NOTE9_SPEN_ACTION_UP,
+            320f,
+            FIRST_STROKE_Y,
+            buttonState = SPEN_BUTTON_STATE,
+            downTime = downTime,
+        )
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+        composeRule.onNodeWithTag("eraser-tool").assertIsNotSelected()
+    }
+
     private fun openEditor() {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             runCatching {
@@ -363,6 +395,9 @@ class PageCanvasInputInstrumentedTest {
         private const val SECOND_STROKE_Y = 400f
         private const val SEED_ASSERTION_X = 300
         private const val SPEN_BUTTON_STATE = MotionEvent.BUTTON_STYLUS_PRIMARY
+        private const val NOTE9_SPEN_ACTION_DOWN = 211
+        private const val NOTE9_SPEN_ACTION_UP = 212
+        private const val NOTE9_SPEN_ACTION_MOVE = 213
     }
 }
 
