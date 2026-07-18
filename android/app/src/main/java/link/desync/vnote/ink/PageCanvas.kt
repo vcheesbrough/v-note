@@ -363,10 +363,11 @@ private fun InkCanvas(
                 .background(Color.White)
                 .testTag("ink-canvas")
                 .pointerInteropFilter { event ->
+                    val action = normalizedSamsungSpenAction(event.actionMasked)
                     if (
                         !shouldHandleCanvasMotion(
                             toolType = event.getToolType(event.actionIndex.coerceAtLeast(0)),
-                            action = event.actionMasked,
+                            action = action,
                             activeStylusGesture = activeStylusTool != null,
                             hoverButtonEraserArmed = hoverButtonEraserArmed,
                             stylusButtonPressed = event.hasStylusButtonPressed(),
@@ -374,7 +375,7 @@ private fun InkCanvas(
                     ) {
                         return@pointerInteropFilter false
                     }
-                    when (event.actionMasked) {
+                    when (action) {
                         MotionEvent.ACTION_HOVER_ENTER,
                         MotionEvent.ACTION_HOVER_MOVE,
                         -> {
@@ -382,7 +383,7 @@ private fun InkCanvas(
                                 nextHoverButtonEraserArmed(
                                     currentlyArmed = hoverButtonEraserArmed,
                                     selectedTool = selectedTool,
-                                    action = event.actionMasked,
+                                    action = action,
                                     toolType = event.getToolType(event.actionIndex),
                                     buttonState = event.buttonState,
                                     actionButton = event.actionButton,
@@ -410,7 +411,7 @@ private fun InkCanvas(
                                 nextHoverButtonEraserArmed(
                                     currentlyArmed = hoverButtonEraserArmed,
                                     selectedTool = selectedTool,
-                                    action = event.actionMasked,
+                                    action = action,
                                     toolType = event.getToolType(event.actionIndex),
                                     buttonState = event.buttonState,
                                     actionButton = event.actionButton,
@@ -600,6 +601,20 @@ internal fun shouldHandleCanvasMotion(
                     action == MotionEvent.ACTION_CANCEL)
     }
 }
+
+internal fun normalizedSamsungSpenAction(action: Int): Int =
+    when (action) {
+        SAMSUNG_SPEN_ACTION_DOWN -> MotionEvent.ACTION_DOWN
+        SAMSUNG_SPEN_ACTION_UP -> MotionEvent.ACTION_UP
+        SAMSUNG_SPEN_ACTION_MOVE -> MotionEvent.ACTION_MOVE
+        SAMSUNG_SPEN_ACTION_CANCEL -> MotionEvent.ACTION_CANCEL
+        else -> action
+    }
+
+private const val SAMSUNG_SPEN_ACTION_DOWN = 211
+private const val SAMSUNG_SPEN_ACTION_UP = 212
+private const val SAMSUNG_SPEN_ACTION_MOVE = 213
+private const val SAMSUNG_SPEN_ACTION_CANCEL = 214
 
 internal fun effectiveCanvasTool(
     selectedTool: CanvasTool,

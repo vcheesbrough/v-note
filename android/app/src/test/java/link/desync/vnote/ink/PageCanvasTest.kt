@@ -10,6 +10,15 @@ import org.junit.Test
 
 class PageCanvasTest {
     @Test
+    fun normalizesSamsungButtonHeldContactActions() {
+        assertEquals(MotionEvent.ACTION_DOWN, normalizedSamsungSpenAction(211))
+        assertEquals(MotionEvent.ACTION_UP, normalizedSamsungSpenAction(212))
+        assertEquals(MotionEvent.ACTION_MOVE, normalizedSamsungSpenAction(213))
+        assertEquals(MotionEvent.ACTION_CANCEL, normalizedSamsungSpenAction(214))
+        assertEquals(MotionEvent.ACTION_HOVER_MOVE, normalizedSamsungSpenAction(MotionEvent.ACTION_HOVER_MOVE))
+    }
+
+    @Test
     fun effectiveToolUsesExplicitButtonAndEraserEndInputs() {
         assertEquals(
             CanvasTool.Drawing,
