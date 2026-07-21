@@ -510,6 +510,7 @@ private fun InkCanvas(
                             activeStylusTool = null
                             capturedDrawingStyle = null
                             erasedThisGesture.clear()
+                            hoverButtonEraserArmed = disarmEraserOnLift(event, action, selectedTool)
                             true
                         }
                         MotionEvent.ACTION_CANCEL -> {
@@ -518,6 +519,7 @@ private fun InkCanvas(
                             activeStylusTool = null
                             capturedDrawingStyle = null
                             erasedThisGesture.clear()
+                            hoverButtonEraserArmed = disarmEraserOnLift(event, action, selectedTool)
                             true
                         }
                         else -> activeStylusTool != null
@@ -662,9 +664,35 @@ internal fun nextHoverButtonEraserArmed(
             toolType == MotionEvent.TOOL_TYPE_ERASER ||
                 buttonState and STYLUS_ERASER_BUTTON_MASK != 0 ||
                 actionButton and STYLUS_ERASER_BUTTON_MASK != 0
+        // A lift ends the gesture. The Samsung path reports the contact stream as
+        // mouse/finger and may never emit an ACTION_BUTTON_RELEASE, so re-derive
+        // from the hardware button at lift: stay armed only while the button is
+        // still physically held, otherwise disarm so the next plain contact draws
+        // instead of erasing. A fresh hover/press re-arms it.
+        MotionEvent.ACTION_UP,
+        MotionEvent.ACTION_CANCEL,
+        ->
+            buttonState and STYLUS_ERASER_BUTTON_MASK != 0 ||
+                actionButton and STYLUS_ERASER_BUTTON_MASK != 0
         else -> currentlyArmed
     }
 }
+
+/// Recompute the armed eraser latch at stylus lift so it cannot stay stuck when
+/// the misclassified Samsung contact stream never emits an ACTION_BUTTON_RELEASE.
+private fun disarmEraserOnLift(
+    event: MotionEvent,
+    action: Int,
+    selectedTool: CanvasTool,
+): Boolean =
+    nextHoverButtonEraserArmed(
+        currentlyArmed = false,
+        selectedTool = selectedTool,
+        action = action,
+        toolType = event.getToolType(event.actionIndex.coerceAtLeast(0)),
+        buttonState = event.buttonState,
+        actionButton = event.actionButton,
+    )
 
 private fun MotionEvent.toWorldPoint(
     viewport: ViewportTransform,

@@ -266,6 +266,63 @@ test.describe('ink page channel', () => {
     )).toBeTruthy();
   });
 
+  test('re-adding an erased stroke id stays deleted (delete-wins on live add)', async ({ page, request }) => {
+    const pageId = await createPage(request, uniqueTitle('ink-add-after-delete'));
+    const strokeId = `stroke-add-after-delete-${crypto.randomUUID()}`;
+
+    const result = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [
+        { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 150,
+          message: {
+            type: 'commit-batch',
+            client_batch_id: 'batch_before_erase',
+            strokes: sampleStrokes(strokeId),
+          },
+        },
+        {
+          delayMs: 150,
+          message: {
+            type: 'commit-tombstones',
+            client_mutation_id: 'erase_before_readd',
+            stroke_ids: [strokeId],
+          },
+        },
+        {
+          delayMs: 200,
+          message: {
+            type: 'commit-batch',
+            client_batch_id: 'batch_after_erase',
+            strokes: sampleStrokes(strokeId),
+          },
+        },
+      ],
+      settleMs: 900,
+    });
+
+    // The erase is acknowledged, and the later re-add of the tombstoned id is
+    // never broadcast as a visible stroke batch.
+    expect(result.messages.some((message) =>
+      message.type === 'tombstone-batch' && message.stroke_ids.includes(strokeId),
+    )).toBeTruthy();
+    expect(result.messages.filter((message) =>
+      message.type === 'stroke-batch' && message.client_batch_id === 'batch_after_erase',
+    )).toHaveLength(0);
+
+    // A fresh full snapshot never resurrects the erased stroke either.
+    const fresh = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
+      settleMs: 700,
+    });
+    expect(replayedStrokeIds(fresh.messages)).not.toContain(strokeId);
+  });
+
   test('SPA viewer renders live stroke batches without refresh', async ({ page, request }) => {
     const title = uniqueTitle('ink-spa-live');
     const pageId = await createPage(request, title);
