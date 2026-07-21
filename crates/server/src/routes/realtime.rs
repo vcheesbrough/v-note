@@ -533,14 +533,19 @@ async fn handle_page_client_message(
                 Ok(persisted) => {
                     let seq = persisted.seq;
                     crate::observability::metrics().record_page_mutation("commit_batch", "success");
-                    state.realtime.publish_page(
-                        page_id,
-                        PageServerMessage::StrokeBatch(StrokeBatch {
-                            seq,
-                            client_batch_id,
-                            strokes,
-                        }),
-                    );
+                    // Delete-wins: broadcast only strokes that survived tombstone
+                    // filtering. An add fully suppressed by tombstones changes no
+                    // visible state, so it is acknowledged without a fan-out.
+                    if !persisted.visible_strokes.is_empty() {
+                        state.realtime.publish_page(
+                            page_id,
+                            PageServerMessage::StrokeBatch(StrokeBatch {
+                                seq,
+                                client_batch_id,
+                                strokes: persisted.visible_strokes,
+                            }),
+                        );
+                    }
                     if persisted.thumbnail_job_created {
                         let page_id = page_id.to_string();
                         crate::observability::metrics().thumbnail_generation_queued();
@@ -742,6 +747,10 @@ struct PersistedBatch {
     seq: u64,
     revision: u64,
     owner_id: String,
+    /// Strokes that survive delete-wins filtering — the only ones to broadcast
+    /// and store. Empty means the whole add was suppressed by tombstones and no
+    /// visible state changed.
+    visible_strokes: Vec<Stroke>,
     thumbnail_job_created: bool,
 }
 
@@ -761,6 +770,26 @@ async fn persist_batch(
     .fetch_one(&mut *tx)
     .await?;
 
+    // Delete-wins: a permanent tombstone for a stroke id suppresses every later
+    // add of that id. Filtering before insert stops an add-after-delete (or a
+    // stale offline replay) from advancing the revision or being broadcast as
+    // visible ink, while identical retries stay idempotent by `client_batch_id`.
+    let submitted_ids: Vec<String> = strokes.iter().map(|stroke| stroke.id.clone()).collect();
+    let tombstoned: HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1 AND stroke_id = ANY($2)",
+    )
+    .bind(page_id)
+    .bind(&submitted_ids)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+    let visible_strokes: Vec<Stroke> = strokes
+        .iter()
+        .filter(|stroke| !tombstoned.contains(&stroke.id))
+        .cloned()
+        .collect();
+
     let existing = sqlx::query_as::<_, (i64, i64)>(
         "SELECT seq, revision FROM stroke_batches WHERE page_id = $1 AND client_batch_id = $2",
     )
@@ -768,35 +797,61 @@ async fn persist_batch(
     .bind(client_batch_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (seq, revision) = if let Some((seq, revision)) = existing {
-        (seq, revision)
-    } else {
-        let next: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
+    if let Some((seq, revision)) = existing {
+        // Idempotent retry: re-echo only the strokes still visible today.
+        tx.commit().await?;
+        return Ok(PersistedBatch {
+            seq: seq as u64,
+            revision: revision as u64,
+            owner_id,
+            visible_strokes,
+            thumbnail_job_created: false,
+        });
+    }
+
+    if visible_strokes.is_empty() {
+        // Every submitted stroke is tombstoned — acknowledge the add as a no-op
+        // without inserting a batch, advancing the revision, or broadcasting.
+        let head_seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1",
         )
         .bind(page_id)
         .fetch_one(&mut *tx)
         .await?;
-        let revision = current_revision + 1;
+        tx.commit().await?;
+        return Ok(PersistedBatch {
+            seq: head_seq as u64,
+            revision: current_revision as u64,
+            owner_id,
+            visible_strokes,
+            thumbnail_job_created: false,
+        });
+    }
 
-        sqlx::query(
-            "INSERT INTO stroke_batches (page_id, seq, revision, client_batch_id, strokes) VALUES ($1, $2, $3, $4, $5)",
-        )
+    let next: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
+    )
+    .bind(page_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let revision = current_revision + 1;
+
+    sqlx::query(
+        "INSERT INTO stroke_batches (page_id, seq, revision, client_batch_id, strokes) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(page_id)
+    .bind(next)
+    .bind(revision)
+    .bind(client_batch_id)
+    .bind(sqlx::types::Json(&visible_strokes))
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE pages SET updated_at = now(), ink_revision = $2 WHERE id = $1")
         .bind(page_id)
-        .bind(next)
         .bind(revision)
-        .bind(client_batch_id)
-        .bind(sqlx::types::Json(strokes))
         .execute(&mut *tx)
         .await?;
-
-        sqlx::query("UPDATE pages SET updated_at = now(), ink_revision = $2 WHERE id = $1")
-            .bind(page_id)
-            .bind(revision)
-            .execute(&mut *tx)
-            .await?;
-        (next, revision)
-    };
     let thumbnail_job_created = sqlx::query(
         "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",
     )
@@ -809,9 +864,10 @@ async fn persist_batch(
 
     tx.commit().await?;
     Ok(PersistedBatch {
-        seq: seq as u64,
+        seq: next as u64,
         revision: revision as u64,
         owner_id,
+        visible_strokes,
         thumbnail_job_created,
     })
 }

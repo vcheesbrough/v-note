@@ -133,6 +133,54 @@ class PageCanvasTest {
     }
 
     @Test
+    fun liftDisarmsLatchedEraserWhenButtonNoLongerHeld() {
+        // Samsung path: the contact stream is reported as finger and no
+        // ACTION_BUTTON_RELEASE arrives. A lift with no button held must disarm
+        // so the next plain stylus-down draws instead of erasing.
+        assertEquals(
+            false,
+            nextHoverButtonEraserArmed(
+                currentlyArmed = true,
+                selectedTool = CanvasTool.Drawing,
+                action = MotionEvent.ACTION_UP,
+                toolType = MotionEvent.TOOL_TYPE_FINGER,
+                buttonState = 0,
+            ),
+        )
+        assertEquals(
+            false,
+            nextHoverButtonEraserArmed(
+                currentlyArmed = true,
+                selectedTool = CanvasTool.Drawing,
+                action = MotionEvent.ACTION_CANCEL,
+                toolType = MotionEvent.TOOL_TYPE_STYLUS,
+                buttonState = 0,
+            ),
+        )
+        // A genuine button-held S-Pen lift keeps erasing on the next contact.
+        assertEquals(
+            true,
+            nextHoverButtonEraserArmed(
+                currentlyArmed = true,
+                selectedTool = CanvasTool.Drawing,
+                action = MotionEvent.ACTION_UP,
+                toolType = MotionEvent.TOOL_TYPE_STYLUS,
+                buttonState = MotionEvent.BUTTON_STYLUS_PRIMARY,
+            ),
+        )
+        // After disarming, an ordinary button-up stylus-down no longer erases.
+        assertEquals(
+            CanvasTool.Drawing,
+            effectiveCanvasTool(
+                CanvasTool.Drawing,
+                MotionEvent.TOOL_TYPE_STYLUS,
+                buttonState = 0,
+                hoverButtonEraserArmed = false,
+            ),
+        )
+    }
+
+    @Test
     fun armedHoverOwnsMisclassifiedContactUntilLift() {
         assertEquals(
             true,
