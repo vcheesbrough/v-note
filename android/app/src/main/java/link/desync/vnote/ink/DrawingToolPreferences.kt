@@ -1,6 +1,9 @@
 package link.desync.vnote.ink
 
 import android.content.Context
+import link.desync.vnote.auth.SOLID_ROUND_PRESSURE_STYLE_VERSION
+import link.desync.vnote.auth.SOLID_ROUND_STYLE_VERSION
+import link.desync.vnote.auth.SOLID_ROUND_TOOL
 import link.desync.vnote.auth.SolidRoundParameters
 import link.desync.vnote.auth.StrokeStyle
 import kotlin.math.roundToInt
@@ -12,13 +15,17 @@ internal class DrawingToolPreferences(
     private val preferences =
         context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    // The active pen authors pressure-modulated (v2) ink. Only colour and width
+    // are persisted; the style version is implied by the app, so an existing
+    // stored preset migrates to v2 in place on the next load.
     fun load(): StrokeStyle {
         val color = preferences.getString(key(COLOR_KEY), null)
         val width = preferences.getString(key(WIDTH_KEY), null)?.toDoubleOrNull()
         if (!isCanonicalColor(color) || !isValidWidth(width)) {
-            return StrokeStyle()
+            return StrokeStyle(styleVersion = SOLID_ROUND_PRESSURE_STYLE_VERSION)
         }
         return StrokeStyle(
+            styleVersion = SOLID_ROUND_PRESSURE_STYLE_VERSION,
             parameters =
                 SolidRoundParameters(
                     color = color!!,
@@ -28,7 +35,11 @@ internal class DrawingToolPreferences(
     }
 
     fun save(style: StrokeStyle) {
-        require(style.toolKind == "solid_round" && style.styleVersion == 1)
+        require(
+            style.toolKind == SOLID_ROUND_TOOL &&
+                (style.styleVersion == SOLID_ROUND_STYLE_VERSION ||
+                    style.styleVersion == SOLID_ROUND_PRESSURE_STYLE_VERSION),
+        )
         require(isCanonicalColor(style.parameters.color))
         require(isValidWidth(style.parameters.width))
         preferences

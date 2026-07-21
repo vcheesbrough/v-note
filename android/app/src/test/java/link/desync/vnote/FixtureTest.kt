@@ -21,6 +21,22 @@ class FixtureTest {
         assertEquals("ok", fixture.getString("status"))
     }
 
+    @Test
+    fun pressureStrokeFixtureCarriesV2StyleAndOptionalPressure() {
+        val fixture = readFixture("stroke-pressure.json")
+        assertEquals(2, fixture.getJSONObject("style").getInt("style_version"))
+        val points = fixture.getJSONArray("points")
+        assertEquals(4, points.length())
+        // Per-point pressure is present and normalised on the sampled points.
+        assertEquals(0.0, points.getJSONObject(0).getDouble("pressure"), 1e-9)
+        assertEquals(1.0, points.getJSONObject(2).getDouble("pressure"), 1e-9)
+        // A v2 point may omit pressure entirely (renders at full width).
+        assertTrue(
+            "trailing point omits pressure",
+            !points.getJSONObject(3).has("pressure"),
+        )
+    }
+
     private fun readFixture(name: String): JSONObject {
         val path = File(System.getProperty("user.dir")).parentFile.parentFile
         val file = File(path, "contracts/fixtures/$name")
