@@ -413,8 +413,10 @@ test.describe('ink page channel', () => {
     });
     expect(result.messages.some((m) => m.type === 'stroke-batch' && m.client_batch_id === 'batch_spa_pressure')).toBeTruthy();
 
-    // Measure per-column green thickness: the low-pressure end must render thinner
-    // than the high-pressure end (the SPA drew variable width from the shared curve).
+    // The SPA opens zoomed out (fixed MIN_CANVAS_SCALE), so the ramp is only a
+    // few px tall — per-column thickness would be antialiasing noise. Instead sum
+    // green *area* in the low-pressure third vs the high-pressure third of the
+    // stroke: the high third covers more ink, integrated over many columns.
     const handle = await page.waitForFunction(() => {
       const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="ink-canvas"]');
       if (!canvas) return null;
@@ -424,42 +426,34 @@ test.describe('ink page channel', () => {
       const data = context.getImageData(0, 0, width, height).data;
       const isGreen = (i: number) =>
         data[i + 3] > 0 && data[i] < 40 && data[i + 1] > 60 && data[i + 1] < 140 && data[i + 2] < 40;
-      const cols = new Map<number, { lo: number; hi: number }>();
+      const perColumn = new Map<number, number>();
       let minX = Infinity;
       let maxX = -Infinity;
+      let total = 0;
       for (let y = 0; y < height; y += 1) {
         for (let x = 0; x < width; x += 1) {
           if (isGreen((y * width + x) * 4)) {
-            const col = cols.get(x) ?? { lo: y, hi: y };
-            col.lo = Math.min(col.lo, y);
-            col.hi = Math.max(col.hi, y);
-            cols.set(x, col);
+            perColumn.set(x, (perColumn.get(x) ?? 0) + 1);
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;
+            total += 1;
           }
         }
       }
       const span = maxX - minX;
-      if (span < 40) return null; // wait until the whole ramp is drawn
-      const thickness = (from: number, to: number) => {
-        let sum = 0;
-        let n = 0;
-        for (let x = Math.floor(from); x <= Math.ceil(to); x += 1) {
-          const col = cols.get(x);
-          if (col) {
-            sum += col.hi - col.lo + 1;
-            n += 1;
-          }
-        }
-        return n ? sum / n : 0;
-      };
-      return {
-        low: thickness(minX + span * 0.1, minX + span * 0.25),
-        high: thickness(maxX - span * 0.25, maxX - span * 0.1),
-      };
+      if (span < 20 || total < 20) return null; // wait until the whole ramp is drawn
+      const third = span / 3;
+      let low = 0;
+      let high = 0;
+      for (const [x, count] of perColumn) {
+        if (x <= minX + third) low += count;
+        else if (x >= maxX - third) high += count;
+      }
+      return { low, high };
     }, null, { timeout: 3_000 });
     const { low, high } = (await handle.jsonValue()) as { low: number; high: number };
-    expect(high, `high-pressure end (${high}px) must be thicker than low-pressure end (${low}px)`).toBeGreaterThan(low + 1);
+    expect(low, 'low-pressure third rendered some ink').toBeGreaterThan(3);
+    expect(high, `high-pressure third area (${high}px) must exceed low third (${low}px)`).toBeGreaterThan(low * 1.25);
   });
 
   test('server rejects pressure on a v1 stroke and out-of-range v2 pressure', async ({ page, request }) => {
@@ -658,7 +652,7 @@ function pressureRampStroke(id = `stroke-${crypto.randomUUID()}`) {
       style: {
         tool_kind: 'solid_round',
         style_version: 2,
-        parameters: { color: '#006400', width: 26.0, cap_style: 'round', join_style: 'round' },
+        parameters: { color: '#006400', width: 32.0, cap_style: 'round', join_style: 'round' },
       },
       points,
     },
