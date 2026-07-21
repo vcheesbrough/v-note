@@ -4,7 +4,8 @@ use std::path::Path;
 use protocol::{
     CreatePageRequest, HealthResponse, LibraryEvent, ListPagesResponse, MeResponse, MetaResponse,
     PageClientMessage, PageReplay, PageServerMessage, PageSummary, RealtimeTicketResponse, Stroke,
-    StrokeBatch, PROTOCOL_VERSION,
+    StrokeBatch, StrokePoint, StrokeStyle, DEFAULT_PEN_WIDTH, MIN_PRESSURE_WIDTH_FACTOR,
+    PROTOCOL_VERSION, SOLID_ROUND_PRESSURE_STYLE_VERSION,
 };
 
 fn fixture(path: &str) -> String {
@@ -96,6 +97,106 @@ fn page_replay_golden_geometry() {
         (5.0, 8.0, 100.0, 90.0),
         "bbox"
     );
+}
+
+/// The v2 pressure fixture parses, carries per-point pressure, and validates —
+/// while a point without pressure is allowed and renders at full width.
+#[test]
+fn deserializes_pressure_stroke_fixture() {
+    let stroke: Stroke = serde_json::from_str(&fixture("stroke-pressure.json"))
+        .expect("pressure stroke fixture should parse");
+    assert_eq!(stroke.style.style_version, SOLID_ROUND_PRESSURE_STYLE_VERSION);
+    assert!(stroke.style.is_pressure_sensitive());
+    assert!(stroke.validate().is_ok(), "v2 stroke with pressure is valid");
+    assert_eq!(stroke.points.len(), 4);
+    assert_eq!(stroke.points[0].pressure, Some(0.0));
+    assert_eq!(stroke.points[2].pressure, Some(1.0));
+    // A v2 point may omit pressure; it renders at full width.
+    assert_eq!(stroke.points[3].pressure, None);
+    let full = stroke.style.parameters.width;
+    assert_eq!(stroke.style.rendered_width(stroke.points[3].pressure), full);
+}
+
+/// Round-trip a v2 stroke: `pressure` survives serialization and absent
+/// pressure stays absent (never serialized as `null`).
+#[test]
+fn pressure_survives_round_trip() {
+    let stroke = Stroke {
+        id: "rt".to_string(),
+        style: StrokeStyle::default_solid_round_pressure(),
+        points: vec![
+            StrokePoint { x: 0.0, y: 0.0, t: 0, pressure: Some(0.25) },
+            StrokePoint { x: 1.0, y: 1.0, t: 8, pressure: None },
+        ],
+    };
+    let json = serde_json::to_string(&stroke).expect("serialize");
+    assert!(!json.contains("null"), "absent pressure must be omitted, not null");
+    let back: Stroke = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, stroke);
+}
+
+/// The shared pressure→width curve: full width at p=1, MIN_FACTOR×width at p=0,
+/// linear between; v1 ignores pressure entirely.
+#[test]
+fn rendered_width_follows_shared_curve() {
+    let v2 = StrokeStyle::default_solid_round_pressure();
+    let w = DEFAULT_PEN_WIDTH;
+    assert_eq!(v2.rendered_width(Some(1.0)), w);
+    assert_eq!(v2.rendered_width(None), w, "absent pressure = full width");
+    assert!((v2.rendered_width(Some(0.0)) - w * MIN_PRESSURE_WIDTH_FACTOR).abs() < 1e-9);
+    let mid = w * (MIN_PRESSURE_WIDTH_FACTOR + (1.0 - MIN_PRESSURE_WIDTH_FACTOR) * 0.5);
+    assert!((v2.rendered_width(Some(0.5)) - mid).abs() < 1e-9);
+    // Out-of-range pressure is clamped for *rendering* (validation rejects it
+    // on the wire, but a renderer must stay in bounds defensively).
+    assert_eq!(v2.rendered_width(Some(5.0)), w);
+    assert!((v2.rendered_width(Some(-1.0)) - w * MIN_PRESSURE_WIDTH_FACTOR).abs() < 1e-9);
+
+    // v1 is constant regardless of pressure.
+    let v1 = StrokeStyle::default_solid_round();
+    assert_eq!(v1.rendered_width(Some(0.0)), w);
+    assert_eq!(v1.rendered_width(Some(1.0)), w);
+}
+
+/// Pressure is legal only on v2 styles, and only when finite and in `0..=1`.
+#[test]
+fn stroke_validation_enforces_pressure_rules() {
+    let point_with = |pressure: Option<f64>| StrokePoint { x: 0.0, y: 0.0, t: 0, pressure };
+
+    // v1 must not carry pressure.
+    let v1_with_pressure = Stroke {
+        id: "a".to_string(),
+        style: StrokeStyle::default_solid_round(),
+        points: vec![point_with(Some(0.5))],
+    };
+    assert!(v1_with_pressure.validate().is_err());
+
+    // v1 without pressure is fine.
+    let v1_clean = Stroke {
+        id: "b".to_string(),
+        style: StrokeStyle::default_solid_round(),
+        points: vec![point_with(None)],
+    };
+    assert!(v1_clean.validate().is_ok());
+
+    // v2 rejects out-of-range and non-finite pressure (reject, don't clamp).
+    for bad in [1.5_f64, -0.1, f64::NAN, f64::INFINITY] {
+        let stroke = Stroke {
+            id: "c".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![point_with(Some(bad))],
+        };
+        assert!(stroke.validate().is_err(), "pressure {bad} must be rejected");
+    }
+
+    // v2 accepts the closed interval and absent pressure.
+    for good in [Some(0.0), Some(1.0), Some(0.42), None] {
+        let stroke = Stroke {
+            id: "d".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![point_with(good)],
+        };
+        assert!(stroke.validate().is_ok(), "pressure {good:?} must be accepted");
+    }
 }
 
 #[test]

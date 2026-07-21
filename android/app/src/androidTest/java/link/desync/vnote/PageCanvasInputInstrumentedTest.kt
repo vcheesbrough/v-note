@@ -18,6 +18,9 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.auth.SOLID_ROUND_PRESSURE_STYLE_VERSION
+import link.desync.vnote.auth.SolidRoundParameters
+import link.desync.vnote.auth.StrokeStyle
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
 import okhttp3.WebSocket
@@ -206,6 +209,197 @@ class PageCanvasInputInstrumentedTest {
         composeRule.onNodeWithTag("eraser-tool").assertIsNotSelected()
     }
 
+    @Test
+    fun pressureStrokeCommitsV2StyleWithClampedPressure() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 260f, FIRST_STROKE_Y, pressure = 0.2f, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_MOVE, 320f, FIRST_STROKE_Y, pressure = 0.8f, downTime = downTime)
+        // Over-range hardware pressure must clamp to 1.0 on the wire, never pass through.
+        sendStylus(MotionEvent.ACTION_UP, 380f, FIRST_STROKE_Y, pressure = 1.6f, downTime = downTime)
+
+        val commit = awaitMutation("commit-batch")
+        assertNotNull("drawing commits a batch", commit)
+        val stroke = commit!!.getJSONArray("strokes").getJSONObject(0)
+        assertEquals(
+            "authored ink uses the pressure-sensitive v2 style",
+            2,
+            stroke.getJSONObject("style").getInt("style_version"),
+        )
+        val points = stroke.getJSONArray("points")
+        assertTrue("down+move+up captured", points.length() >= 3)
+        for (index in 0 until points.length()) {
+            val point = points.getJSONObject(index)
+            assertTrue("point $index carries pressure", point.has("pressure"))
+            val pressure = point.getDouble("pressure")
+            assertTrue("pressure $pressure normalised to 0..1", pressure in 0.0..1.0)
+        }
+        assertEquals(
+            "final over-range sample clamped to 1.0",
+            1.0,
+            points.getJSONObject(points.length() - 1).getDouble("pressure"),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun coalescedHistoricalSamplesAreCapturedInOrder() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 260f, FIRST_STROKE_Y, pressure = 0.3f, downTime = downTime)
+        // One MOVE event batching two intermediate (coalesced) samples plus its
+        // current sample — all three must land in the committed stroke.
+        sendStylusMoveWithHistory(
+            current = Triple(360f, FIRST_STROKE_Y, 0.9f),
+            historical =
+                listOf(
+                    Triple(300f, FIRST_STROKE_Y, 0.5f),
+                    Triple(330f, FIRST_STROKE_Y, 0.7f),
+                ),
+            downTime = downTime,
+        )
+        sendStylus(MotionEvent.ACTION_UP, 400f, FIRST_STROKE_Y, pressure = 1f, downTime = downTime)
+
+        val commit = awaitMutation("commit-batch")
+        assertNotNull("drawing commits a batch", commit)
+        val points = commit!!.getJSONArray("strokes").getJSONObject(0).getJSONArray("points")
+        // down + 2 coalesced + move-current + up == 5 samples.
+        assertEquals("coalesced samples captured", 5, points.length())
+        val pressures = (0 until points.length()).map { points.getJSONObject(it).getDouble("pressure") }
+        assertEquals(listOf(0.3, 0.5, 0.7, 0.9, 1.0), pressures.map { Math.round(it * 10) / 10.0 })
+    }
+
+    @Test
+    fun pressureStrokeRendersThickerAtHighPressureEnd() {
+        // Widen the pen (persisted before the editor loads its preset) so the
+        // low- vs high-pressure width gap is unmistakable in the rasterized ink.
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        DrawingToolPreferences(context, "input-test-user").save(
+            StrokeStyle(
+                styleVersion = SOLID_ROUND_PRESSURE_STYLE_VERSION,
+                parameters = SolidRoundParameters(width = 24.0),
+            ),
+        )
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+
+        // Draw at y=300 — the clear band between the seed lines at y=200 and y=400.
+        val strokeY = 300f
+        val startX = 240f
+        val endX = 470f
+        val samples = 12
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, startX, strokeY, pressure = 0.1f, downTime = downTime)
+        for (index in 1 until samples) {
+            val fraction = index.toFloat() / (samples - 1)
+            sendStylus(
+                MotionEvent.ACTION_MOVE,
+                startX + (endX - startX) * fraction,
+                strokeY,
+                pressure = 0.1f + 0.9f * fraction,
+                downTime = downTime,
+            )
+        }
+        sendStylus(MotionEvent.ACTION_UP, endX, strokeY, pressure = 1f, downTime = downTime)
+        assertNotNull("drawing commits a batch", awaitMutation("commit-batch"))
+
+        // Wait until the committed stroke is rasterized at its high-pressure end.
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching {
+                val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+                greenThickness(pixels, (endX - 25f).toInt(), strokeY.toInt()) > 0
+            }.getOrDefault(false)
+        }
+        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+        val low = greenThickness(pixels, (startX + 25f).toInt(), strokeY.toInt())
+        val high = greenThickness(pixels, (endX - 25f).toInt(), strokeY.toInt())
+        assertTrue("high-pressure end thicker than low: low=$low high=$high", high > low + 2)
+    }
+
+    // Vertical run of dark-green ink pixels through column [x], within ±30px of
+    // [centerY] (kept clear of the seed lines at y=200 and y=400).
+    private fun greenThickness(
+        pixels: androidx.compose.ui.graphics.PixelMap,
+        x: Int,
+        centerY: Int,
+    ): Int {
+        if (x < 0 || x >= pixels.width) return 0
+        var count = 0
+        val top = (centerY - 30).coerceAtLeast(0)
+        val bottom = (centerY + 30).coerceAtMost(pixels.height - 1)
+        for (y in top..bottom) {
+            val color = pixels[x, y]
+            if (color.green > color.red && color.green > color.blue && color.alpha > 0f) {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private fun sendStylusMoveWithHistory(
+        current: Triple<Float, Float, Float>,
+        historical: List<Triple<Float, Float, Float>>,
+        downTime: Long,
+    ) {
+        val canvas = composeRule.onNodeWithTag("ink-canvas").getUnclippedBoundsInRoot()
+        val density = composeRule.activity.resources.displayMetrics.density
+        val contentLocation = IntArray(2)
+        composeRule.activity
+            .findViewById<View>(android.R.id.content)
+            .getLocationOnScreen(contentLocation)
+        fun coords(sample: Triple<Float, Float, Float>): MotionEvent.PointerCoords =
+            MotionEvent.PointerCoords().apply {
+                x = contentLocation[0] + canvas.left.value * density + sample.first
+                y = contentLocation[1] + canvas.top.value * density + sample.second
+                pressure = sample.third
+                size = 0.1f
+            }
+        val properties =
+            arrayOf(
+                MotionEvent.PointerProperties().apply {
+                    id = 0
+                    toolType = MotionEvent.TOOL_TYPE_STYLUS
+                },
+            )
+        // Build the event on the first historical sample, then addBatch the rest
+        // in order; the final addBatch sample becomes the event's current one.
+        val ordered = historical + current
+        val base = android.os.SystemClock.uptimeMillis()
+        val event =
+            MotionEvent.obtain(
+                downTime,
+                base,
+                MotionEvent.ACTION_MOVE,
+                1,
+                properties,
+                arrayOf(coords(ordered.first())),
+                0,
+                0,
+                1f,
+                1f,
+                0,
+                0,
+                InputDevice.SOURCE_STYLUS,
+                0,
+            )
+        for (index in 1 until ordered.size) {
+            event.addBatch(base + index, arrayOf(coords(ordered[index])), 0)
+        }
+        val decor = composeRule.activity.window.decorView
+        val decorLocation = IntArray(2)
+        decor.getLocationOnScreen(decorLocation)
+        event.offsetLocation(-decorLocation[0].toFloat(), -decorLocation[1].toFloat())
+        composeRule.runOnUiThread {
+            assertTrue("app window consumed stylus move", decor.dispatchTouchEvent(event))
+        }
+        event.recycle()
+        android.os.SystemClock.sleep(16)
+    }
+
     private fun openEditor() {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             runCatching {
@@ -259,6 +453,7 @@ class PageCanvasInputInstrumentedTest {
         toolType: Int = MotionEvent.TOOL_TYPE_STYLUS,
         buttonState: Int = 0,
         source: Int = InputDevice.SOURCE_STYLUS,
+        pressure: Float = 1f,
         downTime: Long,
     ) {
         val canvas = composeRule.onNodeWithTag("ink-canvas").getUnclippedBoundsInRoot()
@@ -281,7 +476,7 @@ class PageCanvasInputInstrumentedTest {
                 MotionEvent.PointerCoords().apply {
                     x = screenX
                     y = screenY
-                    pressure = 1f
+                    this.pressure = pressure
                     size = 0.1f
                 },
             )
