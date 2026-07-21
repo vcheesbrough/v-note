@@ -300,6 +300,18 @@ class PageInkInstrumentedTest {
                             "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
                             "commit-tombstones" -> {
                                 tombstone.set(text)
+                                val message = JSONObject(text)
+                                webSocket.send(
+                                    JSONObject()
+                                        .put("type", "tombstone-batch")
+                                        .put("revision", 2)
+                                        .put(
+                                            "client_mutation_id",
+                                            message.getString("client_mutation_id"),
+                                        )
+                                        .put("stroke_ids", message.getJSONArray("stroke_ids"))
+                                        .toString(),
+                                )
                                 tombstoneLatch.countDown()
                             }
                             "release-lease" -> webSocket.close(1000, "lease released")
@@ -322,6 +334,75 @@ class PageInkInstrumentedTest {
         assertEquals("commit-tombstones", message.getString("type"))
         assertEquals(1, message.getJSONArray("stroke_ids").length())
         assertEquals("seed-stroke", message.getJSONArray("stroke_ids").getString(0))
+
+        session.disconnect()
+    }
+
+    @Test
+    fun failedEraseRestoresOptimisticallyHiddenStroke() {
+        val tombstoneReceived = CountDownLatch(1)
+        val allowFailure = CountDownLatch(1)
+        val mutationId = AtomicReference<String>()
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":1}""")
+                    }
+
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        when (JSONObject(text).getString("type")) {
+                            "subscribe" -> {
+                                webSocket.send(seedStrokeMessage)
+                                webSocket.send("""{"type":"synced","last_seq":1}""")
+                            }
+                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                            "commit-tombstones" -> {
+                                val message = JSONObject(text)
+                                mutationId.set(message.getString("client_mutation_id"))
+                                tombstoneReceived.countDown()
+                                allowFailure.await(5, TimeUnit.SECONDS)
+                                webSocket.send(
+                                    JSONObject()
+                                        .put("type", "error")
+                                        .put("code", "tombstone_failed")
+                                        .put("message", "Could not erase stroke")
+                                        .put("client_mutation_id", mutationId.get())
+                                        .toString(),
+                                )
+                            }
+                            "release-lease" -> webSocket.close(1000, "lease released")
+                        }
+                    }
+                },
+            ),
+        )
+
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        session.connect()
+        assertTrue("stroke loaded", awaitUntil { session.strokes.singleOrNull()?.id == "seed-stroke" })
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+
+        try {
+            session.eraseStrokes(listOf("seed-stroke"))
+            assertTrue("tombstone sent", tombstoneReceived.await(5, TimeUnit.SECONDS))
+            assertEquals("stroke hidden before failure", emptyList<Stroke>(), session.strokes)
+        } finally {
+            allowFailure.countDown()
+        }
+
+        assertTrue(
+            "failed erase restores the original stroke",
+            awaitUntil { session.strokes.singleOrNull()?.id == "seed-stroke" },
+        )
+        assertEquals("failure shown", "Could not erase stroke", session.statusBanner)
+        assertEquals("input blocked after server failure", false, session.canEdit)
 
         session.disconnect()
     }

@@ -46,13 +46,21 @@ test.describe('ink page channel', () => {
     await page.reload({ waitUntil: 'load' });
     await expect(page.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible();
 
+    const firstStrokeId = `stroke-thumbnail-${crypto.randomUUID()}`;
     const ticket = await realtimeTicket(request);
     await driveSocket(page, {
       pageId,
       ticket,
       actions: [
         { delayMs: 50, message: { type: 'acquire-lease' } },
-        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'thumb-1', strokes: sampleViewerStrokes() } },
+        {
+          delayMs: 100,
+          message: {
+            type: 'commit-batch',
+            client_batch_id: 'thumb-1',
+            strokes: sampleViewerStrokes(firstStrokeId),
+          },
+        },
       ],
       settleMs: 500,
     });
@@ -70,7 +78,8 @@ test.describe('ink page channel', () => {
     expect(firstImage.status()).toBe(200);
     expect(firstImage.headers()['content-type']).toBe('image/png');
     expect(firstImage.headers()['cache-control']).toContain('immutable');
-    expect((await firstImage.body()).subarray(1, 4).toString()).toBe('PNG');
+    const firstImageBody = await firstImage.body();
+    expect(firstImageBody.subarray(1, 4).toString()).toBe('PNG');
 
     const other = await otherOwnerContext();
     expect((await other.get(firstSummary.thumbnail.url)).status()).toBe(403);
@@ -82,7 +91,14 @@ test.describe('ink page channel', () => {
       ticket: ticket2,
       actions: [
         { delayMs: 50, message: { type: 'acquire-lease' } },
-        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'thumb-2', strokes: sampleStrokes() } },
+        {
+          delayMs: 100,
+          message: {
+            type: 'commit-tombstones',
+            client_mutation_id: 'thumb-2',
+            stroke_ids: [firstStrokeId],
+          },
+        },
       ],
       settleMs: 500,
     });
@@ -90,7 +106,13 @@ test.describe('ink page channel', () => {
       const summary = (await (await request.get('/api/pages')).json()).pages.find((item: any) => item.id === pageId);
       return summary?.thumbnail?.source_seq;
     }).toBe(2);
-    expect((await request.get(firstSummary.thumbnail.url)).status()).toBe(200);
+    const secondSummary = (await (await request.get('/api/pages')).json()).pages.find((item: any) => item.id === pageId);
+    const secondImage = await request.get(secondSummary.thumbnail.url);
+    expect(secondImage.status()).toBe(200);
+    expect((await secondImage.body()).equals(firstImageBody)).toBeFalsy();
+    const immutableFirstImage = await request.get(firstSummary.thumbnail.url);
+    expect(immutableFirstImage.status()).toBe(200);
+    expect((await immutableFirstImage.body()).equals(firstImageBody)).toBeTruthy();
 
     const ticket3 = await realtimeTicket(request);
     await driveSocket(page, {
@@ -186,6 +208,62 @@ test.describe('ink page channel', () => {
     });
     const gapBatches = gap.messages.filter((m) => m.type === 'stroke-batch');
     expect(gapBatches.map((m) => m.seq)).toEqual([2]);
+  });
+
+  test('replays tombstones on fresh load and reconnect without resurrecting ink', async ({ page, request }) => {
+    const pageId = await createPage(request, uniqueTitle('ink-tombstone-replay'));
+    const strokeId = `stroke-tombstone-replay-${crypto.randomUUID()}`;
+
+    const mutation = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [
+        { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 150,
+          message: {
+            type: 'commit-batch',
+            client_batch_id: 'batch_tombstone_replay',
+            strokes: sampleStrokes(strokeId),
+          },
+        },
+        {
+          delayMs: 150,
+          message: {
+            type: 'commit-tombstones',
+            client_mutation_id: 'erase_tombstone_replay',
+            stroke_ids: [strokeId],
+          },
+        },
+      ],
+      settleMs: 800,
+    });
+    expect(mutation.messages.some((message) =>
+      message.type === 'tombstone-batch' && message.stroke_ids.includes(strokeId),
+    )).toBeTruthy();
+
+    const fresh = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
+      settleMs: 700,
+    });
+    expect(replayedStrokeIds(fresh.messages)).not.toContain(strokeId);
+    expect(fresh.messages.some((message) =>
+      message.type === 'tombstone-batch' && message.stroke_ids.includes(strokeId),
+    )).toBeTruthy();
+
+    const reconnect = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 1 } }],
+      settleMs: 700,
+    });
+    expect(replayedStrokeIds(reconnect.messages)).not.toContain(strokeId);
+    expect(reconnect.messages.some((message) =>
+      message.type === 'tombstone-batch' && message.stroke_ids.includes(strokeId),
+    )).toBeTruthy();
   });
 
   test('SPA viewer renders live stroke batches without refresh', async ({ page, request }) => {
@@ -379,10 +457,16 @@ async function driveSocket(
   }, params);
 }
 
-function sampleStrokes() {
+function replayedStrokeIds(messages: any[]): string[] {
+  return messages
+    .filter((message) => message.type === 'stroke-batch')
+    .flatMap((message) => message.strokes.map((stroke: any) => stroke.id));
+}
+
+function sampleStrokes(id = `stroke-${crypto.randomUUID()}`) {
   return [
     {
-      id: `stroke-${crypto.randomUUID()}`,
+      id,
       style: {
         tool_kind: 'solid_round',
         style_version: 1,
@@ -396,10 +480,10 @@ function sampleStrokes() {
   ];
 }
 
-function sampleViewerStrokes() {
+function sampleViewerStrokes(id = `stroke-${crypto.randomUUID()}`) {
   return [
     {
-      id: `stroke-${crypto.randomUUID()}`,
+      id,
       style: {
         tool_kind: 'solid_round',
         style_version: 1,
