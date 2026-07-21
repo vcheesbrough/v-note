@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use axum::{
@@ -423,6 +423,7 @@ async fn handle_page_client_message(
                 PageServerMessage::Error {
                     code: "bad_message".to_string(),
                     message: "could not parse client message".to_string(),
+                    client_mutation_id: None,
                 },
             )
             .await;
@@ -431,8 +432,8 @@ async fn handle_page_client_message(
 
     match message {
         PageClientMessage::Subscribe { from_seq } => {
-            let batches = match load_batches_after(pool, page_id, from_seq).await {
-                Ok(batches) => batches,
+            let (batches, tombstones) = match load_page_replay(pool, page_id, from_seq).await {
+                Ok(replay) => replay,
                 Err(error) => {
                     tracing::error!(error = %error, "stroke replay failed");
                     crate::observability::metrics().record_realtime_event("page", "replay_error");
@@ -441,13 +442,28 @@ async fn handle_page_client_message(
                         PageServerMessage::Error {
                             code: "replay_failed".to_string(),
                             message: "could not load page ink".to_string(),
+                            client_mutation_id: None,
                         },
                     )
                     .await;
                 }
             };
-            for batch in batches {
+            let deleted_ids: HashSet<&str> = tombstones
+                .iter()
+                .flat_map(|batch| batch.stroke_ids.iter().map(String::as_str))
+                .collect();
+            for mut batch in batches {
+                batch
+                    .strokes
+                    .retain(|stroke| !deleted_ids.contains(stroke.id.as_str()));
                 if !send_page(sender, PageServerMessage::StrokeBatch(batch)).await {
+                    return false;
+                }
+            }
+            // Replaying tombstones is required even when `from_seq` skips their
+            // source stroke batches: a reconnecting client may still cache them.
+            for batch in tombstones {
+                if !send_page(sender, PageServerMessage::TombstoneBatch(batch)).await {
                     return false;
                 }
             }
@@ -508,6 +524,7 @@ async fn handle_page_client_message(
                         code: "invalid_stroke_style".to_string(),
                         message: "strokes require a supported immutable solid_round style"
                             .to_string(),
+                        client_mutation_id: None,
                     },
                 )
                 .await;
@@ -553,6 +570,7 @@ async fn handle_page_client_message(
                         PageServerMessage::Error {
                             code: "commit_failed".to_string(),
                             message: "could not persist strokes".to_string(),
+                            client_mutation_id: None,
                         },
                     )
                     .await
@@ -608,6 +626,7 @@ async fn handle_page_client_message(
                         PageServerMessage::Error {
                             code: "tombstone_failed".to_string(),
                             message: "could not persist deleted strokes".to_string(),
+                            client_mutation_id: Some(client_mutation_id),
                         },
                     )
                     .await
@@ -681,6 +700,40 @@ async fn load_batches_after(
         .collect())
 }
 
+#[derive(sqlx::FromRow)]
+struct TombstoneBatchRow {
+    revision: i64,
+    client_mutation_id: String,
+    stroke_ids: sqlx::types::Json<Vec<String>>,
+}
+
+async fn load_page_replay(
+    pool: &PgPool,
+    page_id: &str,
+    from_seq: u64,
+) -> Result<(Vec<StrokeBatch>, Vec<TombstoneBatch>), sqlx::Error> {
+    let batches = load_batches_after(pool, page_id, from_seq).await?;
+    let tombstones = sqlx::query_as::<_, TombstoneBatchRow>(
+        r#"
+        SELECT revision, client_mutation_id, stroke_ids
+        FROM tombstone_batches
+        WHERE page_id = $1
+        ORDER BY revision, client_mutation_id
+        "#,
+    )
+    .bind(page_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| TombstoneBatch {
+        revision: row.revision as u64,
+        client_mutation_id: row.client_mutation_id,
+        stroke_ids: row.stroke_ids.0,
+    })
+    .collect();
+    Ok((batches, tombstones))
+}
+
 /// Persist a stroke batch with a per-page monotonic sequence. Idempotent by
 /// `client_batch_id` so reconnect retries return the existing seq instead of
 /// double-inserting. New batches atomically bump the page `updated_at` and
@@ -708,15 +761,15 @@ async fn persist_batch(
     .fetch_one(&mut *tx)
     .await?;
 
-    let existing = sqlx::query_scalar::<_, i64>(
-        "SELECT seq FROM stroke_batches WHERE page_id = $1 AND client_batch_id = $2",
+    let existing = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT seq, revision FROM stroke_batches WHERE page_id = $1 AND client_batch_id = $2",
     )
     .bind(page_id)
     .bind(client_batch_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let seq = if let Some(existing) = existing {
-        existing
+    let (seq, revision) = if let Some((seq, revision)) = existing {
+        (seq, revision)
     } else {
         let next: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
@@ -724,30 +777,25 @@ async fn persist_batch(
         .bind(page_id)
         .fetch_one(&mut *tx)
         .await?;
+        let revision = current_revision + 1;
 
         sqlx::query(
-            "INSERT INTO stroke_batches (page_id, seq, client_batch_id, strokes) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO stroke_batches (page_id, seq, revision, client_batch_id, strokes) VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(page_id)
         .bind(next)
+        .bind(revision)
         .bind(client_batch_id)
         .bind(sqlx::types::Json(strokes))
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query(
-            "UPDATE pages SET updated_at = now(), ink_revision = ink_revision + 1 WHERE id = $1",
-        )
-        .bind(page_id)
-        .execute(&mut *tx)
-        .await?;
-        next
-    };
-
-    let revision = if existing.is_some() {
-        current_revision
-    } else {
-        current_revision + 1
+        sqlx::query("UPDATE pages SET updated_at = now(), ink_revision = $2 WHERE id = $1")
+            .bind(page_id)
+            .bind(revision)
+            .execute(&mut *tx)
+            .await?;
+        (next, revision)
     };
     let thumbnail_job_created = sqlx::query(
         "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",

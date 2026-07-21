@@ -223,9 +223,8 @@ class ApiClient(
         retryOnUnauthorized: Boolean,
         buildRequest: (String) -> Request,
     ): Result<String> {
-        val accessToken =
-            tokenStore.accessToken()
-                ?: return Result.failure(IllegalStateException("Not signed in"))
+        val accessToken = tokenStore.accessToken()
+            ?: return Result.failure(IllegalStateException("Not signed in"))
 
         http.newCall(buildRequest(accessToken)).execute().use { response ->
             if (response.code == 401 && retryOnUnauthorized) {
@@ -249,8 +248,9 @@ class ApiClient(
         retryOnUnauthorized: Boolean,
         buildRequest: (String) -> Request,
     ): Result<ByteArray> {
-        val accessToken = tokenStore.accessToken()
-            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val accessToken =
+            tokenStore.accessToken()
+                ?: return Result.failure(IllegalStateException("Not signed in"))
         http.newCall(buildRequest(accessToken)).execute().use { response ->
             if (response.code == 401 && retryOnUnauthorized) {
                 if (authRepository.refreshAccessTokenIfNeeded(force = true)) {
@@ -425,7 +425,11 @@ sealed interface PageEvent {
 
     data class Synced(val lastSeq: Long) : PageEvent
 
-    data class TombstoneBatch(val revision: Long, val strokeIds: List<String>) : PageEvent
+    data class TombstoneBatch(
+        val revision: Long,
+        val clientMutationId: String,
+        val strokeIds: List<String>,
+    ) : PageEvent
 
     data object LeaseGranted : PageEvent
 
@@ -433,7 +437,11 @@ sealed interface PageEvent {
 
     data class LeaseChanged(val holder: String?) : PageEvent
 
-    data class Failure(val code: String, val message: String) : PageEvent
+    data class Failure(
+        val code: String,
+        val message: String,
+        val clientMutationId: String?,
+    ) : PageEvent
 }
 
 interface PageEventListener {
@@ -499,16 +507,24 @@ private fun parsePageEvent(json: JSONObject): PageEvent? =
                 strokes = parseStrokes(json.getJSONArray("strokes")),
             )
         "synced" -> PageEvent.Synced(json.getLong("last_seq"))
-        "tombstone-batch" -> PageEvent.TombstoneBatch(
-            json.getLong("revision"),
-            json.getJSONArray("stroke_ids").let { ids ->
-                buildList { for (index in 0 until ids.length()) add(ids.getString(index)) }
-            },
-        )
+        "tombstone-batch" ->
+            PageEvent.TombstoneBatch(
+                revision = json.getLong("revision"),
+                clientMutationId = json.getString("client_mutation_id"),
+                strokeIds =
+                    json.getJSONArray("stroke_ids").let { ids ->
+                        buildList { for (index in 0 until ids.length()) add(ids.getString(index)) }
+                    },
+            )
         "lease-granted" -> PageEvent.LeaseGranted
         "lease-denied" -> PageEvent.LeaseDenied(json.getString("holder"))
         "lease-changed" -> PageEvent.LeaseChanged(json.optString("holder").ifBlank { null })
-        "error" -> PageEvent.Failure(json.optString("code"), json.optString("message"))
+        "error" ->
+            PageEvent.Failure(
+                code = json.optString("code"),
+                message = json.optString("message"),
+                clientMutationId = json.optString("client_mutation_id").ifBlank { null },
+            )
         // Unknown/forward-compatible message types are ignored.
         else -> null
     }

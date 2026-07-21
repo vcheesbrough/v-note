@@ -271,5 +271,7 @@ pub enum PageServerMessage {
     Error {
         code: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_mutation_id: Option<String>,
     },
 }

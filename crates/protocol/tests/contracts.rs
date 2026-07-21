@@ -129,6 +129,29 @@ fn deserializes_page_channel_fixtures() {
 }
 
 #[test]
+fn page_error_correlates_tombstone_failures_and_accepts_legacy_errors() {
+    let correlated = PageServerMessage::Error {
+        code: "tombstone_failed".to_string(),
+        message: "could not persist deleted strokes".to_string(),
+        client_mutation_id: Some("erase_fixture_1".to_string()),
+    };
+    let json = serde_json::to_value(correlated).expect("page error should serialize");
+    assert_eq!(json["client_mutation_id"], "erase_fixture_1");
+
+    let legacy: PageServerMessage = serde_json::from_str(
+        r#"{"type":"error","code":"commit_failed","message":"Commit failed"}"#,
+    )
+    .expect("page errors without a mutation id should remain compatible");
+    assert!(matches!(
+        legacy,
+        PageServerMessage::Error {
+            client_mutation_id: None,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn deserializes_page_fixtures() {
     let page: PageSummary =
         serde_json::from_str(&fixture("page.json")).expect("page fixture should parse");

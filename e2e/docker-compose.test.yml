@@ -101,19 +101,28 @@ services:
         FROM postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
         COPY fixtures/legacy-stroke.sql /fixtures/legacy-stroke.sql
         COPY --from=server-migrations 20260716003000_backfill_legacy_strokes.sql /migrations/20260716003000_backfill_legacy_strokes.sql
+        COPY --from=server-migrations 20260718011500_add_stroke_batch_revisions.sql /migrations/20260718011500_add_stroke_batch_revisions.sql
     environment:
       PGPASSWORD: test-password
     command:
       - sh
       - -ec
       - |
-        until psql -h postgres -U v_note -d v_note -tAc "SELECT to_regclass('public.stroke_batches') IS NOT NULL" | grep -q t; do sleep 1; done
+        until psql -h postgres -U v_note -d v_note -tAc "SELECT COALESCE((SELECT success FROM _sqlx_migrations WHERE version = 20260718011500), false)" | grep -q t; do sleep 1; done
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -c "ALTER TABLE stroke_batches ALTER COLUMN revision DROP NOT NULL"
         psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /fixtures/legacy-stroke.sql
         psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260716003000_backfill_legacy_strokes.sql
         first_id="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT strokes->0->>'id' FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
         psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260716003000_backfill_legacy_strokes.sql
         second_id="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT strokes->0->>'id' FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
         test -n "$$first_id" && test "$$first_id" = "$$second_id"
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260718011500_add_stroke_batch_revisions.sql
+        first_revision="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT revision FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
+        history_revisions="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT string_agg(revision::text, ',' ORDER BY seq) FROM stroke_batches WHERE page_id = 'page_revision_history'")"
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260718011500_add_stroke_batch_revisions.sql
+        second_revision="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT revision FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
+        test "$$first_revision" = "1" && test "$$first_revision" = "$$second_revision"
+        test "$$history_revisions" = "1,3"
         touch /tmp/fixture-ready
         exec tail -f /dev/null
     healthcheck:

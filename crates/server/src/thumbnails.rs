@@ -96,20 +96,23 @@ pub fn thumbnail_url(page_id: &str, source_seq: u64) -> String {
 
 async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), String> {
     let batches = sqlx::query_scalar::<_, sqlx::types::Json<Vec<Stroke>>>(
-        "SELECT strokes FROM stroke_batches WHERE page_id = $1 ORDER BY seq",
+        "SELECT strokes FROM stroke_batches WHERE page_id = $1 AND revision <= $2 ORDER BY revision",
     )
     .bind(page_id)
+    .bind(source_seq as i64)
     .fetch_all(pool)
     .await
     .map_err(|error| error.to_string())?;
-    let tombstones: std::collections::HashSet<String> =
-        sqlx::query_scalar("SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1")
-            .bind(page_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .collect();
+    let tombstones: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1 AND deleted_revision <= $2",
+    )
+    .bind(page_id)
+    .bind(source_seq as i64)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .collect();
     let strokes: Vec<Stroke> = batches
         .into_iter()
         .flat_map(|batch| batch.0)
