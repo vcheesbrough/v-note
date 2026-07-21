@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use axum::{
@@ -14,7 +14,8 @@ use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    LibraryEvent, PageClientMessage, PageServerMessage, RealtimeTicketResponse, Stroke, StrokeBatch,
+    LibraryEvent, PageClientMessage, PageServerMessage, RealtimeTicketResponse, Stroke,
+    StrokeBatch, TombstoneBatch,
 };
 use rand::RngCore;
 use serde::Deserialize;
@@ -422,6 +423,7 @@ async fn handle_page_client_message(
                 PageServerMessage::Error {
                     code: "bad_message".to_string(),
                     message: "could not parse client message".to_string(),
+                    client_mutation_id: None,
                 },
             )
             .await;
@@ -430,8 +432,8 @@ async fn handle_page_client_message(
 
     match message {
         PageClientMessage::Subscribe { from_seq } => {
-            let batches = match load_batches_after(pool, page_id, from_seq).await {
-                Ok(batches) => batches,
+            let (batches, tombstones) = match load_page_replay(pool, page_id, from_seq).await {
+                Ok(replay) => replay,
                 Err(error) => {
                     tracing::error!(error = %error, "stroke replay failed");
                     crate::observability::metrics().record_realtime_event("page", "replay_error");
@@ -440,13 +442,28 @@ async fn handle_page_client_message(
                         PageServerMessage::Error {
                             code: "replay_failed".to_string(),
                             message: "could not load page ink".to_string(),
+                            client_mutation_id: None,
                         },
                     )
                     .await;
                 }
             };
-            for batch in batches {
+            let deleted_ids: HashSet<&str> = tombstones
+                .iter()
+                .flat_map(|batch| batch.stroke_ids.iter().map(String::as_str))
+                .collect();
+            for mut batch in batches {
+                batch
+                    .strokes
+                    .retain(|stroke| !deleted_ids.contains(stroke.id.as_str()));
                 if !send_page(sender, PageServerMessage::StrokeBatch(batch)).await {
+                    return false;
+                }
+            }
+            // Replaying tombstones is required even when `from_seq` skips their
+            // source stroke batches: a reconnecting client may still cache them.
+            for batch in tombstones {
+                if !send_page(sender, PageServerMessage::TombstoneBatch(batch)).await {
                     return false;
                 }
             }
@@ -497,18 +514,38 @@ async fn handle_page_client_message(
                 crate::observability::metrics().record_realtime_event("page", "lease_denied");
                 return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
             }
+            if strokes
+                .iter()
+                .any(|stroke| stroke.id.is_empty() || stroke.style.validate().is_err())
+            {
+                return send_page(
+                    sender,
+                    PageServerMessage::Error {
+                        code: "invalid_stroke_style".to_string(),
+                        message: "strokes require a supported immutable solid_round style"
+                            .to_string(),
+                        client_mutation_id: None,
+                    },
+                )
+                .await;
+            }
             match persist_batch(pool, page_id, &client_batch_id, &strokes).await {
                 Ok(persisted) => {
                     let seq = persisted.seq;
                     crate::observability::metrics().record_page_mutation("commit_batch", "success");
-                    state.realtime.publish_page(
-                        page_id,
-                        PageServerMessage::StrokeBatch(StrokeBatch {
-                            seq,
-                            client_batch_id,
-                            strokes,
-                        }),
-                    );
+                    // Delete-wins: broadcast only strokes that survived tombstone
+                    // filtering. An add fully suppressed by tombstones changes no
+                    // visible state, so it is acknowledged without a fan-out.
+                    if !persisted.visible_strokes.is_empty() {
+                        state.realtime.publish_page(
+                            page_id,
+                            PageServerMessage::StrokeBatch(StrokeBatch {
+                                seq,
+                                client_batch_id,
+                                strokes: persisted.visible_strokes,
+                            }),
+                        );
+                    }
                     if persisted.thumbnail_job_created {
                         let page_id = page_id.to_string();
                         crate::observability::metrics().thumbnail_generation_queued();
@@ -517,11 +554,16 @@ async fn handle_page_client_message(
                             LibraryEvent::PageThumbnailUpdated {
                                 page_id: page_id.clone(),
                                 thumbnail: protocol::ThumbnailMetadata::Generating {
-                                    source_seq: seq,
+                                    source_seq: persisted.revision,
                                 },
                             },
                         );
-                        crate::thumbnails::enqueue(state.clone(), page_id, persisted.owner_id, seq);
+                        crate::thumbnails::enqueue(
+                            state.clone(),
+                            page_id,
+                            persisted.owner_id,
+                            persisted.revision,
+                        );
                     }
                     true
                 }
@@ -533,6 +575,63 @@ async fn handle_page_client_message(
                         PageServerMessage::Error {
                             code: "commit_failed".to_string(),
                             message: "could not persist strokes".to_string(),
+                            client_mutation_id: None,
+                        },
+                    )
+                    .await
+                }
+            }
+        }
+        PageClientMessage::CommitTombstones {
+            client_mutation_id,
+            stroke_ids,
+        } => {
+            if let LeaseOutcome::Denied { holder } =
+                state.realtime.acquire_lease(page_id, session_id)
+            {
+                return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
+            }
+            match persist_tombstones(pool, page_id, &client_mutation_id, &stroke_ids).await {
+                Ok(persisted) => {
+                    let event = TombstoneBatch {
+                        revision: persisted.revision,
+                        client_mutation_id,
+                        stroke_ids: persisted.stroke_ids,
+                    };
+                    state
+                        .realtime
+                        .publish_page(page_id, PageServerMessage::TombstoneBatch(event));
+                    if persisted.thumbnail_job_created {
+                        state.realtime.publish_library_event(
+                            &persisted.owner_id,
+                            LibraryEvent::PageThumbnailUpdated {
+                                page_id: page_id.to_string(),
+                                thumbnail: protocol::ThumbnailMetadata::Generating {
+                                    source_seq: persisted.revision,
+                                },
+                            },
+                        );
+                        crate::thumbnails::enqueue(
+                            state.clone(),
+                            page_id.to_string(),
+                            persisted.owner_id,
+                            persisted.revision,
+                        );
+                    }
+                    crate::observability::metrics()
+                        .record_page_mutation("commit_tombstones", "success");
+                    true
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "tombstone commit failed");
+                    crate::observability::metrics()
+                        .record_page_mutation("commit_tombstones", "error");
+                    send_page(
+                        sender,
+                        PageServerMessage::Error {
+                            code: "tombstone_failed".to_string(),
+                            message: "could not persist deleted strokes".to_string(),
+                            client_mutation_id: Some(client_mutation_id),
                         },
                     )
                     .await
@@ -606,13 +705,52 @@ async fn load_batches_after(
         .collect())
 }
 
+#[derive(sqlx::FromRow)]
+struct TombstoneBatchRow {
+    revision: i64,
+    client_mutation_id: String,
+    stroke_ids: sqlx::types::Json<Vec<String>>,
+}
+
+async fn load_page_replay(
+    pool: &PgPool,
+    page_id: &str,
+    from_seq: u64,
+) -> Result<(Vec<StrokeBatch>, Vec<TombstoneBatch>), sqlx::Error> {
+    let batches = load_batches_after(pool, page_id, from_seq).await?;
+    let tombstones = sqlx::query_as::<_, TombstoneBatchRow>(
+        r#"
+        SELECT revision, client_mutation_id, stroke_ids
+        FROM tombstone_batches
+        WHERE page_id = $1
+        ORDER BY revision, client_mutation_id
+        "#,
+    )
+    .bind(page_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| TombstoneBatch {
+        revision: row.revision as u64,
+        client_mutation_id: row.client_mutation_id,
+        stroke_ids: row.stroke_ids.0,
+    })
+    .collect();
+    Ok((batches, tombstones))
+}
+
 /// Persist a stroke batch with a per-page monotonic sequence. Idempotent by
 /// `client_batch_id` so reconnect retries return the existing seq instead of
 /// double-inserting. New batches atomically bump the page `updated_at` and
 /// persist their thumbnail job before the commit is acknowledged.
 struct PersistedBatch {
     seq: u64,
+    revision: u64,
     owner_id: String,
+    /// Strokes that survive delete-wins filtering — the only ones to broadcast
+    /// and store. Empty means the whole add was suppressed by tombstones and no
+    /// visible state changed.
+    visible_strokes: Vec<Stroke>,
     thumbnail_job_created: bool,
 }
 
@@ -625,51 +763,100 @@ async fn persist_batch(
     let mut tx = pool.begin().await?;
 
     // Serialize seq allocation for this page against concurrent commits.
-    let owner_id =
-        sqlx::query_scalar::<_, String>("SELECT owner_id FROM pages WHERE id = $1 FOR UPDATE")
-            .bind(page_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (owner_id, current_revision) = sqlx::query_as::<_, (String, i64)>(
+        "SELECT owner_id, ink_revision FROM pages WHERE id = $1 FOR UPDATE",
+    )
+    .bind(page_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
-    let existing = sqlx::query_scalar::<_, i64>(
-        "SELECT seq FROM stroke_batches WHERE page_id = $1 AND client_batch_id = $2",
+    // Delete-wins: a permanent tombstone for a stroke id suppresses every later
+    // add of that id. Filtering before insert stops an add-after-delete (or a
+    // stale offline replay) from advancing the revision or being broadcast as
+    // visible ink, while identical retries stay idempotent by `client_batch_id`.
+    let submitted_ids: Vec<String> = strokes.iter().map(|stroke| stroke.id.clone()).collect();
+    let tombstoned: HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1 AND stroke_id = ANY($2)",
+    )
+    .bind(page_id)
+    .bind(&submitted_ids)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+    let visible_strokes: Vec<Stroke> = strokes
+        .iter()
+        .filter(|stroke| !tombstoned.contains(&stroke.id))
+        .cloned()
+        .collect();
+
+    let existing = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT seq, revision FROM stroke_batches WHERE page_id = $1 AND client_batch_id = $2",
     )
     .bind(page_id)
     .bind(client_batch_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let seq = if let Some(existing) = existing {
-        existing
-    } else {
-        let next: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
+    if let Some((seq, revision)) = existing {
+        // Idempotent retry: re-echo only the strokes still visible today.
+        tx.commit().await?;
+        return Ok(PersistedBatch {
+            seq: seq as u64,
+            revision: revision as u64,
+            owner_id,
+            visible_strokes,
+            thumbnail_job_created: false,
+        });
+    }
+
+    if visible_strokes.is_empty() {
+        // Every submitted stroke is tombstoned — acknowledge the add as a no-op
+        // without inserting a batch, advancing the revision, or broadcasting.
+        let head_seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1",
         )
         .bind(page_id)
         .fetch_one(&mut *tx)
         .await?;
+        tx.commit().await?;
+        return Ok(PersistedBatch {
+            seq: head_seq as u64,
+            revision: current_revision as u64,
+            owner_id,
+            visible_strokes,
+            thumbnail_job_created: false,
+        });
+    }
 
-        sqlx::query(
-            "INSERT INTO stroke_batches (page_id, seq, client_batch_id, strokes) VALUES ($1, $2, $3, $4)",
-        )
+    let next: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
+    )
+    .bind(page_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let revision = current_revision + 1;
+
+    sqlx::query(
+        "INSERT INTO stroke_batches (page_id, seq, revision, client_batch_id, strokes) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(page_id)
+    .bind(next)
+    .bind(revision)
+    .bind(client_batch_id)
+    .bind(sqlx::types::Json(&visible_strokes))
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE pages SET updated_at = now(), ink_revision = $2 WHERE id = $1")
         .bind(page_id)
-        .bind(next)
-        .bind(client_batch_id)
-        .bind(sqlx::types::Json(strokes))
+        .bind(revision)
         .execute(&mut *tx)
         .await?;
-
-        sqlx::query("UPDATE pages SET updated_at = now() WHERE id = $1")
-            .bind(page_id)
-            .execute(&mut *tx)
-            .await?;
-        next
-    };
-
     let thumbnail_job_created = sqlx::query(
         "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",
     )
     .bind(page_id)
-    .bind(seq)
+    .bind(revision)
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -677,8 +864,86 @@ async fn persist_batch(
 
     tx.commit().await?;
     Ok(PersistedBatch {
-        seq: seq as u64,
+        seq: next as u64,
+        revision: revision as u64,
         owner_id,
+        visible_strokes,
+        thumbnail_job_created,
+    })
+}
+
+struct PersistedTombstones {
+    revision: u64,
+    owner_id: String,
+    stroke_ids: Vec<String>,
+    thumbnail_job_created: bool,
+}
+
+async fn persist_tombstones(
+    pool: &PgPool,
+    page_id: &str,
+    client_mutation_id: &str,
+    requested_ids: &[String],
+) -> Result<PersistedTombstones, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let (owner_id, current_revision) = sqlx::query_as::<_, (String, i64)>(
+        "SELECT owner_id, ink_revision FROM pages WHERE id = $1 FOR UPDATE",
+    )
+    .bind(page_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if let Some((revision, ids)) = sqlx::query_as::<_, (i64, sqlx::types::Json<Vec<String>>)>(
+        "SELECT revision, stroke_ids FROM tombstone_batches WHERE page_id = $1 AND client_mutation_id = $2",
+    )
+    .bind(page_id)
+    .bind(client_mutation_id)
+    .fetch_optional(&mut *tx)
+    .await? {
+        tx.commit().await?;
+        return Ok(PersistedTombstones { revision: revision as u64, owner_id, stroke_ids: ids.0, thumbnail_job_created: false });
+    }
+
+    let mut ids = requested_ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT stroke_id FROM stroke_tombstones WHERE page_id = $1 AND stroke_id = ANY($2)",
+    )
+    .bind(page_id)
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    ids.retain(|id| !existing.contains(id));
+    let revision = if ids.is_empty() {
+        current_revision
+    } else {
+        current_revision + 1
+    };
+    for id in &ids {
+        sqlx::query("INSERT INTO stroke_tombstones (page_id, stroke_id, deleted_revision) VALUES ($1, $2, $3)")
+            .bind(page_id).bind(id).bind(revision).execute(&mut *tx).await?;
+    }
+    sqlx::query("INSERT INTO tombstone_batches (page_id, client_mutation_id, revision, stroke_ids) VALUES ($1, $2, $3, $4)")
+        .bind(page_id).bind(client_mutation_id).bind(revision).bind(sqlx::types::Json(&ids)).execute(&mut *tx).await?;
+    if !ids.is_empty() {
+        sqlx::query(
+            "UPDATE pages SET updated_at = now(), ink_revision = ink_revision + 1 WHERE id = $1",
+        )
+        .bind(page_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let thumbnail_job_created = if ids.is_empty() {
+        false
+    } else {
+        sqlx::query("INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING")
+            .bind(page_id).bind(revision).execute(&mut *tx).await?.rows_affected() == 1
+    };
+    tx.commit().await?;
+    Ok(PersistedTombstones {
+        revision: revision as u64,
+        owner_id,
+        stroke_ids: ids,
         thumbnail_job_created,
     })
 }

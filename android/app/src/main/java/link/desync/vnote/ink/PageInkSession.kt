@@ -44,6 +44,7 @@ class PageInkSession(
     private val seenBatchIds = mutableSetOf<String>()
     private val confirmedStrokes = mutableListOf<Stroke>()
     private val pendingBatches = linkedMapOf<String, List<Stroke>>()
+    private val pendingErasures = linkedMapOf<String, Set<String>>()
     private var socket: PageSocket? = null
     private var leaseRenewJob: Job? = null
 
@@ -93,6 +94,16 @@ class PageInkSession(
         activeSocket.commitBatch(clientBatchId, submitted)
     }
 
+    fun eraseStrokes(strokeIds: Collection<String>) {
+        if (!canEdit || strokeIds.isEmpty()) return
+        val activeSocket = socket ?: return
+        val uniqueIds = strokeIds.toSet()
+        val clientMutationId = "erase_${UUID.randomUUID().toString().replace("-", "")}"
+        pendingErasures[clientMutationId] = uniqueIds
+        publishRenderableStrokes()
+        activeSocket.commitTombstones(clientMutationId, uniqueIds.toList())
+    }
+
     private fun handle(event: PageEvent) {
         when (event) {
             is PageEvent.Welcome -> {
@@ -124,6 +135,14 @@ class PageInkSession(
                     lastSeq = event.lastSeq
                 }
             }
+            is PageEvent.TombstoneBatch -> {
+                val locallyErasedIds = pendingErasures.remove(event.clientMutationId).orEmpty()
+                val deletedIds = locallyErasedIds + event.strokeIds
+                confirmedStrokes.removeAll { it.id in deletedIds }
+                pendingBatches.replaceAll { _, strokes -> strokes.filterNot { it.id in deletedIds } }
+                pendingBatches.entries.removeAll { (_, strokes) -> strokes.isEmpty() }
+                publishRenderableStrokes()
+            }
             PageEvent.LeaseGranted -> {
                 canEdit = true
                 ensureLeaseRenewal()
@@ -134,6 +153,7 @@ class PageInkSession(
             is PageEvent.LeaseDenied -> {
                 canEdit = false
                 stopLeaseRenewal()
+                clearPendingErasures()
                 discardPendingBatches()
                 statusBanner = LEASE_BLOCKED
             }
@@ -157,6 +177,9 @@ class PageInkSession(
                 }
             }
             is PageEvent.Failure -> {
+                if (event.code == TOMBSTONE_FAILED) {
+                    restorePendingErasure(event.clientMutationId)
+                }
                 canEdit = false
                 stopLeaseRenewal()
                 discardPendingBatches()
@@ -187,7 +210,26 @@ class PageInkSession(
     }
 
     private fun publishRenderableStrokes() {
-        strokes = confirmedStrokes + pendingBatches.values.flatten()
+        val erasedIds = pendingErasures.values.flatten().toSet()
+        strokes =
+            (confirmedStrokes + pendingBatches.values.flatten())
+                .filterNot { it.id in erasedIds }
+    }
+
+    private fun restorePendingErasure(clientMutationId: String?) {
+        if (clientMutationId == null) {
+            pendingErasures.clear()
+        } else {
+            pendingErasures.remove(clientMutationId)
+        }
+        publishRenderableStrokes()
+    }
+
+    private fun clearPendingErasures() {
+        if (pendingErasures.isNotEmpty()) {
+            pendingErasures.clear()
+            publishRenderableStrokes()
+        }
     }
 
     private fun discardPendingBatches() {
@@ -205,6 +247,7 @@ class PageInkSession(
 
     companion object {
         private const val LEASE_RENEW_INTERVAL_MS = 10_000L
+        private const val TOMBSTONE_FAILED = "tombstone_failed"
         const val LEASE_BLOCKED = "Another device is editing this page"
         const val CONNECTING = "Connecting…"
         const val DISCONNECTED = "Realtime disconnected"

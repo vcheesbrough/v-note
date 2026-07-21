@@ -561,6 +561,15 @@ fn apply_page_event(
             viewer_status.set("Synced".to_string());
             viewer_error.set(None);
         }
+        PageServerMessage::TombstoneBatch(tombstones) => {
+            let removed: std::collections::HashSet<_> = tombstones.stroke_ids.into_iter().collect();
+            batches.update(|items| {
+                for batch in items {
+                    batch.strokes.retain(|stroke| !removed.contains(&stroke.id));
+                }
+            });
+            viewer_status.set("Live".to_string());
+        }
         PageServerMessage::Error { message, .. } => {
             viewer_error.set(Some(message));
         }
@@ -638,8 +647,8 @@ fn draw_stroke(
     const MIN_RENDERED_STROKE_WIDTH: f64 = 0.75;
 
     context.begin_path();
-    context.set_stroke_style_str(&stroke.color);
-    context.set_line_width((stroke.width * scale).max(MIN_RENDERED_STROKE_WIDTH));
+    context.set_stroke_style_str(&stroke.style.parameters.color);
+    context.set_line_width((stroke.style.parameters.width * scale).max(MIN_RENDERED_STROKE_WIDTH));
     if let Some(first) = stroke.points.first() {
         context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
         for point in stroke.points.iter().skip(1) {

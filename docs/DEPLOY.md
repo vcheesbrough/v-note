@@ -27,7 +27,7 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket)
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
-Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, `android-instrumented`, `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
+Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
 
 Operator reproduction from a Woodpecker-equivalent shell:
 
@@ -145,7 +145,7 @@ All four repo-built images set [OCI Image Spec](https://github.com/opencontainer
 | --- | --- | --- |
 | **`v-note`** | `Dockerfile.web` | `registry.desync.link/v-note:{release}` |
 | **`v-note-android`** | `Dockerfile.android` | `registry.desync.link/v-note-android:{release}` |
-| **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}` |
+| **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}-api{29\|36}` |
 | **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
 
 Label sources (no `LABEL` instructions in Dockerfiles — all set at build time):
@@ -158,7 +158,7 @@ Label sources (no `LABEL` instructions in Dockerfiles — all set at build time)
 | `org.opencontainers.image.source` | `docker build --label` or compose `build.labels` |
 | `org.opencontainers.image.created` | `docker build --label` or compose `build.labels` (UTC RFC 3339 at build time) |
 
-Woodpecker runs **`scripts/check-image-metadata.sh`** after **`build-web`** (before push), **`build-android`**, **`android-instrumented`**, and **`e2e-web`** (playwright build) — pipeline fails if labels are missing or version/revision mismatch.
+Woodpecker applies these labels to every repo-built image. The **`e2e-web`** step also runs **`scripts/check-image-metadata.sh`** against the Playwright image and fails if labels are missing or the version/revision does not match.
 
 **Build context:** each image uses a Dockerfile-paired ignore file (BuildKit convention) so `COPY . .` cache is not busted by unrelated tree changes:
 

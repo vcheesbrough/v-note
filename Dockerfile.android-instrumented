@@ -7,13 +7,17 @@
 ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
 FROM ${ANDROID_BUILD_BOX_IMAGE}
 
+ARG ANDROID_API_LEVEL=36
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV PATH=/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:${PATH}
+ENV ANDROID_API_LEVEL=${ANDROID_API_LEVEL}
+ENV AVD_NAME=vnote-ci-api-${ANDROID_API_LEVEL}
+ENV SYSTEM_IMAGE=system-images;android-${ANDROID_API_LEVEL};google_apis;x86_64
 
 RUN yes | sdkmanager --licenses >/dev/null 2>&1 || true \
-    && sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64" \
-    && echo no | avdmanager create avd -n vnote-ci -k "system-images;android-35;google_apis;x86_64" -d pixel_6 --force
+    && sdkmanager "platform-tools" "emulator" "${SYSTEM_IMAGE}" \
+    && echo no | avdmanager create avd -n "${AVD_NAME}" -k "${SYSTEM_IMAGE}" -d pixel_6 --force
 
 ARG V_NOTE_RELEASE=
 ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}

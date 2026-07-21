@@ -144,7 +144,7 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
 | **`e2e/` Playwright** | SPA flows, REST probes, multi-context realtime (two browsers on same page), failure injection (stop service, 5xx) |
 | **`e2e/global-setup.ts`** | Wait for `/health`, seed auth cookie/bearer (bored pattern) |
 | **`.woodpecker/build.yml` `e2e` step** | `docker compose … up --exit-code-from playwright` (+ Android job when instrumented tests exist) |
-| **`android/…/androidTest`** | **Compose UI / instrumented e2e** for native flows Playwright cannot drive (ink capture, lease banner, disconnect UX, search jump) — runs on **emulator in CI** |
+| **`android/…/androidTest`** | **Compose UI / instrumented e2e** for native flows Playwright cannot drive (ink capture, lease banner, disconnect UX, search jump) — runs in CI on Android 10/API 29 (Note9 generation) and Android 16/API 36 (Tab S8 Ultra generation) |
 
 Reference implementation: **[bored `e2e/`](https://github.com/vcheesbrough/bored/tree/main/e2e)** (mock-oauth2-server, Playwright, `sse.spec.ts` two-context pattern).
 
