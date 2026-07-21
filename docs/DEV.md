@@ -158,7 +158,7 @@ Unit tests (host or Docker):
 source scripts/android-env.sh && cd android && ./gradlew :app:testDevDebugUnitTest
 ```
 
-Instrumented tests: `./gradlew :app:connectedDevDebugAndroidTest` with emulator running, or CI-parity `just android-instrumented-docker` (Woodpecker `android-instrumented` step).
+Instrumented tests: `./gradlew :app:connectedDevDebugAndroidTest` with an emulator running. CI gates both supported device generations: Android 10/API 29 (Galaxy Note9) and Android 16/API 36 (Galaxy Tab S8 Ultra). Reproduce either lane with `just android-instrumented-docker 29` or `just android-instrumented-docker 36`; API 36 is the recipe default.
 
 ### Emulator (WSL2 / Hyper-V)
 

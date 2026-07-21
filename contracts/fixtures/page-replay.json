@@ -7,9 +7,8 @@
       "client_batch_id": "batch_aaaaaaaaaaaaaaaaaaaaaaaa",
       "strokes": [
         {
-          "tool": "pen",
-          "color": "#006400",
-          "width": 4.0,
+          "id": "stroke_replay_1",
+          "style": { "tool_kind": "solid_round", "style_version": 1, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
           "points": [
             { "x": 10.0, "y": 20.0, "t": 0 },
             { "x": 30.0, "y": 25.0, "t": 16 },
@@ -23,18 +22,16 @@
       "client_batch_id": "batch_bbbbbbbbbbbbbbbbbbbbbbbb",
       "strokes": [
         {
-          "tool": "pen",
-          "color": "#006400",
-          "width": 4.0,
+          "id": "stroke_replay_2",
+          "style": { "tool_kind": "solid_round", "style_version": 1, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
           "points": [
             { "x": 5.0, "y": 60.0, "t": 0 },
             { "x": 80.0, "y": 90.0, "t": 16 }
           ]
         },
         {
-          "tool": "pen",
-          "color": "#006400",
-          "width": 4.0,
+          "id": "stroke_replay_3",
+          "style": { "tool_kind": "solid_round", "style_version": 1, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
           "points": [
             { "x": 100.0, "y": 12.0, "t": 0 },
             { "x": 70.0, "y": 8.0, "t": 16 }

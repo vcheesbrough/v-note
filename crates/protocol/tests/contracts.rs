@@ -44,9 +44,10 @@ fn deserializes_me_fixture() {
 fn deserializes_stroke_fixtures() {
     let stroke: Stroke =
         serde_json::from_str(&fixture("stroke.json")).expect("stroke fixture should parse");
-    assert_eq!(stroke.tool, "pen");
-    assert_eq!(stroke.color, "#006400");
-    assert_eq!(stroke.width, 4.0);
+    assert_eq!(stroke.id, "stroke_fixture_1");
+    assert_eq!(stroke.style.parameters.color, "#006400");
+    assert_eq!(stroke.style.parameters.width, 4.0);
+    assert!(stroke.style.validate().is_ok());
     assert_eq!(stroke.points.len(), 3);
     // MVP omits pressure entirely.
     assert!(stroke.points.iter().all(|point| point.pressure.is_none()));
@@ -125,6 +126,29 @@ fn deserializes_page_channel_fixtures() {
     let denied: PageServerMessage = serde_json::from_str(&fixture("page-server-lease-denied.json"))
         .expect("lease-denied fixture should parse");
     assert!(matches!(denied, PageServerMessage::LeaseDenied { .. }));
+}
+
+#[test]
+fn page_error_correlates_tombstone_failures_and_accepts_legacy_errors() {
+    let correlated = PageServerMessage::Error {
+        code: "tombstone_failed".to_string(),
+        message: "could not persist deleted strokes".to_string(),
+        client_mutation_id: Some("erase_fixture_1".to_string()),
+    };
+    let json = serde_json::to_value(correlated).expect("page error should serialize");
+    assert_eq!(json["client_mutation_id"], "erase_fixture_1");
+
+    let legacy: PageServerMessage = serde_json::from_str(
+        r#"{"type":"error","code":"commit_failed","message":"Commit failed"}"#,
+    )
+    .expect("page errors without a mutation id should remain compatible");
+    assert!(matches!(
+        legacy,
+        PageServerMessage::Error {
+            client_mutation_id: None,
+            ..
+        }
+    ));
 }
 
 #[test]
