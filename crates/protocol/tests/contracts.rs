@@ -4,7 +4,7 @@ use std::path::Path;
 use protocol::{
     CreatePageRequest, HealthResponse, LibraryEvent, ListPagesResponse, MeResponse, MetaResponse,
     PageClientMessage, PageReplay, PageServerMessage, PageSummary, RealtimeTicketResponse, Stroke,
-    StrokeBatch, StrokePoint, StrokeStyle, DEFAULT_PEN_WIDTH, MIN_PRESSURE_WIDTH_FACTOR,
+    StrokeBatch, StrokePoint, StrokeStyle, DEFAULT_PEN_WIDTH, MIN_PRESSURE_WIDTH,
     PROTOCOL_VERSION, SOLID_ROUND_PRESSURE_STYLE_VERSION,
 };
 
@@ -135,21 +135,34 @@ fn pressure_survives_round_trip() {
     assert_eq!(back, stroke);
 }
 
-/// The shared pressure→width curve: full width at p=1, MIN_FACTOR×width at p=0,
-/// linear between; v1 ignores pressure entirely.
+/// The shared pressure→width curve: full preset width at p=1, an absolute
+/// MIN_PRESSURE_WIDTH floor at p=0, linear between; v1 ignores pressure.
 #[test]
 fn rendered_width_follows_shared_curve() {
     let v2 = StrokeStyle::default_solid_round_pressure();
-    let w = DEFAULT_PEN_WIDTH;
+    let w = DEFAULT_PEN_WIDTH; // 4.0
+    let floor = MIN_PRESSURE_WIDTH; // 1.5, < 4.0
     assert_eq!(v2.rendered_width(Some(1.0)), w);
     assert_eq!(v2.rendered_width(None), w, "absent pressure = full width");
-    assert!((v2.rendered_width(Some(0.0)) - w * MIN_PRESSURE_WIDTH_FACTOR).abs() < 1e-9);
-    let mid = w * (MIN_PRESSURE_WIDTH_FACTOR + (1.0 - MIN_PRESSURE_WIDTH_FACTOR) * 0.5);
+    assert!((v2.rendered_width(Some(0.0)) - floor).abs() < 1e-9);
+    let mid = floor + (w - floor) * 0.5;
     assert!((v2.rendered_width(Some(0.5)) - mid).abs() < 1e-9);
     // Out-of-range pressure is clamped for *rendering* (validation rejects it
     // on the wire, but a renderer must stay in bounds defensively).
     assert_eq!(v2.rendered_width(Some(5.0)), w);
-    assert!((v2.rendered_width(Some(-1.0)) - w * MIN_PRESSURE_WIDTH_FACTOR).abs() < 1e-9);
+    assert!((v2.rendered_width(Some(-1.0)) - floor).abs() < 1e-9);
+
+    // The floor is absolute, so a wide pen tapers far below its preset width.
+    let mut wide = StrokeStyle::default_solid_round_pressure();
+    wide.parameters.width = 32.0;
+    assert!((wide.rendered_width(Some(0.0)) - floor).abs() < 1e-9);
+    assert_eq!(wide.rendered_width(Some(1.0)), 32.0);
+
+    // A pen thinner than the floor never exceeds its own preset (no taper range).
+    let mut thin = StrokeStyle::default_solid_round_pressure();
+    thin.parameters.width = 1.0;
+    assert_eq!(thin.rendered_width(Some(0.0)), 1.0);
+    assert_eq!(thin.rendered_width(Some(1.0)), 1.0);
 
     // v1 is constant regardless of pressure.
     let v1 = StrokeStyle::default_solid_round();

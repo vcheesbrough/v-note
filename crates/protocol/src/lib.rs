@@ -101,15 +101,18 @@ pub const DEFAULT_PEN_WIDTH: f64 = 4.0;
 pub const MIN_PEN_WIDTH: f64 = 1.0;
 pub const MAX_PEN_WIDTH: f64 = 32.0;
 
-/// Fraction of the preset width rendered at zero pressure. The shared,
-/// cross-platform pressure→width curve is linear in pressure `p`:
+/// Rendered nib diameter at zero pressure, in world logical pixels — an
+/// **absolute** floor, not a fraction of the preset. The shared, cross-platform
+/// pressure→width curve interpolates linearly from this floor up to the preset
+/// width, so a heavy pen still tapers to a thin line at light pressure:
 ///
-/// `width(p) = preset_width × (MIN_PRESSURE_WIDTH_FACTOR + (1 − MIN_PRESSURE_WIDTH_FACTOR) × p)`
+/// `width(p) = min_floor + (preset_width − min_floor) × p`,
+/// where `min_floor = min(MIN_PRESSURE_WIDTH, preset_width)`.
 ///
 /// This constant is the single source of truth for the curve; Android mirrors
 /// the same value in Kotlin. It is part of the v2 style's defined semantics,
 /// not a stored parameter.
-pub const MIN_PRESSURE_WIDTH_FACTOR: f64 = 0.35;
+pub const MIN_PRESSURE_WIDTH: f64 = 1.5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SolidRoundParameters {
@@ -164,13 +167,16 @@ impl StrokeStyle {
     /// width from here so geometry matches.
     ///
     /// - v1 styles: constant `width`, pressure ignored.
-    /// - v2 styles: `width × (MIN_PRESSURE_WIDTH_FACTOR + (1 − MIN_PRESSURE_WIDTH_FACTOR) × p)`,
-    ///   with `p` clamped to `0.0..=1.0`; a point with no pressure renders at
-    ///   full `width` (`p = 1.0`).
+    /// - v2 styles: linear interpolation from an absolute [`MIN_PRESSURE_WIDTH`]
+    ///   floor (capped at the preset for very thin pens) up to the preset
+    ///   `width`, with `p` clamped to `0.0..=1.0`; a point with no pressure
+    ///   renders at full `width` (`p = 1.0`).
     pub fn rendered_width(&self, pressure: Option<f64>) -> f64 {
         if self.is_pressure_sensitive() {
             let p = pressure.unwrap_or(1.0).clamp(0.0, 1.0);
-            self.parameters.width * (MIN_PRESSURE_WIDTH_FACTOR + (1.0 - MIN_PRESSURE_WIDTH_FACTOR) * p)
+            let preset = self.parameters.width;
+            let floor = MIN_PRESSURE_WIDTH.min(preset);
+            floor + (preset - floor) * p
         } else {
             self.parameters.width
         }
