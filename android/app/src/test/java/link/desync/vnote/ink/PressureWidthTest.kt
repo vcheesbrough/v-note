@@ -1,6 +1,6 @@
 package link.desync.vnote.ink
 
-import link.desync.vnote.auth.MIN_PRESSURE_WIDTH_FACTOR
+import link.desync.vnote.auth.MIN_PRESSURE_WIDTH
 import link.desync.vnote.auth.SOLID_ROUND_PRESSURE_STYLE_VERSION
 import link.desync.vnote.auth.SolidRoundParameters
 import link.desync.vnote.auth.StrokeStyle
@@ -27,12 +27,17 @@ class PressureWidthTest {
         assertTrue(v2.isPressureSensitive)
         assertEquals(4.0, v2.renderedWidth(1.0), 1e-9)
         assertEquals(4.0, v2.renderedWidth(null), 1e-9) // absent pressure = full width
-        assertEquals(4.0 * MIN_PRESSURE_WIDTH_FACTOR, v2.renderedWidth(0.0), 1e-9)
-        val mid = 4.0 * (MIN_PRESSURE_WIDTH_FACTOR + (1.0 - MIN_PRESSURE_WIDTH_FACTOR) * 0.5)
+        assertEquals(MIN_PRESSURE_WIDTH, v2.renderedWidth(0.0), 1e-9) // absolute floor
+        val mid = MIN_PRESSURE_WIDTH + (4.0 - MIN_PRESSURE_WIDTH) * 0.5
         assertEquals(mid, v2.renderedWidth(0.5), 1e-9)
         // Out-of-range pressure is clamped for rendering.
         assertEquals(4.0, v2.renderedWidth(5.0), 1e-9)
-        assertEquals(4.0 * MIN_PRESSURE_WIDTH_FACTOR, v2.renderedWidth(-1.0), 1e-9)
+        assertEquals(MIN_PRESSURE_WIDTH, v2.renderedWidth(-1.0), 1e-9)
+
+        // A wide pen still tapers to the same thin floor at light pressure.
+        val wide = v2.copy(parameters = v2.parameters.copy(width = 32.0))
+        assertEquals(MIN_PRESSURE_WIDTH, wide.renderedWidth(0.0), 1e-9)
+        assertEquals(32.0, wide.renderedWidth(1.0), 1e-9)
     }
 
     @Test

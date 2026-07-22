@@ -392,9 +392,10 @@ const val SOLID_ROUND_STYLE_VERSION = 1
 const val SOLID_ROUND_PRESSURE_STYLE_VERSION = 2
 
 // Shared, cross-platform pressure→width curve constant (see
-// `protocol::MIN_PRESSURE_WIDTH_FACTOR`). Zero-pressure ink renders at this
-// fraction of the preset width; the curve is linear in pressure.
-const val MIN_PRESSURE_WIDTH_FACTOR = 0.35
+// `protocol::MIN_PRESSURE_WIDTH`). Absolute rendered nib diameter (world logical
+// px) at zero pressure; the curve interpolates linearly from this floor up to
+// the preset width, so a heavy pen still tapers to a thin line.
+const val MIN_PRESSURE_WIDTH = 1.5
 
 // One captured stroke uses an immutable style snapshot captured at stylus-down.
 // The server accepts only the v3 solid_round style, but the discriminated shape
@@ -417,11 +418,14 @@ data class StrokeStyle(
 
     // Rendered nib diameter for a point carrying the given optional pressure.
     // Must stay identical to `protocol::StrokeStyle::rendered_width`. v1 is
-    // constant; v2 modulates linearly and treats null pressure as full width.
+    // constant; v2 interpolates linearly from an absolute MIN_PRESSURE_WIDTH
+    // floor (capped at the preset) up to the preset, treating null as full width.
     fun renderedWidth(pressure: Double?): Double =
         if (isPressureSensitive) {
             val p = (pressure ?: 1.0).coerceIn(0.0, 1.0)
-            parameters.width * (MIN_PRESSURE_WIDTH_FACTOR + (1.0 - MIN_PRESSURE_WIDTH_FACTOR) * p)
+            val preset = parameters.width
+            val floor = minOf(MIN_PRESSURE_WIDTH, preset)
+            floor + (preset - floor) * p
         } else {
             parameters.width
         }

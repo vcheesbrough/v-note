@@ -901,23 +901,68 @@ private fun DrawScope.drawInk(
         )
         return
     }
-    // Pressure-modulated (v2) ink: each segment is stroked at the mean of its
-    // endpoints' pressure widths (the shared curve). Round caps overlap adjacent
-    // segments so joins stay continuous with no visible pop on commit.
-    for (index in 0 until points.size - 1) {
-        val a = points[index]
-        val b = points[index + 1]
-        val segmentWidth =
-            ((style.renderedWidth(a.pressure) + style.renderedWidth(b.pressure)) / 2.0).toFloat()
-        val path = Path()
-        path.moveTo(a.x.toFloat(), a.y.toFloat())
-        path.lineTo(b.x.toFloat(), b.y.toFloat())
-        drawPath(
-            path = path,
-            color = color,
-            style = DrawStroke(width = segmentWidth, cap = StrokeCap.Round, join = StrokeJoin.Round),
-        )
+    // Pressure-modulated (v2) ink: build one filled variable-width ribbon and
+    // draw it in a single call. Per-segment stroking was O(points) draw calls
+    // per stroke, re-run for every committed stroke every frame — the source of
+    // the multi-stroke latency. A single fill restores ~constant-width cost.
+    drawPath(path = buildPressureRibbon(points, style), color = color)
+}
+
+// One filled polygon approximating a variable-width stroke: walk the left offset
+// forward, then the right offset back, and close (flat end caps). Per-vertex
+// averaged normals keep joins smooth. Filled once (NonZero), this replaces the
+// O(points) per-segment stroking that scaled badly across many strokes.
+private fun buildPressureRibbon(points: List<StrokePoint>, style: StrokeStyle): Path {
+    val n = points.size
+    val px = FloatArray(n) { points[it].x.toFloat() }
+    val py = FloatArray(n) { points[it].y.toFloat() }
+    val radius = FloatArray(n) { (style.renderedWidth(points[it].pressure) / 2.0).toFloat() }
+
+    // Left-side unit normal per vertex, averaged from the incident segments so
+    // the offset edges meet smoothly at joins.
+    val nx = FloatArray(n)
+    val ny = FloatArray(n)
+    for (i in 0 until n) {
+        var ax = 0f
+        var ay = 0f
+        if (i > 0) {
+            val dx = px[i] - px[i - 1]
+            val dy = py[i] - py[i - 1]
+            val len = sqrt(dx * dx + dy * dy)
+            if (len > 1e-3f) {
+                ax += -dy / len
+                ay += dx / len
+            }
+        }
+        if (i < n - 1) {
+            val dx = px[i + 1] - px[i]
+            val dy = py[i + 1] - py[i]
+            val len = sqrt(dx * dx + dy * dy)
+            if (len > 1e-3f) {
+                ax += -dy / len
+                ay += dx / len
+            }
+        }
+        val len = sqrt(ax * ax + ay * ay)
+        if (len > 1e-3f) {
+            nx[i] = ax / len
+            ny[i] = ay / len
+        } else {
+            nx[i] = 0f
+            ny[i] = 1f
+        }
     }
+
+    val path = Path()
+    path.moveTo(px[0] + nx[0] * radius[0], py[0] + ny[0] * radius[0])
+    for (i in 1 until n) {
+        path.lineTo(px[i] + nx[i] * radius[i], py[i] + ny[i] * radius[i])
+    }
+    for (i in n - 1 downTo 0) {
+        path.lineTo(px[i] - nx[i] * radius[i], py[i] - ny[i] * radius[i])
+    }
+    path.close()
+    return path
 }
 
 private fun parseColor(value: String): Color = Color(android.graphics.Color.parseColor(value))
