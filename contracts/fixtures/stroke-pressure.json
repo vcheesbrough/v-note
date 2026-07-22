@@ -1,0 +1,10 @@
+{
+  "id": "stroke_pressure_fixture_1",
+  "style": { "tool_kind": "solid_round", "style_version": 2, "parameters": { "color": "#006400", "width": 8.0, "cap_style": "round", "join_style": "round" } },
+  "points": [
+    { "x": 10.0, "y": 20.0, "t": 0, "pressure": 0.0 },
+    { "x": 30.0, "y": 25.0, "t": 16, "pressure": 0.5 },
+    { "x": 50.0, "y": 40.0, "t": 32, "pressure": 1.0 },
+    { "x": 70.0, "y": 55.0, "t": 48 }
+  ]
+}

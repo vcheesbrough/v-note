@@ -385,6 +385,106 @@ test.describe('ink page channel', () => {
     await expect(page.getByText(/Live · seq 1|Synced · seq 1/)).toBeVisible({ timeout: 1_000 });
   });
 
+  test('SPA replays a v2 pressure stroke with variable width', async ({ page, request }) => {
+    const title = uniqueTitle('ink-spa-pressure');
+    const pageId = await createPage(request, title);
+
+    const openPage = page.getByRole('button', { name: `Open ${title}`, exact: true });
+    await openPage.waitFor({ state: 'visible', timeout: 5_000 }).catch(async () => {
+      await page.reload({ waitUntil: 'load' });
+      await expect(openPage).toBeVisible({ timeout: 5_000 });
+    });
+    await openPage.click();
+    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+
+    const ticket = await realtimeTicket(request);
+    const result = await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 150,
+          message: { type: 'commit-batch', client_batch_id: 'batch_spa_pressure', strokes: pressureRampStroke() },
+        },
+      ],
+      settleMs: 300,
+    });
+    expect(result.messages.some((m) => m.type === 'stroke-batch' && m.client_batch_id === 'batch_spa_pressure')).toBeTruthy();
+
+    // The SPA opens zoomed out (fixed MIN_CANVAS_SCALE), so the ramp is only a
+    // few px tall — per-column thickness would be antialiasing noise. Instead sum
+    // green *area* in the low-pressure third vs the high-pressure third of the
+    // stroke: the high third covers more ink, integrated over many columns.
+    const handle = await page.waitForFunction(() => {
+      const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="ink-canvas"]');
+      if (!canvas) return null;
+      const context = canvas.getContext('2d');
+      if (!context) return null;
+      const { width, height } = canvas;
+      const data = context.getImageData(0, 0, width, height).data;
+      const isGreen = (i: number) =>
+        data[i + 3] > 0 && data[i] < 40 && data[i + 1] > 60 && data[i + 1] < 140 && data[i + 2] < 40;
+      const perColumn = new Map<number, number>();
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let total = 0;
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          if (isGreen((y * width + x) * 4)) {
+            perColumn.set(x, (perColumn.get(x) ?? 0) + 1);
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            total += 1;
+          }
+        }
+      }
+      const span = maxX - minX;
+      if (span < 20 || total < 20) return null; // wait until the whole ramp is drawn
+      const third = span / 3;
+      let low = 0;
+      let high = 0;
+      for (const [x, count] of perColumn) {
+        if (x <= minX + third) low += count;
+        else if (x >= maxX - third) high += count;
+      }
+      return { low, high };
+    }, null, { timeout: 3_000 });
+    const { low, high } = (await handle.jsonValue()) as { low: number; high: number };
+    expect(low, 'low-pressure third rendered some ink').toBeGreaterThan(3);
+    expect(high, `high-pressure third area (${high}px) must exceed low third (${low}px)`).toBeGreaterThan(low * 1.25);
+  });
+
+  test('server rejects pressure on a v1 stroke and out-of-range v2 pressure', async ({ page, request }) => {
+    const pageId = await createPage(request, uniqueTitle('ink-pressure-reject'));
+    const ticket = await realtimeTicket(request);
+    const badV1 = {
+      id: `stroke-${crypto.randomUUID()}`,
+      style: { tool_kind: 'solid_round', style_version: 1, parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' } },
+      points: [{ x: 0.0, y: 0.0, t: 0, pressure: 0.5 }, { x: 10.0, y: 10.0, t: 5, pressure: 0.5 }],
+    };
+    const badV2 = {
+      id: `stroke-${crypto.randomUUID()}`,
+      style: { tool_kind: 'solid_round', style_version: 2, parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' } },
+      points: [{ x: 0.0, y: 0.0, t: 0, pressure: 1.5 }],
+    };
+    const result = await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'bad-v1-pressure', strokes: [badV1] } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'bad-v2-pressure', strokes: [badV2] } },
+      ],
+      settleMs: 400,
+    });
+    const errors = result.messages.filter((m) => m.type === 'error' && m.code === 'invalid_stroke_style');
+    expect(errors.length, 'both invalid-pressure commits are rejected').toBeGreaterThanOrEqual(2);
+    // Neither rejected batch is sequenced/persisted.
+    expect(result.messages.some((m) => m.type === 'stroke-batch' && (m.client_batch_id === 'bad-v1-pressure' || m.client_batch_id === 'bad-v2-pressure'))).toBeFalsy();
+  });
+
   test('blocks a second session from inking while the lease is held', async ({ page, request }) => {
     const pageId = await createPage(request, uniqueTitle('ink-lease'));
     const ticketA = await realtimeTicket(request);
@@ -533,6 +633,28 @@ function sampleStrokes(id = `stroke-${crypto.randomUUID()}`) {
         { x: 5.0, y: 6.0, t: 0 },
         { x: 7.0, y: 8.0, t: 12 },
       ],
+    },
+  ];
+}
+
+// A long horizontal v2 stroke whose pressure ramps 0 → 1 across many coalesced
+// samples; wide enough that the low- vs high-pressure width difference is
+// unmistakable once the SPA rasterizes it.
+function pressureRampStroke(id = `stroke-${crypto.randomUUID()}`) {
+  const samples = 33;
+  const points = Array.from({ length: samples }, (_, index) => {
+    const fraction = index / (samples - 1);
+    return { x: 40.0 + 720.0 * fraction, y: 140.0, t: index, pressure: fraction };
+  });
+  return [
+    {
+      id,
+      style: {
+        tool_kind: 'solid_round',
+        style_version: 2,
+        parameters: { color: '#006400', width: 32.0, cap_style: 'round', join_style: 'round' },
+      },
+      points,
     },
   ];
 }

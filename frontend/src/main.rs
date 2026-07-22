@@ -637,6 +637,8 @@ fn draw_canvas(
     }
 }
 
+const MIN_RENDERED_STROKE_WIDTH: f64 = 0.75;
+
 fn draw_stroke(
     context: &CanvasRenderingContext2d,
     stroke: &Stroke,
@@ -644,10 +646,16 @@ fn draw_stroke(
     offset_y: f64,
     scale: f64,
 ) {
-    const MIN_RENDERED_STROKE_WIDTH: f64 = 0.75;
+    context.set_stroke_style_str(&stroke.style.parameters.color);
+
+    // Pressure-modulated (v2) strokes replay as per-segment variable-width
+    // paths; v1 keeps the single constant-width path below byte-identical.
+    if stroke.style.is_pressure_sensitive() {
+        draw_pressure_stroke(context, stroke, offset_x, offset_y, scale);
+        return;
+    }
 
     context.begin_path();
-    context.set_stroke_style_str(&stroke.style.parameters.color);
     context.set_line_width((stroke.style.parameters.width * scale).max(MIN_RENDERED_STROKE_WIDTH));
     if let Some(first) = stroke.points.first() {
         context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
@@ -656,6 +664,29 @@ fn draw_stroke(
         }
     }
     context.stroke();
+}
+
+/// Replay one v2 stroke as a chain of round-capped segments, each stroked at the
+/// mean of its endpoints' pressure widths (the shared curve in `protocol`).
+/// Round caps overlap consecutive segments so joins stay continuous.
+fn draw_pressure_stroke(
+    context: &CanvasRenderingContext2d,
+    stroke: &Stroke,
+    offset_x: f64,
+    offset_y: f64,
+    scale: f64,
+) {
+    let style = &stroke.style;
+    for pair in stroke.points.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let width =
+            (style.rendered_width(a.pressure) + style.rendered_width(b.pressure)) / 2.0 * scale;
+        context.begin_path();
+        context.set_line_width(width.max(MIN_RENDERED_STROKE_WIDTH));
+        context.move_to(a.x * scale + offset_x, a.y * scale + offset_y);
+        context.line_to(b.x * scale + offset_x, b.y * scale + offset_y);
+        context.stroke();
+    }
 }
 
 async fn load_pages(

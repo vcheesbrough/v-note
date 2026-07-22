@@ -376,12 +376,26 @@ private fun parseLibraryEvent(json: JSONObject): LibraryEvent =
 // ---- Canonical ink (world-space strokes) ---------------------------------
 
 // A single stroke sample in world/document coordinates. `t` is milliseconds
-// relative to the start of the stroke. MVP omits pressure.
+// relative to the start of the stroke. `pressure` is a normalised 0.0..1.0
+// value present only on pressure-sensitive (solid_round v2) strokes; v1 strokes
+// leave it null. A v2 point with null pressure renders at full width.
 data class StrokePoint(
     val x: Double,
     val y: Double,
     val t: Long,
+    val pressure: Double? = null,
 )
+
+// solid_round style discriminator versions, mirrored from `crates/protocol`.
+const val SOLID_ROUND_TOOL = "solid_round"
+const val SOLID_ROUND_STYLE_VERSION = 1
+const val SOLID_ROUND_PRESSURE_STYLE_VERSION = 2
+
+// Shared, cross-platform pressure→width curve constant (see
+// `protocol::MIN_PRESSURE_WIDTH`). Absolute rendered nib diameter (world logical
+// px) at zero pressure; the curve interpolates linearly from this floor up to
+// the preset width, so a heavy pen still tapers to a thin line.
+const val MIN_PRESSURE_WIDTH = 1.5
 
 // One captured stroke uses an immutable style snapshot captured at stylus-down.
 // The server accepts only the v3 solid_round style, but the discriminated shape
@@ -394,10 +408,28 @@ data class SolidRoundParameters(
 )
 
 data class StrokeStyle(
-    val toolKind: String = "solid_round",
-    val styleVersion: Int = 1,
+    val toolKind: String = SOLID_ROUND_TOOL,
+    val styleVersion: Int = SOLID_ROUND_STYLE_VERSION,
     val parameters: SolidRoundParameters = SolidRoundParameters(),
-)
+) {
+    // True when this style modulates rendered width by per-point pressure.
+    val isPressureSensitive: Boolean
+        get() = toolKind == SOLID_ROUND_TOOL && styleVersion == SOLID_ROUND_PRESSURE_STYLE_VERSION
+
+    // Rendered nib diameter for a point carrying the given optional pressure.
+    // Must stay identical to `protocol::StrokeStyle::rendered_width`. v1 is
+    // constant; v2 interpolates linearly from an absolute MIN_PRESSURE_WIDTH
+    // floor (capped at the preset) up to the preset, treating null as full width.
+    fun renderedWidth(pressure: Double?): Double =
+        if (isPressureSensitive) {
+            val p = (pressure ?: 1.0).coerceIn(0.0, 1.0)
+            val preset = parameters.width
+            val floor = minOf(MIN_PRESSURE_WIDTH, preset)
+            floor + (preset - floor) * p
+        } else {
+            parameters.width
+        }
+}
 
 data class Stroke(
     val points: List<StrokePoint>,
@@ -547,6 +579,12 @@ private fun parseStroke(json: JSONObject): Stroke {
                         x = point.getDouble("x"),
                         y = point.getDouble("y"),
                         t = point.getLong("t"),
+                        pressure =
+                            if (point.has("pressure") && !point.isNull("pressure")) {
+                                point.getDouble("pressure")
+                            } else {
+                                null
+                            },
                     ),
                 )
             }
@@ -593,12 +631,15 @@ private fun encodeCommitBatch(
     for (stroke in strokes) {
         val pointsArray = org.json.JSONArray()
         for (point in stroke.points) {
-            pointsArray.put(
+            val pointJson =
                 JSONObject()
                     .put("x", point.x)
                     .put("y", point.y)
-                    .put("t", point.t),
-            )
+                    .put("t", point.t)
+            // Emit pressure only when present, so v1 strokes stay byte-identical
+            // on the wire (absent, never `null`).
+            point.pressure?.let { pointJson.put("pressure", it) }
+            pointsArray.put(pointJson)
         }
         strokesArray.put(
             JSONObject()
