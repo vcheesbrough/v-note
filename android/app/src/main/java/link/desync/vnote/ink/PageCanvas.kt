@@ -901,6 +901,23 @@ private fun DrawScope.drawInk(
         )
         return
     }
+    // A tap/dot commits (near-)coincident points; the ribbon would collapse to a
+    // zero-area sliver and vanish. If the stroke's extent is smaller than its own
+    // nib, render a dot at the largest pressure width (v1 drew these via round
+    // caps).
+    val minX = points.minOf { it.x }
+    val maxX = points.maxOf { it.x }
+    val minY = points.minOf { it.y }
+    val maxY = points.maxOf { it.y }
+    val maxWidth = points.maxOf { style.renderedWidth(it.pressure) }
+    if (maxOf(maxX - minX, maxY - minY) < maxWidth) {
+        drawCircle(
+            color = color,
+            radius = (maxWidth / 2.0).toFloat(),
+            center = Offset(((minX + maxX) / 2.0).toFloat(), ((minY + maxY) / 2.0).toFloat()),
+        )
+        return
+    }
     // Pressure-modulated (v2) ink: build one filled variable-width ribbon and
     // draw it in a single call. Per-segment stroking was O(points) draw calls
     // per stroke, re-run for every committed stroke every frame — the source of
