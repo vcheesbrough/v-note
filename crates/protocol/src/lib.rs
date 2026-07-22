@@ -84,15 +84,35 @@ pub enum LibraryEvent {
 // is reserved on each point so post-MVP pressure/tilt curves extend the schema
 // without breaking v1 strokes (see `docs/PLAN.md` → Stroke tool).
 
-/// The only style accepted by protocol v3. Stored styles deliberately carry a
-/// discriminator and version so later rendering models cannot reinterpret
-/// historical ink.
+/// Stored styles deliberately carry a discriminator and version so later
+/// rendering models cannot reinterpret historical ink.
 pub const SOLID_ROUND_TOOL: &str = "solid_round";
+/// `solid_round` v1: constant-width nib. Stylus pressure is ignored and MUST
+/// NOT appear on points. Historical (pre-iteration-17) ink is all v1 and is
+/// rendered identically forever.
 pub const SOLID_ROUND_STYLE_VERSION: u32 = 1;
+/// `solid_round` v2: pressure-modulated nib width (see [`StrokeStyle::rendered_width`]).
+/// Points MAY carry a normalised `pressure` in `0.0..=1.0`; the same colour,
+/// width bounds, and round cap/join rules as v1 apply. The `width` parameter is
+/// the full-pressure (`p = 1.0`) diameter.
+pub const SOLID_ROUND_PRESSURE_STYLE_VERSION: u32 = 2;
 pub const DEFAULT_PEN_COLOR: &str = "#006400";
 pub const DEFAULT_PEN_WIDTH: f64 = 4.0;
 pub const MIN_PEN_WIDTH: f64 = 1.0;
 pub const MAX_PEN_WIDTH: f64 = 32.0;
+
+/// Rendered nib diameter at zero pressure, in world logical pixels — an
+/// **absolute** floor, not a fraction of the preset. The shared, cross-platform
+/// pressure→width curve interpolates linearly from this floor up to the preset
+/// width, so a heavy pen still tapers to a thin line at light pressure:
+///
+/// `width(p) = min_floor + (preset_width − min_floor) × p`,
+/// where `min_floor = min(MIN_PRESSURE_WIDTH, preset_width)`.
+///
+/// This constant is the single source of truth for the curve; Android mirrors
+/// the same value in Kotlin. It is part of the v2 style's defined semantics,
+/// not a stored parameter.
+pub const MIN_PRESSURE_WIDTH: f64 = 1.5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SolidRoundParameters {
@@ -110,6 +130,8 @@ pub struct StrokeStyle {
 }
 
 impl StrokeStyle {
+    /// Constant-width v1 pen (dark green, 4px). Historical default; never
+    /// modulates pressure.
     pub fn default_solid_round() -> Self {
         Self {
             tool_kind: SOLID_ROUND_TOOL.to_string(),
@@ -123,8 +145,50 @@ impl StrokeStyle {
         }
     }
 
+    /// Pressure-modulated v2 pen with the same default colour and width; the
+    /// `width` is the full-pressure (`p = 1.0`) diameter.
+    pub fn default_solid_round_pressure() -> Self {
+        Self {
+            style_version: SOLID_ROUND_PRESSURE_STYLE_VERSION,
+            ..Self::default_solid_round()
+        }
+    }
+
+    /// True when this style modulates rendered width by per-point pressure
+    /// (`solid_round` v2). v1 styles ignore pressure entirely.
+    pub fn is_pressure_sensitive(&self) -> bool {
+        self.tool_kind == SOLID_ROUND_TOOL
+            && self.style_version == SOLID_ROUND_PRESSURE_STYLE_VERSION
+    }
+
+    /// Rendered nib diameter (world-space logical pixels) for a point carrying
+    /// the given optional pressure. This is the single, shared cross-platform
+    /// curve — every renderer (thumbnails, SPA, Android) must derive per-point
+    /// width from here so geometry matches.
+    ///
+    /// - v1 styles: constant `width`, pressure ignored.
+    /// - v2 styles: linear interpolation from an absolute [`MIN_PRESSURE_WIDTH`]
+    ///   floor (capped at the preset for very thin pens) up to the preset
+    ///   `width`, with `p` clamped to `0.0..=1.0`; a point with no pressure
+    ///   renders at full `width` (`p = 1.0`).
+    pub fn rendered_width(&self, pressure: Option<f64>) -> f64 {
+        if self.is_pressure_sensitive() {
+            let p = pressure.unwrap_or(1.0).clamp(0.0, 1.0);
+            let preset = self.parameters.width;
+            let floor = MIN_PRESSURE_WIDTH.min(preset);
+            floor + (preset - floor) * p
+        } else {
+            self.parameters.width
+        }
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.tool_kind != SOLID_ROUND_TOOL || self.style_version != SOLID_ROUND_STYLE_VERSION {
+        if self.tool_kind != SOLID_ROUND_TOOL
+            || !matches!(
+                self.style_version,
+                SOLID_ROUND_STYLE_VERSION | SOLID_ROUND_PRESSURE_STYLE_VERSION
+            )
+        {
             return Err("unsupported style");
         }
         let parameters = &self.parameters;
@@ -157,7 +221,10 @@ pub struct StrokePoint {
     pub y: f64,
     /// Milliseconds relative to the start of the stroke.
     pub t: i64,
-    /// MVP omits pressure; reserved for post-MVP pressure/tilt curves.
+    /// Normalised stylus pressure in `0.0..=1.0`. Present only on
+    /// pressure-sensitive (`solid_round` v2) strokes; v1 strokes omit it. A v2
+    /// point without pressure renders at full width (see
+    /// [`StrokeStyle::rendered_width`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pressure: Option<f64>,
 }
@@ -169,6 +236,32 @@ pub struct Stroke {
     /// Immutable style snapshot captured at stylus-down.
     pub style: StrokeStyle,
     pub points: Vec<StrokePoint>,
+}
+
+impl Stroke {
+    /// Validate the style and the per-point pressure invariants together:
+    /// pressure may appear only on pressure-sensitive (v2) styles, and only as
+    /// a finite value in `0.0..=1.0`. Out-of-range or misplaced pressure is
+    /// rejected, never silently clamped — mirroring the width/colour posture in
+    /// [`StrokeStyle::validate`].
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.style.validate()?;
+        let allows_pressure = self.style.is_pressure_sensitive();
+        for point in &self.points {
+            match point.pressure {
+                None => {}
+                Some(_) if !allows_pressure => {
+                    return Err("pressure is only permitted on pressure-sensitive styles");
+                }
+                Some(pressure) => {
+                    if !pressure.is_finite() || !(0.0..=1.0).contains(&pressure) {
+                        return Err("pressure must be finite in 0.0..=1.0");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A persisted, server-sequenced batch of coalesced strokes on a page.

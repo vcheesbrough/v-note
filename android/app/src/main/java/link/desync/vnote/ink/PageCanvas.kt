@@ -449,7 +449,13 @@ private fun InkCanvas(
                             liveStroke.clear()
                             liveEraserPath.clear()
                             erasedThisGesture.clear()
-                            val point = event.toWorldPoint(viewport, stylusStartTime)
+                            val sensitive = capturedDrawingStyle?.isPressureSensitive == true
+                            val point =
+                                event.toWorldPoint(
+                                    viewport,
+                                    stylusStartTime,
+                                    event.capturedPressure(sensitive),
+                                )
                             if (activeStylusTool == CanvasTool.Drawing) {
                                 liveStroke.add(point)
                             } else {
@@ -470,12 +476,30 @@ private fun InkCanvas(
                             if (activeStylusTool == null) {
                                 return@pointerInteropFilter false
                             }
-                            val point = event.toWorldPoint(viewport, stylusStartTime)
                             if (activeStylusTool == CanvasTool.Drawing) {
-                                liveStroke.add(point)
+                                val sensitive = capturedDrawingStyle?.isPressureSensitive == true
+                                // Replay coalesced samples in order, then the
+                                // current one — preserving fast pressure changes.
+                                for (h in 0 until event.historySize) {
+                                    liveStroke.add(
+                                        event.historicalWorldPoint(
+                                            h,
+                                            viewport,
+                                            stylusStartTime,
+                                            event.capturedHistoricalPressure(h, sensitive),
+                                        ),
+                                    )
+                                }
+                                liveStroke.add(
+                                    event.toWorldPoint(
+                                        viewport,
+                                        stylusStartTime,
+                                        event.capturedPressure(sensitive),
+                                    ),
+                                )
                             } else {
                                 eraseAtPoint(
-                                    point,
+                                    event.toWorldPoint(viewport, stylusStartTime),
                                     liveEraserPath,
                                     strokes,
                                     erasedThisGesture,
@@ -487,7 +511,13 @@ private fun InkCanvas(
                         }
                         MotionEvent.ACTION_UP -> {
                             val tool = activeStylusTool ?: return@pointerInteropFilter false
-                            val point = event.toWorldPoint(viewport, stylusStartTime)
+                            val sensitive = capturedDrawingStyle?.isPressureSensitive == true
+                            val point =
+                                event.toWorldPoint(
+                                    viewport,
+                                    stylusStartTime,
+                                    event.capturedPressure(sensitive),
+                                )
                             if (tool == CanvasTool.Drawing) {
                                 liveStroke.add(point)
                                 val captured = liveStroke.toList()
@@ -559,7 +589,7 @@ private fun InkCanvas(
             for (stroke in strokes) {
                 drawInk(
                     stroke.points,
-                    stroke.style.parameters.width.toFloat(),
+                    stroke.style,
                     parseColor(stroke.style.parameters.color),
                 )
             }
@@ -567,7 +597,7 @@ private fun InkCanvas(
                 val liveStyle = capturedDrawingStyle ?: drawingStyle
                 drawInk(
                     liveStroke,
-                    liveStyle.parameters.width.toFloat(),
+                    liveStyle,
                     parseColor(liveStyle.parameters.color),
                 )
             }
@@ -697,10 +727,47 @@ private fun disarmEraserOnLift(
 private fun MotionEvent.toWorldPoint(
     viewport: ViewportTransform,
     startTime: Long,
+    pressure: Double? = null,
 ): StrokePoint {
     val world = viewport.toWorld(Offset(x, y))
-    return StrokePoint(world.x.toDouble(), world.y.toDouble(), eventTime - startTime)
+    return StrokePoint(world.x.toDouble(), world.y.toDouble(), eventTime - startTime, pressure)
 }
+
+// World-space sample for a historical (coalesced) pointer position in this
+// event. Between frames Android batches several samples; capturing them keeps
+// fast pressure changes and fine geometry from being lost.
+private fun MotionEvent.historicalWorldPoint(
+    index: Int,
+    viewport: ViewportTransform,
+    startTime: Long,
+    pressure: Double?,
+): StrokePoint {
+    val world = viewport.toWorld(Offset(getHistoricalX(index), getHistoricalY(index)))
+    return StrokePoint(
+        world.x.toDouble(),
+        world.y.toDouble(),
+        getHistoricalEventTime(index) - startTime,
+        pressure,
+    )
+}
+
+// Normalise a raw stylus pressure sample for the wire: null when the active
+// style ignores pressure (v1), otherwise clamped to 0.0..1.0 (raw pressure can
+// exceed 1.0 on some devices, and NaN must never reach the contract).
+internal fun normalizePressure(
+    raw: Float,
+    sensitive: Boolean,
+): Double? {
+    if (!sensitive) return null
+    if (raw.isNaN()) return 0.0
+    return raw.toDouble().coerceIn(0.0, 1.0)
+}
+
+private fun MotionEvent.capturedPressure(sensitive: Boolean): Double? =
+    normalizePressure(pressure, sensitive)
+
+private fun MotionEvent.capturedHistoricalPressure(index: Int, sensitive: Boolean): Double? =
+    normalizePressure(getHistoricalPressure(index), sensitive)
 
 private fun eraseAtPoint(
     point: StrokePoint,
@@ -800,7 +867,7 @@ private fun toWorldPoint(
 
 private fun DrawScope.drawInk(
     points: List<StrokePoint>,
-    width: Float,
+    style: StrokeStyle,
     color: Color,
 ) {
     if (points.isEmpty()) {
@@ -809,21 +876,110 @@ private fun DrawScope.drawInk(
     if (points.size == 1) {
         drawCircle(
             color = color,
-            radius = width / 2f,
+            radius = (style.renderedWidth(points[0].pressure) / 2.0).toFloat(),
             center = Offset(points[0].x.toFloat(), points[0].y.toFloat()),
         )
         return
     }
-    val path = Path()
-    path.moveTo(points[0].x.toFloat(), points[0].y.toFloat())
-    for (index in 1 until points.size) {
-        path.lineTo(points[index].x.toFloat(), points[index].y.toFloat())
+    // Constant-width (v1) ink: a single round-capped polyline. Byte-identical to
+    // the pre-pressure renderer.
+    if (!style.isPressureSensitive) {
+        val path = Path()
+        path.moveTo(points[0].x.toFloat(), points[0].y.toFloat())
+        for (index in 1 until points.size) {
+            path.lineTo(points[index].x.toFloat(), points[index].y.toFloat())
+        }
+        drawPath(
+            path = path,
+            color = color,
+            style =
+                DrawStroke(
+                    width = style.parameters.width.toFloat(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round,
+                ),
+        )
+        return
     }
-    drawPath(
-        path = path,
-        color = color,
-        style = DrawStroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round),
-    )
+    // A tap/dot commits (near-)coincident points; the ribbon would collapse to a
+    // zero-area sliver and vanish. If the stroke's extent is smaller than its own
+    // nib, render a dot at the largest pressure width (v1 drew these via round
+    // caps).
+    val minX = points.minOf { it.x }
+    val maxX = points.maxOf { it.x }
+    val minY = points.minOf { it.y }
+    val maxY = points.maxOf { it.y }
+    val maxWidth = points.maxOf { style.renderedWidth(it.pressure) }
+    if (maxOf(maxX - minX, maxY - minY) < maxWidth) {
+        drawCircle(
+            color = color,
+            radius = (maxWidth / 2.0).toFloat(),
+            center = Offset(((minX + maxX) / 2.0).toFloat(), ((minY + maxY) / 2.0).toFloat()),
+        )
+        return
+    }
+    // Pressure-modulated (v2) ink: build one filled variable-width ribbon and
+    // draw it in a single call. Per-segment stroking was O(points) draw calls
+    // per stroke, re-run for every committed stroke every frame — the source of
+    // the multi-stroke latency. A single fill restores ~constant-width cost.
+    drawPath(path = buildPressureRibbon(points, style), color = color)
+}
+
+// One filled polygon approximating a variable-width stroke: walk the left offset
+// forward, then the right offset back, and close (flat end caps). Per-vertex
+// averaged normals keep joins smooth. Filled once (NonZero), this replaces the
+// O(points) per-segment stroking that scaled badly across many strokes.
+private fun buildPressureRibbon(points: List<StrokePoint>, style: StrokeStyle): Path {
+    val n = points.size
+    val px = FloatArray(n) { points[it].x.toFloat() }
+    val py = FloatArray(n) { points[it].y.toFloat() }
+    val radius = FloatArray(n) { (style.renderedWidth(points[it].pressure) / 2.0).toFloat() }
+
+    // Left-side unit normal per vertex, averaged from the incident segments so
+    // the offset edges meet smoothly at joins.
+    val nx = FloatArray(n)
+    val ny = FloatArray(n)
+    for (i in 0 until n) {
+        var ax = 0f
+        var ay = 0f
+        if (i > 0) {
+            val dx = px[i] - px[i - 1]
+            val dy = py[i] - py[i - 1]
+            val len = sqrt(dx * dx + dy * dy)
+            if (len > 1e-3f) {
+                ax += -dy / len
+                ay += dx / len
+            }
+        }
+        if (i < n - 1) {
+            val dx = px[i + 1] - px[i]
+            val dy = py[i + 1] - py[i]
+            val len = sqrt(dx * dx + dy * dy)
+            if (len > 1e-3f) {
+                ax += -dy / len
+                ay += dx / len
+            }
+        }
+        val len = sqrt(ax * ax + ay * ay)
+        if (len > 1e-3f) {
+            nx[i] = ax / len
+            ny[i] = ay / len
+        } else {
+            nx[i] = 0f
+            ny[i] = 1f
+        }
+    }
+
+    val path = Path()
+    path.moveTo(px[0] + nx[0] * radius[0], py[0] + ny[0] * radius[0])
+    for (i in 1 until n) {
+        path.lineTo(px[i] + nx[i] * radius[i], py[i] + ny[i] * radius[i])
+    }
+    for (i in n - 1 downTo 0) {
+        path.lineTo(px[i] - nx[i] * radius[i], py[i] - ny[i] * radius[i])
+    }
+    path.close()
+    return path
 }
 
 private fun parseColor(value: String): Color = Color(android.graphics.Color.parseColor(value))

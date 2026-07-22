@@ -516,13 +516,14 @@ async fn handle_page_client_message(
             }
             if strokes
                 .iter()
-                .any(|stroke| stroke.id.is_empty() || stroke.style.validate().is_err())
+                .any(|stroke| stroke.id.is_empty() || stroke.validate().is_err())
             {
                 return send_page(
                     sender,
                     PageServerMessage::Error {
                         code: "invalid_stroke_style".to_string(),
-                        message: "strokes require a supported immutable solid_round style"
+                        message: "strokes require a supported immutable solid_round style \
+                                  with in-range pressure"
                             .to_string(),
                         client_mutation_id: None,
                     },
