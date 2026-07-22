@@ -135,8 +135,12 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
 }
 
 fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
+    // Bound only the strokes actually drawn below (the loop skips the same set):
+    // a skipped invalid stroke with far-away points must not stretch the scale
+    // and shrink the valid ink.
     let points: Vec<_> = strokes
         .iter()
+        .filter(|stroke| !stroke.points.is_empty() && stroke.validate().is_ok())
         .flat_map(|stroke| stroke.points.iter())
         .collect();
     let (min_x, max_x, min_y, max_y) = points.iter().fold(
@@ -251,10 +255,30 @@ fn render_pressure_stroke(
     // Screen-space nib diameter for a point, using the shared width curve.
     let nib_px = |pressure: Option<f64>| style.rendered_width(pressure) as f32 * scale * boost;
 
-    if stroke.points.len() == 1 {
-        let point = &stroke.points[0];
-        let radius_world = nib_px(point.pressure) / (2.0 * scale);
-        if let Some(dot) = PathBuilder::from_circle(point.x as f32, point.y as f32, radius_world) {
+    // Dot-like strokes (single point, or a tap whose extent is smaller than its
+    // own nib) collapse the per-segment ribbon to nothing — render a dot at the
+    // largest pressure width instead, matching the Android renderer.
+    let (min_x, max_x, min_y, max_y) = stroke.points.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+        |(min_x, max_x, min_y, max_y), point| {
+            (
+                min_x.min(point.x),
+                max_x.max(point.x),
+                min_y.min(point.y),
+                max_y.max(point.y),
+            )
+        },
+    );
+    let extent = (max_x - min_x).max(max_y - min_y) as f32;
+    let max_nib = stroke
+        .points
+        .iter()
+        .map(|point| nib_px(point.pressure))
+        .fold(0.0_f32, f32::max);
+    if stroke.points.len() == 1 || extent * scale < max_nib {
+        let center_x = ((min_x + max_x) / 2.0) as f32;
+        let center_y = ((min_y + max_y) / 2.0) as f32;
+        if let Some(dot) = PathBuilder::from_circle(center_x, center_y, max_nib / (2.0 * scale)) {
             pixmap.fill_path(&dot, paint, FillRule::Winding, transform, None);
         }
         return;
@@ -414,6 +438,26 @@ mod tests {
         );
     }
 
+    /// A v2 tap (coincident down/up points) must still render as a dot, not
+    /// collapse the per-segment ribbon to nothing.
+    #[test]
+    fn pressure_tap_renders_as_dot() {
+        let bytes = render(&[Stroke {
+            id: "v2_tap".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![
+                StrokePoint { x: 50.0, y: 50.0, t: 0, pressure: Some(1.0) },
+                StrokePoint { x: 50.0, y: 50.0, t: 8, pressure: Some(1.0) },
+            ],
+        }])
+        .expect("thumbnail should render");
+        let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
+        let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
+        // A visible, roughly round blob (not an empty thumbnail).
+        assert!((max_x - min_x + 1) >= 10, "tap dot has visible width");
+        assert!((max_y - min_y + 1) >= 10, "tap dot has visible height");
+    }
+
     /// At full pressure a v2 stroke reaches the same nib width as the constant v1
     /// pen — the pressure model only *narrows* below the preset width.
     #[test]
@@ -444,6 +488,41 @@ mod tests {
         assert!(
             v2_dot.abs_diff(v1_dot) <= 1,
             "full-pressure v2 dot {v2_dot}px should match v1 dot {v1_dot}px"
+        );
+    }
+
+    /// A skipped (invalid) stroke far off-canvas must not stretch the bounding
+    /// box and shrink the valid ink that is actually drawn.
+    #[test]
+    fn invalid_strokes_excluded_from_thumbnail_bounds() {
+        let valid = Stroke {
+            id: "valid".to_string(),
+            style: StrokeStyle::default_solid_round(),
+            points: vec![
+                StrokePoint { x: 0.0, y: 0.0, t: 0, pressure: None },
+                StrokePoint { x: 100.0, y: 60.0, t: 5, pressure: None },
+            ],
+        };
+        // v1 style carrying pressure => rejected by stroke.validate(), skipped.
+        let far_invalid = Stroke {
+            id: "far_invalid".to_string(),
+            style: StrokeStyle::default_solid_round(),
+            points: vec![
+                StrokePoint { x: 5000.0, y: 5000.0, t: 0, pressure: Some(0.5) },
+                StrokePoint { x: 5100.0, y: 5100.0, t: 5, pressure: Some(0.5) },
+            ],
+        };
+        let span = |strokes: &[Stroke]| {
+            let bytes = render(strokes).expect("thumbnail should render");
+            let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
+            let (min_x, max_x, _, _) = ink_bounds(&pixmap);
+            max_x - min_x + 1
+        };
+        let with_far = span(&[valid.clone(), far_invalid]);
+        let only_valid = span(&[valid]);
+        assert!(
+            with_far.abs_diff(only_valid) <= 2,
+            "far invalid stroke rescaled the valid ink: {with_far} vs {only_valid}"
         );
     }
 

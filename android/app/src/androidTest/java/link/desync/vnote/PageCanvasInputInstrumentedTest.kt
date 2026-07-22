@@ -340,6 +340,35 @@ class PageCanvasInputInstrumentedTest {
         return count
     }
 
+    @Test
+    fun pressureTapRendersAsDot() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        DrawingToolPreferences(context, "input-test-user").save(
+            StrokeStyle(
+                styleVersion = SOLID_ROUND_PRESSURE_STYLE_VERSION,
+                parameters = SolidRoundParameters(width = 24.0),
+            ),
+        )
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
+
+        // A tap: down + up at the same coordinate (no movement) — a v2 stroke of
+        // coincident points that must render as a dot, not collapse to nothing.
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 300f, 300f, pressure = 0.9f, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_UP, 300f, 300f, pressure = 0.9f, downTime = downTime)
+        assertNotNull("tap commits a batch", awaitMutation("commit-batch"))
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching {
+                val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+                greenThickness(pixels, 300, 300) > 0
+            }.getOrDefault(false)
+        }
+        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+        assertTrue("v2 tap renders a visible dot", greenThickness(pixels, 300, 300) > 2)
+    }
+
     private fun sendStylusMoveWithHistory(
         current: Triple<Float, Float, Float>,
         historical: List<Triple<Float, Float, Float>>,
