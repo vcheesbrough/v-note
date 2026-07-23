@@ -45,6 +45,16 @@
           ]
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "page_id", "updated_at"],
+      "properties": {
+        "type": { "const": "page-updated" },
+        "page_id": { "type": "string", "minLength": 1 },
+        "updated_at": { "type": "string", "minLength": 1 }
+      }
     }
   ]
 }

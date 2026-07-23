@@ -25,6 +25,7 @@ steps:
     image: rust:1.89.0@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9
     commands:
       - cargo test -p protocol
+      - cargo test -p frontend
       - ./scripts/check-android-build-box-image.sh
 
   build-android:

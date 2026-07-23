@@ -335,6 +335,7 @@ sealed interface LibraryEvent {
 
     data class PageDeleted(val pageId: String) : LibraryEvent
     data class PageThumbnailUpdated(val pageId: String, val thumbnail: ThumbnailMetadata) : LibraryEvent
+    data class PageUpdated(val pageId: String, val updatedAt: String) : LibraryEvent
 }
 
 interface LibraryEventListener {
@@ -369,6 +370,9 @@ private fun parseLibraryEvent(json: JSONObject): LibraryEvent =
         "page-deleted" -> LibraryEvent.PageDeleted(json.getString("page_id"))
         "page-thumbnail-updated" -> LibraryEvent.PageThumbnailUpdated(
             json.getString("page_id"), parseThumbnail(json.getJSONObject("thumbnail")),
+        )
+        "page-updated" -> LibraryEvent.PageUpdated(
+            json.getString("page_id"), json.getString("updated_at"),
         )
         else -> error("Unknown realtime event type: $type")
     }

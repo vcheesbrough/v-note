@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
@@ -73,6 +73,10 @@ pub enum LibraryEvent {
     PageThumbnailUpdated {
         page_id: String,
         thumbnail: ThumbnailMetadata,
+    },
+    PageUpdated {
+        page_id: String,
+        updated_at: String,
     },
 }
 

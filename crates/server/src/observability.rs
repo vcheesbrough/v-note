@@ -27,7 +27,7 @@ use tracing_subscriber::EnvFilter;
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
-const PROTOCOL_VERSION: &str = "3";
+const PROTOCOL_VERSION: &str = "4";
 
 static METRICS: Lazy<Metrics> = Lazy::new(Metrics::new);
 
