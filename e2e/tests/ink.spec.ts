@@ -433,6 +433,73 @@ test.describe('ink page channel', () => {
     }, { timeout: 5_000 }).toBeTruthy();
   });
 
+  test('SPA library re-sorts live when a page\'s strokes are erased', async ({ page, request }) => {
+    const titleTarget = uniqueTitle('erase-target');
+    const titleOther = uniqueTitle('erase-other');
+    const targetId = await createPage(request, titleTarget);
+    const otherId = await createPage(request, titleOther);
+
+    const labelTarget = `Open ${titleTarget}`;
+    const labelOther = `Open ${titleOther}`;
+
+    await page.reload({ waitUntil: 'load' });
+    await expect(page.getByRole('button', { name: labelTarget, exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('button', { name: labelOther, exact: true })).toBeVisible({ timeout: 5_000 });
+
+    const order = async () => {
+      const labels = await page
+        .locator('ul.page-grid li.page-tile button.page-preview-button')
+        .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('aria-label')));
+      return { target: labels.indexOf(labelTarget), other: labels.indexOf(labelOther) };
+    };
+
+    const strokeId = `stroke-erase-${crypto.randomUUID()}`;
+
+    // Seed a stroke on the target, then bump the other page so the target is no
+    // longer on top immediately before the erase.
+    await driveSocket(page, {
+      pageId: targetId,
+      ticket: await realtimeTicket(request),
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'erase-seed', strokes: sampleStrokes(strokeId) } },
+      ],
+      settleMs: 250,
+    });
+    await driveSocket(page, {
+      pageId: otherId,
+      ticket: await realtimeTicket(request),
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'erase-bump', strokes: sampleStrokes() } },
+      ],
+      settleMs: 250,
+    });
+    await expect.poll(async () => {
+      const current = await order();
+      return current.other >= 0 && current.other < current.target;
+    }, { timeout: 5_000 }).toBeTruthy();
+
+    // Erase the target's stroke over the realtime channel. No reload after this —
+    // the live re-sort must be driven by the page-updated event on the tombstone
+    // (erase) commit path.
+    const erase = await driveSocket(page, {
+      pageId: targetId,
+      ticket: await realtimeTicket(request),
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-tombstones', client_mutation_id: 'erase-resort', stroke_ids: [strokeId] } },
+      ],
+      settleMs: 250,
+    });
+    expect(erase.messages.some((m) => m.type === 'tombstone-batch' && m.stroke_ids.includes(strokeId))).toBeTruthy();
+
+    await expect.poll(async () => {
+      const current = await order();
+      return current.target >= 0 && current.target < current.other;
+    }, { timeout: 5_000 }).toBeTruthy();
+  });
+
   test('SPA replays a v2 pressure stroke with variable width', async ({ page, request }) => {
     const title = uniqueTitle('ink-spa-pressure');
     const pageId = await createPage(request, title);
