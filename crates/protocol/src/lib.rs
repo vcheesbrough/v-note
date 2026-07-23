@@ -74,6 +74,10 @@ pub enum LibraryEvent {
         page_id: String,
         thumbnail: ThumbnailMetadata,
     },
+    PageUpdated {
+        page_id: String,
+        updated_at: String,
+    },
 }
 
 // ---- Canonical ink (stroke geometry) -------------------------------------

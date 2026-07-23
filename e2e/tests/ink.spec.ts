@@ -385,6 +385,54 @@ test.describe('ink page channel', () => {
     await expect(page.getByText(/Live · seq 1|Synced · seq 1/)).toBeVisible({ timeout: 1_000 });
   });
 
+  test('SPA library re-sorts live when a page is edited', async ({ page, request }) => {
+    const titleOlder = uniqueTitle('resort-older');
+    const titleNewer = uniqueTitle('resort-newer');
+    // Older created first, newer second — the newer page starts on top of the
+    // recent-first (updated_at DESC) library.
+    const olderId = await createPage(request, titleOlder);
+    await createPage(request, titleNewer);
+
+    const labelOlder = `Open ${titleOlder}`;
+    const labelNewer = `Open ${titleNewer}`;
+
+    await page.reload({ waitUntil: 'load' });
+    await expect(page.getByRole('button', { name: labelOlder, exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('button', { name: labelNewer, exact: true })).toBeVisible({ timeout: 5_000 });
+
+    // DOM order of the two tiles among the whole library (indices are relative,
+    // so other owner pages in the list do not perturb the assertion).
+    const order = async () => {
+      const labels = await page
+        .locator('ul.page-grid li.page-tile button.page-preview-button')
+        .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('aria-label')));
+      return { older: labels.indexOf(labelOlder), newer: labels.indexOf(labelNewer) };
+    };
+
+    const initial = await order();
+    expect(initial.newer).toBeGreaterThanOrEqual(0);
+    expect(initial.newer, 'newer page starts ahead of older').toBeLessThan(initial.older);
+
+    // Edit the older page over the realtime channel. No reload after this — the
+    // re-sort must be driven live by the page-updated library event alone.
+    const ticket = await realtimeTicket(request);
+    const commit = await driveSocket(page, {
+      pageId: olderId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'resort-edit', strokes: sampleStrokes() } },
+      ],
+      settleMs: 250,
+    });
+    expect(commit.messages.some((m) => m.type === 'stroke-batch' && m.client_batch_id === 'resort-edit')).toBeTruthy();
+
+    await expect.poll(async () => {
+      const current = await order();
+      return current.older >= 0 && current.older < current.newer;
+    }, { timeout: 5_000 }).toBeTruthy();
+  });
+
   test('SPA replays a v2 pressure stroke with variable width', async ({ page, request }) => {
     const title = uniqueTitle('ink-spa-pressure');
     const pageId = await createPage(request, title);

@@ -547,6 +547,15 @@ async fn handle_page_client_message(
                             }),
                         );
                     }
+                    if let Some(updated_at) = persisted.updated_at {
+                        state.realtime.publish_library_event(
+                            &persisted.owner_id,
+                            LibraryEvent::PageUpdated {
+                                page_id: page_id.to_string(),
+                                updated_at,
+                            },
+                        );
+                    }
                     if persisted.thumbnail_job_created {
                         let page_id = page_id.to_string();
                         crate::observability::metrics().thumbnail_generation_queued();
@@ -602,6 +611,15 @@ async fn handle_page_client_message(
                     state
                         .realtime
                         .publish_page(page_id, PageServerMessage::TombstoneBatch(event));
+                    if let Some(updated_at) = persisted.updated_at {
+                        state.realtime.publish_library_event(
+                            &persisted.owner_id,
+                            LibraryEvent::PageUpdated {
+                                page_id: page_id.to_string(),
+                                updated_at,
+                            },
+                        );
+                    }
                     if persisted.thumbnail_job_created {
                         state.realtime.publish_library_event(
                             &persisted.owner_id,
@@ -753,6 +771,10 @@ struct PersistedBatch {
     /// visible state changed.
     visible_strokes: Vec<Stroke>,
     thumbnail_job_created: bool,
+    /// The new `updated_at` (RFC 3339) when this commit actually bumped the row,
+    /// so the library can re-sort. `None` for idempotent retries and fully
+    /// suppressed adds, which change no last-edited timestamp.
+    updated_at: Option<String>,
 }
 
 async fn persist_batch(
@@ -807,6 +829,7 @@ async fn persist_batch(
             owner_id,
             visible_strokes,
             thumbnail_job_created: false,
+            updated_at: None,
         });
     }
 
@@ -826,6 +849,7 @@ async fn persist_batch(
             owner_id,
             visible_strokes,
             thumbnail_job_created: false,
+            updated_at: None,
         });
     }
 
@@ -848,11 +872,14 @@ async fn persist_batch(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE pages SET updated_at = now(), ink_revision = $2 WHERE id = $1")
-        .bind(page_id)
-        .bind(revision)
-        .execute(&mut *tx)
-        .await?;
+    let updated_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        "UPDATE pages SET updated_at = now(), ink_revision = $2 WHERE id = $1 RETURNING updated_at",
+    )
+    .bind(page_id)
+    .bind(revision)
+    .fetch_one(&mut *tx)
+    .await?
+    .to_rfc3339();
     let thumbnail_job_created = sqlx::query(
         "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",
     )
@@ -870,6 +897,7 @@ async fn persist_batch(
         owner_id,
         visible_strokes,
         thumbnail_job_created,
+        updated_at: Some(updated_at),
     })
 }
 
@@ -878,6 +906,9 @@ struct PersistedTombstones {
     owner_id: String,
     stroke_ids: Vec<String>,
     thumbnail_job_created: bool,
+    /// See `PersistedBatch::updated_at` — `None` when the erase changed no
+    /// strokes (idempotent replay or all-already-tombstoned).
+    updated_at: Option<String>,
 }
 
 async fn persist_tombstones(
@@ -901,7 +932,7 @@ async fn persist_tombstones(
     .fetch_optional(&mut *tx)
     .await? {
         tx.commit().await?;
-        return Ok(PersistedTombstones { revision: revision as u64, owner_id, stroke_ids: ids.0, thumbnail_job_created: false });
+        return Ok(PersistedTombstones { revision: revision as u64, owner_id, stroke_ids: ids.0, thumbnail_job_created: false, updated_at: None });
     }
 
     let mut ids = requested_ids.to_vec();
@@ -926,14 +957,19 @@ async fn persist_tombstones(
     }
     sqlx::query("INSERT INTO tombstone_batches (page_id, client_mutation_id, revision, stroke_ids) VALUES ($1, $2, $3, $4)")
         .bind(page_id).bind(client_mutation_id).bind(revision).bind(sqlx::types::Json(&ids)).execute(&mut *tx).await?;
-    if !ids.is_empty() {
-        sqlx::query(
-            "UPDATE pages SET updated_at = now(), ink_revision = ink_revision + 1 WHERE id = $1",
+    let updated_at = if !ids.is_empty() {
+        Some(
+            sqlx::query_scalar::<_, DateTime<Utc>>(
+                "UPDATE pages SET updated_at = now(), ink_revision = ink_revision + 1 WHERE id = $1 RETURNING updated_at",
+            )
+            .bind(page_id)
+            .fetch_one(&mut *tx)
+            .await?
+            .to_rfc3339(),
         )
-        .bind(page_id)
-        .execute(&mut *tx)
-        .await?;
-    }
+    } else {
+        None
+    };
     let thumbnail_job_created = if ids.is_empty() {
         false
     } else {
@@ -946,6 +982,7 @@ async fn persist_tombstones(
         owner_id,
         stroke_ids: ids,
         thumbnail_job_created,
+        updated_at,
     })
 }
 
