@@ -208,7 +208,10 @@ fn App() -> impl IntoView {
                                     library_error.track();
                                     pages.get()
                                 }
-                                key=|page| (page.id.clone(), thumbnail_key(&page.thumbnail))
+                                // `updated_at` is in the key so a page-updated event (which only
+                                // bumps the timestamp) rebuilds the row, refreshing the captured
+                                // "Updated …" age label and the click-handler's page snapshot.
+                                key=|page| (page.id.clone(), page.updated_at.clone(), thumbnail_key(&page.thumbnail))
                                 children=move |page| {
                                     let preview_page = page.clone();
                                     let delete_page_id = page.id.clone();
