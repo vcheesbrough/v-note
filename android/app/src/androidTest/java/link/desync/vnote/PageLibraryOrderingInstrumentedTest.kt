@@ -121,6 +121,27 @@ class PageLibraryOrderingInstrumentedTest {
     }
 
     @Test
+    fun editedPageMovesToTopLiveViaPageUpdatedEvent() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            pageListRequests.get() >= 1 && pageIsBefore("page_new", "page_old")
+        }
+        // The live re-sort must not depend on a library refetch.
+        val fetchesBeforeEdit = pageListRequests.get()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) { librarySocket.get() != null }
+        assertTrue(
+            "page-updated event sent",
+            librarySocket.get()?.send(
+                """{"type":"page-updated","page_id":"page_old","updated_at":"2026-07-15T10:00:00Z"}""",
+            ) == true,
+        )
+
+        composeRule.waitUntil(timeoutMillis = 5_000) { pageIsBefore("page_old", "page_new") }
+        assertTrue("edited page is first", pageIsBefore("page_old", "page_new"))
+        assertEquals("no library refetch was needed", fetchesBeforeEdit, pageListRequests.get())
+    }
+
+    @Test
     fun pageEditorExposesDrawingEraserAndInteractivePalette() {
         openPage("page_old")
 

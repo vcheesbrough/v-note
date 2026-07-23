@@ -807,19 +807,57 @@ fn apply_event(
     selected_page: RwSignal<Option<PageSummary>>,
     event: LibraryEvent,
 ) {
-    match event {
-        LibraryEvent::PageCreated { page } => upsert_page(pages, page),
-        LibraryEvent::PageDeleted { page_id } => remove_page(pages, selected_page, &page_id),
-        LibraryEvent::PageThumbnailUpdated { page_id, thumbnail } => {
-            pages.update(|items| {
-                if let Some(page) = items.iter_mut().find(|page| page.id == page_id) {
-                    if thumbnail_seq(&thumbnail) >= thumbnail_seq(&page.thumbnail) {
-                        page.thumbnail = thumbnail;
-                    }
-                }
-            });
+    // Clearing a deleted page's selection is the only cross-signal effect; the
+    // list mutation itself is a pure reducer so it can be unit-tested.
+    if let LibraryEvent::PageDeleted { page_id } = &event {
+        if selected_page
+            .get_untracked()
+            .as_ref()
+            .is_some_and(|page| &page.id == page_id)
+        {
+            selected_page.set(None);
         }
     }
+    pages.update(|items| apply_library_event_to_pages(items, event));
+}
+
+/// Apply a library event to the in-memory page list, keeping recent-first
+/// (`updated_at` DESC) order. Pure over the vector so it is unit-testable
+/// without a reactive runtime.
+fn apply_library_event_to_pages(items: &mut Vec<PageSummary>, event: LibraryEvent) {
+    match event {
+        LibraryEvent::PageCreated { page } => {
+            items.retain(|existing| existing.id != page.id);
+            items.push(page);
+            sort_pages_recent_first(items);
+        }
+        LibraryEvent::PageDeleted { page_id } => items.retain(|page| page.id != page_id),
+        LibraryEvent::PageThumbnailUpdated { page_id, thumbnail } => {
+            if let Some(page) = items.iter_mut().find(|page| page.id == page_id) {
+                if thumbnail_seq(&thumbnail) >= thumbnail_seq(&page.thumbnail) {
+                    page.thumbnail = thumbnail;
+                }
+            }
+        }
+        LibraryEvent::PageUpdated {
+            page_id,
+            updated_at,
+        } => {
+            let Some(index) = items.iter().position(|page| page.id == page_id) else {
+                return;
+            };
+            // Ignore a stale/duplicate timestamp so re-sort stays idempotent.
+            if updated_at <= items[index].updated_at {
+                return;
+            }
+            items[index].updated_at = updated_at;
+            sort_pages_recent_first(items);
+        }
+    }
+}
+
+fn sort_pages_recent_first(items: &mut [PageSummary]) {
+    items.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 }
 
 fn thumbnail_seq(thumbnail: &ThumbnailMetadata) -> u64 {
@@ -840,14 +878,6 @@ fn thumbnail_key(thumbnail: &ThumbnailMetadata) -> String {
     }
 }
 
-fn upsert_page(pages: RwSignal<Vec<PageSummary>>, page: PageSummary) {
-    pages.update(|items| {
-        items.retain(|existing| existing.id != page.id);
-        items.push(page);
-        items.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    });
-}
-
 fn remove_page(
     pages: RwSignal<Vec<PageSummary>>,
     selected_page: RwSignal<Option<PageSummary>>,
@@ -860,5 +890,81 @@ fn remove_page(
         .is_some_and(|page| page.id == page_id)
     {
         selected_page.set(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(id: &str, updated_at: &str) -> PageSummary {
+        PageSummary {
+            id: id.to_string(),
+            title: id.to_string(),
+            created_at: "2026-07-22T00:00:00+00:00".to_string(),
+            updated_at: updated_at.to_string(),
+            thumbnail: ThumbnailMetadata::Empty,
+        }
+    }
+
+    fn ids(items: &[PageSummary]) -> Vec<&str> {
+        items.iter().map(|page| page.id.as_str()).collect()
+    }
+
+    #[test]
+    fn page_updated_moves_edited_page_to_front() {
+        let mut items = vec![
+            summary("newer", "2026-07-22T10:00:00+00:00"),
+            summary("older", "2026-07-22T09:00:00+00:00"),
+        ];
+        apply_library_event_to_pages(
+            &mut items,
+            LibraryEvent::PageUpdated {
+                page_id: "older".to_string(),
+                updated_at: "2026-07-22T11:00:00+00:00".to_string(),
+            },
+        );
+        assert_eq!(ids(&items), vec!["older", "newer"]);
+        assert_eq!(items[0].updated_at, "2026-07-22T11:00:00+00:00");
+    }
+
+    #[test]
+    fn page_updated_ignores_stale_or_equal_timestamp() {
+        let mut items = vec![
+            summary("a", "2026-07-22T10:00:00+00:00"),
+            summary("b", "2026-07-22T09:00:00+00:00"),
+        ];
+        // Equal timestamp is a no-op.
+        apply_library_event_to_pages(
+            &mut items,
+            LibraryEvent::PageUpdated {
+                page_id: "b".to_string(),
+                updated_at: "2026-07-22T09:00:00+00:00".to_string(),
+            },
+        );
+        // Older timestamp is a no-op.
+        apply_library_event_to_pages(
+            &mut items,
+            LibraryEvent::PageUpdated {
+                page_id: "b".to_string(),
+                updated_at: "2026-07-22T08:00:00+00:00".to_string(),
+            },
+        );
+        assert_eq!(ids(&items), vec!["a", "b"]);
+        assert_eq!(items[1].updated_at, "2026-07-22T09:00:00+00:00");
+    }
+
+    #[test]
+    fn page_updated_for_unknown_page_is_ignored() {
+        let mut items = vec![summary("a", "2026-07-22T10:00:00+00:00")];
+        apply_library_event_to_pages(
+            &mut items,
+            LibraryEvent::PageUpdated {
+                page_id: "missing".to_string(),
+                updated_at: "2026-07-22T12:00:00+00:00".to_string(),
+            },
+        );
+        assert_eq!(ids(&items), vec!["a"]);
+        assert_eq!(items[0].updated_at, "2026-07-22T10:00:00+00:00");
     }
 }
