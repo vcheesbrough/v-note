@@ -348,6 +348,20 @@ class MainActivity : ComponentActivity() {
                                         } else page
                                     }
                                 }
+                                is LibraryEvent.PageUpdated -> {
+                                    val current = pagesState.value.firstOrNull { it.id == event.pageId }
+                                    // Ignore a stale/duplicate timestamp so re-sort stays idempotent.
+                                    if (current != null && event.updatedAt > current.updatedAt) {
+                                        pagesState.value =
+                                            pagesState.value
+                                                .map { page ->
+                                                    if (page.id == event.pageId) {
+                                                        page.copy(updatedAt = event.updatedAt)
+                                                    } else page
+                                                }
+                                                .sortedByDescending { it.updatedAt }
+                                    }
+                                }
                             }
                             libraryErrorState.value = null
                         }

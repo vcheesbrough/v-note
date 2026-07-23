@@ -301,4 +301,19 @@ fn deserializes_realtime_fixtures() {
         thumbnail,
         LibraryEvent::PageThumbnailUpdated { .. }
     ));
+
+    let updated: LibraryEvent = serde_json::from_str(&fixture("library-event-page-updated.json"))
+        .expect("page-updated event fixture should parse");
+    match &updated {
+        LibraryEvent::PageUpdated {
+            page_id,
+            updated_at,
+        } => {
+            assert!(!page_id.is_empty());
+            assert!(!updated_at.is_empty());
+        }
+        other => panic!("expected page-updated event, got {other:?}"),
+    }
+    let reserialized = serde_json::to_value(&updated).expect("page-updated should serialize");
+    assert_eq!(reserialized["type"], "page-updated");
 }
