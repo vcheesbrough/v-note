@@ -12,7 +12,7 @@ class FixtureTest {
         val fixture = readFixture("meta.json")
         assertEquals("v-note", fixture.getString("app_name"))
         assertTrue("app_version present", fixture.getString("app_version").isNotEmpty())
-        assertEquals(3, fixture.getInt("protocol_version"))
+        assertEquals(4, fixture.getInt("protocol_version"))
     }
 
     @Test
