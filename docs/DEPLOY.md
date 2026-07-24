@@ -54,12 +54,15 @@ Operator reproduction from a Woodpecker-equivalent shell:
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
 | `v_note_prod_sovereign_access_url` | Access URL for the `/v-note/prod/server` sovereign-config subtree |
-| `v_note_dev_assetlinks_json` | Minified App Links JSON, source for `android/assetlinks-json` (dev, package `link.desync.vnote.dev`) |
-| `v_note_prod_assetlinks_json` | Minified App Links JSON, source for `android/assetlinks-json` (prod, package `link.desync.vnote`) |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
 | Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
 Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
+
+App Links JSON is **not** in this list: since iteration 19 it lives in sovereign-config
+at `android/assetlinks-json`. The former `v_note_{dev,prod}_assetlinks_json` keys have
+been deleted — rotating a signing certificate means rewriting that leaf (see
+[Set App Links JSON](#set-app-links-json) below), not patching OpenBao.
 
 ### Local compose (WSL / laptop)
 
@@ -135,9 +138,9 @@ documented in [`DEV.md`](DEV.md).
 related leaves are missing; deploy reads them from sovereign-config, local compose
 and e2e supply them via `VNOTE__*` (mock OIDC).
 
-App Links JSON is sourced from the Woodpecker secrets
-`v_note_{dev,prod}_assetlinks_json` and stored at the `android/assetlinks-json`
-leaf. Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do
+App Links JSON lives at the `android/assetlinks-json` leaf in sovereign-config and
+is rendered from the signing certificate fingerprint — see [Set App Links JSON](#set-app-links-json)
+above. Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do
 not commit real fingerprints).
 
 ## Observability
@@ -149,7 +152,9 @@ v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 - **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
 - **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
-**Set App Links JSON** (operator). Since iteration 19 this lives in sovereign-config
+### Set App Links JSON
+
+Operator task. Since iteration 19 this lives in sovereign-config
 at the `android/assetlinks-json` leaf, not in OpenBao — render it and write it to
 both env subtrees:
 

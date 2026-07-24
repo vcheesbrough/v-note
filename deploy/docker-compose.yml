@@ -24,6 +24,11 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.web
+      # sovereign-config-provider is a git dep on a private repo, so the cargo
+      # layers need a credential — the same one CI passes via --secret. Set
+      # GITHUB_TOKEN before `--build`; see docs/DEV.md.
+      secrets:
+        - github_token
       labels:
         org.opencontainers.image.title: v-note
         org.opencontainers.image.description: v-note server (Axum API + Leptos SPA static)
@@ -86,6 +91,12 @@ secrets:
   # var to disable the sovereign layer entirely.
   SOVEREIGN_CONFIG_ACCESS_URL_FILE:
     environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE
+
+  # Build-time only (v-note.build.secrets), never mounted into the running
+  # container: lets a local `--build` fetch the private sovereign-config git dep
+  # the same way CI does. Deploys pull a prebuilt image and never reference it.
+  github_token:
+    environment: GITHUB_TOKEN
 
 volumes:
   v-note-db:
