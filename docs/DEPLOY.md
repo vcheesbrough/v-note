@@ -149,24 +149,25 @@ v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 - **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
 - **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
-**Seed Woodpecker App Links secrets** (operator, on mini or with write access to `secret/woodpecker/repos/vcheesbrough/v-note`):
+**Set App Links JSON** (operator). Since iteration 19 this lives in sovereign-config
+at the `android/assetlinks-json` leaf, not in OpenBao — render it and write it to
+both env subtrees:
 
 ```bash
-export BAO_ADDR=https://secrets.desync.link
-export BAO_TOKEN=<token>
-
 # Dev — fingerprint of the committed keystore android/app/debug.keystore (all builds
 # sign with it, so this is fixed): SHA-256
 #   3A:49:7C:AE:57:AD:FF:E4:D0:C8:3B:D2:D0:98:2C:C2:98:CB:1D:B6:3F:70:68:5A:57:13:07:96:CC:9C:62:3A
-export V_NOTE_DEV_ANDROID_CERT_SHA256="$(./scripts/android-dev-debug-fingerprint.sh)"
-./scripts/patch-v-note-woodpecker-openbao-secrets.sh
+./scripts/render-assetlinks-json.sh dev "$(./scripts/android-dev-debug-fingerprint.sh)" \
+  | sovereign-config put /v-note/dev/server/android/assetlinks-json
 
 # Prod — release keystore SHA-256 (keytool -list -v …), when prod Android ships:
-export V_NOTE_PROD_ANDROID_CERT_SHA256='AA:BB:CC:...'
-./scripts/patch-v-note-woodpecker-openbao-secrets.sh
+./scripts/render-assetlinks-json.sh prod 'AA:BB:CC:...' \
+  | sovereign-config put /v-note/prod/server/android/assetlinks-json
 ```
 
-Manual render (without patch script): `./scripts/render-assetlinks-json.sh dev "$SHA"` → pipe to `bao kv patch` as `v_note_dev_assetlinks_json`.
+The value is non-secret (it is served publicly at `/.well-known/assetlinks.json`),
+so it is a plain `put`, not `secret put`. The server validates it parses as JSON at
+startup and refuses to start otherwise.
 
 Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keystore), `--docker` only for the CI image keystore, or `keytool -list -v` on a release keystore (prod).
 
