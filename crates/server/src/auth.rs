@@ -65,13 +65,12 @@ impl AuthConfig {
     /// endpoints via OIDC discovery.
     ///
     /// Presence and URL well-formedness are already guaranteed by [`OidcConfig`];
-    /// this only performs the network discovery step.
-    pub async fn from_oidc(oidc: &OidcConfig) -> Self {
+    /// this only performs the network discovery step, so the only way it fails is
+    /// the issuer being unreachable or serving an unusable document.
+    pub async fn from_oidc(oidc: &OidcConfig) -> Result<Self, String> {
         let issuer_url = oidc.issuer_url.to_string();
 
-        let discovery = Self::discover(&issuer_url)
-            .await
-            .expect("OIDC discovery failed for oidc.issuer-url");
+        let discovery = Self::discover(&issuer_url).await?;
 
         let authorize_endpoint = oidc
             .authorize_url
@@ -79,7 +78,7 @@ impl AuthConfig {
             .map(Url::to_string)
             .unwrap_or(discovery.authorization_endpoint);
 
-        Self {
+        Ok(Self {
             issuer_url,
             client_id: oidc.client_id.clone(),
             client_secret: oidc.client_secret.clone(),
@@ -91,7 +90,7 @@ impl AuthConfig {
             jwks_uri: discovery.jwks_uri,
             android_issuer_url: oidc.android.issuer_url.as_ref().map(Url::to_string),
             android_client_id: oidc.android.client_id.clone(),
-        }
+        })
     }
 
     async fn discover(issuer_url: &str) -> Result<DiscoveryDoc, String> {

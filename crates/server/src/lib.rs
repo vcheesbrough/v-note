@@ -44,6 +44,51 @@ pub fn app_version() -> &'static str {
     }
 }
 
+/// A startup dependency that could not be brought up.
+///
+/// Startup failures are reported, not panicked: `main` already returns `Result`
+/// and prints a single clean line for a bad config value, so an unreachable
+/// dependency should exit the same way rather than unwinding with a backtrace.
+pub enum StartupError {
+    OidcDiscovery(String),
+    DatabaseConnect(sqlx::Error),
+    DatabaseMigrate(sqlx::migrate::MigrateError),
+}
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartupError::OidcDiscovery(reason) => {
+                write!(f, "OIDC discovery failed for `oidc.issuer-url`: {reason}")
+            }
+            StartupError::DatabaseConnect(source) => {
+                write!(f, "database should be reachable: {source}")
+            }
+            StartupError::DatabaseMigrate(source) => {
+                write!(f, "database migrations should apply: {source}")
+            }
+        }
+    }
+}
+
+/// Startup failures surface through `Termination`, which prints `Debug`. Delegate
+/// to `Display` so an operator sees the one-line reason, matching `ConfigError`.
+impl std::fmt::Debug for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for StartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StartupError::OidcDiscovery(_) => None,
+            StartupError::DatabaseConnect(source) => Some(source),
+            StartupError::DatabaseMigrate(source) => Some(source),
+        }
+    }
+}
+
 /// Assemble the application router from its already-loaded config groups.
 ///
 /// Takes the validated DTOs directly — how they were sourced (sovereign-config,
@@ -54,28 +99,32 @@ pub async fn build_app_router(
     oidc: &OidcConfig,
     android: &AndroidConfig,
     server: &ServerConfig,
-) -> Router {
-    let auth = Arc::new(AuthConfig::from_oidc(oidc).await);
+) -> Result<Router, StartupError> {
+    let auth = Arc::new(
+        AuthConfig::from_oidc(oidc)
+            .await
+            .map_err(StartupError::OidcDiscovery)?,
+    );
     let jwks_cache = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect_with(database_connect_options(database))
         .await
-        .expect("database should be reachable");
+        .map_err(StartupError::DatabaseConnect)?;
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
-        .expect("database migrations should apply");
+        .map_err(StartupError::DatabaseMigrate)?;
 
-    build_router_full(
+    Ok(build_router_full(
         app_version().to_string(),
         auth,
         jwks_cache,
         Some(pool),
         android.assetlinks_json().map(Arc::from),
         server.static_dir.clone(),
-    )
+    ))
 }
 
 fn database_connect_options(database: &DatabaseConfig) -> PgConnectOptions {

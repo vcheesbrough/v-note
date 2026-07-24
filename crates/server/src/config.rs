@@ -46,6 +46,12 @@ pub enum ConfigError {
     Build(config::ConfigError),
     /// A group could not be deserialized from its sub-branch (missing field or a
     /// leaf that would not coerce to the target type).
+    ///
+    /// **Invariant:** `source` is `config`'s own message, which embeds the
+    /// offending value on a type mismatch (`invalid type: string "…"`). Secret
+    /// leaves must therefore stay `String`-typed — `String` cannot fail coercion,
+    /// so a secret can never reach this branch and never appears in a startup log.
+    /// Pinned by `secret_leaves_never_leak_their_value_in_errors`.
     Load {
         group: String,
         source: config::ConfigError,
