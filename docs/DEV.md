@@ -66,12 +66,27 @@ is set) → `VNOTE__*` environment overrides. Local dev and e2e have no
 sovereign-config server, so they supply every group through the env layer.
 
 The `server` group is image-internal (identical across deployments), so it comes
-from defaults or `VNOTE__SERVER__*` overrides set by the image — never from
-sovereign-config.
+from defaults or `VNOTE__SERVER__*` overrides set by the image. **Do not add a
+`server/*` leaf to sovereign-config** — that is a convention, not an enforced
+boundary: the sovereign layer is merged wholesale, so such a leaf would be picked
+up (the image's env overrides out-rank it for `tls-cert`/`tls-key`/`static-dir`,
+but `http-port` has no override).
 
-`VNOTE__<GROUP>__<LEAF>` maps to `<group>.<leaf>`; `__` separates path segments and
-**multi-word leaves are kebab-case** (sovereign-config path segments forbid `_`), so
-the same key overrides across every layer. Blank optional values mean "absent".
+`VNOTE__<GROUP>__<LEAF>` maps to `<group>.<leaf>`; `__` separates path segments.
+Canonical leaf names are **kebab-case**, matching sovereign-config path segments
+(which forbid `_`), so one key addresses the same value in every layer.
+
+**Both spellings work.** `-` is not legal in a shell variable name — a plain
+`VNOTE__OBSERVABILITY__METRICS-ADDR=… cargo run` is parsed as a *command*, not an
+assignment — so the snake_case form is accepted too and folded onto the same key:
+
+```bash
+VNOTE__OBSERVABILITY__METRICS_ADDR=127.0.0.1:9090 cargo run -p server   # shell-friendly
+VNOTE__OBSERVABILITY__METRICS-ADDR: "127.0.0.1:9090"                    # compose / sovereign-config
+```
+
+Use snake_case in a shell, kebab-case in compose and sovereign-config. Errors always
+name the canonical kebab path. Blank optional values mean "absent".
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -112,7 +127,7 @@ Metrics are served as Prometheus text on the internal metrics listener
 does not expose `/metrics` through Traefik. Local checks:
 
 ```bash
-VNOTE__OBSERVABILITY__METRICS-ADDR=127.0.0.1:9090 cargo run -p server
+VNOTE__OBSERVABILITY__METRICS_ADDR=127.0.0.1:9090 cargo run -p server
 curl http://127.0.0.1:9090/metrics
 ```
 

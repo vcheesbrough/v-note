@@ -41,6 +41,9 @@ services:
       VNOTE__OIDC__CLIENT-SECRET: ${OIDC_CLIENT_SECRET:-local-mock-secret}
       VNOTE__OIDC__REDIRECT-URI: ${OIDC_REDIRECT_URI:?Set OIDC_REDIRECT_URI (deploy/compose.env)}
       VNOTE__OIDC__REQUIRED-SCOPE: ${REQUIRED_SCOPE:?Set REQUIRED_SCOPE (deploy/compose.env)}
+      # Unset by default — mock OIDC has no end-session endpoint — but forwarded so
+      # pointing local compose at real Authentik gets RP-initiated logout.
+      VNOTE__OIDC__END-SESSION-URL: ${OIDC_END_SESSION_URL:-}
       VNOTE__OIDC__ANDROID__CLIENT-ID: ${OIDC_ANDROID_CLIENT_ID:-}
       VNOTE__OIDC__ANDROID__ISSUER-URL: ${OIDC_ANDROID_ISSUER_URL:-}
       VNOTE__OBSERVABILITY__ENVIRONMENT: ${APP_ENV:-dev}
