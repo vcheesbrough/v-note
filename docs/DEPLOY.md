@@ -52,8 +52,8 @@ Operator reproduction from a Woodpecker-equivalent shell:
 | `v_note_prod_oidc_client_secret` | SPA confidential client (prod) |
 | `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
-| `v_note_dev_sovereign_access_url` | Access URL for the `/applications/v-note/dev` sovereign-config subtree |
-| `v_note_prod_sovereign_access_url` | Access URL for the `/applications/v-note/prod` sovereign-config subtree |
+| `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
+| `v_note_prod_sovereign_access_url` | Access URL for the `/v-note/prod/server` sovereign-config subtree |
 | `v_note_dev_assetlinks_json` | Minified App Links JSON, source for `android/assetlinks-json` (dev, package `link.desync.vnote.dev`) |
 | `v_note_prod_assetlinks_json` | Minified App Links JSON, source for `android/assetlinks-json` (prod, package `link.desync.vnote`) |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
@@ -77,7 +77,7 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 ## Runtime config (sovereign-config)
 
 Since iteration 19 the app's runtime configuration lives in **sovereign-config**
-under `/applications/v-note/dev` and `/applications/v-note/prod`, not in compose
+under `/v-note/dev/server` and `/v-note/prod/server`, not in compose
 env vars. The server loads four independent groups — `database`, `oidc`,
 `observability`, `android` — and **refuses to start (non-zero exit, redacted
 error) if any value is missing or invalid**.
@@ -92,12 +92,12 @@ a config flag.
 
 ### Creating / rotating an access URL (operator)
 
-The access URL grants read access to the **whole** `/applications/v-note/<env>`
+The access URL grants read access to the **whole** `/v-note/<env>/server`
 subtree, secret leaves included — treat it like a password.
 
 1. Create a managed connection (sovereign-config MCP or web UI), scoped and
    read-only — the URL is displayed **once**:
-   `create_connection root=/applications/v-note/dev permissions=["read"]`
+   `create_connection root=/v-note/dev/server permissions=["read"]`
 2. Pipe it straight into OpenBao without it touching a terminal argument or
    shell history:
    ```bash

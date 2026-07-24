@@ -6,13 +6,13 @@
 #          (match the from_secret names in .woodpecker/build.yml)
 #
 # The access URL is a long-lived credential granting read access to the whole
-# /applications/v-note/<env> subtree — including database/password and
+# /v-note/<env>/server subtree — including database/password and
 # oidc/client-secret. It is therefore read from STDIN, never from an argument, so
 # it never lands in argv, the process table, or shell history.
 #
 # Get a URL by creating a managed connection (sovereign-config MCP or web UI):
-#   create_connection root=/applications/v-note/dev  permissions=["read"]
-#   create_connection root=/applications/v-note/prod permissions=["read"]
+#   create_connection root=/v-note/dev/server  permissions=["read"]
+#   create_connection root=/v-note/prod/server permissions=["read"]
 # The URL is shown once at creation — pipe it straight into this script.
 #
 # Usage:

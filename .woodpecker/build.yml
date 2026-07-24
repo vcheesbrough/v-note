@@ -277,7 +277,7 @@ steps:
         from_secret: zot_ci_password
       POSTGRES_PASSWORD:
         from_secret: v_note_dev_postgres_password
-      # Unlocks the /applications/v-note/dev sovereign-config subtree; the URL
+      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
       # itself selects the environment.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_dev_sovereign_access_url
@@ -299,7 +299,7 @@ steps:
         from_secret: zot_ci_password
       POSTGRES_PASSWORD:
         from_secret: v_note_dev_postgres_password
-      # Unlocks the /applications/v-note/dev sovereign-config subtree; the URL
+      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
       # itself selects the environment.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_dev_sovereign_access_url
@@ -336,7 +336,7 @@ steps:
         from_secret: zot_ci_password
       POSTGRES_PASSWORD:
         from_secret: v_note_prod_postgres_password
-      # Unlocks the /applications/v-note/prod sovereign-config subtree.
+      # Unlocks the /v-note/prod/server sovereign-config subtree.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_prod_sovereign_access_url
     commands:
