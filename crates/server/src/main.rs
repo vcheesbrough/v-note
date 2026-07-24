@@ -1,10 +1,10 @@
-use std::env;
 use std::net::SocketAddr;
 
 use axum_server::tls_rustls::RustlsConfig;
 use server::build_app_router;
 use server::config::{
     build_config, load_group, AndroidConfig, DatabaseConfig, ObservabilityConfig, OidcConfig,
+    ServerConfig,
 };
 use server::observability::{init_tracing, run_metrics_server};
 
@@ -25,20 +25,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database = load_group::<DatabaseConfig>(&cfg, "database")?;
     let oidc = load_group::<OidcConfig>(&cfg, "oidc")?;
     let android = load_group::<AndroidConfig>(&cfg, "android")?;
+    let server = load_group::<ServerConfig>(&cfg, "server")?;
     drop(cfg);
 
     let _telemetry_guard = init_tracing(&observability);
     let metrics_addr = observability.metrics_socket_addr();
 
-    let app = build_app_router(&database, &oidc, &android).await;
+    let app = build_app_router(&database, &oidc, &android, &server).await;
     tokio::spawn(async move {
         if let Err(error) = run_metrics_server(metrics_addr).await {
             tracing::error!(error = %error, "internal metrics listener stopped");
         }
     });
 
-    match (env::var("TLS_CERT").ok(), env::var("TLS_KEY").ok()) {
-        (Some(cert_path), Some(key_path)) => {
+    match server.tls_pair() {
+        Some((cert_path, key_path)) => {
             let addr: SocketAddr = "0.0.0.0:443".parse()?;
             let config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
             tracing::info!("Starting TLS server on {addr}");
@@ -46,12 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .serve(app.into_make_service())
                 .await?;
         }
-        _ => {
-            let port = env::var("PORT")
-                .ok()
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(8080);
-            let addr = format!("0.0.0.0:{port}");
+        None => {
+            let addr = format!("0.0.0.0:{}", server.http_port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             tracing::info!("Starting HTTP server on {addr}");
             axum::serve(listener, app).await?;

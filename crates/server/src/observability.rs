@@ -132,7 +132,7 @@ impl Metrics {
         let build_info = IntGauge::with_opts(
             Opts::new("v_note_build_info", "v-note build and protocol metadata")
                 .const_label("protocol", PROTOCOL_VERSION)
-                .const_label("version", crate::app_version_from_env()),
+                .const_label("version", crate::app_version()),
         )
         .expect("build info gauge should build");
         build_info.set(1);
@@ -414,7 +414,7 @@ fn build_tracer_provider(
         .with_service_name(observability.service_name.clone())
         .with_attributes([
             KeyValue::new("deployment.environment", observability.environment.clone()),
-            KeyValue::new("service.version", crate::app_version_from_env()),
+            KeyValue::new("service.version", crate::app_version()),
             KeyValue::new("vnote.protocol", PROTOCOL_VERSION),
         ])
         .build();
