@@ -11,6 +11,9 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::Instrument as _;
+use url::Url;
+
+use crate::config::OidcConfig;
 
 pub const AUTH_COOKIE: &str = "auth";
 pub const STATE_COOKIE: &str = "auth_state";
@@ -58,49 +61,36 @@ struct DiscoveryDoc {
 }
 
 impl AuthConfig {
-    pub async fn load() -> Self {
-        let issuer_url = std::env::var("OIDC_ISSUER_URL")
-            .expect("OIDC_ISSUER_URL is required (use mock-oidc locally — see deploy/compose.env)");
-        if issuer_url.is_empty() {
-            panic!("OIDC_ISSUER_URL must not be empty");
-        }
-        let client_id = std::env::var("OIDC_CLIENT_ID").expect("OIDC_CLIENT_ID is required");
-        let client_secret =
-            std::env::var("OIDC_CLIENT_SECRET").expect("OIDC_CLIENT_SECRET is required");
-        let redirect_uri =
-            std::env::var("OIDC_REDIRECT_URI").expect("OIDC_REDIRECT_URI is required");
-        let required_scope = std::env::var("REQUIRED_SCOPE").expect("REQUIRED_SCOPE is required");
-        let end_session_url = std::env::var("OIDC_END_SESSION_URL")
-            .ok()
-            .filter(|value| !value.is_empty());
-        let android_issuer_url = std::env::var("OIDC_ANDROID_ISSUER_URL")
-            .ok()
-            .filter(|value| !value.is_empty());
-        let android_client_id = std::env::var("OIDC_ANDROID_CLIENT_ID")
-            .ok()
-            .filter(|value| !value.is_empty());
+    /// Build from the validated `oidc` config group, resolving the remaining
+    /// endpoints via OIDC discovery.
+    ///
+    /// Presence and URL well-formedness are already guaranteed by [`OidcConfig`];
+    /// this only performs the network discovery step.
+    pub async fn from_oidc(oidc: &OidcConfig) -> Self {
+        let issuer_url = oidc.issuer_url.to_string();
 
         let discovery = Self::discover(&issuer_url)
             .await
-            .expect("OIDC discovery failed for OIDC_ISSUER_URL");
+            .expect("OIDC discovery failed for oidc.issuer-url");
 
-        let authorize_endpoint = std::env::var("OIDC_AUTHORIZE_URL")
-            .ok()
-            .filter(|value| !value.is_empty())
+        let authorize_endpoint = oidc
+            .authorize_url
+            .as_ref()
+            .map(Url::to_string)
             .unwrap_or(discovery.authorization_endpoint);
 
         Self {
             issuer_url,
-            client_id,
-            client_secret,
-            redirect_uri,
-            required_scope,
-            end_session_url,
+            client_id: oidc.client_id.clone(),
+            client_secret: oidc.client_secret.clone(),
+            redirect_uri: oidc.redirect_uri.to_string(),
+            required_scope: oidc.required_scope.clone(),
+            end_session_url: oidc.end_session_url.as_ref().map(Url::to_string),
             authorize_endpoint,
             token_endpoint: discovery.token_endpoint,
             jwks_uri: discovery.jwks_uri,
-            android_issuer_url,
-            android_client_id,
+            android_issuer_url: oidc.android.issuer_url.as_ref().map(Url::to_string),
+            android_client_id: oidc.android.client_id.clone(),
         }
     }
 

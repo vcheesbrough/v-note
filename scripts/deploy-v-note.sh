@@ -19,9 +19,21 @@ if [ "$target" != "dev" ] && [ "$target" != "prod" ]; then
   exit 1
 fi
 
-for name in REGISTRY_USER REGISTRY_PASSWORD OIDC_CLIENT_SECRET POSTGRES_PASSWORD ASSETLINKS_JSON; do
+# Runtime app config (database/oidc/observability/android) now comes from
+# sovereign-config; the only app secret this script handles is the access URL that
+# unlocks it. POSTGRES_PASSWORD stays here because the postgres service consumes it
+# directly (same value lives in both OpenBao and sovereign-config — see card #273).
+for name in REGISTRY_USER REGISTRY_PASSWORD POSTGRES_PASSWORD SOVEREIGN_ACCESS_URL; do
   require_env "$name"
 done
+
+# The access URL is a secret: hand it to compose as a docker secret via a file
+# rather than an env var, and keep it out of the process table and `docker inspect`.
+sovereign_url_file="$(mktemp)"
+chmod 600 "$sovereign_url_file"
+cleanup() { rm -f "$sovereign_url_file"; }
+trap cleanup EXIT INT TERM
+printf '%s' "$SOVEREIGN_ACCESS_URL" >"$sovereign_url_file"
 
 if [ -n "${V_NOTE_IMAGE_TAG:-}" ]; then
   release_tag="$V_NOTE_IMAGE_TAG"
@@ -38,13 +50,6 @@ case "$target" in
     app_env="${CI_COMMIT_BRANCH:-dev}"
     v_note_host="v-notes-dev.desync.link"
     v_note_container_name="v-note-dev"
-    oidc_issuer_url="https://auth.desync.link/application/o/v-note-dev/"
-    oidc_client_id="v-note-browser-dev"
-    oidc_redirect_uri="https://v-notes-dev.desync.link/auth/callback"
-    required_scope="v-note:dev:access"
-    oidc_end_session_url="https://auth.desync.link/application/o/v-note-dev/end-session/"
-    oidc_android_client_id="v-note-android-dev"
-    oidc_android_issuer_url="https://auth.desync.link/application/o/v-note-android-dev/"
     compose_files="-f deploy/docker-compose.yml -f deploy/docker-compose.android-apk.yml"
     docker pull "registry.desync.link/v-note-android:$release_tag"
     ;;
@@ -54,13 +59,6 @@ case "$target" in
     app_env="production"
     v_note_host="v-notes.desync.link"
     v_note_container_name="v-note"
-    oidc_issuer_url="https://auth.desync.link/application/o/v-note-prod/"
-    oidc_client_id="v-note-browser-prod"
-    oidc_redirect_uri="https://v-notes.desync.link/auth/callback"
-    required_scope="v-note:prod:access"
-    oidc_end_session_url="https://auth.desync.link/application/o/v-note-prod/end-session/"
-    oidc_android_client_id="v-note-android-prod"
-    oidc_android_issuer_url="https://auth.desync.link/application/o/v-note-android-prod/"
     compose_files="-f deploy/docker-compose.yml"
     ;;
 esac
@@ -71,22 +69,10 @@ docker pull "registry.desync.link/v-note:$release_tag"
 V_NOTE_IMAGE_TAG="$release_tag" \
 APP_VERSION="$release_tag" \
 APP_ENV="$app_env" \
-OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://monitor-alloy:4317}" \
-OTEL_EXPORTER_OTLP_PROTOCOL="${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}" \
-OTEL_EXPORTER_OTLP_TIMEOUT="${OTEL_EXPORTER_OTLP_TIMEOUT:-2000}" \
-OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-v-note}" \
 VNOTE_PROTOCOL_VERSION="${VNOTE_PROTOCOL_VERSION:-2}" \
 V_NOTE_HOST="$v_note_host" \
 V_NOTE_CONTAINER_NAME="$v_note_container_name" \
 DB_VOLUME="$db_volume" \
 POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-OIDC_ISSUER_URL="$oidc_issuer_url" \
-OIDC_CLIENT_ID="$oidc_client_id" \
-OIDC_CLIENT_SECRET="$OIDC_CLIENT_SECRET" \
-OIDC_REDIRECT_URI="$oidc_redirect_uri" \
-REQUIRED_SCOPE="$required_scope" \
-OIDC_END_SESSION_URL="$oidc_end_session_url" \
-OIDC_ANDROID_CLIENT_ID="$oidc_android_client_id" \
-OIDC_ANDROID_ISSUER_URL="$oidc_android_issuer_url" \
-ASSETLINKS_JSON="$ASSETLINKS_JSON" \
+SOVEREIGN_ACCESS_URL_HOST_FILE="$sovereign_url_file" \
 docker compose -p "$project" $compose_files up -d

@@ -24,6 +24,27 @@ services:
       - v-note-net
     labels: !override
       - traefik.enable=false
+    # No sovereign-config server locally: blank the access URL so that layer is
+    # skipped, and supply every group from the plain VNOTE__* env layer instead.
+    # Multi-word leaf segments are kebab-case to match sovereign-config paths.
+    secrets: !override []
+    environment:
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE: ""
+      VNOTE__DATABASE__HOST: postgres
+      VNOTE__DATABASE__PORT: "5432"
+      VNOTE__DATABASE__NAME: v_note
+      VNOTE__DATABASE__USER: v_note
+      VNOTE__DATABASE__PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally)}
+      VNOTE__OIDC__ISSUER-URL: ${OIDC_ISSUER_URL:?Set OIDC_ISSUER_URL (deploy/compose.env)}
+      VNOTE__OIDC__AUTHORIZE-URL: ${OIDC_AUTHORIZE_URL:-}
+      VNOTE__OIDC__CLIENT-ID: ${OIDC_CLIENT_ID:?Set OIDC_CLIENT_ID (deploy/compose.env)}
+      VNOTE__OIDC__CLIENT-SECRET: ${OIDC_CLIENT_SECRET:-local-mock-secret}
+      VNOTE__OIDC__REDIRECT-URI: ${OIDC_REDIRECT_URI:?Set OIDC_REDIRECT_URI (deploy/compose.env)}
+      VNOTE__OIDC__REQUIRED-SCOPE: ${REQUIRED_SCOPE:?Set REQUIRED_SCOPE (deploy/compose.env)}
+      VNOTE__OIDC__ANDROID__CLIENT-ID: ${OIDC_ANDROID_CLIENT_ID:-}
+      VNOTE__OIDC__ANDROID__ISSUER-URL: ${OIDC_ANDROID_ISSUER_URL:-}
+      VNOTE__OBSERVABILITY__ENVIRONMENT: ${APP_ENV:-dev}
+      VNOTE__ANDROID__ASSETLINKS-JSON: ${ASSETLINKS_JSON:-}
     depends_on:
       mock-oidc:
         condition: service_started

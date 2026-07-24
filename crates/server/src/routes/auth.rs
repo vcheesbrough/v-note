@@ -225,15 +225,15 @@ pub async fn mobile_callback(OriginalUri(uri): OriginalUri) -> Html<String> {
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn assetlinks() -> Response {
-    match std::env::var("ASSETLINKS_JSON") {
-        Ok(json) if !json.is_empty() => (
+pub async fn assetlinks(State(state): State<AppState>) -> Response {
+    match state.assetlinks_json.as_deref() {
+        Some(json) => (
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            json,
+            json.to_owned(),
         )
             .into_response(),
-        _ => (StatusCode::NOT_FOUND, "assetlinks not configured").into_response(),
+        None => (StatusCode::NOT_FOUND, "assetlinks not configured").into_response(),
     }
 }
 

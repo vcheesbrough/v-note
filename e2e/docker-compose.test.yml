@@ -69,20 +69,23 @@ services:
   app:
     image: ${TEST_IMAGE:?TEST_IMAGE must be set}
     environment:
-      APP_ENV: test
+      # No sovereign-config server in e2e: the access URL is left unset so that
+      # layer is skipped and every group is supplied from the VNOTE__* env layer.
+      # Multi-word leaf segments are kebab-case to match sovereign-config paths.
       APP_VERSION: test
-      OIDC_ISSUER_URL: http://mock-oidc:8080/default
-      OIDC_CLIENT_ID: v-note-test
-      OIDC_CLIENT_SECRET: test-secret
-      OIDC_REDIRECT_URI: https://app:443/auth/callback
-      REQUIRED_SCOPE: v-note:test:access
-      OIDC_ANDROID_CLIENT_ID: v-note-android-test
-      OIDC_ANDROID_ISSUER_URL: http://mock-oidc:8080/default
-      DATABASE_HOST: postgres
-      DATABASE_PORT: 5432
-      DATABASE_USER: v_note
-      DATABASE_PASSWORD: test-password
-      DATABASE_NAME: v_note
+      VNOTE__OBSERVABILITY__ENVIRONMENT: test
+      VNOTE__OIDC__ISSUER-URL: http://mock-oidc:8080/default
+      VNOTE__OIDC__CLIENT-ID: v-note-test
+      VNOTE__OIDC__CLIENT-SECRET: test-secret
+      VNOTE__OIDC__REDIRECT-URI: https://app:443/auth/callback
+      VNOTE__OIDC__REQUIRED-SCOPE: v-note:test:access
+      VNOTE__OIDC__ANDROID__CLIENT-ID: v-note-android-test
+      VNOTE__OIDC__ANDROID__ISSUER-URL: http://mock-oidc:8080/default
+      VNOTE__DATABASE__HOST: postgres
+      VNOTE__DATABASE__PORT: "5432"
+      VNOTE__DATABASE__USER: v_note
+      VNOTE__DATABASE__PASSWORD: test-password
+      VNOTE__DATABASE__NAME: v_note
     depends_on:
       mock-oidc:
         condition: service_started
