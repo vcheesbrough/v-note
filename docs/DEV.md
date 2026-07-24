@@ -227,9 +227,15 @@ WSL builds/install via `adb` (USB or emulator started on Windows); `just android
 ```bash
 export BAO_ADDR=https://secrets.desync.link
 export BAO_TOKEN=<token with read on secret/v-note-stack/env>
+export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>  # only for --build
 ./scripts/fetch-compose-env.sh   # writes deploy/.env from OpenBao + deploy/compose.env
 just run-compose
 ```
+
+`just run-compose` builds the image, and the cargo layers fetch the **private**
+`sovereign-config` git dep — so `GITHUB_TOKEN` must be set. Compose passes it as a
+build secret (`v-note.build.secrets`), the same credential path CI uses; it is
+build-time only and never mounted into the running container.
 
 Non-secret compose defaults are in **`deploy/compose.env`** (committed). Secrets (**`POSTGRES_PASSWORD`**, **`OIDC_CLIENT_SECRET`**) live in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator).
 
@@ -248,8 +254,16 @@ Mini deploy uses `deploy/docker-compose.yml` only (Traefik `proxy-backend`, `lan
 
 ## CI reproduction
 
+Building the web image needs a GitHub token: `sovereign-config-provider` is a git
+dependency on a **private** repo, so the cargo layers fetch it with the same
+BuildKit secret CI uses. A token with read access to `vcheesbrough/sovereign-config`
+is enough. (`cargo run -p server` does not need this — it uses your host git
+credentials directly.)
+
 ```bash
-docker build -f Dockerfile.web -t v-note:local .  # add --label flags from .woodpecker/build.yml build-web for OCI metadata
+export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>
+
+docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --label flags from .woodpecker/build.yml build-web for OCI metadata
 cargo test -p protocol -p server
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright

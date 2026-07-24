@@ -7,8 +7,9 @@
 #
 # The access URL is a long-lived credential granting read access to the whole
 # /v-note/<env>/server subtree — including database/password and
-# oidc/client-secret. It is therefore read from STDIN, never from an argument, so
-# it never lands in argv, the process table, or shell history.
+# oidc/client-secret. It is therefore read from STDIN and piped onward to bao via
+# its `key=-` stdin form, never as an argument — so it lands in neither this
+# script's argv, nor bao's (/proc/<pid>/cmdline), nor shell history.
 #
 # Get a URL by creating a managed connection (sovereign-config MCP or web UI):
 #   create_connection root=/v-note/dev/server  permissions=["read"]
@@ -66,10 +67,14 @@ case "$url" in
 esac
 
 echo "==> Storing $KEY (${#url} chars) at $KV_PATH"
+# `KEY=-` makes bao read the value from stdin, so only the key *name* reaches argv.
+# Passing "$KEY=$url" would expose the credential in /proc/<pid>/cmdline for the
+# duration of the call. `printf '%s'` adds no trailing newline, so the stored value
+# is byte-exact regardless of whether bao trims one.
 if bao kv get "$KV_PATH" >/dev/null 2>&1; then
-  bao kv patch "$KV_PATH" "$KEY=$url" >/dev/null
+  printf '%s' "$url" | bao kv patch "$KV_PATH" "$KEY=-" >/dev/null
 else
-  bao kv put "$KV_PATH" "$KEY=$url" >/dev/null
+  printf '%s' "$url" | bao kv put "$KV_PATH" "$KEY=-" >/dev/null
 fi
 
 echo "==> Done. Redeploy $target from Woodpecker when both envs are stored."
