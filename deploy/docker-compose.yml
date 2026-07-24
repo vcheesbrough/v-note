@@ -46,12 +46,13 @@ services:
       # orchestration and image-internal values stay here — see card #273.
       # Set to an empty value (docker-compose.local.yml) to disable the
       # sovereign-config layer and fall back to plain VNOTE__* env.
-      SOVEREIGN_CONFIG_ACCESS_URL_FILE: ${SOVEREIGN_CONFIG_ACCESS_URL_FILE-/run/secrets/sovereign_access_url}
+      # Points at the docker secret below; the provider reads the URL from that file.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE: /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
       V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
       VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-2}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-2}}
     secrets:
-      - sovereign_access_url
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,13 +78,14 @@ services:
       - observability.protocol=${VNOTE_PROTOCOL_VERSION:-2}
 
 secrets:
-  # Written by scripts/deploy-v-note.sh from the Woodpecker secret
-  # v_note_{dev,prod}_sovereign_access_url. The connection URL is itself a secret
-  # and selects the env: dev vs prod is decided by *which* URL is injected.
-  # Defaults to /dev/null so the local overlay (which disables the sovereign layer)
-  # can still render this file.
-  sovereign_access_url:
-    file: ${SOVEREIGN_ACCESS_URL_HOST_FILE:-/dev/null}
+  # Sourced straight from the Woodpecker secret v_note_{dev,prod}_sovereign_access_url,
+  # exposed by the deploy step as the SOVEREIGN_CONFIG_ACCESS_URL_FILE env var. Compose
+  # materialises it as a file mounted at /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE.
+  # The connection URL is itself a secret and selects the env: dev vs prod is decided
+  # by *which* URL is injected. The local overlay drops this mount and blanks the env
+  # var to disable the sovereign layer entirely.
+  SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+    environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE
 
 volumes:
   v-note-db:

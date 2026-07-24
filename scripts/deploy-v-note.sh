@@ -21,19 +21,13 @@ fi
 
 # Runtime app config (database/oidc/observability/android) now comes from
 # sovereign-config; the only app secret this script handles is the access URL that
-# unlocks it. POSTGRES_PASSWORD stays here because the postgres service consumes it
-# directly (same value lives in both OpenBao and sovereign-config — see card #273).
-for name in REGISTRY_USER REGISTRY_PASSWORD POSTGRES_PASSWORD SOVEREIGN_ACCESS_URL; do
+# unlocks it. It arrives as SOVEREIGN_CONFIG_ACCESS_URL_FILE (Woodpecker secret) and
+# compose turns it into the docker secret of the same name — see deploy/docker-compose.yml.
+# POSTGRES_PASSWORD stays here because the postgres service consumes it directly
+# (same value lives in both OpenBao and sovereign-config — see card #273).
+for name in REGISTRY_USER REGISTRY_PASSWORD POSTGRES_PASSWORD SOVEREIGN_CONFIG_ACCESS_URL_FILE; do
   require_env "$name"
 done
-
-# The access URL is a secret: hand it to compose as a docker secret via a file
-# rather than an env var, and keep it out of the process table and `docker inspect`.
-sovereign_url_file="$(mktemp)"
-chmod 600 "$sovereign_url_file"
-cleanup() { rm -f "$sovereign_url_file"; }
-trap cleanup EXIT INT TERM
-printf '%s' "$SOVEREIGN_ACCESS_URL" >"$sovereign_url_file"
 
 if [ -n "${V_NOTE_IMAGE_TAG:-}" ]; then
   release_tag="$V_NOTE_IMAGE_TAG"
@@ -74,5 +68,5 @@ V_NOTE_HOST="$v_note_host" \
 V_NOTE_CONTAINER_NAME="$v_note_container_name" \
 DB_VOLUME="$db_volume" \
 POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-SOVEREIGN_ACCESS_URL_HOST_FILE="$sovereign_url_file" \
+SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
 docker compose -p "$project" $compose_files up -d

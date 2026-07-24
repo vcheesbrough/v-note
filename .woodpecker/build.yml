@@ -279,7 +279,7 @@ steps:
         from_secret: v_note_dev_postgres_password
       # Unlocks the /applications/v-note/dev sovereign-config subtree; the URL
       # itself selects the environment.
-      SOVEREIGN_ACCESS_URL:
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_dev_sovereign_access_url
     commands:
       - ./scripts/deploy-v-note.sh dev
@@ -301,7 +301,7 @@ steps:
         from_secret: v_note_dev_postgres_password
       # Unlocks the /applications/v-note/dev sovereign-config subtree; the URL
       # itself selects the environment.
-      SOVEREIGN_ACCESS_URL:
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_dev_sovereign_access_url
     commands:
       - ./scripts/deploy-v-note.sh dev
@@ -337,7 +337,7 @@ steps:
       POSTGRES_PASSWORD:
         from_secret: v_note_prod_postgres_password
       # Unlocks the /applications/v-note/prod sovereign-config subtree.
-      SOVEREIGN_ACCESS_URL:
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_prod_sovereign_access_url
     commands:
       - ./scripts/deploy-v-note.sh prod

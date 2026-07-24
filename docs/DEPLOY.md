@@ -82,11 +82,13 @@ env vars. The server loads four independent groups — `database`, `oidc`,
 `observability`, `android` — and **refuses to start (non-zero exit, redacted
 error) if any value is missing or invalid**.
 
-`scripts/deploy-v-note.sh` writes the per-env access URL (Woodpecker secret
-`v_note_{dev,prod}_sovereign_access_url`) to a file mounted as the docker secret
-`sovereign_access_url`; compose points `SOVEREIGN_CONFIG_ACCESS_URL_FILE` at it.
-**The URL is itself a secret and selects the environment** — dev vs prod is decided
-by which URL is injected, not by a config flag.
+The deploy step exposes the per-env access URL (Woodpecker secret
+`v_note_{dev,prod}_sovereign_access_url`) as the `SOVEREIGN_CONFIG_ACCESS_URL_FILE`
+env var; compose sources a docker secret of the same name straight from it and
+mounts it at `/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE`, which the container's
+`SOVEREIGN_CONFIG_ACCESS_URL_FILE` points at. **The URL is itself a secret and
+selects the environment** — dev vs prod is decided by which URL is injected, not by
+a config flag.
 
 ### Creating / rotating an access URL (operator)
 
