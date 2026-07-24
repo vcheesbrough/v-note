@@ -57,7 +57,7 @@ system below.
 ### Runtime configuration (`VNOTE__*`)
 
 Since iteration 19 the server's runtime config lives in **sovereign-config**
-(`/applications/v-note/{dev,prod}`), loaded as five independent groups —
+(`/v-note/{dev,prod}/server`), loaded as five independent groups —
 `database`, `oidc`, `observability`, `android`, `server`. **The server refuses to
 start (non-zero exit, redacted error) if any value is missing or invalid.**
 
