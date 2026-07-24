@@ -25,8 +25,11 @@ crates/server/tests/
 Dockerfile
 Dockerfile.*
 
-# Scripts (not invoked by Dockerfile.web)
-scripts/
+# Scripts — only the git-credential helper is sourced by the cargo layers.
+# Exclude contents (glob, not the dir, so the negation below is honoured) then
+# re-include the one file the build needs.
+scripts/*
+!scripts/docker-git-credential.sh
 
 # Meta
 README.md
