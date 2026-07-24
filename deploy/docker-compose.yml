@@ -47,8 +47,6 @@ services:
       # Set to an empty value (docker-compose.local.yml) to disable the
       # sovereign-config layer and fall back to plain VNOTE__* env.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE: ${SOVEREIGN_CONFIG_ACCESS_URL_FILE-/run/secrets/sovereign_access_url}
-      APP_VERSION: ${APP_VERSION:-0.11.0}
-      STATIC_DIR: /app/dist
       V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
       VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-2}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-2}}

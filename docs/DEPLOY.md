@@ -122,7 +122,7 @@ and **fails closed on protocol mismatch**; if that server is upgraded, bump
 | `V_NOTE_CONTAINER_NAME` | `v-note` vs `v-note-dev` |
 | `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
 | `APP_ENV` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.env` labels |
-| `APP_VERSION` | release tag, exposed in `/api/meta` |
+| `APP_VERSION` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.release` labels (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
 | `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
 
 Everything else (database, OIDC, OTLP, metrics address, App Links JSON) now comes

@@ -45,24 +45,29 @@ curl http://localhost:8080/api/meta
 
 Environment:
 
+Only three env vars are read directly; everything else goes through the config
+system below.
+
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PORT` | `8080` | HTTP listen (no TLS) |
-| `APP_VERSION` | workspace `0.1.0` | exposed in `/api/meta` |
-| `STATIC_DIR` | unset | when set, serves SPA + fallback `index.html` |
-| `TLS_CERT` / `TLS_KEY` | unset | Docker image sets self-signed TLS on `:443` |
-| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | unset | path to the sovereign-config access-URL secret; when set (or `SOVEREIGN_CONFIG_ACCESS_URL`), runtime config is read from sovereign-config |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` / `SOVEREIGN_CONFIG_ACCESS_URL` | unset | **bootstrap** — path to (or inline) the sovereign-config access-URL secret; when set, runtime config is read from sovereign-config |
+| `RUST_LOG` | `server=info,tower_http=info,axum=info` | standard tracing `EnvFilter` level |
+| `V_NOTE_RELEASE` | crate version | **compile-time** — release tag baked into the binary (and the SPA) at build; shown in `/api/meta` and OTEL `service.version` |
 
 ### Runtime configuration (`VNOTE__*`)
 
 Since iteration 19 the server's runtime config lives in **sovereign-config**
-(`/applications/v-note/{dev,prod}`), loaded as four independent groups —
-`database`, `oidc`, `observability`, `android`. **The server refuses to start
-(non-zero exit, redacted error) if any value is missing or invalid.**
+(`/applications/v-note/{dev,prod}`), loaded as five independent groups —
+`database`, `oidc`, `observability`, `android`, `server`. **The server refuses to
+start (non-zero exit, redacted error) if any value is missing or invalid.**
 
 Config is layered: in-memory defaults → sovereign-config (only when an access URL
 is set) → `VNOTE__*` environment overrides. Local dev and e2e have no
 sovereign-config server, so they supply every group through the env layer.
+
+The `server` group is image-internal (identical across deployments), so it comes
+from defaults or `VNOTE__SERVER__*` overrides set by the image — never from
+sovereign-config.
 
 `VNOTE__<GROUP>__<LEAF>` maps to `<group>.<leaf>`; `__` separates path segments and
 **multi-word leaves are kebab-case** (sovereign-config path segments forbid `_`), so
@@ -90,6 +95,9 @@ the same key overrides across every layer. Blank optional values mean "absent".
 | `VNOTE__OBSERVABILITY__SERVICE-NAME` | `v-note` | trace service name |
 | `VNOTE__OBSERVABILITY__METRICS-ADDR` | `0.0.0.0:9090` | internal Prometheus listener; `disabled`/blank turns it off |
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
+| `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
+| `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
+| `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
 
 **OIDC is mandatory:** the server refuses to start without `VNOTE__OIDC__ISSUER-URL` and related leaves. Local dev and CI use **mock OIDC** (`deploy/docker-compose.local.yml`, `e2e/docker-compose.test.yml`) — not auth-disabled anonymous mode.
 

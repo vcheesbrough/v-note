@@ -46,8 +46,11 @@ RUN openssl req -x509 -newkey rsa:4096 \
         -days 3650 \
         -nodes \
         -subj "/CN=v-note"
-ENV TLS_CERT=/app/cert.pem
-ENV TLS_KEY=/app/key.pem
-ENV STATIC_DIR=/app/dist
+# Image-internal serving config, supplied through the config system's env-override
+# layer (the `server` group is never sourced from sovereign-config). Kebab-case leaf
+# segments match every other group; `__` separates path segments.
+ENV VNOTE__SERVER__TLS-CERT=/app/cert.pem
+ENV VNOTE__SERVER__TLS-KEY=/app/key.pem
+ENV VNOTE__SERVER__STATIC-DIR=/app/dist
 EXPOSE 443
 CMD ["./server"]

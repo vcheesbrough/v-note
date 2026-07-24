@@ -72,7 +72,7 @@ services:
       # No sovereign-config server in e2e: the access URL is left unset so that
       # layer is skipped and every group is supplied from the VNOTE__* env layer.
       # Multi-word leaf segments are kebab-case to match sovereign-config paths.
-      APP_VERSION: test
+      # (server group — tls/static/port — comes from the image's own ENV defaults.)
       VNOTE__OBSERVABILITY__ENVIRONMENT: test
       VNOTE__OIDC__ISSUER-URL: http://mock-oidc:8080/default
       VNOTE__OIDC__CLIENT-ID: v-note-test

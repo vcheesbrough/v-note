@@ -4,7 +4,6 @@ pub mod observability;
 mod routes;
 mod thumbnails;
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,7 +16,7 @@ use sqlx::PgPool;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{auth_middleware, AuthConfig, JwksCache};
-use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig};
+use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig, ServerConfig};
 use crate::observability::request_observability_middleware;
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
@@ -35,8 +34,14 @@ pub struct AppState {
     pub assetlinks_json: Option<Arc<str>>,
 }
 
-pub fn app_version_from_env() -> String {
-    env::var("APP_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+/// The build version: the release tag baked in at compile time (`V_NOTE_RELEASE`,
+/// injected by `Dockerfile.web`), falling back to the crate version for local builds.
+/// A build constant, not runtime config — mirrors how the SPA sources its version.
+pub fn app_version() -> &'static str {
+    match option_env!("V_NOTE_RELEASE") {
+        Some(release) if !release.is_empty() => release,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 /// Assemble the application router from its already-loaded config groups.
@@ -48,6 +53,7 @@ pub async fn build_app_router(
     database: &DatabaseConfig,
     oidc: &OidcConfig,
     android: &AndroidConfig,
+    server: &ServerConfig,
 ) -> Router {
     let auth = Arc::new(AuthConfig::from_oidc(oidc).await);
     let jwks_cache = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
@@ -63,11 +69,12 @@ pub async fn build_app_router(
         .expect("database migrations should apply");
 
     build_router_full(
-        app_version_from_env(),
+        app_version().to_string(),
         auth,
         jwks_cache,
         Some(pool),
         android.assetlinks_json().map(Arc::from),
+        server.static_dir.clone(),
     )
 }
 
@@ -94,7 +101,7 @@ pub fn build_router_with_db(
     jwks_cache: Arc<JwksCache>,
     db: Option<PgPool>,
 ) -> Router {
-    build_router_full(app_version, auth, jwks_cache, db, None)
+    build_router_full(app_version, auth, jwks_cache, db, None, None)
 }
 
 pub fn build_router_full(
@@ -103,6 +110,7 @@ pub fn build_router_full(
     jwks_cache: Arc<JwksCache>,
     db: Option<PgPool>,
     assetlinks_json: Option<Arc<str>>,
+    static_dir: Option<PathBuf>,
 ) -> Router {
     let state = AppState {
         app_version,
@@ -158,8 +166,8 @@ pub fn build_router_full(
             get(page_socket).with_state(state.clone()),
         );
 
-    if let Ok(static_dir) = env::var("STATIC_DIR") {
-        let index = PathBuf::from(&static_dir).join("index.html");
+    if let Some(static_dir) = static_dir {
+        let index = static_dir.join("index.html");
         let spa_service = axum::routing::get_service(
             ServeDir::new(static_dir).not_found_service(ServeFile::new(index)),
         );
