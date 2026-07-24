@@ -24,7 +24,7 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
-4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket)
+4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the app's `/health` from inside the compose network and fails the deploy (dumping container status + logs) if it never serves. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
 Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.

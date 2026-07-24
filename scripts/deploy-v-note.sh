@@ -1,8 +1,42 @@
 #!/bin/sh
 set -eu
 
+# Minimal image used to probe the app's /health from inside the docker network.
+# busybox wget speaks HTTPS and exits non-zero on DNS failure or any non-200.
+HEALTH_PROBE_IMAGE="alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
+HEALTH_TIMEOUT_SECONDS=120
+
 usage() {
   echo "Usage: $0 dev|prod" >&2
+}
+
+# `docker compose up -d` returns as soon as the container is *created*, so an app
+# that starts and then immediately exits (bad config, unreachable dependency)
+# still looks like a successful deploy — a crash-looping container once reached
+# CI as "green". Poll the app's own /health over the compose network and fail the
+# deploy if it never serves.
+wait_for_health() {
+  container="$1"
+  network="$2"
+  deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
+
+  echo "==> waiting for $container to serve /health (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
+  while :; do
+    if docker run --rm --network "$network" "$HEALTH_PROBE_IMAGE" \
+        wget --no-check-certificate -q -O /dev/null "https://$container/health" >/dev/null 2>&1; then
+      echo "==> $container is healthy"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "ERROR: $container did not serve /health within ${HEALTH_TIMEOUT_SECONDS}s" >&2
+      echo "--- docker ps ---" >&2
+      docker ps -a --filter "name=$container" --format '{{.Names}}\t{{.Status}}' >&2 || true
+      echo "--- last 50 log lines from $container ---" >&2
+      docker logs --tail 50 "$container" >&2 2>&1 || true
+      return 1
+    fi
+    sleep 3
+  done
 }
 
 require_env() {
@@ -70,3 +104,5 @@ DB_VOLUME="$db_volume" \
 POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
 SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
 docker compose -p "$project" $compose_files up -d
+
+wait_for_health "$v_note_container_name" "${DOCKER_NETWORK:-v-note-net}"
