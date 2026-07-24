@@ -41,32 +41,19 @@ services:
     container_name: ${V_NOTE_CONTAINER_NAME:?V_NOTE_CONTAINER_NAME is required}
     restart: unless-stopped
     environment:
-      APP_ENV: ${APP_ENV:-dev}
+      # Runtime config (database / oidc / observability / android) comes from
+      # sovereign-config, reached via the access-URL secret below. Only build,
+      # orchestration and image-internal values stay here — see card #273.
+      # Set to an empty value (docker-compose.local.yml) to disable the
+      # sovereign-config layer and fall back to plain VNOTE__* env.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE: ${SOVEREIGN_CONFIG_ACCESS_URL_FILE-/run/secrets/sovereign_access_url}
       APP_VERSION: ${APP_VERSION:-0.11.0}
-      DATABASE_HOST: postgres
-      DATABASE_PORT: 5432
-      DATABASE_USER: v_note
-      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
-      DATABASE_NAME: v_note
       STATIC_DIR: /app/dist
       V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
-      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
-      OIDC_AUTHORIZE_URL: ${OIDC_AUTHORIZE_URL:-}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
-      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
-      REQUIRED_SCOPE: ${REQUIRED_SCOPE:-}
-      OIDC_END_SESSION_URL: ${OIDC_END_SESSION_URL:-}
-      OIDC_ANDROID_CLIENT_ID: ${OIDC_ANDROID_CLIENT_ID:-}
-      OIDC_ANDROID_ISSUER_URL: ${OIDC_ANDROID_ISSUER_URL:-}
-      ASSETLINKS_JSON: ${ASSETLINKS_JSON:-}
-      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
-      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-2000}
-      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-v-note}
       VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-2}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-2}}
+    secrets:
+      - sovereign_access_url
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,6 +77,15 @@ services:
       - observability.env=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-0.11.0}
       - observability.protocol=${VNOTE_PROTOCOL_VERSION:-2}
+
+secrets:
+  # Written by scripts/deploy-v-note.sh from the Woodpecker secret
+  # v_note_{dev,prod}_sovereign_access_url. The connection URL is itself a secret
+  # and selects the env: dev vs prod is decided by *which* URL is injected.
+  # Defaults to /dev/null so the local overlay (which disables the sovereign layer)
+  # can still render this file.
+  sovereign_access_url:
+    file: ${SOVEREIGN_ACCESS_URL_HOST_FILE:-/dev/null}
 
 volumes:
   v-note-db:

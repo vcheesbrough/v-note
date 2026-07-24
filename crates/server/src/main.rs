@@ -2,8 +2,11 @@ use std::env;
 use std::net::SocketAddr;
 
 use axum_server::tls_rustls::RustlsConfig;
+use server::build_app_router;
+use server::config::{
+    build_config, load_group, AndroidConfig, DatabaseConfig, ObservabilityConfig, OidcConfig,
+};
 use server::observability::{init_tracing, run_metrics_server};
-use server::router_from_env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,11 +14,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("failed to install rustls ring crypto provider");
 
-    let _telemetry_guard = init_tracing();
+    // Composition root: the only place that knows configuration is sourced from
+    // sovereign-config. Assembling it blocks on a startup RPC (the provider runs it
+    // on its own dedicated thread), which is fine to do inline here — no other task
+    // is scheduled yet, so there is nothing for spawn_blocking to unblock. Any
+    // missing/invalid value fails here. Each group is loaded + validated from its own
+    // sub-branch, then handed to the feature that owns it — features only see their DTO.
+    let cfg = build_config()?;
+    let observability = load_group::<ObservabilityConfig>(&cfg, "observability")?;
+    let database = load_group::<DatabaseConfig>(&cfg, "database")?;
+    let oidc = load_group::<OidcConfig>(&cfg, "oidc")?;
+    let android = load_group::<AndroidConfig>(&cfg, "android")?;
+    drop(cfg);
 
-    let app = router_from_env().await;
-    tokio::spawn(async {
-        if let Err(error) = run_metrics_server().await {
+    let _telemetry_guard = init_tracing(&observability);
+    let metrics_addr = observability.metrics_socket_addr();
+
+    let app = build_app_router(&database, &oidc, &android).await;
+    tokio::spawn(async move {
+        if let Err(error) = run_metrics_server(metrics_addr).await {
             tracing::error!(error = %error, "internal metrics listener stopped");
         }
     });

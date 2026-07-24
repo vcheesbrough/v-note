@@ -52,8 +52,10 @@ Operator reproduction from a Woodpecker-equivalent shell:
 | `v_note_prod_oidc_client_secret` | SPA confidential client (prod) |
 | `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
-| `v_note_dev_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (dev App Links, package `link.desync.vnote.dev`) |
-| `v_note_prod_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (prod App Links, package `link.desync.vnote`) |
+| `v_note_dev_sovereign_access_url` | Access URL for the `/applications/v-note/dev` sovereign-config subtree |
+| `v_note_prod_sovereign_access_url` | Access URL for the `/applications/v-note/prod` sovereign-config subtree |
+| `v_note_dev_assetlinks_json` | Minified App Links JSON, source for `android/assetlinks-json` (dev, package `link.desync.vnote.dev`) |
+| `v_note_prod_assetlinks_json` | Minified App Links JSON, source for `android/assetlinks-json` (prod, package `link.desync.vnote`) |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
 | Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
@@ -72,35 +74,76 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 
 ---
 
-## Compose env vars (per deployment)
+## Runtime config (sovereign-config)
+
+Since iteration 19 the app's runtime configuration lives in **sovereign-config**
+under `/applications/v-note/dev` and `/applications/v-note/prod`, not in compose
+env vars. The server loads four independent groups — `database`, `oidc`,
+`observability`, `android` — and **refuses to start (non-zero exit, redacted
+error) if any value is missing or invalid**.
+
+`scripts/deploy-v-note.sh` writes the per-env access URL (Woodpecker secret
+`v_note_{dev,prod}_sovereign_access_url`) to a file mounted as the docker secret
+`sovereign_access_url`; compose points `SOVEREIGN_CONFIG_ACCESS_URL_FILE` at it.
+**The URL is itself a secret and selects the environment** — dev vs prod is decided
+by which URL is injected, not by a config flag.
+
+### Creating / rotating an access URL (operator)
+
+The access URL grants read access to the **whole** `/applications/v-note/<env>`
+subtree, secret leaves included — treat it like a password.
+
+1. Create a managed connection (sovereign-config MCP or web UI), scoped and
+   read-only — the URL is displayed **once**:
+   `create_connection root=/applications/v-note/dev permissions=["read"]`
+2. Pipe it straight into OpenBao without it touching a terminal argument or
+   shell history:
+   ```bash
+   export BAO_ADDR=https://secrets.desync.link BAO_TOKEN=<write token>
+   ./scripts/store-sovereign-access-url.sh dev    # paste URL, Ctrl-D
+   ./scripts/store-sovereign-access-url.sh prod
+   ```
+3. Redeploy. To rotate, `rotate_connection` and repeat — no app change needed.
+
+Secret leaves (`database/password`, `oidc/client-secret`) are stored with
+`put_secret` and revealed to the app at load. `POSTGRES_PASSWORD` **also** stays in
+OpenBao because the `postgres` service consumes it directly — the same value lives
+in two stores.
+
+The provider is pinned to the running sovereign-config server's tag (**2.12.1**)
+and **fails closed on protocol mismatch**; if that server is upgraded, bump
+`sovereign-config-provider` in `crates/server/Cargo.toml` and rebuild.
+
+### Compose env vars that remain (per deployment)
 
 | Variable (example) | Purpose |
 | --- | --- |
 | `V_NOTE_HOST` | `v-notes.desync.link` vs `v-notes-dev.desync.link` |
+| `V_NOTE_CONTAINER_NAME` | `v-note` vs `v-note-dev` |
 | `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
-| `REQUIRED_SCOPE` | `v-note:prod:access` vs `v-note:dev:access` |
-| `OIDC_ISSUER_URL` | Matching Authentik provider issuer |
-| `OIDC_CLIENT_ID` | SPA confidential client (`v-note-browser-{dev,prod}`) |
-| `OIDC_CLIENT_SECRET` | SPA client secret (Woodpecker secret per env) |
-| `OIDC_REDIRECT_URI` | `https://{host}/auth/callback` |
-| `OIDC_END_SESSION_URL` | Authentik RP logout URL for env |
-| `OIDC_ANDROID_CLIENT_ID` | Android app client (`v-note-android-{dev,prod}`) |
-| `OIDC_ANDROID_ISSUER_URL` | Android Authentik provider issuer URL |
-| `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Defaults to `http://monitor-alloy:4317` in deploy; override only if mini-config changes |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` |
-| `METRICS_ADDR` | `0.0.0.0:9090` internal listener scraped by Alloy |
+| `APP_ENV` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.env` labels |
+| `APP_VERSION` | release tag, exposed in `/api/meta` |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
 
-**OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
+Everything else (database, OIDC, OTLP, metrics address, App Links JSON) now comes
+from sovereign-config, overridable per-deploy through the `VNOTE__*` env layer
+documented in [`DEV.md`](DEV.md).
 
-Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for deploy** — Woodpecker injects minified JSON from OpenBao keys `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` (step `environment:` → `docker compose` reads `${ASSETLINKS_JSON}`). Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do not commit real fingerprints).
+**OIDC is mandatory** — the server exits non-zero at startup if `oidc/issuer-url` or
+related leaves are missing; deploy reads them from sovereign-config, local compose
+and e2e supply them via `VNOTE__*` (mock OIDC).
+
+App Links JSON is sourced from the Woodpecker secrets
+`v_note_{dev,prod}_assetlinks_json` and stored at the `android/assetlinks-json`
+leaf. Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do
+not commit real fingerprints).
 
 ## Observability
 
 v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 
 - **Metrics:** the app serves Prometheus text on internal port `9090` at `/metrics`. Alloy discovers it through Docker labels on the `v-note` service: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.metrics.scheme=http`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
-- **Traces:** `scripts/deploy-v-note.sh` sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://monitor-alloy:4317`, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, and `OTEL_SERVICE_NAME=v-note` unless explicitly overridden.
+- **Traces:** the `observability` config group sets `otlp-endpoint=http://monitor-alloy:4317`, `otlp-protocol=grpc`, and `service-name=v-note` in both env subtrees; `observability/environment` supplies the OTEL `deployment.environment` attribute (`dev` / `production`).
 - **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
 - **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
