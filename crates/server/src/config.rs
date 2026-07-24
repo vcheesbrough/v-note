@@ -139,10 +139,53 @@ pub fn build_config() -> Result<Config, ConfigError> {
 }
 
 /// The environment override layer. `VNOTE__OIDC__CLIENT-ID` → `oidc.client-id`.
-fn env_source() -> Environment {
-    Environment::with_prefix(ENV_PREFIX)
-        .prefix_separator(ENV_SEPARATOR)
-        .separator(ENV_SEPARATOR)
+///
+/// Also accepts the snake_case spelling (`VNOTE__OIDC__CLIENT_ID`), because `-` is
+/// not legal in a POSIX shell variable name — `VNOTE__A__B-C=x` is parsed as a
+/// command, not an assignment, so the kebab form is unusable from a plain shell.
+fn env_source() -> KebabCaseEnvironment {
+    KebabCaseEnvironment(
+        Environment::with_prefix(ENV_PREFIX)
+            .prefix_separator(ENV_SEPARATOR)
+            .separator(ENV_SEPARATOR),
+    )
+}
+
+/// Wraps [`Environment`], folding snake_case leaf names onto the canonical
+/// kebab-case keys **before** the layers merge.
+///
+/// Aliasing at the serde level is not sufficient: `server.http-port` (from the
+/// defaults layer) and `server.http_port` (from env) are distinct keys, so they do
+/// not override one another — serde sees the field twice and fails with
+/// `duplicate field`. Normalising here means both spellings address the same key.
+#[derive(Debug, Clone)]
+struct KebabCaseEnvironment(Environment);
+
+impl KebabCaseEnvironment {
+    /// Read from an explicit map instead of the process environment (tests).
+    #[cfg(test)]
+    fn source(self, source: Option<config::Map<String, String>>) -> Self {
+        KebabCaseEnvironment(self.0.source(source))
+    }
+}
+
+impl config::Source for KebabCaseEnvironment {
+    fn clone_into_box(&self) -> Box<dyn config::Source + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
+        Ok(self
+            .0
+            .collect()?
+            .into_iter()
+            // `config` has already lowercased the name and turned the `__`
+            // separator into `.`, so any `_` still present is inside a leaf
+            // segment. Config path segments never legitimately contain `_`
+            // (sovereign-config forbids it), so this rewrite is unambiguous.
+            .map(|(key, value)| (key.replace('_', "-"), value))
+            .collect())
+    }
 }
 
 fn apply_defaults(
@@ -378,7 +421,17 @@ impl ValidatedConfig for AndroidConfig {
 
 /// How the process exposes itself. These are image-internal (identical across
 /// deployments), so they come from config defaults or `VNOTE__SERVER__*` overrides
-/// set by the image — never from sovereign-config.
+/// set by the image.
+///
+/// **Do not put a `server/*` leaf in sovereign-config.** That is a convention, not
+/// an enforced boundary: the sovereign layer is merged wholesale, so a `server/*`
+/// leaf would be picked up like any other. The image's `VNOTE__SERVER__*` env vars
+/// out-rank it for `tls-cert`, `tls-key` and `static-dir` (env is the top layer),
+/// but `http-port` has no such override and a remote value would win over the
+/// default. Deliberately unenforced: no `server` branch exists in either env
+/// subtree, and write access to it already implies control of `database/password`
+/// and `oidc/client-secret`, so this is a tidiness boundary rather than a
+/// security one.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ServerConfig {

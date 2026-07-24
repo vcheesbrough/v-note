@@ -516,6 +516,112 @@ fn server_blank_tls_and_static_are_treated_as_absent() {
 }
 
 // ---------------------------------------------------------------------------
+// shell-safe env names
+// ---------------------------------------------------------------------------
+
+/// Canonical leaf keys are kebab-case to match sovereign-config paths, but `-` is
+/// not legal in a POSIX shell variable name — `VNOTE__OBSERVABILITY__METRICS-ADDR=x`
+/// is parsed as a command, not an assignment. Every multi-word leaf therefore also
+/// accepts the snake_case form via `#[serde(alias = …)]`.
+///
+/// This exercises **every** multi-word leaf, so a new field added without an alias
+/// fails here rather than silently breaking `cargo run` for local dev.
+#[test]
+fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
+    // oidc (including the nested android subtree)
+    let oidc: OidcConfig = load_group(
+        &cfg(&[
+            ("VNOTE__OIDC__ISSUER_URL", "https://auth.example/o/v-note/"),
+            (
+                "VNOTE__OIDC__AUTHORIZE_URL",
+                "https://auth.example/authorize",
+            ),
+            ("VNOTE__OIDC__CLIENT_ID", "browser"),
+            ("VNOTE__OIDC__CLIENT_SECRET", "shhh"),
+            (
+                "VNOTE__OIDC__REDIRECT_URI",
+                "https://v.example/auth/callback",
+            ),
+            ("VNOTE__OIDC__REQUIRED_SCOPE", "v-note:prod:access"),
+            (
+                "VNOTE__OIDC__END_SESSION_URL",
+                "https://auth.example/logout",
+            ),
+            ("VNOTE__OIDC__ANDROID__CLIENT_ID", "android"),
+            (
+                "VNOTE__OIDC__ANDROID__ISSUER_URL",
+                "https://auth.example/o/a/",
+            ),
+        ]),
+        "oidc",
+    )
+    .expect("snake_case oidc leaves should load");
+    assert_eq!(oidc.client_id, "browser");
+    assert_eq!(oidc.required_scope, "v-note:prod:access");
+    assert!(oidc.authorize_url.is_some());
+    assert!(oidc.end_session_url.is_some());
+    assert_eq!(oidc.android.client_id.as_deref(), Some("android"));
+    assert!(oidc.android.issuer_url.is_some());
+
+    // observability
+    let observability: ObservabilityConfig = load_group(
+        &cfg(&[
+            ("VNOTE__OBSERVABILITY__ENVIRONMENT", "dev"),
+            ("VNOTE__OBSERVABILITY__OTLP_ENDPOINT", "http://alloy:4317/"),
+            ("VNOTE__OBSERVABILITY__OTLP_PROTOCOL", "grpc"),
+            ("VNOTE__OBSERVABILITY__OTLP_TIMEOUT_MS", "7000"),
+            ("VNOTE__OBSERVABILITY__SERVICE_NAME", "v-note-snake"),
+            ("VNOTE__OBSERVABILITY__METRICS_ADDR", "127.0.0.1:9111"),
+        ]),
+        "observability",
+    )
+    .expect("snake_case observability leaves should load");
+    assert_eq!(observability.otlp_timeout_ms, 7000);
+    assert_eq!(observability.service_name, "v-note-snake");
+    assert_eq!(
+        observability.metrics_socket_addr(),
+        Some("127.0.0.1:9111".parse().expect("addr"))
+    );
+    assert!(observability.otlp_endpoint.is_some());
+
+    // android
+    let android: AndroidConfig = load_group(
+        &cfg(&[("VNOTE__ANDROID__ASSETLINKS_JSON", "[]")]),
+        "android",
+    )
+    .expect("snake_case android leaf should load");
+    assert_eq!(android.assetlinks_json(), Some("[]"));
+
+    // server
+    let server: ServerConfig = load_group(
+        &cfg(&[
+            ("VNOTE__SERVER__HTTP_PORT", "9001"),
+            ("VNOTE__SERVER__TLS_CERT", "/app/cert.pem"),
+            ("VNOTE__SERVER__TLS_KEY", "/app/key.pem"),
+            ("VNOTE__SERVER__STATIC_DIR", "/app/dist"),
+        ]),
+        "server",
+    )
+    .expect("snake_case server leaves should load");
+    assert_eq!(server.http_port, 9001);
+    assert!(server.tls_pair().is_some());
+    assert!(server.static_dir.is_some());
+}
+
+/// Both spellings must reach the same field — kebab for sovereign-config/compose
+/// parity, snake for shell assignment.
+#[test]
+fn kebab_and_snake_names_are_interchangeable() {
+    let kebab: ServerConfig =
+        load_group(&cfg(&[("VNOTE__SERVER__HTTP-PORT", "9100")]), "server").expect("kebab loads");
+    let snake: ServerConfig =
+        load_group(&cfg(&[("VNOTE__SERVER__HTTP_PORT", "9100")]), "server").expect("snake loads");
+
+    assert_eq!(kebab.http_port, snake.http_port);
+    assert_eq!(kebab.http_port, 9100);
+}
+
+// ---------------------------------------------------------------------------
 // secret redaction
 // ---------------------------------------------------------------------------
 
