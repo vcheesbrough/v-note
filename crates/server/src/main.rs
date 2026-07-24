@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _telemetry_guard = init_tracing(&observability);
     let metrics_addr = observability.metrics_socket_addr();
 
-    let app = build_app_router(&database, &oidc, &android, &server).await;
+    let app = build_app_router(&database, &oidc, &android, &server).await?;
     tokio::spawn(async move {
         if let Err(error) = run_metrics_server(metrics_addr).await {
             tracing::error!(error = %error, "internal metrics listener stopped");

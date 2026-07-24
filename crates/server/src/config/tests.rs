@@ -516,6 +516,91 @@ fn server_blank_tls_and_static_are_treated_as_absent() {
 }
 
 // ---------------------------------------------------------------------------
+// secret redaction
+// ---------------------------------------------------------------------------
+
+/// `ConfigError::Load` forwards `config`'s own message, which embeds the offending
+/// value on a type mismatch (`invalid type: string "…", expected an integer`). What
+/// keeps a secret out of that message is that every secret leaf is `String`-typed,
+/// and `String` cannot fail coercion.
+///
+/// That invariant is what this test pins: re-typing a secret leaf as anything richer
+/// would put its value straight into the startup log.
+#[test]
+fn secret_leaves_never_leak_their_value_in_errors() {
+    const SENTINEL: &str = "s3cr3t-sentinel-value-not-a-number";
+
+    // database/password: a value that would break any richer type still loads,
+    // proving the leaf is String-typed and so cannot produce a coercion error...
+    let config = cfg(&with(
+        database_env(),
+        &[("VNOTE__DATABASE__PASSWORD", SENTINEL)],
+    ));
+    let database: DatabaseConfig =
+        load_group(&config, "database").expect("a String secret accepts any value");
+    assert_eq!(database.password, SENTINEL);
+
+    // ...and when a *different* field in the same group fails to coerce, the
+    // resulting error must not carry the secret alongside it.
+    let config = cfg(&with(
+        database_env(),
+        &[
+            ("VNOTE__DATABASE__PASSWORD", SENTINEL),
+            ("VNOTE__DATABASE__PORT", "not-a-port"),
+        ],
+    ));
+    let error = load_group::<DatabaseConfig>(&config, "database")
+        .expect_err("non-numeric port should be rejected");
+    assert!(
+        !error.to_string().contains(SENTINEL),
+        "database/password leaked into a Load error: {error}"
+    );
+
+    // Same for oidc/client-secret.
+    let config = cfg(&with(
+        oidc_env(),
+        &[("VNOTE__OIDC__CLIENT-SECRET", SENTINEL)],
+    ));
+    let oidc: OidcConfig = load_group(&config, "oidc").expect("a String secret accepts any value");
+    assert_eq!(oidc.client_secret, SENTINEL);
+
+    let config = cfg(&with(
+        oidc_env(),
+        &[
+            ("VNOTE__OIDC__CLIENT-SECRET", SENTINEL),
+            ("VNOTE__OIDC__ISSUER-URL", "not a url"),
+        ],
+    ));
+    let error =
+        load_group::<OidcConfig>(&config, "oidc").expect_err("malformed URL should be rejected");
+    assert!(
+        !error.to_string().contains(SENTINEL),
+        "oidc/client-secret leaked into a Load error: {error}"
+    );
+}
+
+/// The redaction guarantee that *is* unconditional: checks I perform myself never
+/// echo the value, only the field path.
+#[test]
+fn validate_errors_name_the_field_but_never_the_value() {
+    const SENTINEL: &str = "s3cr3t-sentinel-value";
+
+    let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__REQUIRED-SCOPE", "   ")]));
+    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank scope rejected");
+    assert!(error.to_string().contains("oidc.required-scope"));
+    assert!(!error.to_string().contains("   "));
+
+    // A blank secret is reported by path alone.
+    let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__CLIENT-SECRET", " ")]));
+    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank secret rejected");
+    assert_eq!(
+        error.to_string(),
+        "invalid config `oidc.client-secret`: must not be empty"
+    );
+    assert!(!error.to_string().contains(SENTINEL));
+}
+
+// ---------------------------------------------------------------------------
 // layering
 // ---------------------------------------------------------------------------
 
