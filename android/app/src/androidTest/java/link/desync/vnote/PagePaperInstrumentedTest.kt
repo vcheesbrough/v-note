@@ -166,6 +166,45 @@ class PagePaperInstrumentedTest {
         composeRule.onNodeWithTag("paper-tool").assertIsNotEnabled()
     }
 
+    /** An acknowledged change becomes the sticky new-page default. */
+    @Test
+    fun acknowledgedChangePersistsTheStickyDefault() {
+        openEditor()
+        composeRule.onNodeWithTag("paper-tool").performClick()
+        composeRule.onNodeWithTag("paper-option-squared-large").performClick()
+
+        assertNotNull("set-paper sent", awaitMutation("set-paper"))
+        // The mock server replies with `paper-changed`; only then is the
+        // preference written.
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            storedPaper() == Paper.SquaredLarge
+        }
+        assertEquals(Paper.SquaredLarge, storedPaper())
+    }
+
+    /**
+     * A change the server refuses must not become the sticky default. The
+     * preference is written on acknowledgement, not on dispatch, so a rejected
+     * pick leaves both the canvas and the stored default untouched.
+     */
+    @Test
+    fun rejectedChangeDoesNotPersistTheStickyDefault() {
+        failPaper.set(true)
+        openEditor()
+        composeRule.onNodeWithTag("paper-tool").performClick()
+        composeRule.onNodeWithTag("paper-option-squared-large").performClick()
+
+        assertNotNull("set-paper sent", awaitMutation("set-paper"))
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching { countPaperPixels() == 0 }.getOrDefault(false)
+        }
+        assertEquals(
+            "a refused change must not become the new-page default",
+            Paper.None,
+            storedPaper(),
+        )
+    }
+
     /** A rejected change reverts to the last confirmed value rather than sticking. */
     @Test
     fun paperFailedRevertsTheOptimisticChange() {
@@ -208,6 +247,11 @@ class PagePaperInstrumentedTest {
      * Paper pixels blend toward white preserving their channel ordering, which
      * is disjoint from the green-dominant ink classifier.
      */
+    private fun storedPaper(): Paper {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        return PaperPreferences(context, TEST_USER_ID).load()
+    }
+
     private fun countPaperPixels(): Int {
         val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
         var count = 0

@@ -23,6 +23,12 @@ class PageInkSession(
     private val pageId: String,
     private val scope: CoroutineScope,
     initialPaper: Paper = Paper.None,
+    // Invoked only when a paper change *this session asked for* is confirmed in
+    // force by the server. Deliberately not called for `Welcome`-carried paper
+    // (which reports the page's existing paper, not a choice the user just
+    // made) nor for a sibling device's change — otherwise merely opening a page
+    // would rewrite the caller's new-page default.
+    private val onPaperConfirmed: (Paper) -> Unit = {},
 ) {
     // The page's paper. Seeded from the library listing so the first frame is
     // not blank, then WSS-authoritative: `Welcome` carries it on every connect
@@ -38,6 +44,11 @@ class PageInkSession(
     // The last value the server confirmed, so an optimistic set can be reverted
     // if the server rejects it.
     private var confirmedPaper: Paper = initialPaper
+
+    // The paper this session has asked for and not yet seen confirmed. Cleared
+    // on confirmation and on every revert path, so a change that never landed
+    // cannot later be mistaken for an acknowledgement.
+    private var pendingPaper: Paper? = null
 
     // Rendered strokes: confirmed server batches followed by locally submitted
     // batches that are awaiting their matching server echo.
@@ -115,20 +126,24 @@ class PageInkSession(
     // denial, or a disconnect all revert to the last confirmed value. Gated on
     // the edit lease, exactly like ink.
     //
-    // Returns true when the caller may treat the choice as taken — either it was
-    // dispatched, or the page already carries it. False means nothing reached
-    // the server, so a caller must not persist the choice as a sticky default.
-    fun setPaper(next: Paper): Boolean {
+    // Durable side effects are deferred to [onPaperConfirmed] rather than run
+    // here: a dispatched change can still be refused (`paper_failed`,
+    // `lease-denied`) or lost to a disconnect, and a caller must not persist a
+    // choice the server never put in force.
+    fun setPaper(next: Paper) {
         if (!canEdit) {
-            return false
+            return
         }
         if (next == paper) {
-            return true
+            // Already in force server-side, so it is confirmed by definition —
+            // there is nothing to send and nothing to wait for.
+            onPaperConfirmed(next)
+            return
         }
-        val activeSocket = socket ?: return false
+        val activeSocket = socket ?: return
         paperState = next
+        pendingPaper = next
         activeSocket.setPaper("paper_${UUID.randomUUID().toString().replace("-", "")}", next)
-        return true
     }
 
     fun eraseStrokes(strokeIds: Collection<String>) {
@@ -150,6 +165,8 @@ class PageInkSession(
                 // self-corrects a value that went stale in the open library.
                 paperState = event.paper
                 confirmedPaper = event.paper
+                // A fresh connection supersedes anything still in flight.
+                pendingPaper = null
                 // Catch up on persisted ink, then take the lease if it is free.
                 socket?.subscribe(lastSeq)
                 if (event.leaseHolder == null || event.leaseHolder == sessionId) {
@@ -187,6 +204,14 @@ class PageInkSession(
             is PageEvent.PaperChanged -> {
                 paperState = event.paper
                 confirmedPaper = event.paper
+                // Only a change this session requested is reported as confirmed.
+                // Matching on the value is sufficient: if the paper now in force
+                // is the one asked for, that request has been satisfied — even
+                // if a sibling device happened to set the same value first.
+                if (pendingPaper == event.paper) {
+                    pendingPaper = null
+                    onPaperConfirmed(event.paper)
+                }
             }
             PageEvent.LeaseGranted -> {
                 canEdit = true
@@ -227,8 +252,7 @@ class PageInkSession(
                     restorePendingErasure(event.clientMutationId)
                 }
                 if (event.code == PAPER_FAILED) {
-                    // Revert the optimistic paper to the last confirmed value.
-                    paperState = confirmedPaper
+                    revertUnconfirmedPaper()
                 }
                 canEdit = false
                 stopLeaseRenewal()
@@ -303,6 +327,7 @@ class PageInkSession(
     // Without this the canvas would keep showing paper that was never stored,
     // until the next `Welcome` reasserted the authoritative value.
     private fun revertUnconfirmedPaper() {
+        pendingPaper = null
         if (paperState != confirmedPaper) {
             paperState = confirmedPaper
         }
