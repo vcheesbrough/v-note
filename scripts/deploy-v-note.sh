@@ -75,7 +75,15 @@ case "$target" in
   dev)
     project="v-note-dev"
     db_volume="v-note-dev-db"
-    app_env="${CI_COMMIT_BRANCH:-dev}"
+    # Canonical environment name, matching the sovereign-config
+    # `observability/environment` leaf the server uses for the OTEL
+    # `deployment.environment` trace attribute. Previously this was the branch
+    # name, which split one deployment across two values: traces said `dev` while
+    # the metrics/log discovery labels said e.g. `feat/foo`, so no single
+    # environment filter matched all three signals. The build is already
+    # identified by `observability.release` (the release tag) and the image's
+    # `org.opencontainers.image.revision`, so the branch is not needed here.
+    app_env="dev"
     v_note_host="v-notes-dev.desync.link"
     v_note_container_name="v-note-dev"
     compose_files="-f deploy/docker-compose.yml -f deploy/docker-compose.android-apk.yml"
@@ -94,6 +102,32 @@ esac
 docker volume create "$db_volume"
 docker pull "registry.desync.link/v-note:$release_tag"
 
+# Single source for the metrics listener in a deployment. The app override and
+# Alloy's scrape-discovery labels are both derived from it, so the listener and
+# the thing scraping it cannot disagree — previously the labels hardcoded
+# `scrape=true` and port 9090 while `observability/metrics-addr` was freely
+# configurable, so moving or disabling the listener silently lost metrics.
+#
+# This step cannot read sovereign-config itself (it runs in a docker CLI image and
+# the connection is gRPC), so the value lives here for now. When the Woodpecker
+# sovereign-config broker lands it will supply this from
+# `observability/metrics-addr`, making it literally the same value in both places.
+metrics_addr="${V_NOTE_METRICS_ADDR:-0.0.0.0:9090}"
+case "$metrics_addr" in
+  disabled|"")
+    metrics_scrape="false"
+    metrics_port="9090"
+    ;;
+  *:*)
+    metrics_scrape="true"
+    metrics_port="${metrics_addr##*:}"
+    ;;
+  *)
+    echo "ERROR: V_NOTE_METRICS_ADDR must be host:port or 'disabled' (got: '$metrics_addr')" >&2
+    exit 1
+    ;;
+esac
+
 V_NOTE_IMAGE_TAG="$release_tag" \
 APP_VERSION="$release_tag" \
 APP_ENV="$app_env" \
@@ -103,6 +137,9 @@ V_NOTE_CONTAINER_NAME="$v_note_container_name" \
 DB_VOLUME="$db_volume" \
 POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
 SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
+VNOTE__OBSERVABILITY__METRICS_ADDR="$metrics_addr" \
+V_NOTE_METRICS_PORT="$metrics_port" \
+V_NOTE_METRICS_SCRAPE="$metrics_scrape" \
 docker compose -p "$project" $compose_files up -d
 
 wait_for_health "$v_note_container_name" "${DOCKER_NETWORK:-v-note-net}"

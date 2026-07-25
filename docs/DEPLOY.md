@@ -129,6 +129,7 @@ and **fails closed on protocol mismatch**; if that server is upgraded, bump
 | `APP_ENV` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.env` labels |
 | `APP_VERSION` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.release` labels (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
 | `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
+| `V_NOTE_METRICS_ADDR` | `0.0.0.0:9090` or `disabled` — **one** source for the listener *and* Alloy's scrape labels, so they cannot drift. `deploy-v-note.sh` derives `VNOTE__OBSERVABILITY__METRICS_ADDR`, `observability.metrics.port` and `observability.metrics.scrape` from it. Being an env override it out-ranks the sovereign `observability/metrics-addr` leaf for deployments; the planned Woodpecker sovereign-config broker will feed this from that same leaf |
 
 Everything else (database, OIDC, OTLP, metrics address, App Links JSON) now comes
 from sovereign-config, overridable per-deploy through the `VNOTE__*` env layer

@@ -54,6 +54,13 @@ services:
       # Points at the docker secret below; the provider reads the URL from that file.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE: /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
       V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
+      # The metrics listener and Alloy's scrape-discovery labels below are derived
+      # from one value in deploy-v-note.sh, so they cannot drift apart. Snake_case
+      # because a shell cannot assign a name containing `-`; the server accepts
+      # both spellings. Once the Woodpecker sovereign-config broker lands this will
+      # be fed from `observability/metrics-addr`, making it the same value the app
+      # would otherwise read directly.
+      VNOTE__OBSERVABILITY__METRICS_ADDR: ${VNOTE__OBSERVABILITY__METRICS_ADDR:-0.0.0.0:9090}
       VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-2}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-2}}
     secrets:
@@ -73,8 +80,8 @@ services:
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,crowdsec@docker,security-headers@docker
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.scheme=https
-      - observability.metrics.scrape=true
-      - observability.metrics.port=9090
+      - observability.metrics.scrape=${V_NOTE_METRICS_SCRAPE:-true}
+      - observability.metrics.port=${V_NOTE_METRICS_PORT:-9090}
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
       - observability.service=v-note
