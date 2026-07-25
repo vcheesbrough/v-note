@@ -128,18 +128,34 @@ case "$metrics_addr" in
     ;;
 esac
 
-V_NOTE_IMAGE_TAG="$release_tag" \
-APP_VERSION="$release_tag" \
-APP_ENV="$app_env" \
-VNOTE_PROTOCOL_VERSION="${VNOTE_PROTOCOL_VERSION:-2}" \
-V_NOTE_HOST="$v_note_host" \
-V_NOTE_CONTAINER_NAME="$v_note_container_name" \
-DB_VOLUME="$db_volume" \
-POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
-VNOTE__OBSERVABILITY__METRICS_ADDR="$metrics_addr" \
-V_NOTE_METRICS_PORT="$metrics_port" \
-V_NOTE_METRICS_SCRAPE="$metrics_scrape" \
-docker compose -p "$project" $compose_files up -d
+# `docker compose up -d` with the deploy environment; extra args are appended.
+compose_up() {
+  V_NOTE_IMAGE_TAG="$release_tag" \
+  APP_VERSION="$release_tag" \
+  APP_ENV="$app_env" \
+  VNOTE_PROTOCOL_VERSION="${VNOTE_PROTOCOL_VERSION:-2}" \
+  V_NOTE_HOST="$v_note_host" \
+  V_NOTE_CONTAINER_NAME="$v_note_container_name" \
+  DB_VOLUME="$db_volume" \
+  POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
+  VNOTE__OBSERVABILITY__METRICS_ADDR="$metrics_addr" \
+  V_NOTE_METRICS_PORT="$metrics_port" \
+  V_NOTE_METRICS_SCRAPE="$metrics_scrape" \
+  docker compose -p "$project" $compose_files up -d "$@"
+}
+
+compose_up
+
+# The server snapshots sovereign-config once at startup, and that config lives
+# *outside* the compose model — so changing a leaf, or rotating the access URL,
+# produces no model change and the `up -d` above is a no-op. The old container
+# keeps serving stale database/OIDC/App Links values, and the health probe below
+# would pass against it, reporting a green deploy that changed nothing.
+#
+# Before this migration config was compose env, so a config change moved the model
+# and forced a recreate; that coupling is gone. Recreate the app explicitly. It is
+# stateless so this is cheap, and `--no-deps` leaves postgres untouched.
+compose_up --force-recreate --no-deps v-note
 
 wait_for_health "$v_note_container_name" "${DOCKER_NETWORK:-v-note-net}"

@@ -129,11 +129,15 @@ pub fn build_config() -> Result<Config, ConfigError> {
     let mut builder = Config::builder();
     builder = apply_defaults(builder)?;
 
+    // Both sources are trimmed: whitespace is never meaningful in a config leaf and
+    // is silently destructive in at least one place (see `Trimmed`).
     if sovereign_source_enabled() {
-        builder = builder.add_source(SovereignConfigSource::initialise_from_default_environment());
+        builder = builder.add_source(Trimmed(
+            SovereignConfigSource::initialise_from_default_environment(),
+        ));
     }
 
-    builder = builder.add_source(env_source());
+    builder = builder.add_source(Trimmed(env_source()));
 
     builder.build().map_err(ConfigError::Build)
 }
@@ -149,6 +153,55 @@ fn env_source() -> KebabCaseEnvironment {
             .prefix_separator(ENV_SEPARATOR)
             .separator(ENV_SEPARATOR),
     )
+}
+
+/// Wraps any [`config::Source`], trimming surrounding whitespace from every string
+/// leaf it produces.
+///
+/// Stray whitespace in a config value is always an accident — a copy-paste, or a
+/// trailing newline from whatever wrote the leaf — and it can be silently
+/// destructive. `oidc/required-scope` with a trailing space passes every startup
+/// check (`require_non_empty` trims only for its emptiness test, then stores the
+/// original), and then never matches a token scope, because JWT validation splits
+/// the token's scope on whitespace and compares whole values. The result is 403 for
+/// every user while startup, the deploy health gate and CI all report green.
+///
+/// Trimming centrally, at the point values enter the config, means no individual
+/// field can reintroduce that — including fields added later. Applied to secrets
+/// too: a credential with leading or trailing whitespace is far more likely to be a
+/// paste artefact than intentional.
+#[derive(Debug, Clone)]
+struct Trimmed<S>(S);
+
+impl<S> config::Source for Trimmed<S>
+where
+    S: config::Source + Clone + Send + Sync + 'static,
+{
+    fn clone_into_box(&self) -> Box<dyn config::Source + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
+        let mut collected = self.0.collect()?;
+        for value in collected.values_mut() {
+            trim_value(value);
+        }
+        Ok(collected)
+    }
+}
+
+fn trim_value(value: &mut config::Value) {
+    match &mut value.kind {
+        config::ValueKind::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.len() != text.len() {
+                *text = trimmed.to_owned();
+            }
+        }
+        config::ValueKind::Table(table) => table.values_mut().for_each(trim_value),
+        config::ValueKind::Array(items) => items.iter_mut().for_each(trim_value),
+        _ => {}
+    }
 }
 
 /// Wraps [`Environment`], folding snake_case leaf names onto the canonical
