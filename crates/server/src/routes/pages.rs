@@ -6,7 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use protocol::{
-    CreatePageRequest, LibraryEvent, ListPagesResponse, PageResponse, PageSummary,
+    CreatePageRequest, LibraryEvent, ListPagesResponse, PageResponse, PageSummary, Paper,
     ThumbnailMetadata,
 };
 use tracing::Instrument as _;
@@ -23,6 +23,7 @@ struct PageRow {
     updated_at: DateTime<Utc>,
     thumbnail_status: Option<String>,
     thumbnail_seq: Option<i64>,
+    paper: String,
 }
 
 impl From<PageRow> for PageSummary {
@@ -47,6 +48,10 @@ impl From<PageRow> for PageSummary {
             created_at: row.created_at.to_rfc3339(),
             updated_at: row.updated_at.to_rfc3339(),
             thumbnail,
+            // A stored value outside the wire vocabulary is only reachable if
+            // the `pages_paper_known` CHECK were dropped; degrade to a blank
+            // page rather than failing the whole listing.
+            paper: Paper::from_wire(&row.paper).unwrap_or_default(),
         }
     }
 }
@@ -74,7 +79,7 @@ pub async fn list_pages(
 ) -> Result<Json<ListPagesResponse>, Response> {
     let rows = sqlx::query_as::<_, PageRow>(
         r#"
-        SELECT p.id, p.title, p.created_at, p.updated_at,
+        SELECT p.id, p.title, p.created_at, p.updated_at, p.paper,
                t.status AS thumbnail_status, t.source_seq AS thumbnail_seq
         FROM pages p
         LEFT JOIN LATERAL (
@@ -110,16 +115,20 @@ pub async fn create_page(
         .unwrap_or("");
     let page_id = format!("page_{}", Uuid::new_v4().simple());
 
+    // A page is born with its paper — one round trip, no revision bump, and no
+    // thumbnail job (a page with no ink has nothing to preview yet). Serde has
+    // already rejected any value outside the wire vocabulary.
     let row = sqlx::query_as::<_, PageRow>(
         r#"
-        INSERT INTO pages (id, owner_id, title)
-        VALUES ($1, $2, $3)
-        RETURNING id, title, created_at, updated_at, NULL::text AS thumbnail_status, NULL::bigint AS thumbnail_seq
+        INSERT INTO pages (id, owner_id, title, paper)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, title, created_at, updated_at, paper, NULL::text AS thumbnail_status, NULL::bigint AS thumbnail_seq
         "#,
     )
     .bind(page_id)
     .bind(claims.sub.clone())
     .bind(title)
+    .bind(payload.paper.wire_value())
     .fetch_one(db(&state)?)
     .instrument(db_query_span("INSERT", "create_page"))
     .await
@@ -145,7 +154,7 @@ pub async fn get_page(
 ) -> Result<Json<PageResponse>, Response> {
     let row = sqlx::query_as::<_, PageRow>(
         r#"
-        SELECT p.id, p.title, p.created_at, p.updated_at,
+        SELECT p.id, p.title, p.created_at, p.updated_at, p.paper,
                t.status AS thumbnail_status, t.source_seq AS thumbnail_seq
         FROM pages p
         LEFT JOIN LATERAL (

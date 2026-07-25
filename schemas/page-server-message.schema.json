@@ -11,7 +11,8 @@
         "type": { "const": "welcome" },
         "session_id": { "type": "string", "minLength": 1 },
         "last_seq": { "type": "integer", "minimum": 0 },
-        "lease_holder": { "type": "string", "minLength": 1 }
+        "lease_holder": { "type": "string", "minLength": 1 },
+        "paper": { "enum": ["none", "ruled-margin-narrow", "ruled-margin-wide", "ruled-narrow", "ruled-wide", "squared-small", "squared-large"], "default": "none" }
       }
     },
     {
@@ -70,7 +71,18 @@
       "properties": {
         "type": { "const": "error" },
         "code": { "type": "string" },
-        "message": { "type": "string" }
+        "message": { "type": "string" },
+        "client_mutation_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "paper", "revision"],
+      "properties": {
+        "type": { "const": "paper-changed" },
+        "paper": { "enum": ["none", "ruled-margin-narrow", "ruled-margin-wide", "ruled-narrow", "ruled-wide", "squared-small", "squared-large"] },
+        "revision": { "type": "integer", "minimum": 0 }
       }
     }
   ]

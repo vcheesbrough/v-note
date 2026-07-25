@@ -147,7 +147,9 @@ async fn metrics_endpoint_exposes_build_and_http_metrics() {
     let text = String::from_utf8(body.to_vec()).expect("metrics should be UTF-8");
 
     assert!(text.contains("v_note_build_info"));
-    assert!(text.contains("protocol=\"4\""));
+    // Derived from the canonical constant, so a protocol bump cannot leave this
+    // assertion silently pinning the previous version.
+    assert!(text.contains(&format!("protocol=\"{}\"", protocol::PROTOCOL_VERSION)));
     assert!(text.contains("v_note_thumbnail_generation_duration_seconds"));
     assert!(text.contains("v_note_thumbnail_queue_depth"));
     assert!(text.contains("v_note_thumbnail_recoveries_total"));

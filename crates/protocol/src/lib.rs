@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub mod paper;
+
+// Named re-exports only — a glob would pull `Paper::None` into scope and shadow
+// `Option::None` at every call site.
+pub use paper::{
+    is_ink_classified, paper_family_visible, paper_mark_device_width, paper_marks,
+    preview_viewport, visit_paper_marks, Paper, PaperMark, PaperMarkKind, WorldViewport,
+    GRID_SPACING_LARGE, GRID_SPACING_SMALL, MARGIN_COLOR, MARGIN_COLOR_RGB, MARGIN_LINE_WIDTH,
+    MARGIN_X, MAX_EXACT_PAPER_WORLD_EXTENT, MAX_PAPER_MARKS_PER_AXIS, MIN_PAPER_MARK_DEVICE_PITCH,
+    MIN_PAPER_MARK_DEVICE_WIDTH, RULE_COLOR, RULE_COLOR_RGB, RULE_LINE_WIDTH, RULE_SPACING_NARROW,
+    RULE_SPACING_WIDE,
+};
+
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
@@ -28,6 +41,10 @@ pub struct PageSummary {
     pub created_at: String,
     pub updated_at: String,
     pub thumbnail: ThumbnailMetadata,
+    /// The page's paper (rule lines). Always serialized, but defaulted on read
+    /// so pre-v5 payloads still parse as blank pages.
+    #[serde(default)]
+    pub paper: Paper,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +70,11 @@ pub struct PageResponse {
 pub struct CreatePageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Paper for the new page. Absent ⇒ `none`. Carrying it on create (rather
+    /// than a post-create `SetPaper`) is how a client's sticky default lands:
+    /// one round trip, no revision bump, page born with its paper.
+    #[serde(default)]
+    pub paper: Paper,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -332,6 +354,14 @@ pub enum PageClientMessage {
         client_mutation_id: String,
         stroke_ids: Vec<String>,
     },
+    /// Change the page's paper. Requires the edit lease — paper is a visible
+    /// page mutation that bumps the revision, mints a thumbnail and re-sorts the
+    /// library, exactly the class the single-editor invariant governs.
+    /// `client_mutation_id` exists purely so an `Error` can be correlated back.
+    SetPaper {
+        client_mutation_id: String,
+        paper: Paper,
+    },
 }
 
 /// Server → client messages on the page channel.
@@ -345,6 +375,11 @@ pub enum PageServerMessage {
         last_seq: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         lease_holder: Option<String>,
+        /// The page's current paper, so the page channel is self-sufficient
+        /// after a reconnect. Defaulted on read, so pre-v5 welcome payloads
+        /// still parse.
+        #[serde(default)]
+        paper: Paper,
     },
     /// A sequenced stroke batch (gap-fill replay, snapshot, or live fan-out).
     StrokeBatch(StrokeBatch),
@@ -358,6 +393,13 @@ pub enum PageServerMessage {
     /// The edit lease is held by another session; ink is blocked.
     LeaseDenied {
         holder: String,
+    },
+    /// The page's paper is now `paper` as of `revision`. Broadcast on a real
+    /// change; also sent directly as an ack when a `SetPaper` names the paper
+    /// already in force, so a racing client still converges.
+    PaperChanged {
+        paper: Paper,
+        revision: u64,
     },
     /// Broadcast when the page's lease holder changes (or clears → omitted).
     LeaseChanged {

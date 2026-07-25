@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    LibraryEvent, PageClientMessage, PageServerMessage, RealtimeTicketResponse, Stroke,
+    LibraryEvent, PageClientMessage, PageServerMessage, Paper, RealtimeTicketResponse, Stroke,
     StrokeBatch, TombstoneBatch,
 };
 use rand::RngCore;
@@ -349,10 +349,15 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
 
     let last_seq = max_seq(&pool, &page_id).await.unwrap_or(0);
     let lease_holder = state.realtime.current_lease_holder(&page_id);
+    // Carrying paper here makes the page channel self-sufficient: a reconnecting
+    // client gets the authoritative value without a second REST round trip, which
+    // is also what self-corrects a stale `PageSummary.paper` in an open library.
+    let paper = current_paper(&pool, &page_id).await.unwrap_or_default();
     let welcome = PageServerMessage::Welcome {
         session_id: session_id.clone(),
         last_seq,
         lease_holder,
+        paper,
     };
     if !send_page(&mut sender, welcome).await {
         crate::observability::metrics().record_realtime_event("page", "send_error");
@@ -657,6 +662,88 @@ async fn handle_page_client_message(
                 }
             }
         }
+        PageClientMessage::SetPaper {
+            client_mutation_id,
+            paper,
+        } => {
+            // Paper is a visible page mutation that bumps the revision, mints a
+            // thumbnail and re-sorts the library — exactly the class the
+            // single-editor invariant governs. Acquiring also renews the holder's
+            // lease, identically to CommitBatch/CommitTombstones.
+            if let LeaseOutcome::Denied { holder } =
+                state.realtime.acquire_lease(page_id, session_id)
+            {
+                crate::observability::metrics().record_realtime_event("page", "lease_denied");
+                return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
+            }
+            match persist_paper(pool, page_id, paper).await {
+                Ok(persisted) => {
+                    if !persisted.changed {
+                        // Value-idempotent: nothing bumped, nothing fanned out.
+                        // Ack directly so a racing client still converges.
+                        crate::observability::metrics().record_page_mutation("set_paper", "noop");
+                        return send_page(
+                            sender,
+                            PageServerMessage::PaperChanged {
+                                paper,
+                                revision: persisted.revision,
+                            },
+                        )
+                        .await;
+                    }
+                    // The broadcast reaches the sender too, as with StrokeBatch.
+                    state.realtime.publish_page(
+                        page_id,
+                        PageServerMessage::PaperChanged {
+                            paper,
+                            revision: persisted.revision,
+                        },
+                    );
+                    if let Some(updated_at) = persisted.updated_at {
+                        state.realtime.publish_library_event(
+                            &persisted.owner_id,
+                            LibraryEvent::PageUpdated {
+                                page_id: page_id.to_string(),
+                                updated_at,
+                            },
+                        );
+                    }
+                    if persisted.thumbnail_job_created {
+                        crate::observability::metrics().thumbnail_generation_queued();
+                        state.realtime.publish_library_event(
+                            &persisted.owner_id,
+                            LibraryEvent::PageThumbnailUpdated {
+                                page_id: page_id.to_string(),
+                                thumbnail: protocol::ThumbnailMetadata::Generating {
+                                    source_seq: persisted.revision,
+                                },
+                            },
+                        );
+                        crate::thumbnails::enqueue(
+                            state.clone(),
+                            page_id.to_string(),
+                            persisted.owner_id,
+                            persisted.revision,
+                        );
+                    }
+                    crate::observability::metrics().record_page_mutation("set_paper", "success");
+                    true
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "paper change failed");
+                    crate::observability::metrics().record_page_mutation("set_paper", "error");
+                    send_page(
+                        sender,
+                        PageServerMessage::Error {
+                            code: "paper_failed".to_string(),
+                            message: "could not persist the page paper".to_string(),
+                            client_mutation_id: Some(client_mutation_id),
+                        },
+                    )
+                    .await
+                }
+            }
+        }
     }
 }
 
@@ -678,6 +765,17 @@ async fn page_belongs_to_owner(
         .fetch_optional(pool)
         .await?;
     Ok(row.is_some())
+}
+
+/// The page's current paper. An unrecognised stored value (only reachable if the
+/// `pages_paper_known` CHECK were dropped) degrades to a blank page rather than
+/// failing the connection.
+async fn current_paper(pool: &PgPool, page_id: &str) -> Result<Paper, sqlx::Error> {
+    let stored: String = sqlx::query_scalar("SELECT paper FROM pages WHERE id = $1")
+        .bind(page_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(Paper::from_wire(&stored).unwrap_or_default())
 }
 
 async fn max_seq(pool: &PgPool, page_id: &str) -> Result<u64, sqlx::Error> {
@@ -785,9 +883,11 @@ async fn persist_batch(
 ) -> Result<PersistedBatch, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // Serialize seq allocation for this page against concurrent commits.
-    let (owner_id, current_revision) = sqlx::query_as::<_, (String, i64)>(
-        "SELECT owner_id, ink_revision FROM pages WHERE id = $1 FOR UPDATE",
+    // Serialize seq allocation for this page against concurrent commits. `paper`
+    // is read under the same lock so the thumbnail job records the paper in force
+    // at the revision it will rasterize.
+    let (owner_id, current_revision, paper) = sqlx::query_as::<_, (String, i64, String)>(
+        "SELECT owner_id, ink_revision, paper FROM pages WHERE id = $1 FOR UPDATE",
     )
     .bind(page_id)
     .fetch_one(&mut *tx)
@@ -881,10 +981,11 @@ async fn persist_batch(
     .await?
     .to_rfc3339();
     let thumbnail_job_created = sqlx::query(
-        "INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING",
+        "INSERT INTO page_thumbnails (page_id, source_seq, status, paper) VALUES ($1, $2, 'generating', $3) ON CONFLICT (page_id, source_seq) DO NOTHING",
     )
     .bind(page_id)
     .bind(revision)
+    .bind(&paper)
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -918,8 +1019,8 @@ async fn persist_tombstones(
     requested_ids: &[String],
 ) -> Result<PersistedTombstones, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let (owner_id, current_revision) = sqlx::query_as::<_, (String, i64)>(
-        "SELECT owner_id, ink_revision FROM pages WHERE id = $1 FOR UPDATE",
+    let (owner_id, current_revision, paper) = sqlx::query_as::<_, (String, i64, String)>(
+        "SELECT owner_id, ink_revision, paper FROM pages WHERE id = $1 FOR UPDATE",
     )
     .bind(page_id)
     .fetch_one(&mut *tx)
@@ -973,8 +1074,8 @@ async fn persist_tombstones(
     let thumbnail_job_created = if ids.is_empty() {
         false
     } else {
-        sqlx::query("INSERT INTO page_thumbnails (page_id, source_seq, status) VALUES ($1, $2, 'generating') ON CONFLICT (page_id, source_seq) DO NOTHING")
-            .bind(page_id).bind(revision).execute(&mut *tx).await?.rows_affected() == 1
+        sqlx::query("INSERT INTO page_thumbnails (page_id, source_seq, status, paper) VALUES ($1, $2, 'generating', $3) ON CONFLICT (page_id, source_seq) DO NOTHING")
+            .bind(page_id).bind(revision).bind(&paper).execute(&mut *tx).await?.rows_affected() == 1
     };
     tx.commit().await?;
     Ok(PersistedTombstones {
@@ -983,6 +1084,126 @@ async fn persist_tombstones(
         stroke_ids: ids,
         thumbnail_job_created,
         updated_at,
+    })
+}
+
+/// Outcome of a paper change.
+///
+/// Note this widens `pages.ink_revision` from "ink mutations" to "anything that
+/// changes how the page renders". That is safe: gap-fill and `Welcome.last_seq`
+/// use `stroke_batches.seq`, a *separate* sequence, and `thumbnails::generate`
+/// filters revisions with range predicates, so gaps in `revision` are harmless.
+/// The column is deliberately **not** renamed — it is read in three query sites.
+struct PersistedPaper {
+    /// False when the page already had this paper: nothing bumped, nothing
+    /// stored, nothing to fan out.
+    changed: bool,
+    /// The revision the paper is in force at — the new one when the page had
+    /// visible ink, otherwise the unchanged current one.
+    revision: u64,
+    owner_id: String,
+    thumbnail_job_created: bool,
+    /// See `PersistedBatch::updated_at` — `None` for a same-value no-op.
+    updated_at: Option<String>,
+}
+
+async fn persist_paper(
+    pool: &PgPool,
+    page_id: &str,
+    paper: Paper,
+) -> Result<PersistedPaper, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let (owner_id, current_revision, current_paper) = sqlx::query_as::<_, (String, i64, String)>(
+        "SELECT owner_id, ink_revision, paper FROM pages WHERE id = $1 FOR UPDATE",
+    )
+    .bind(page_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if current_paper == paper.wire_value() {
+        tx.commit().await?;
+        return Ok(PersistedPaper {
+            changed: false,
+            revision: current_revision as u64,
+            owner_id,
+            thumbnail_job_created: false,
+            updated_at: None,
+        });
+    }
+
+    // Does the page have any ink still *visible* at this revision? Erased ink
+    // does not count — an all-erased page is as inkless as a never-inked one.
+    let has_visible_ink: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+             SELECT 1
+             FROM stroke_batches b
+             CROSS JOIN LATERAL jsonb_array_elements(b.strokes) AS s(stroke)
+             WHERE b.page_id = $1
+               AND b.revision <= $2
+               AND NOT EXISTS (
+                 SELECT 1 FROM stroke_tombstones t
+                 WHERE t.page_id = b.page_id
+                   AND t.stroke_id = s.stroke ->> 'id'
+                   AND t.deleted_revision <= $2
+               )
+           )"#,
+    )
+    .bind(page_id)
+    .bind(current_revision)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // With visible ink the existing thumbnail is now stale, so bump the revision
+    // to mint a fresh immutable artifact (new source_seq → new URL) and let the
+    // existing PageThumbnailUpdated fan-out and `source_seq >=` freshness guards
+    // do the rest.
+    //
+    // With no visible ink there is nothing to invalidate — and bumping would
+    // break an invariant `thumbnails::cleanup` depends on: it protects the head
+    // artifact with `source_seq <> (SELECT ink_revision …)`. Today ink_revision
+    // always names an existing thumbnail row; a bump with no job created would
+    // leave it naming nothing, making *every* surviving thumbnail of that page
+    // retention-eligible and silently dropping the library preview after 7 days.
+    let revision = if has_visible_ink {
+        current_revision + 1
+    } else {
+        current_revision
+    };
+
+    let updated_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        "UPDATE pages SET paper = $2, updated_at = now(), ink_revision = $3 WHERE id = $1 RETURNING updated_at",
+    )
+    .bind(page_id)
+    .bind(paper.wire_value())
+    .bind(revision)
+    .fetch_one(&mut *tx)
+    .await?
+    .to_rfc3339();
+
+    let thumbnail_job_created = if has_visible_ink {
+        sqlx::query(
+            "INSERT INTO page_thumbnails (page_id, source_seq, status, paper) VALUES ($1, $2, 'generating', $3) ON CONFLICT (page_id, source_seq) DO NOTHING",
+        )
+        .bind(page_id)
+        .bind(revision)
+        .bind(paper.wire_value())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1
+    } else {
+        false
+    };
+
+    tx.commit().await?;
+    Ok(PersistedPaper {
+        changed: true,
+        revision: revision as u64,
+        owner_id,
+        thumbnail_job_created,
+        // The library re-sorts on a paper change even for an inkless page: the
+        // page really was last edited now.
+        updated_at: Some(updated_at),
     })
 }
 

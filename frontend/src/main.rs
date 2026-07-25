@@ -9,8 +9,9 @@ use js_sys::{Date, Reflect};
 use leptos::prelude::*;
 use leptos::{ev, leptos_dom::helpers::window_event_listener};
 use protocol::{
-    LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageServerMessage, PageSummary,
-    RealtimeTicketResponse, Stroke, StrokeBatch, ThumbnailMetadata,
+    paper_mark_device_width, visit_paper_marks, LibraryEvent, ListPagesResponse, MeResponse,
+    MetaResponse, PageServerMessage, PageSummary, Paper, RealtimeTicketResponse, Stroke,
+    StrokeBatch, ThumbnailMetadata, WorldViewport,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, PointerEvent, WheelEvent};
@@ -346,6 +347,10 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
     let scale = RwSignal::new(MIN_CANVAS_SCALE);
     let dragging = RwSignal::new(None::<(i32, f64, f64)>);
     let canvas_resize_tick = RwSignal::new(0_u64);
+    // Seeded from the library listing so the first frame is not blank, then
+    // superseded by the authoritative value `Welcome` carries.
+    let paper = RwSignal::new(page.paper);
+    let initial_paper = page.paper;
     let page_id = page.id.clone();
     let page_title = page_display_title(&page);
 
@@ -354,12 +359,20 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
         viewer_error.set(None);
         viewer_status.set("Connecting".to_string());
         last_seq.set(0);
+        paper.set(initial_paper);
         let page_id = page_id.clone();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         on_cleanup(move || abort_handle.abort());
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(Err(error)) = Abortable::new(
-                page_realtime_loop(page_id, batches, viewer_status, viewer_error, last_seq),
+                page_realtime_loop(
+                    page_id,
+                    batches,
+                    viewer_status,
+                    viewer_error,
+                    last_seq,
+                    paper,
+                ),
                 abort_registration,
             )
             .await
@@ -372,6 +385,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
 
     Effect::new(move |_| {
         batches.track();
+        paper.track();
         offset_x.track();
         offset_y.track();
         scale.track();
@@ -380,6 +394,7 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
             draw_canvas(
                 &canvas,
                 &batches.get_untracked(),
+                paper.get_untracked(),
                 offset_x.get_untracked(),
                 offset_y.get_untracked(),
                 scale.get_untracked(),
@@ -476,9 +491,19 @@ async fn page_realtime_loop(
     viewer_status: RwSignal<String>,
     viewer_error: RwSignal<Option<String>>,
     last_seq: RwSignal<u64>,
+    paper: RwSignal<Paper>,
 ) -> Result<(), String> {
     loop {
-        match page_realtime_once(&page_id, batches, viewer_status, viewer_error, last_seq).await {
+        match page_realtime_once(
+            &page_id,
+            batches,
+            viewer_status,
+            viewer_error,
+            last_seq,
+            paper,
+        )
+        .await
+        {
             Ok(()) => TimeoutFuture::new(500).await,
             Err(error) => {
                 viewer_error.set(Some(error));
@@ -495,6 +520,7 @@ async fn page_realtime_once(
     viewer_status: RwSignal<String>,
     viewer_error: RwSignal<Option<String>>,
     last_seq: RwSignal<u64>,
+    paper: RwSignal<Paper>,
 ) -> Result<(), String> {
     let ticket_response = Request::post("/api/realtime-ticket")
         .header(REQUEST_ID_HEADER, &request_id())
@@ -529,10 +555,22 @@ async fn page_realtime_once(
         if let Message::Text(text) = message {
             let event: PageServerMessage = serde_json::from_str(&text)
                 .map_err(|error| format!("invalid page realtime event: {error}"))?;
-            apply_page_event(event, batches, viewer_status, viewer_error, last_seq);
+            apply_page_event(event, batches, viewer_status, viewer_error, last_seq, paper);
         }
     }
     Err("page realtime socket closed".to_string())
+}
+
+/// Pure reducer for the viewer's paper. The page channel is authoritative:
+/// `Welcome` carries it on every (re)connect and `PaperChanged` carries each
+/// change, which is what self-corrects a `PageSummary.paper` that went stale in
+/// an already-open library. Every other event leaves it untouched.
+fn next_viewer_paper(current: Paper, event: &PageServerMessage) -> Paper {
+    match event {
+        PageServerMessage::Welcome { paper, .. }
+        | PageServerMessage::PaperChanged { paper, .. } => *paper,
+        _ => current,
+    }
 }
 
 fn apply_page_event(
@@ -541,7 +579,12 @@ fn apply_page_event(
     viewer_status: RwSignal<String>,
     viewer_error: RwSignal<Option<String>>,
     last_seq: RwSignal<u64>,
+    paper: RwSignal<Paper>,
 ) {
+    let next_paper = next_viewer_paper(paper.get_untracked(), &event);
+    if next_paper != paper.get_untracked() {
+        paper.set(next_paper);
+    }
     match event {
         PageServerMessage::Welcome { last_seq: seq, .. } => {
             viewer_status.set("Connected".to_string());
@@ -576,7 +619,10 @@ fn apply_page_event(
         PageServerMessage::Error { message, .. } => {
             viewer_error.set(Some(message));
         }
-        PageServerMessage::LeaseGranted
+        // Paper is handled by `next_viewer_paper` above; the SPA is a read-only
+        // viewer, so leases never affect what it renders.
+        PageServerMessage::PaperChanged { .. }
+        | PageServerMessage::LeaseGranted
         | PageServerMessage::LeaseDenied { .. }
         | PageServerMessage::LeaseChanged { .. } => {}
     }
@@ -596,9 +642,67 @@ fn mark_ink_applied(seq: u64) {
     let _ = Reflect::set(&window, &"__vNoteLastInkSeq".into(), &(seq as f64).into());
 }
 
+/// The world-space rectangle currently on screen — the exact inverse of the
+/// `world * scale + offset` mapping the stroke loop applies, so paper is
+/// enumerated for precisely the area being painted.
+///
+/// `scale` here is CSS px per world unit: the DPR transform is applied outside
+/// this function, so on a 2× display the *physical* pitch is double the cull
+/// threshold. That is conservative — it can only ever cull too early, never too
+/// late — and is deliberately left uncorrected.
+fn world_viewport(
+    css_width: f64,
+    css_height: f64,
+    offset_x: f64,
+    offset_y: f64,
+    scale: f64,
+) -> WorldViewport {
+    WorldViewport::new(
+        (0.0 - offset_x) / scale,
+        (0.0 - offset_y) / scale,
+        (css_width - offset_x) / scale,
+        (css_height - offset_y) / scale,
+        scale,
+    )
+}
+
+/// Paint the page's paper behind the ink, under the same world→CSS mapping the
+/// stroke loop uses, so it stays locked to the ink through pan and zoom.
+fn draw_paper(
+    context: &CanvasRenderingContext2d,
+    paper: Paper,
+    viewport: &WorldViewport,
+    offset_x: f64,
+    offset_y: f64,
+    scale: f64,
+) {
+    if paper == Paper::None {
+        return;
+    }
+    // Butt caps: a round cap would bulge each line's ends past the viewport edge.
+    // Restored to "round" for ink by the caller.
+    context.set_line_cap("butt");
+    visit_paper_marks(paper, viewport, |mark| {
+        context.set_stroke_style_str(mark.kind.color());
+        context.set_line_width(paper_mark_device_width(mark.world_width(), scale));
+        context.begin_path();
+        if mark.kind.is_horizontal() {
+            let y = mark.position * scale + offset_y;
+            context.move_to(viewport.min_x * scale + offset_x, y);
+            context.line_to(viewport.max_x * scale + offset_x, y);
+        } else {
+            let x = mark.position * scale + offset_x;
+            context.move_to(x, viewport.min_y * scale + offset_y);
+            context.line_to(x, viewport.max_y * scale + offset_y);
+        }
+        context.stroke();
+    });
+}
+
 fn draw_canvas(
     canvas: &HtmlCanvasElement,
     batches: &[StrokeBatch],
+    paper: Paper,
     offset_x: f64,
     offset_y: f64,
     scale: f64,
@@ -628,6 +732,12 @@ fn draw_canvas(
     let _ = context.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
     context.set_fill_style_str("#ffffff");
     context.fill_rect(0.0, 0.0, css_width, css_height);
+
+    // Paper goes on after the white fill and before every stroke, so it can
+    // never overpaint ink.
+    let viewport = world_viewport(css_width, css_height, offset_x, offset_y, scale);
+    draw_paper(&context, paper, &viewport, offset_x, offset_y, scale);
+
     context.set_line_cap("round");
     context.set_line_join("round");
 
@@ -907,6 +1017,7 @@ mod tests {
             created_at: "2026-07-22T00:00:00+00:00".to_string(),
             updated_at: updated_at.to_string(),
             thumbnail: ThumbnailMetadata::Empty,
+            paper: Paper::None,
         }
     }
 
@@ -969,5 +1080,131 @@ mod tests {
         );
         assert_eq!(ids(&items), vec!["a"]);
         assert_eq!(items[0].updated_at, "2026-07-22T10:00:00+00:00");
+    }
+
+    /// `world_viewport` must be the exact inverse of the `world * scale + offset`
+    /// mapping the stroke loop applies, or paper drifts against the ink.
+    #[test]
+    fn world_viewport_inverts_the_ink_transform() {
+        let (css_w, css_h, offset_x, offset_y, scale) = (800.0, 600.0, 80.0, -45.0, 0.5);
+        let viewport = world_viewport(css_w, css_h, offset_x, offset_y, scale);
+        let to_css = |world: f64, offset: f64| world * scale + offset;
+        assert!((to_css(viewport.min_x, offset_x) - 0.0).abs() < 1e-9);
+        assert!((to_css(viewport.min_y, offset_y) - 0.0).abs() < 1e-9);
+        assert!((to_css(viewport.max_x, offset_x) - css_w).abs() < 1e-9);
+        assert!((to_css(viewport.max_y, offset_y) - css_h).abs() < 1e-9);
+        assert_eq!(viewport.scale, scale);
+    }
+
+    /// Panning moves the world window by exactly the inverse pan, so paper stays
+    /// locked to the ink rather than sliding under it.
+    #[test]
+    fn world_viewport_tracks_pan_and_zoom() {
+        let base = world_viewport(400.0, 300.0, 0.0, 0.0, 1.0);
+        let panned = world_viewport(400.0, 300.0, 100.0, 50.0, 1.0);
+        assert!((panned.min_x - (base.min_x - 100.0)).abs() < 1e-9);
+        assert!((panned.min_y - (base.min_y - 50.0)).abs() < 1e-9);
+        // Zooming in halves the world extent on screen.
+        let zoomed = world_viewport(400.0, 300.0, 0.0, 0.0, 2.0);
+        assert!(((zoomed.max_x - zoomed.min_x) * 2.0 - (base.max_x - base.min_x)).abs() < 1e-9);
+    }
+
+    /// The page channel is authoritative for paper; nothing else changes it.
+    #[test]
+    fn next_viewer_paper_follows_the_page_channel() {
+        let welcome = PageServerMessage::Welcome {
+            session_id: "session_1".to_string(),
+            last_seq: 0,
+            lease_holder: None,
+            paper: Paper::SquaredLarge,
+        };
+        assert_eq!(
+            next_viewer_paper(Paper::None, &welcome),
+            Paper::SquaredLarge,
+            "welcome carries the authoritative value on every reconnect"
+        );
+
+        let changed = PageServerMessage::PaperChanged {
+            paper: Paper::RuledWide,
+            revision: 7,
+        };
+        assert_eq!(
+            next_viewer_paper(Paper::SquaredLarge, &changed),
+            Paper::RuledWide
+        );
+
+        // A change back to blank is honoured, not treated as "no value".
+        let cleared = PageServerMessage::PaperChanged {
+            paper: Paper::None,
+            revision: 8,
+        };
+        assert_eq!(next_viewer_paper(Paper::RuledWide, &cleared), Paper::None);
+
+        // Every other event leaves paper untouched.
+        for event in [
+            PageServerMessage::Synced { last_seq: 3 },
+            PageServerMessage::LeaseGranted,
+            PageServerMessage::LeaseDenied {
+                holder: "other".to_string(),
+            },
+            PageServerMessage::LeaseChanged { holder: None },
+            PageServerMessage::Error {
+                code: "paper_failed".to_string(),
+                message: "nope".to_string(),
+                client_mutation_id: None,
+            },
+        ] {
+            assert_eq!(
+                next_viewer_paper(Paper::RuledNarrow, &event),
+                Paper::RuledNarrow
+            );
+        }
+    }
+
+    /// A library re-sort must not drop the paper it is not carrying, and a
+    /// created page must arrive with the paper it was born with.
+    #[test]
+    fn library_events_preserve_and_carry_paper() {
+        let mut items = vec![summary("a", "2026-07-22T10:00:00+00:00")];
+        items[0].paper = Paper::SquaredSmall;
+        apply_library_event_to_pages(
+            &mut items,
+            LibraryEvent::PageUpdated {
+                page_id: "a".to_string(),
+                updated_at: "2026-07-22T11:00:00+00:00".to_string(),
+            },
+        );
+        assert_eq!(
+            items[0].paper,
+            Paper::SquaredSmall,
+            "re-sort must not blank paper"
+        );
+
+        let mut created = summary("b", "2026-07-22T12:00:00+00:00");
+        created.paper = Paper::RuledMarginWide;
+        apply_library_event_to_pages(&mut items, LibraryEvent::PageCreated { page: created });
+        let page = items
+            .iter()
+            .find(|page| page.id == "b")
+            .expect("created page");
+        assert_eq!(page.paper, Paper::RuledMarginWide);
+    }
+
+    /// At the SPA's default (minimum) zoom the graded cull leaves the coarse
+    /// papers visible and hides the fine ones. This is specified behaviour, and
+    /// it is why the e2e spec has to zoom in before asserting on narrow rules.
+    #[test]
+    fn cull_at_minimum_canvas_scale_is_graded() {
+        const MIN_CANVAS_SCALE: f64 = 0.08;
+        let visible = |paper: Paper| {
+            let viewport = world_viewport(1200.0, 800.0, 0.0, 0.0, MIN_CANVAS_SCALE);
+            !protocol::paper_marks(paper, &viewport).is_empty()
+        };
+        assert!(visible(Paper::RuledWide));
+        assert!(visible(Paper::SquaredLarge));
+        assert!(!visible(Paper::RuledNarrow));
+        assert!(!visible(Paper::SquaredSmall));
+        // The margin is never culled, so a margin paper still shows one line.
+        assert!(visible(Paper::RuledMarginNarrow));
     }
 }
