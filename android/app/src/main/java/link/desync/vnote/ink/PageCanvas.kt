@@ -110,7 +110,15 @@ fun PageCanvasScreen(
     val context = LocalContext.current
     val toolPreferences = remember(userId) { DrawingToolPreferences(context, userId) }
     val paperPreferences = remember(userId) { PaperPreferences(context, userId) }
-    val session = remember(page.id) { PageInkSession(apiClient, page.id, scope, page.paper) }
+    // The sticky new-page default is written only when the server confirms a
+    // change this session asked for — never on dispatch, and never for the
+    // paper `Welcome` reports for a page the user merely opened.
+    val session =
+        remember(page.id) {
+            PageInkSession(apiClient, page.id, scope, page.paper) { confirmed ->
+                paperPreferences.save(confirmed)
+            }
+        }
     var selectedTool by remember(page.id) { mutableStateOf(CanvasTool.Drawing) }
     var paletteOpen by remember(page.id) { mutableStateOf(false) }
     // Paper is deliberately *not* a CanvasTool: picking it must never deselect
@@ -149,13 +157,7 @@ fun PageCanvasScreen(
                 },
                 onPaletteDismiss = { paperPaletteOpen = false },
                 onPaperChange = { paper ->
-                    // Only remember it as the new-page default once the session
-                    // has actually taken the choice; otherwise a pick made while
-                    // the socket is tearing down would persist device-wide a
-                    // paper the server never saw.
-                    if (session.setPaper(paper)) {
-                        paperPreferences.save(paper)
-                    }
+                    session.setPaper(paper)
                     paperPaletteOpen = false
                 },
             )
