@@ -17,7 +17,8 @@ fn cfg(entries: &[(&str, &str)]) -> Config {
         .collect();
     apply_defaults(Config::builder())
         .expect("defaults should apply")
-        .add_source(env_source().source(Some(source)))
+        // Wrapped exactly as `build_config` wraps it, so tests exercise trimming.
+        .add_source(Trimmed(env_source().source(Some(source))))
         .build()
         .expect("config should build")
 }
@@ -513,6 +514,78 @@ fn server_blank_tls_and_static_are_treated_as_absent() {
 
     assert!(server.tls_pair().is_none());
     assert!(server.static_dir.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// whitespace trimming
+// ---------------------------------------------------------------------------
+
+/// The motivating case: JWT validation splits the token's `scope` claim on
+/// whitespace and compares whole values, so a `required-scope` with a stray space
+/// can never match — every user gets 403 while startup, the deploy health gate and
+/// CI all report green. Trimming at the source makes that unrepresentable.
+#[test]
+fn required_scope_with_surrounding_whitespace_is_trimmed() {
+    let config = cfg(&with(
+        oidc_env(),
+        &[("VNOTE__OIDC__REQUIRED-SCOPE", "  v-note:dev:access\n")],
+    ));
+    let oidc: OidcConfig = load_group(&config, "oidc").expect("should load");
+
+    assert_eq!(oidc.required_scope, "v-note:dev:access");
+    // The comparison auth.rs performs must now succeed.
+    assert!("openid profile v-note:dev:access"
+        .split_whitespace()
+        .any(|value| value == oidc.required_scope));
+}
+
+/// Trimming is applied to every string leaf, not a curated list — including
+/// secrets, where surrounding whitespace is a paste artefact rather than intent.
+#[test]
+fn every_string_leaf_is_trimmed_including_secrets() {
+    let config = cfg(&[
+        ("VNOTE__DATABASE__HOST", "  postgres  "),
+        ("VNOTE__DATABASE__NAME", "\tv_note\n"),
+        ("VNOTE__DATABASE__USER", " v_note "),
+        ("VNOTE__DATABASE__PASSWORD", "  s3cret\n"),
+        ("VNOTE__DATABASE__PORT", "  6543  "),
+    ]);
+    let database: DatabaseConfig = load_group(&config, "database").expect("should load");
+
+    assert_eq!(database.host, "postgres");
+    assert_eq!(database.name, "v_note");
+    assert_eq!(database.user, "v_note");
+    assert_eq!(database.password, "s3cret");
+    // Trimming happens before coercion, so a padded number still parses.
+    assert_eq!(database.port, 6543);
+}
+
+/// Trimming must not turn a whitespace-only value into a silently accepted one:
+/// it becomes empty, which `validate` still rejects by field path.
+#[test]
+fn whitespace_only_value_is_still_rejected() {
+    let config = cfg(&with(
+        oidc_env(),
+        &[("VNOTE__OIDC__CLIENT-SECRET", "   \n ")],
+    ));
+    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank secret rejected");
+
+    match error {
+        ConfigError::Invalid { ref path, .. } => assert_eq!(path, "oidc.client-secret"),
+        other => panic!("expected Invalid, got: {other}"),
+    }
+}
+
+/// A trailing newline is the common real-world case — the dev `assetlinks-json`
+/// leaf carried one from its original OpenBao value.
+#[test]
+fn trailing_newline_on_a_json_leaf_is_trimmed() {
+    let json = r#"[{"relation":["delegate_permission/common.handle_all_urls"]}]"#;
+    let padded = format!("{json}\n");
+    let config = cfg(&[("VNOTE__ANDROID__ASSETLINKS-JSON", padded.as_str())]);
+    let android: AndroidConfig = load_group(&config, "android").expect("should load");
+
+    assert_eq!(android.assetlinks_json(), Some(json));
 }
 
 // ---------------------------------------------------------------------------
