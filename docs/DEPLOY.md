@@ -24,7 +24,7 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
-4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket)
+4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the app's `/health` from inside the compose network and fails the deploy (dumping container status + logs) if it never serves. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
 Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
@@ -52,12 +52,17 @@ Operator reproduction from a Woodpecker-equivalent shell:
 | `v_note_prod_oidc_client_secret` | SPA confidential client (prod) |
 | `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
-| `v_note_dev_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (dev App Links, package `link.desync.vnote.dev`) |
-| `v_note_prod_assetlinks_json` | Minified JSON for `ASSETLINKS_JSON` (prod App Links, package `link.desync.vnote`) |
+| `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
+| `v_note_prod_sovereign_access_url` | Access URL for the `/v-note/prod/server` sovereign-config subtree |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
 | Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
 Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
+
+App Links JSON is **not** in this list: since iteration 19 it lives in sovereign-config
+at `android/assetlinks-json`. The former `v_note_{dev,prod}_assetlinks_json` keys have
+been deleted — rotating a signing certificate means rewriting that leaf (see
+[Set App Links JSON](#set-app-links-json) below), not patching OpenBao.
 
 ### Local compose (WSL / laptop)
 
@@ -72,56 +77,103 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 
 ---
 
-## Compose env vars (per deployment)
+## Runtime config (sovereign-config)
+
+Since iteration 19 the app's runtime configuration lives in **sovereign-config**
+under `/v-note/dev/server` and `/v-note/prod/server`, not in compose
+env vars. The server loads four independent groups — `database`, `oidc`,
+`observability`, `android` — and **refuses to start (non-zero exit, redacted
+error) if any value is missing or invalid**.
+
+The deploy step exposes the per-env access URL (Woodpecker secret
+`v_note_{dev,prod}_sovereign_access_url`) as the `SOVEREIGN_CONFIG_ACCESS_URL_FILE`
+env var; compose sources a docker secret of the same name straight from it and
+mounts it at `/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE`, which the container's
+`SOVEREIGN_CONFIG_ACCESS_URL_FILE` points at. **The URL is itself a secret and
+selects the environment** — dev vs prod is decided by which URL is injected, not by
+a config flag.
+
+### Creating / rotating an access URL (operator)
+
+The access URL grants read access to the **whole** `/v-note/<env>/server`
+subtree, secret leaves included — treat it like a password.
+
+1. Create a managed connection (sovereign-config MCP or web UI), scoped and
+   read-only — the URL is displayed **once**:
+   `create_connection root=/v-note/dev/server permissions=["read"]`
+2. Pipe it straight into OpenBao without it touching a terminal argument or
+   shell history:
+   ```bash
+   export BAO_ADDR=https://secrets.desync.link BAO_TOKEN=<write token>
+   ./scripts/store-sovereign-access-url.sh dev    # paste URL, Ctrl-D
+   ./scripts/store-sovereign-access-url.sh prod
+   ```
+3. Redeploy. To rotate, `rotate_connection` and repeat — no app change needed.
+
+Secret leaves (`database/password`, `oidc/client-secret`) are stored with
+`put_secret` and revealed to the app at load. `POSTGRES_PASSWORD` **also** stays in
+OpenBao because the `postgres` service consumes it directly — the same value lives
+in two stores.
+
+The provider is pinned to the running sovereign-config server's tag (**2.12.1**)
+and **fails closed on protocol mismatch**; if that server is upgraded, bump
+`sovereign-config-provider` in `crates/server/Cargo.toml` and rebuild.
+
+### Compose env vars that remain (per deployment)
 
 | Variable (example) | Purpose |
 | --- | --- |
 | `V_NOTE_HOST` | `v-notes.desync.link` vs `v-notes-dev.desync.link` |
+| `V_NOTE_CONTAINER_NAME` | `v-note` vs `v-note-dev` |
 | `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
-| `REQUIRED_SCOPE` | `v-note:prod:access` vs `v-note:dev:access` |
-| `OIDC_ISSUER_URL` | Matching Authentik provider issuer |
-| `OIDC_CLIENT_ID` | SPA confidential client (`v-note-browser-{dev,prod}`) |
-| `OIDC_CLIENT_SECRET` | SPA client secret (Woodpecker secret per env) |
-| `OIDC_REDIRECT_URI` | `https://{host}/auth/callback` |
-| `OIDC_END_SESSION_URL` | Authentik RP logout URL for env |
-| `OIDC_ANDROID_CLIENT_ID` | Android app client (`v-note-android-{dev,prod}`) |
-| `OIDC_ANDROID_ISSUER_URL` | Android Authentik provider issuer URL |
-| `ASSETLINKS_JSON` | JSON served at `/.well-known/assetlinks.json` for Android App Links |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Defaults to `http://monitor-alloy:4317` in deploy; override only if mini-config changes |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` |
-| `METRICS_ADDR` | `0.0.0.0:9090` internal listener scraped by Alloy |
+| `APP_ENV` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.env` labels |
+| `APP_VERSION` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.release` labels (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
+| `V_NOTE_METRICS_ADDR` | `0.0.0.0:9090` or `disabled` — **one** source for the listener *and* Alloy's scrape labels, so they cannot drift. `deploy-v-note.sh` derives `VNOTE__OBSERVABILITY__METRICS_ADDR`, `observability.metrics.port` and `observability.metrics.scrape` from it. Being an env override it out-ranks the sovereign `observability/metrics-addr` leaf for deployments; the planned Woodpecker sovereign-config broker will feed this from that same leaf |
 
-**OIDC is mandatory** — the server panics at startup if `OIDC_ISSUER_URL` or related vars are missing; deploy and local compose always set them (Authentik on mini, mock OIDC locally).
+Everything else (database, OIDC, OTLP, metrics address, App Links JSON) now comes
+from sovereign-config, overridable per-deploy through the `VNOTE__*` env layer
+documented in [`DEV.md`](DEV.md).
 
-Exact names in `deploy/docker-compose.yml`. **`ASSETLINKS_JSON` is required for deploy** — Woodpecker injects minified JSON from OpenBao keys `v_note_dev_assetlinks_json` / `v_note_prod_assetlinks_json` (step `environment:` → `docker compose` reads `${ASSETLINKS_JSON}`). Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do not commit real fingerprints).
+**OIDC is mandatory** — the server exits non-zero at startup if `oidc/issuer-url` or
+related leaves are missing; deploy reads them from sovereign-config, local compose
+and e2e supply them via `VNOTE__*` (mock OIDC).
+
+App Links JSON lives at the `android/assetlinks-json` leaf in sovereign-config and
+is rendered from the signing certificate fingerprint — see [Set App Links JSON](#set-app-links-json)
+above. Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do
+not commit real fingerprints).
 
 ## Observability
 
 v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 
 - **Metrics:** the app serves Prometheus text on internal port `9090` at `/metrics`. Alloy discovers it through Docker labels on the `v-note` service: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.metrics.scheme=http`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
-- **Traces:** `scripts/deploy-v-note.sh` sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://monitor-alloy:4317`, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, and `OTEL_SERVICE_NAME=v-note` unless explicitly overridden.
+- **Traces:** the `observability` config group sets `otlp-endpoint=http://monitor-alloy:4317`, `otlp-protocol=grpc`, and `service-name=v-note` in both env subtrees; `observability/environment` supplies the OTEL `deployment.environment` attribute (`dev` / `production`).
 - **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
 - **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
-**Seed Woodpecker App Links secrets** (operator, on mini or with write access to `secret/woodpecker/repos/vcheesbrough/v-note`):
+### Set App Links JSON
+
+Operator task. Since iteration 19 this lives in sovereign-config
+at the `android/assetlinks-json` leaf, not in OpenBao — render it and write it to
+both env subtrees:
 
 ```bash
-export BAO_ADDR=https://secrets.desync.link
-export BAO_TOKEN=<token>
-
 # Dev — fingerprint of the committed keystore android/app/debug.keystore (all builds
 # sign with it, so this is fixed): SHA-256
 #   3A:49:7C:AE:57:AD:FF:E4:D0:C8:3B:D2:D0:98:2C:C2:98:CB:1D:B6:3F:70:68:5A:57:13:07:96:CC:9C:62:3A
-export V_NOTE_DEV_ANDROID_CERT_SHA256="$(./scripts/android-dev-debug-fingerprint.sh)"
-./scripts/patch-v-note-woodpecker-openbao-secrets.sh
+./scripts/render-assetlinks-json.sh dev "$(./scripts/android-dev-debug-fingerprint.sh)" \
+  | sovereign-config put /v-note/dev/server/android/assetlinks-json
 
 # Prod — release keystore SHA-256 (keytool -list -v …), when prod Android ships:
-export V_NOTE_PROD_ANDROID_CERT_SHA256='AA:BB:CC:...'
-./scripts/patch-v-note-woodpecker-openbao-secrets.sh
+./scripts/render-assetlinks-json.sh prod 'AA:BB:CC:...' \
+  | sovereign-config put /v-note/prod/server/android/assetlinks-json
 ```
 
-Manual render (without patch script): `./scripts/render-assetlinks-json.sh dev "$SHA"` → pipe to `bao kv patch` as `v_note_dev_assetlinks_json`.
+The value is non-secret (it is served publicly at `/.well-known/assetlinks.json`),
+so it is a plain `put`, not `secret put`. The server validates it parses as JSON at
+startup and refuses to start otherwise.
 
 Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keystore), `--docker` only for the CI image keystore, or `keytool -list -v` on a release keystore (prod).
 

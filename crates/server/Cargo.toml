@@ -10,6 +10,7 @@ axum-extra = { version = "0.10", features = ["cookie"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+config = { version = "0.15", default-features = false }
 futures-util = "0.3"
 jsonwebtoken = "9"
 once_cell = "1.21.4"
@@ -24,6 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", features = ["ring"] }
 serde.workspace = true
 serde_json.workspace = true
+sovereign-config-provider = { git = "https://github.com/vcheesbrough/sovereign-config", tag = "2.12.1", features = ["config"] }
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "derive", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
 time = "0.3"
 tokio.workspace = true
@@ -32,7 +34,7 @@ tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-url = "2"
+url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

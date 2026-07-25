@@ -24,6 +24,11 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.web
+      # sovereign-config-provider is a git dep on a private repo, so the cargo
+      # layers need a credential — the same one CI passes via --secret. Set
+      # GITHUB_TOKEN before `--build`; see docs/DEV.md.
+      secrets:
+        - github_token
       labels:
         org.opencontainers.image.title: v-note
         org.opencontainers.image.description: v-note server (Axum API + Leptos SPA static)
@@ -41,32 +46,25 @@ services:
     container_name: ${V_NOTE_CONTAINER_NAME:?V_NOTE_CONTAINER_NAME is required}
     restart: unless-stopped
     environment:
-      APP_ENV: ${APP_ENV:-dev}
-      APP_VERSION: ${APP_VERSION:-0.11.0}
-      DATABASE_HOST: postgres
-      DATABASE_PORT: 5432
-      DATABASE_USER: v_note
-      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
-      DATABASE_NAME: v_note
-      STATIC_DIR: /app/dist
+      # Runtime config (database / oidc / observability / android) comes from
+      # sovereign-config, reached via the access-URL secret below. Only build,
+      # orchestration and image-internal values stay here — see card #273.
+      # Set to an empty value (docker-compose.local.yml) to disable the
+      # sovereign-config layer and fall back to plain VNOTE__* env.
+      # Points at the docker secret below; the provider reads the URL from that file.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE: /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
       V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
-      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
-      OIDC_AUTHORIZE_URL: ${OIDC_AUTHORIZE_URL:-}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
-      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
-      REQUIRED_SCOPE: ${REQUIRED_SCOPE:-}
-      OIDC_END_SESSION_URL: ${OIDC_END_SESSION_URL:-}
-      OIDC_ANDROID_CLIENT_ID: ${OIDC_ANDROID_CLIENT_ID:-}
-      OIDC_ANDROID_ISSUER_URL: ${OIDC_ANDROID_ISSUER_URL:-}
-      ASSETLINKS_JSON: ${ASSETLINKS_JSON:-}
-      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
-      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-2000}
-      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-v-note}
+      # The metrics listener and Alloy's scrape-discovery labels below are derived
+      # from one value in deploy-v-note.sh, so they cannot drift apart. Snake_case
+      # because a shell cannot assign a name containing `-`; the server accepts
+      # both spellings. Once the Woodpecker sovereign-config broker lands this will
+      # be fed from `observability/metrics-addr`, making it the same value the app
+      # would otherwise read directly.
+      VNOTE__OBSERVABILITY__METRICS_ADDR: ${VNOTE__OBSERVABILITY__METRICS_ADDR:-0.0.0.0:9090}
       VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-2}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-2}}
+    secrets:
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,14 +80,30 @@ services:
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,crowdsec@docker,security-headers@docker
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.scheme=https
-      - observability.metrics.scrape=true
-      - observability.metrics.port=9090
+      - observability.metrics.scrape=${V_NOTE_METRICS_SCRAPE:-true}
+      - observability.metrics.port=${V_NOTE_METRICS_PORT:-9090}
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
       - observability.service=v-note
       - observability.env=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-0.11.0}
       - observability.protocol=${VNOTE_PROTOCOL_VERSION:-2}
+
+secrets:
+  # Sourced straight from the Woodpecker secret v_note_{dev,prod}_sovereign_access_url,
+  # exposed by the deploy step as the SOVEREIGN_CONFIG_ACCESS_URL_FILE env var. Compose
+  # materialises it as a file mounted at /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE.
+  # The connection URL is itself a secret and selects the env: dev vs prod is decided
+  # by *which* URL is injected. The local overlay drops this mount and blanks the env
+  # var to disable the sovereign layer entirely.
+  SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+    environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE
+
+  # Build-time only (v-note.build.secrets), never mounted into the running
+  # container: lets a local `--build` fetch the private sovereign-config git dep
+  # the same way CI does. Deploys pull a prebuilt image and never reference it.
+  github_token:
+    environment: GITHUB_TOKEN
 
 volumes:
   v-note-db:

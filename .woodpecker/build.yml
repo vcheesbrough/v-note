@@ -22,10 +22,20 @@ steps:
     when:
       - event: [push, manual]
     depends_on: []
-    image: rust:1.89.0@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9
+    image: rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
     commands:
+      # sovereign-config-provider is a git+tag dep on a private repo; cargo must be
+      # able to resolve it even for workspace members that don't depend on it.
+      - export CARGO_NET_GIT_FETCH_WITH_CLI=true
+      - export GIT_CONFIG_COUNT=1
+      - export GIT_CONFIG_KEY_0="url.https://x-access-token:$${GITHUB_TOKEN}@github.com/.insteadOf"
+      - export GIT_CONFIG_VALUE_0="https://github.com/"
       - cargo test -p protocol
       - cargo test -p frontend
+      - cargo test -p server
       - ./scripts/check-android-build-box-image.sh
 
   build-android:
@@ -130,7 +140,14 @@ steps:
       - compute-version
     image: *docker-image
     volumes: *docker-socket
-    environment: *registry-creds
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      # Needed by the cargo layers to fetch the private sovereign-config git dep.
+      GITHUB_TOKEN:
+        from_secret: github_token
     commands:
       - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - |
@@ -138,6 +155,7 @@ steps:
         IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
         START=$$(date +%s)
         docker build -f Dockerfile.web \
+          --secret id=github_token,env=GITHUB_TOKEN \
           --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
           --label org.opencontainers.image.title=v-note \
           --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
@@ -257,12 +275,12 @@ steps:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
-      OIDC_CLIENT_SECRET:
-        from_secret: v_note_dev_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_dev_postgres_password
-      ASSETLINKS_JSON:
-        from_secret: v_note_dev_assetlinks_json
+      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
+      # itself selects the environment.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+        from_secret: v_note_dev_sovereign_access_url
     commands:
       - ./scripts/deploy-v-note.sh dev
 
@@ -279,16 +297,16 @@ steps:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
-      OIDC_CLIENT_SECRET:
-        from_secret: v_note_dev_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_dev_postgres_password
-      ASSETLINKS_JSON:
-        from_secret: v_note_dev_assetlinks_json
+      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
+      # itself selects the environment.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+        from_secret: v_note_dev_sovereign_access_url
     commands:
       - ./scripts/deploy-v-note.sh dev
 
-  tag-release-auto-dev-0.13.0:
+  tag-release-auto-dev:
     when:
       - event: push
     depends_on:
@@ -316,12 +334,11 @@ steps:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
-      OIDC_CLIENT_SECRET:
-        from_secret: v_note_prod_oidc_client_secret
       POSTGRES_PASSWORD:
         from_secret: v_note_prod_postgres_password
-      ASSETLINKS_JSON:
-        from_secret: v_note_prod_assetlinks_json
+      # Unlocks the /v-note/prod/server sovereign-config subtree.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+        from_secret: v_note_prod_sovereign_access_url
     commands:
       - ./scripts/deploy-v-note.sh prod
 
