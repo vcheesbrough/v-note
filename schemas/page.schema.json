@@ -4,7 +4,7 @@
   "title": "PageSummary",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "title", "created_at", "updated_at", "thumbnail", "paper"],
+  "required": ["id", "title", "created_at", "updated_at", "thumbnail"],
   "properties": {
     "id": {
       "type": "string",
