@@ -15,7 +15,9 @@ Prerequisites: **Rust**, **Docker**, **Trunk** (`cargo install trunk`), **Node.j
 just run-server
 curl http://localhost:8080/health
 curl http://localhost:8080/api/meta
-# Auth routes are active when OIDC_* env vars are set (see docs/DEV.md)
+# Runtime config comes from sovereign-config, overridable via VNOTE__* env vars.
+# A bare run needs the database and OIDC groups set — see docs/DEV.md, or use
+# `just run-compose` for a ready-made local stack with mock OIDC.
 
 # SPA (Trunk dev server — proxies API to server in dev)
 just run-spa

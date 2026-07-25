@@ -1,6 +1,4 @@
-use std::env;
 use std::net::SocketAddr;
-use std::time::Duration;
 use std::time::Instant;
 
 use axum::extract::Request;
@@ -24,6 +22,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+
+use crate::config::ObservabilityConfig;
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
@@ -132,7 +132,7 @@ impl Metrics {
         let build_info = IntGauge::with_opts(
             Opts::new("v_note_build_info", "v-note build and protocol metadata")
                 .const_label("protocol", PROTOCOL_VERSION)
-                .const_label("version", crate::app_version_from_env()),
+                .const_label("version", crate::app_version()),
         )
         .expect("build info gauge should build");
         build_info.set(1);
@@ -328,8 +328,10 @@ pub async fn metrics_handler() -> Response {
     }
 }
 
-pub async fn run_metrics_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(addr) = metrics_addr() else {
+pub async fn run_metrics_server(
+    addr: Option<SocketAddr>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(addr) = addr else {
         return Ok(());
     };
     let app = Router::new().route("/metrics", get(metrics_handler));
@@ -353,7 +355,7 @@ impl Drop for TelemetryGuard {
     }
 }
 
-pub fn init_tracing() -> TelemetryGuard {
+pub fn init_tracing(observability: &ObservabilityConfig) -> TelemetryGuard {
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("server=info,tower_http=info,axum=info"))
         .expect("default tracing filter should be valid");
@@ -363,7 +365,7 @@ pub fn init_tracing() -> TelemetryGuard {
         .with_current_span(true)
         .with_span_list(false);
 
-    match build_tracer_provider() {
+    match build_tracer_provider(observability) {
         Ok(Some(provider)) => {
             let tracer = provider.tracer("v-note");
             let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -394,32 +396,25 @@ pub fn init_tracing() -> TelemetryGuard {
     }
 }
 
-fn build_tracer_provider() -> Result<Option<SdkTracerProvider>, String> {
-    let endpoint = match env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
-        Ok(value) if !value.trim().is_empty() => value,
-        _ => return Ok(None),
+fn build_tracer_provider(
+    observability: &ObservabilityConfig,
+) -> Result<Option<SdkTracerProvider>, String> {
+    // No OTLP endpoint configured → tracing export stays off.
+    let Some(endpoint) = observability.otlp_endpoint.as_ref() else {
+        return Ok(None);
     };
-    let protocol = env::var("OTEL_EXPORTER_OTLP_PROTOCOL").unwrap_or_else(|_| "grpc".to_string());
-    if protocol != "grpc" {
-        return Err(format!(
-            "unsupported OTEL_EXPORTER_OTLP_PROTOCOL={protocol}; expected grpc"
-        ));
-    }
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(endpoint)
-        .with_timeout(otel_export_timeout())
+        .with_endpoint(endpoint.to_string())
+        .with_timeout(observability.otlp_timeout())
         .build()
         .map_err(|error| error.to_string())?;
     let resource = opentelemetry_sdk::Resource::builder()
-        .with_service_name(env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "v-note".to_string()))
+        .with_service_name(observability.service_name.clone())
         .with_attributes([
-            KeyValue::new(
-                "deployment.environment",
-                env::var("APP_ENV").unwrap_or_else(|_| "dev".to_string()),
-            ),
-            KeyValue::new("service.version", crate::app_version_from_env()),
+            KeyValue::new("deployment.environment", observability.environment.clone()),
+            KeyValue::new("service.version", crate::app_version()),
             KeyValue::new("vnote.protocol", PROTOCOL_VERSION),
         ])
         .build();
@@ -428,14 +423,6 @@ fn build_tracer_provider() -> Result<Option<SdkTracerProvider>, String> {
         .with_resource(resource)
         .build();
     Ok(Some(provider))
-}
-
-fn otel_export_timeout() -> Duration {
-    env::var("OTEL_EXPORTER_OTLP_TIMEOUT")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or_else(|| Duration::from_secs(2))
 }
 
 fn request_id_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -469,14 +456,6 @@ fn generate_request_id() -> String {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     )
-}
-
-fn metrics_addr() -> Option<SocketAddr> {
-    match env::var("METRICS_ADDR") {
-        Ok(value) if value.eq_ignore_ascii_case("disabled") || value.trim().is_empty() => None,
-        Ok(value) => Some(value.parse().expect("METRICS_ADDR should be host:port")),
-        Err(_) => Some("0.0.0.0:9090".parse().expect("default metrics addr")),
-    }
 }
 
 fn normalized_route(path: &str) -> String {

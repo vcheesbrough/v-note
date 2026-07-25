@@ -45,29 +45,76 @@ curl http://localhost:8080/api/meta
 
 Environment:
 
+Only three env vars are read directly; everything else goes through the config
+system below.
+
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PORT` | `8080` | HTTP listen (no TLS) |
-| `APP_VERSION` | workspace `0.1.0` | exposed in `/api/meta` |
-| `STATIC_DIR` | unset | when set, serves SPA + fallback `index.html` |
-| `DATABASE_URL` | unset | sqlx migrations dir present; optional Postgres |
-| `TLS_CERT` / `TLS_KEY` | unset | Docker image sets self-signed TLS on `:443` |
-| `OIDC_ISSUER_URL` | **required** | OIDC issuer (mock-oidc locally — `deploy/compose.env`) |
-| `OIDC_AUTHORIZE_URL` | optional | Browser-facing `/authorize` URL when it differs from discovery (local mock on `localhost:18080`) |
-| `OIDC_CLIENT_ID` | **required** | SPA confidential client |
-| `OIDC_CLIENT_SECRET` | **required** | SPA client secret (`test-secret` for local mock OIDC) |
-| `OIDC_REDIRECT_URI` | **required** | e.g. `https://v-notes-dev.desync.link/auth/callback` |
-| `REQUIRED_SCOPE` | **required** | `v-note:dev:access` or `v-note:prod:access` |
-| `OIDC_END_SESSION_URL` | optional | RP-initiated logout redirect |
-| `OIDC_ANDROID_CLIENT_ID` | optional | Android Authentik app client id (`v-note-android-{dev,prod}`) |
-| `OIDC_ANDROID_ISSUER_URL` | optional | Android provider issuer (separate Authentik app) |
-| `ASSETLINKS_JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json` |
-| `METRICS_ADDR` | `0.0.0.0:9090` | internal Prometheus listener; set `disabled` to turn it off |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | when set, exports OTLP traces to Alloy, e.g. `http://monitor-alloy:4317` |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | only gRPC is supported |
-| `OTEL_SERVICE_NAME` | `v-note` | trace service name |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` / `SOVEREIGN_CONFIG_ACCESS_URL` | unset | **bootstrap** — path to (or inline) the sovereign-config access-URL secret; when set, runtime config is read from sovereign-config |
+| `RUST_LOG` | `server=info,tower_http=info,axum=info` | standard tracing `EnvFilter` level |
+| `V_NOTE_RELEASE` | crate version | **compile-time** — release tag baked into the binary (and the SPA) at build; shown in `/api/meta` and OTEL `service.version` |
 
-**OIDC is mandatory:** the server refuses to start without `OIDC_ISSUER_URL` and related vars. Local dev and CI use **mock OIDC** (`deploy/docker-compose.local.yml`, `e2e/docker-compose.test.yml`) — not auth-disabled anonymous mode.
+### Runtime configuration (`VNOTE__*`)
+
+Since iteration 19 the server's runtime config lives in **sovereign-config**
+(`/v-note/{dev,prod}/server`), loaded as five independent groups —
+`database`, `oidc`, `observability`, `android`, `server`. **The server refuses to
+start (non-zero exit, redacted error) if any value is missing or invalid.**
+
+Config is layered: in-memory defaults → sovereign-config (only when an access URL
+is set) → `VNOTE__*` environment overrides. Local dev and e2e have no
+sovereign-config server, so they supply every group through the env layer.
+
+The `server` group is image-internal (identical across deployments), so it comes
+from defaults or `VNOTE__SERVER__*` overrides set by the image. **Do not add a
+`server/*` leaf to sovereign-config** — that is a convention, not an enforced
+boundary: the sovereign layer is merged wholesale, so such a leaf would be picked
+up (the image's env overrides out-rank it for `tls-cert`/`tls-key`/`static-dir`,
+but `http-port` has no override).
+
+`VNOTE__<GROUP>__<LEAF>` maps to `<group>.<leaf>`; `__` separates path segments.
+Canonical leaf names are **kebab-case**, matching sovereign-config path segments
+(which forbid `_`), so one key addresses the same value in every layer.
+
+**Both spellings work.** `-` is not legal in a shell variable name — a plain
+`VNOTE__OBSERVABILITY__METRICS-ADDR=… cargo run` is parsed as a *command*, not an
+assignment — so the snake_case form is accepted too and folded onto the same key:
+
+```bash
+VNOTE__OBSERVABILITY__METRICS_ADDR=127.0.0.1:9090 cargo run -p server   # shell-friendly
+VNOTE__OBSERVABILITY__METRICS-ADDR: "127.0.0.1:9090"                    # compose / sovereign-config
+```
+
+Use snake_case in a shell, kebab-case in compose and sovereign-config. Errors always
+name the canonical kebab path. Blank optional values mean "absent".
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `VNOTE__DATABASE__HOST` | **required** | Postgres host |
+| `VNOTE__DATABASE__PORT` | `5432` | coerced to `u16` |
+| `VNOTE__DATABASE__NAME` / `__USER` | **required** | database + role |
+| `VNOTE__DATABASE__PASSWORD` | **required** | secret leaf in sovereign-config |
+| `VNOTE__OIDC__ISSUER-URL` | **required** | OIDC issuer (mock-oidc locally — `deploy/compose.env`) |
+| `VNOTE__OIDC__AUTHORIZE-URL` | optional | browser-facing `/authorize` when it differs from discovery |
+| `VNOTE__OIDC__CLIENT-ID` | **required** | SPA confidential client |
+| `VNOTE__OIDC__CLIENT-SECRET` | **required** | secret leaf (`test-secret` for local mock OIDC) |
+| `VNOTE__OIDC__REDIRECT-URI` | **required** | e.g. `https://v-notes-dev.desync.link/auth/callback` |
+| `VNOTE__OIDC__REQUIRED-SCOPE` | **required** | `v-note:dev:access` or `v-note:prod:access` |
+| `VNOTE__OIDC__END-SESSION-URL` | optional | RP-initiated logout redirect |
+| `VNOTE__OIDC__ANDROID__CLIENT-ID` | optional | Android Authentik app client id |
+| `VNOTE__OIDC__ANDROID__ISSUER-URL` | optional | Android provider issuer (separate Authentik app) |
+| `VNOTE__OBSERVABILITY__ENVIRONMENT` | **required** | OTEL `deployment.environment` (`dev` \| `production`) |
+| `VNOTE__OBSERVABILITY__OTLP-ENDPOINT` | unset | when set, exports OTLP traces to Alloy, e.g. `http://monitor-alloy:4317` |
+| `VNOTE__OBSERVABILITY__OTLP-PROTOCOL` | `grpc` | only gRPC is supported; anything else fails startup |
+| `VNOTE__OBSERVABILITY__OTLP-TIMEOUT-MS` | `2000` | coerced to `u64` |
+| `VNOTE__OBSERVABILITY__SERVICE-NAME` | `v-note` | trace service name |
+| `VNOTE__OBSERVABILITY__METRICS-ADDR` | `0.0.0.0:9090` | internal Prometheus listener; `disabled`/blank turns it off |
+| `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
+| `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
+| `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
+| `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
+
+**OIDC is mandatory:** the server refuses to start without `VNOTE__OIDC__ISSUER-URL` and related leaves. Local dev and CI use **mock OIDC** (`deploy/docker-compose.local.yml`, `e2e/docker-compose.test.yml`) — not auth-disabled anonymous mode.
 
 **E2e auth:** `e2e/docker-compose.test.yml` runs mock OIDC; Playwright `global-setup.ts` seeds the `auth` cookie. See `e2e/tests/auth.spec.ts`.
 
@@ -75,10 +122,12 @@ Environment:
 
 Server logs are JSON on stdout/stderr. REST responses echo `X-Request-Id` and `X-Correlation-Id`; the SPA sends `X-Request-Id` on HTTP calls, and Android sends it on HTTP plus WSS handshakes.
 
-Metrics are served as Prometheus text on the internal metrics listener (`METRICS_ADDR`, default `0.0.0.0:9090`). The main app router does not expose `/metrics` through Traefik. Local checks:
+Metrics are served as Prometheus text on the internal metrics listener
+(`VNOTE__OBSERVABILITY__METRICS-ADDR`, default `0.0.0.0:9090`). The main app router
+does not expose `/metrics` through Traefik. Local checks:
 
 ```bash
-METRICS_ADDR=127.0.0.1:9090 cargo run -p server
+VNOTE__OBSERVABILITY__METRICS_ADDR=127.0.0.1:9090 cargo run -p server
 curl http://127.0.0.1:9090/metrics
 ```
 
@@ -193,11 +242,20 @@ WSL builds/install via `adb` (USB or emulator started on Windows); `just android
 ```bash
 export BAO_ADDR=https://secrets.desync.link
 export BAO_TOKEN=<token with read on secret/v-note-stack/env>
+export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>  # only for --build
 ./scripts/fetch-compose-env.sh   # writes deploy/.env from OpenBao + deploy/compose.env
 just run-compose
 ```
 
+`just run-compose` builds the image, and the cargo layers fetch the **private**
+`sovereign-config` git dep — so `GITHUB_TOKEN` must be set. Compose passes it as a
+build secret (`v-note.build.secrets`), the same credential path CI uses; it is
+build-time only and never mounted into the running container.
+
 Non-secret compose defaults are in **`deploy/compose.env`** (committed). Secrets (**`POSTGRES_PASSWORD`**, **`OIDC_CLIENT_SECRET`**) live in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator).
+
+The local overlay maps those into the `VNOTE__*` layer and blanks
+`SOVEREIGN_CONFIG_ACCESS_URL_FILE`, so local dev never talks to sovereign-config.
 
 Or: `./scripts/fetch-compose-env.sh` then `docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build`
 
@@ -211,8 +269,16 @@ Mini deploy uses `deploy/docker-compose.yml` only (Traefik `proxy-backend`, `lan
 
 ## CI reproduction
 
+Building the web image needs a GitHub token: `sovereign-config-provider` is a git
+dependency on a **private** repo, so the cargo layers fetch it with the same
+BuildKit secret CI uses. A token with read access to `vcheesbrough/sovereign-config`
+is enough. (`cargo run -p server` does not need this — it uses your host git
+credentials directly.)
+
 ```bash
-docker build -f Dockerfile.web -t v-note:local .  # add --label flags from .woodpecker/build.yml build-web for OCI metadata
+export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>
+
+docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --label flags from .woodpecker/build.yml build-web for OCI metadata
 cargo test -p protocol -p server
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright

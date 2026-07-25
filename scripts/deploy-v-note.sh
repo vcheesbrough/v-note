@@ -1,8 +1,42 @@
 #!/bin/sh
 set -eu
 
+# Minimal image used to probe the app's /health from inside the docker network.
+# busybox wget speaks HTTPS and exits non-zero on DNS failure or any non-200.
+HEALTH_PROBE_IMAGE="alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
+HEALTH_TIMEOUT_SECONDS=120
+
 usage() {
   echo "Usage: $0 dev|prod" >&2
+}
+
+# `docker compose up -d` returns as soon as the container is *created*, so an app
+# that starts and then immediately exits (bad config, unreachable dependency)
+# still looks like a successful deploy — a crash-looping container once reached
+# CI as "green". Poll the app's own /health over the compose network and fail the
+# deploy if it never serves.
+wait_for_health() {
+  container="$1"
+  network="$2"
+  deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
+
+  echo "==> waiting for $container to serve /health (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
+  while :; do
+    if docker run --rm --network "$network" "$HEALTH_PROBE_IMAGE" \
+        wget --no-check-certificate -q -O /dev/null "https://$container/health" >/dev/null 2>&1; then
+      echo "==> $container is healthy"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "ERROR: $container did not serve /health within ${HEALTH_TIMEOUT_SECONDS}s" >&2
+      echo "--- docker ps ---" >&2
+      docker ps -a --filter "name=$container" --format '{{.Names}}\t{{.Status}}' >&2 || true
+      echo "--- last 50 log lines from $container ---" >&2
+      docker logs --tail 50 "$container" >&2 2>&1 || true
+      return 1
+    fi
+    sleep 3
+  done
 }
 
 require_env() {
@@ -19,7 +53,13 @@ if [ "$target" != "dev" ] && [ "$target" != "prod" ]; then
   exit 1
 fi
 
-for name in REGISTRY_USER REGISTRY_PASSWORD OIDC_CLIENT_SECRET POSTGRES_PASSWORD ASSETLINKS_JSON; do
+# Runtime app config (database/oidc/observability/android) now comes from
+# sovereign-config; the only app secret this script handles is the access URL that
+# unlocks it. It arrives as SOVEREIGN_CONFIG_ACCESS_URL_FILE (Woodpecker secret) and
+# compose turns it into the docker secret of the same name — see deploy/docker-compose.yml.
+# POSTGRES_PASSWORD stays here because the postgres service consumes it directly
+# (same value lives in both OpenBao and sovereign-config — see card #273).
+for name in REGISTRY_USER REGISTRY_PASSWORD POSTGRES_PASSWORD SOVEREIGN_CONFIG_ACCESS_URL_FILE; do
   require_env "$name"
 done
 
@@ -35,16 +75,17 @@ case "$target" in
   dev)
     project="v-note-dev"
     db_volume="v-note-dev-db"
-    app_env="${CI_COMMIT_BRANCH:-dev}"
+    # Canonical environment name, matching the sovereign-config
+    # `observability/environment` leaf the server uses for the OTEL
+    # `deployment.environment` trace attribute. Previously this was the branch
+    # name, which split one deployment across two values: traces said `dev` while
+    # the metrics/log discovery labels said e.g. `feat/foo`, so no single
+    # environment filter matched all three signals. The build is already
+    # identified by `observability.release` (the release tag) and the image's
+    # `org.opencontainers.image.revision`, so the branch is not needed here.
+    app_env="dev"
     v_note_host="v-notes-dev.desync.link"
     v_note_container_name="v-note-dev"
-    oidc_issuer_url="https://auth.desync.link/application/o/v-note-dev/"
-    oidc_client_id="v-note-browser-dev"
-    oidc_redirect_uri="https://v-notes-dev.desync.link/auth/callback"
-    required_scope="v-note:dev:access"
-    oidc_end_session_url="https://auth.desync.link/application/o/v-note-dev/end-session/"
-    oidc_android_client_id="v-note-android-dev"
-    oidc_android_issuer_url="https://auth.desync.link/application/o/v-note-android-dev/"
     compose_files="-f deploy/docker-compose.yml -f deploy/docker-compose.android-apk.yml"
     docker pull "registry.desync.link/v-note-android:$release_tag"
     ;;
@@ -54,13 +95,6 @@ case "$target" in
     app_env="production"
     v_note_host="v-notes.desync.link"
     v_note_container_name="v-note"
-    oidc_issuer_url="https://auth.desync.link/application/o/v-note-prod/"
-    oidc_client_id="v-note-browser-prod"
-    oidc_redirect_uri="https://v-notes.desync.link/auth/callback"
-    required_scope="v-note:prod:access"
-    oidc_end_session_url="https://auth.desync.link/application/o/v-note-prod/end-session/"
-    oidc_android_client_id="v-note-android-prod"
-    oidc_android_issuer_url="https://auth.desync.link/application/o/v-note-android-prod/"
     compose_files="-f deploy/docker-compose.yml"
     ;;
 esac
@@ -68,25 +102,60 @@ esac
 docker volume create "$db_volume"
 docker pull "registry.desync.link/v-note:$release_tag"
 
-V_NOTE_IMAGE_TAG="$release_tag" \
-APP_VERSION="$release_tag" \
-APP_ENV="$app_env" \
-OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://monitor-alloy:4317}" \
-OTEL_EXPORTER_OTLP_PROTOCOL="${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}" \
-OTEL_EXPORTER_OTLP_TIMEOUT="${OTEL_EXPORTER_OTLP_TIMEOUT:-2000}" \
-OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-v-note}" \
-VNOTE_PROTOCOL_VERSION="${VNOTE_PROTOCOL_VERSION:-2}" \
-V_NOTE_HOST="$v_note_host" \
-V_NOTE_CONTAINER_NAME="$v_note_container_name" \
-DB_VOLUME="$db_volume" \
-POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-OIDC_ISSUER_URL="$oidc_issuer_url" \
-OIDC_CLIENT_ID="$oidc_client_id" \
-OIDC_CLIENT_SECRET="$OIDC_CLIENT_SECRET" \
-OIDC_REDIRECT_URI="$oidc_redirect_uri" \
-REQUIRED_SCOPE="$required_scope" \
-OIDC_END_SESSION_URL="$oidc_end_session_url" \
-OIDC_ANDROID_CLIENT_ID="$oidc_android_client_id" \
-OIDC_ANDROID_ISSUER_URL="$oidc_android_issuer_url" \
-ASSETLINKS_JSON="$ASSETLINKS_JSON" \
-docker compose -p "$project" $compose_files up -d
+# Single source for the metrics listener in a deployment. The app override and
+# Alloy's scrape-discovery labels are both derived from it, so the listener and
+# the thing scraping it cannot disagree — previously the labels hardcoded
+# `scrape=true` and port 9090 while `observability/metrics-addr` was freely
+# configurable, so moving or disabling the listener silently lost metrics.
+#
+# This step cannot read sovereign-config itself (it runs in a docker CLI image and
+# the connection is gRPC), so the value lives here for now. When the Woodpecker
+# sovereign-config broker lands it will supply this from
+# `observability/metrics-addr`, making it literally the same value in both places.
+metrics_addr="${V_NOTE_METRICS_ADDR:-0.0.0.0:9090}"
+case "$metrics_addr" in
+  disabled|"")
+    metrics_scrape="false"
+    metrics_port="9090"
+    ;;
+  *:*)
+    metrics_scrape="true"
+    metrics_port="${metrics_addr##*:}"
+    ;;
+  *)
+    echo "ERROR: V_NOTE_METRICS_ADDR must be host:port or 'disabled' (got: '$metrics_addr')" >&2
+    exit 1
+    ;;
+esac
+
+# `docker compose up -d` with the deploy environment; extra args are appended.
+compose_up() {
+  V_NOTE_IMAGE_TAG="$release_tag" \
+  APP_VERSION="$release_tag" \
+  APP_ENV="$app_env" \
+  VNOTE_PROTOCOL_VERSION="${VNOTE_PROTOCOL_VERSION:-2}" \
+  V_NOTE_HOST="$v_note_host" \
+  V_NOTE_CONTAINER_NAME="$v_note_container_name" \
+  DB_VOLUME="$db_volume" \
+  POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
+  VNOTE__OBSERVABILITY__METRICS_ADDR="$metrics_addr" \
+  V_NOTE_METRICS_PORT="$metrics_port" \
+  V_NOTE_METRICS_SCRAPE="$metrics_scrape" \
+  docker compose -p "$project" $compose_files up -d "$@"
+}
+
+compose_up
+
+# The server snapshots sovereign-config once at startup, and that config lives
+# *outside* the compose model — so changing a leaf, or rotating the access URL,
+# produces no model change and the `up -d` above is a no-op. The old container
+# keeps serving stale database/OIDC/App Links values, and the health probe below
+# would pass against it, reporting a green deploy that changed nothing.
+#
+# Before this migration config was compose env, so a config change moved the model
+# and forced a recreate; that coupling is gone. Recreate the app explicitly. It is
+# stateless so this is cheap, and `--no-deps` leaves postgres untouched.
+compose_up --force-recreate --no-deps v-note
+
+wait_for_health "$v_note_container_name" "${DOCKER_NETWORK:-v-note-net}"
