@@ -149,8 +149,13 @@ fun PageCanvasScreen(
                 },
                 onPaletteDismiss = { paperPaletteOpen = false },
                 onPaperChange = { paper ->
-                    session.setPaper(paper)
-                    paperPreferences.save(paper)
+                    // Only remember it as the new-page default once the session
+                    // has actually taken the choice; otherwise a pick made while
+                    // the socket is tearing down would persist device-wide a
+                    // paper the server never saw.
+                    if (session.setPaper(paper)) {
+                        paperPreferences.save(paper)
+                    }
                     paperPaletteOpen = false
                 },
             )

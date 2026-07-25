@@ -352,7 +352,30 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
     // Carrying paper here makes the page channel self-sufficient: a reconnecting
     // client gets the authoritative value without a second REST round trip, which
     // is also what self-corrects a stale `PageSummary.paper` in an open library.
-    let paper = current_paper(&pool, &page_id).await.unwrap_or_default();
+    //
+    // A read failure closes the connection rather than degrading to `none`.
+    // Unlike `last_seq` above — where a wrong value is repaired by the next
+    // gap-fill — nothing downstream re-reads paper: `Subscribe` replays only ink
+    // and tombstones, so a synthesized blank would render as a blank page for as
+    // long as the socket stayed open. Failing loudly is recoverable; rendering
+    // the wrong page silently is not.
+    let paper = match current_paper(&pool, &page_id).await {
+        Ok(paper) => paper,
+        Err(error) => {
+            tracing::error!(error = %error, %page_id, "could not read page paper");
+            crate::observability::metrics().record_realtime_event("page", "paper_read_error");
+            send_page(
+                &mut sender,
+                PageServerMessage::Error {
+                    code: "welcome_failed".to_string(),
+                    message: "could not load the page".to_string(),
+                    client_mutation_id: None,
+                },
+            )
+            .await;
+            return;
+        }
+    };
     let welcome = PageServerMessage::Welcome {
         session_id: session_id.clone(),
         last_seq,

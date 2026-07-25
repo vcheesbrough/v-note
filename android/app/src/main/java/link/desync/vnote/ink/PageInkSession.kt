@@ -111,15 +111,24 @@ class PageInkSession(
     }
 
     // Change the page's paper. Optimistic so the canvas repaints immediately;
-    // the server's `PaperChanged` confirms it and a `paper_failed` error reverts
-    // to the last confirmed value. Gated on the edit lease, exactly like ink.
-    fun setPaper(next: Paper) {
-        if (!canEdit || next == paper) {
-            return
+    // the server's `PaperChanged` confirms it, while `paper_failed`, a lease
+    // denial, or a disconnect all revert to the last confirmed value. Gated on
+    // the edit lease, exactly like ink.
+    //
+    // Returns true when the caller may treat the choice as taken — either it was
+    // dispatched, or the page already carries it. False means nothing reached
+    // the server, so a caller must not persist the choice as a sticky default.
+    fun setPaper(next: Paper): Boolean {
+        if (!canEdit) {
+            return false
         }
-        val activeSocket = socket ?: return
+        if (next == paper) {
+            return true
+        }
+        val activeSocket = socket ?: return false
         paperState = next
         activeSocket.setPaper("paper_${UUID.randomUUID().toString().replace("-", "")}", next)
+        return true
     }
 
     fun eraseStrokes(strokeIds: Collection<String>) {
@@ -191,6 +200,7 @@ class PageInkSession(
                 stopLeaseRenewal()
                 clearPendingErasures()
                 discardPendingBatches()
+                revertUnconfirmedPaper()
                 statusBanner = LEASE_BLOCKED
             }
             is PageEvent.LeaseChanged -> {
@@ -282,7 +292,20 @@ class PageInkSession(
     private fun handleDisconnected(message: String) {
         canEdit = false
         stopLeaseRenewal()
+        revertUnconfirmedPaper()
         statusBanner = message
+    }
+
+    // Drop an optimistic paper the server never acknowledged. `paper_failed` is
+    // only one of three ways that can happen: the lease can transfer between
+    // this control rendering and the server handling the message (answered with
+    // `lease-denied`, not an error), and the socket can close before any reply.
+    // Without this the canvas would keep showing paper that was never stored,
+    // until the next `Welcome` reasserted the authoritative value.
+    private fun revertUnconfirmedPaper() {
+        if (paperState != confirmedPaper) {
+            paperState = confirmedPaper
+        }
     }
 
     companion object {

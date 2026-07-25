@@ -32,6 +32,11 @@ internal fun DrawScope.drawPaperMarks(
             scale = viewport.scale.toDouble(),
         )
 
+    // Only two colours exist, so parse them once per draw rather than
+    // re-parsing a hex string for every mark on every frame.
+    val ruleColor = parseColor(RULE_COLOR)
+    val marginColor = parseColor(MARGIN_COLOR)
+
     visitPaperMarks(paper, paperViewport) { mark ->
         // The DrawScope is already scaled by the transform, so the device-space
         // width floor has to be divided back out to survive it unchanged.
@@ -50,7 +55,7 @@ internal fun DrawScope.drawPaperMarks(
             end = Offset(position, paperViewport.maxY.toFloat())
         }
         drawLine(
-            color = parseColor(mark.kind.color),
+            color = if (mark.kind == PaperMarkKind.Margin) marginColor else ruleColor,
             start = start,
             end = end,
             strokeWidth = strokeWidth,
@@ -73,6 +78,8 @@ internal fun DrawScope.drawPaperPreview(
     }
     val viewport = previewViewport(paper, size.width.toDouble(), size.height.toDouble())
     val scale = viewport.scale
+    val ruleColor = parseColor(RULE_COLOR)
+    val marginColor = parseColor(MARGIN_COLOR)
     visitPaperMarks(paper, viewport) { mark ->
         val strokeWidth = paperMarkDeviceWidth(mark.worldWidth, scale).toFloat()
         // Preview draws in device space directly, so map world → swatch pixels.
@@ -87,7 +94,7 @@ internal fun DrawScope.drawPaperPreview(
             end = Offset(position, size.height)
         }
         drawLine(
-            color = parseColor(mark.kind.color),
+            color = if (mark.kind == PaperMarkKind.Margin) marginColor else ruleColor,
             start = start,
             end = end,
             strokeWidth = strokeWidth,
@@ -97,7 +104,7 @@ internal fun DrawScope.drawPaperPreview(
     // A hairline frame keeps the swatch legible against the menu surface; it is
     // chrome, not paper, so it is drawn outside the mark loop.
     drawRect(
-        color = parseColor(RULE_COLOR),
+        color = ruleColor,
         style = DrawStroke(width = 1f),
     )
 }

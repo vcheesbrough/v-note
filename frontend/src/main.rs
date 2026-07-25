@@ -682,10 +682,26 @@ fn draw_paper(
     // Butt caps: a round cap would bulge each line's ends past the viewport edge.
     // Restored to "round" for ink by the caller.
     context.set_line_cap("butt");
+
+    // Batch by style instead of stroking each mark on its own. `visit_paper_marks`
+    // yields marks grouped by kind, and rules and columns share a colour *and* a
+    // width, so a whole grid collapses to one `begin_path` + one style pair + one
+    // `stroke()`, with the margin as a second batch. Disjoint `move_to`/`line_to`
+    // pairs are separate subpaths of that single path — this is exactly what
+    // Canvas2D batching is for, and it turns dozens of JS/WASM boundary crossings
+    // per frame into about three.
+    let mut batch: Option<(&'static str, f64)> = None;
     visit_paper_marks(paper, viewport, |mark| {
-        context.set_stroke_style_str(mark.kind.color());
-        context.set_line_width(paper_mark_device_width(mark.world_width(), scale));
-        context.begin_path();
+        let style = (mark.kind.color(), mark.world_width());
+        if batch != Some(style) {
+            if batch.is_some() {
+                context.stroke();
+            }
+            context.begin_path();
+            context.set_stroke_style_str(style.0);
+            context.set_line_width(paper_mark_device_width(style.1, scale));
+            batch = Some(style);
+        }
         if mark.kind.is_horizontal() {
             let y = mark.position * scale + offset_y;
             context.move_to(viewport.min_x * scale + offset_x, y);
@@ -695,8 +711,10 @@ fn draw_paper(
             context.move_to(x, viewport.min_y * scale + offset_y);
             context.line_to(x, viewport.max_y * scale + offset_y);
         }
-        context.stroke();
     });
+    if batch.is_some() {
+        context.stroke();
+    }
 }
 
 fn draw_canvas(

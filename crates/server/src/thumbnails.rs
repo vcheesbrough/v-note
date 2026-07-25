@@ -292,17 +292,30 @@ fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offs
     );
     let transform = Transform::from_scale(scale, scale).post_translate(offset_x, offset_y);
 
-    visit_paper_marks(paper, &viewport, |mark| {
-        let [red, green, blue] = mark.kind.color_rgb();
+    // Only two (colour, width) pairs exist across every mark, so build them once
+    // rather than reallocating a Paint and a Stroke for each line.
+    let style_for = |kind: protocol::PaperMarkKind| {
+        let [red, green, blue] = kind.color_rgb();
         let mut paint = Paint::default();
         paint.set_color_rgba8(red, green, blue, 0xff);
         // The pen width is in world units (the transform scales it), so undo the
         // scale on the device-space floor.
         let pen = SkiaStroke {
-            width: paper_mark_device_width(mark.world_width(), scale as f64) as f32 / scale,
+            width: paper_mark_device_width(kind.world_width(), scale as f64) as f32 / scale,
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,
             ..Default::default()
+        };
+        (paint, pen)
+    };
+    let (rule_paint, rule_pen) = style_for(protocol::PaperMarkKind::Rule);
+    let (margin_paint, margin_pen) = style_for(protocol::PaperMarkKind::Margin);
+
+    visit_paper_marks(paper, &viewport, |mark| {
+        let (paint, pen) = if mark.kind == protocol::PaperMarkKind::Margin {
+            (&margin_paint, &margin_pen)
+        } else {
+            (&rule_paint, &rule_pen)
         };
         let position = mark.position as f32;
         let mut path = PathBuilder::new();
@@ -314,7 +327,7 @@ fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offs
             path.line_to(position, viewport.max_y as f32);
         }
         if let Some(path) = path.finish() {
-            pixmap.stroke_path(&path, &paint, &pen, transform, None);
+            pixmap.stroke_path(&path, paint, pen, transform, None);
         }
     });
 }
