@@ -22,7 +22,23 @@ class PageInkSession(
     private val apiClient: ApiClient,
     private val pageId: String,
     private val scope: CoroutineScope,
+    initialPaper: Paper = Paper.None,
 ) {
+    // The page's paper. Seeded from the library listing so the first frame is
+    // not blank, then WSS-authoritative: `Welcome` carries it on every connect
+    // and `PaperChanged` carries each change.
+    //
+    // Backed by a private state property rather than `var paper … private set`
+    // because that would compile to a private `setPaper(Paper)` and clash with
+    // the public `setPaper` below on the same JVM signature.
+    private var paperState by mutableStateOf(initialPaper)
+
+    val paper: Paper get() = paperState
+
+    // The last value the server confirmed, so an optimistic set can be reverted
+    // if the server rejects it.
+    private var confirmedPaper: Paper = initialPaper
+
     // Rendered strokes: confirmed server batches followed by locally submitted
     // batches that are awaiting their matching server echo.
     var strokes by mutableStateOf<List<Stroke>>(emptyList())
@@ -94,6 +110,18 @@ class PageInkSession(
         activeSocket.commitBatch(clientBatchId, submitted)
     }
 
+    // Change the page's paper. Optimistic so the canvas repaints immediately;
+    // the server's `PaperChanged` confirms it and a `paper_failed` error reverts
+    // to the last confirmed value. Gated on the edit lease, exactly like ink.
+    fun setPaper(next: Paper) {
+        if (!canEdit || next == paper) {
+            return
+        }
+        val activeSocket = socket ?: return
+        paperState = next
+        activeSocket.setPaper("paper_${UUID.randomUUID().toString().replace("-", "")}", next)
+    }
+
     fun eraseStrokes(strokeIds: Collection<String>) {
         if (!canEdit || strokeIds.isEmpty()) return
         val activeSocket = socket ?: return
@@ -109,6 +137,10 @@ class PageInkSession(
             is PageEvent.Welcome -> {
                 sessionId = event.sessionId
                 statusBanner = null
+                // Authoritative on every (re)connect, which is what
+                // self-corrects a value that went stale in the open library.
+                paperState = event.paper
+                confirmedPaper = event.paper
                 // Catch up on persisted ink, then take the lease if it is free.
                 socket?.subscribe(lastSeq)
                 if (event.leaseHolder == null || event.leaseHolder == sessionId) {
@@ -142,6 +174,10 @@ class PageInkSession(
                 pendingBatches.replaceAll { _, strokes -> strokes.filterNot { it.id in deletedIds } }
                 pendingBatches.entries.removeAll { (_, strokes) -> strokes.isEmpty() }
                 publishRenderableStrokes()
+            }
+            is PageEvent.PaperChanged -> {
+                paperState = event.paper
+                confirmedPaper = event.paper
             }
             PageEvent.LeaseGranted -> {
                 canEdit = true
@@ -179,6 +215,10 @@ class PageInkSession(
             is PageEvent.Failure -> {
                 if (event.code == TOMBSTONE_FAILED) {
                     restorePendingErasure(event.clientMutationId)
+                }
+                if (event.code == PAPER_FAILED) {
+                    // Revert the optimistic paper to the last confirmed value.
+                    paperState = confirmedPaper
                 }
                 canEdit = false
                 stopLeaseRenewal()
@@ -248,6 +288,7 @@ class PageInkSession(
     companion object {
         private const val LEASE_RENEW_INTERVAL_MS = 10_000L
         private const val TOMBSTONE_FAILED = "tombstone_failed"
+        private const val PAPER_FAILED = "paper_failed"
         const val LEASE_BLOCKED = "Another device is editing this page"
         const val CONNECTING = "Connecting…"
         const val DISCONNECTED = "Realtime disconnected"

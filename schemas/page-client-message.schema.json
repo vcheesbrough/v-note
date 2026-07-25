@@ -48,6 +48,26 @@
           "items": { "$ref": "stroke.schema.json" }
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "client_mutation_id", "stroke_ids"],
+      "properties": {
+        "type": { "const": "commit-tombstones" },
+        "client_mutation_id": { "type": "string", "minLength": 1 },
+        "stroke_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "client_mutation_id", "paper"],
+      "properties": {
+        "type": { "const": "set-paper" },
+        "client_mutation_id": { "type": "string", "minLength": 1 },
+        "paper": { "enum": ["none", "ruled-margin-narrow", "ruled-margin-wide", "ruled-narrow", "ruled-wide", "squared-small", "squared-large"] }
+      }
     }
   ]
 }

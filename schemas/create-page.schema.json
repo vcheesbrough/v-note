@@ -7,6 +7,10 @@
   "properties": {
     "title": {
       "type": "string"
+    },
+    "paper": {
+      "enum": ["none", "ruled-margin-narrow", "ruled-margin-wide", "ruled-narrow", "ruled-wide", "squared-small", "squared-large"],
+      "default": "none"
     }
   }
 }

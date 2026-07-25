@@ -1,4 +1,7 @@
-use protocol::{LibraryEvent, Stroke, ThumbnailMetadata};
+use protocol::{
+    paper_mark_device_width, visit_paper_marks, LibraryEvent, Paper, Stroke, ThumbnailMetadata,
+    WorldViewport,
+};
 use sqlx::PgPool;
 use std::time::Instant;
 use tiny_skia::{
@@ -17,6 +20,9 @@ pub fn recover_pending(state: AppState) {
         return;
     };
     tokio::spawn(async move {
+        // No paper is carried here on purpose: `generate` reads it from the job
+        // row it is about to render, so a job recovered after a restart can never
+        // pick up a paper the page has moved on to since. See `generate`.
         let pending = sqlx::query_as::<_, (String, String, i64)>(
             r#"SELECT t.page_id, p.owner_id, t.source_seq
                FROM page_thumbnails t
@@ -95,6 +101,24 @@ pub fn thumbnail_url(page_id: &str, source_seq: u64) -> String {
 }
 
 async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), String> {
+    // Thumbnails are immutable per revision, so the paper comes from the *job
+    // row* — the paper in force when this revision was minted — never from
+    // `pages.paper`, which may already name a later choice. This is the only
+    // place paper is read for rendering, so no caller can pass a stale value
+    // (notably `recover_pending`, which re-queues jobs after a restart with no
+    // in-memory context at all).
+    let paper: String = sqlx::query_scalar(
+        "SELECT paper FROM page_thumbnails WHERE page_id = $1 AND source_seq = $2",
+    )
+    .bind(page_id)
+    .bind(source_seq as i64)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .ok_or("thumbnail job row is missing")?;
+    let paper =
+        Paper::from_wire(&paper).ok_or_else(|| format!("unknown stored paper {paper:?}"))?;
+
     let batches = sqlx::query_scalar::<_, sqlx::types::Json<Vec<Stroke>>>(
         "SELECT strokes FROM stroke_batches WHERE page_id = $1 AND revision <= $2 ORDER BY revision",
     )
@@ -118,7 +142,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
         .flat_map(|batch| batch.0)
         .filter(|stroke| !tombstones.contains(&stroke.id))
         .collect();
-    let png = render(&strokes)?;
+    let png = render(paper, &strokes)?;
     let png_bytes = png.len();
     sqlx::query(
         "UPDATE page_thumbnails SET status = 'available', png = $3 WHERE page_id = $1 AND source_seq = $2",
@@ -134,7 +158,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     Ok(())
 }
 
-fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
+fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
     // Bound only the strokes actually drawn below (the loop skips the same set):
     // a skipped invalid stroke with far-away points must not stretch the scale
     // and shrink the valid ink.
@@ -143,6 +167,17 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         .filter(|stroke| !stroke.points.is_empty() && stroke.validate().is_ok())
         .flat_map(|stroke| stroke.points.iter())
         .collect();
+    let mut pixmap = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
+    pixmap.fill(Color::WHITE);
+    if points.is_empty() {
+        // With no drawable points the bounds fold below yields ±INFINITY and the
+        // derived scale/offsets are garbage. That was harmless while only the
+        // (empty) stroke loop consumed them, but paper enumeration consumes them
+        // too and would walk an infinite viewport — an all-erased page is a job
+        // `persist_tombstones` really creates. A blank page has no ink to anchor
+        // paper to, and the card forbids paper-only thumbnails, so return white.
+        return pixmap.encode_png().map_err(|error| error.to_string());
+    }
     let (min_x, max_x, min_y, max_y) = points.iter().fold(
         (
             f64::INFINITY,
@@ -159,8 +194,6 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
             )
         },
     );
-    let mut pixmap = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
-    pixmap.fill(Color::WHITE);
     let bounds_w = (max_x - min_x) as f32;
     let bounds_h = (max_y - min_y) as f32;
     let content_w = bounds_w.max(1.0);
@@ -185,6 +218,10 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         };
     let offset_x = (WIDTH as f32 - content_w * scale) / 2.0 - content_min_x * scale;
     let offset_y = (HEIGHT as f32 - content_h * scale) / 2.0 - content_min_y * scale;
+    // Paper shares the ink transform, so its size and position relative to the
+    // ink match the SPA and Android exactly. Drawn after the white fill and
+    // before every stroke, so it can never overpaint ink.
+    draw_paper(&mut pixmap, paper, scale, offset_x, offset_y);
     for stroke in strokes {
         if stroke.validate().is_err() || stroke.points.is_empty() {
             continue;
@@ -232,6 +269,56 @@ fn render(strokes: &[Stroke]) -> Result<Vec<u8>, String> {
     pixmap.encode_png().map_err(|error| error.to_string())
 }
 
+/// Rasterize the page's paper behind the ink, under the *same* transform the
+/// stroke loop uses. The world viewport is the exact inverse of that transform
+/// over the whole `0..WIDTH × 0..HEIGHT` pixmap, so marks are enumerated for
+/// precisely the area being painted.
+///
+/// Marks use `Butt` caps (a `Round` cap would bulge each line's ends past the
+/// viewport edge) and the paper's own [`protocol::MIN_PAPER_MARK_DEVICE_WIDTH`]
+/// floor — emphatically *not* [`MIN_THUMBNAIL_STROKE_WIDTH`], which is 20 px and
+/// would turn a 240×160 preview solid blue.
+fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offset_y: f32) {
+    if paper == Paper::None || scale <= 0.0 || !scale.is_finite() {
+        return;
+    }
+    let to_world = |device: f32, offset: f32| ((device - offset) / scale) as f64;
+    let viewport = WorldViewport::new(
+        to_world(0.0, offset_x),
+        to_world(0.0, offset_y),
+        to_world(WIDTH as f32, offset_x),
+        to_world(HEIGHT as f32, offset_y),
+        scale as f64,
+    );
+    let transform = Transform::from_scale(scale, scale).post_translate(offset_x, offset_y);
+
+    visit_paper_marks(paper, &viewport, |mark| {
+        let [red, green, blue] = mark.kind.color_rgb();
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(red, green, blue, 0xff);
+        // The pen width is in world units (the transform scales it), so undo the
+        // scale on the device-space floor.
+        let pen = SkiaStroke {
+            width: paper_mark_device_width(mark.world_width(), scale as f64) as f32 / scale,
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Miter,
+            ..Default::default()
+        };
+        let position = mark.position as f32;
+        let mut path = PathBuilder::new();
+        if mark.kind.is_horizontal() {
+            path.move_to(viewport.min_x as f32, position);
+            path.line_to(viewport.max_x as f32, position);
+        } else {
+            path.move_to(position, viewport.min_y as f32);
+            path.line_to(position, viewport.max_y as f32);
+        }
+        if let Some(path) = path.finish() {
+            pixmap.stroke_path(&path, &paint, &pen, transform, None);
+        }
+    });
+}
+
 /// Rasterize one pressure-sensitive (`solid_round` v2) stroke as a chain of
 /// round-capped segments, each drawn at the mean of its endpoints' pressure
 /// widths. Round caps overlap consecutive segments so joins stay continuous.
@@ -259,7 +346,12 @@ fn render_pressure_stroke(
     // own nib) collapse the per-segment ribbon to nothing — render a dot at the
     // largest pressure width instead, matching the Android renderer.
     let (min_x, max_x, min_y, max_y) = stroke.points.iter().fold(
-        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+        (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ),
         |(min_x, max_x, min_y, max_y), point| {
             (
                 min_x.min(point.x),
@@ -344,24 +436,27 @@ mod tests {
 
     #[test]
     fn renders_png_with_canonical_ink_colour() {
-        let bytes = render(&[Stroke {
-            id: "stroke_1".to_string(),
-            style: StrokeStyle::default_solid_round(),
-            points: vec![
-                StrokePoint {
-                    x: 0.0,
-                    y: 0.0,
-                    t: 0,
-                    pressure: None,
-                },
-                StrokePoint {
-                    x: 100.0,
-                    y: 50.0,
-                    t: 10,
-                    pressure: None,
-                },
-            ],
-        }])
+        let bytes = render(
+            Paper::None,
+            &[Stroke {
+                id: "stroke_1".to_string(),
+                style: StrokeStyle::default_solid_round(),
+                points: vec![
+                    StrokePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        t: 0,
+                        pressure: None,
+                    },
+                    StrokePoint {
+                        x: 100.0,
+                        y: 50.0,
+                        t: 10,
+                        pressure: None,
+                    },
+                ],
+            }],
+        )
         .expect("thumbnail should render");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         assert!(bytes.len() > 100);
@@ -369,16 +464,19 @@ mod tests {
 
     #[test]
     fn renders_single_point_strokes_as_dots() {
-        let bytes = render(&[Stroke {
-            id: "stroke_1".to_string(),
-            style: StrokeStyle::default_solid_round(),
-            points: vec![StrokePoint {
-                x: 50.0,
-                y: 50.0,
-                t: 0,
-                pressure: None,
+        let bytes = render(
+            Paper::None,
+            &[Stroke {
+                id: "stroke_1".to_string(),
+                style: StrokeStyle::default_solid_round(),
+                points: vec![StrokePoint {
+                    x: 50.0,
+                    y: 50.0,
+                    t: 0,
+                    pressure: None,
+                }],
             }],
-        }])
+        )
         .expect("thumbnail should render");
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
         let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
@@ -418,14 +516,22 @@ mod tests {
         let points: Vec<StrokePoint> = (0..samples)
             .map(|i| {
                 let f = i as f64 / (samples - 1) as f64;
-                StrokePoint { x: f * 200.0, y: 50.0, t: i as i64, pressure: Some(f) }
+                StrokePoint {
+                    x: f * 200.0,
+                    y: 50.0,
+                    t: i as i64,
+                    pressure: Some(f),
+                }
             })
             .collect();
-        let bytes = render(&[Stroke {
-            id: "pressure_ramp".to_string(),
-            style: StrokeStyle::default_solid_round_pressure(),
-            points,
-        }])
+        let bytes = render(
+            Paper::None,
+            &[Stroke {
+                id: "pressure_ramp".to_string(),
+                style: StrokeStyle::default_solid_round_pressure(),
+                points,
+            }],
+        )
         .expect("thumbnail should render");
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
         let (min_x, max_x, _, _) = ink_bounds(&pixmap);
@@ -442,14 +548,27 @@ mod tests {
     /// collapse the per-segment ribbon to nothing.
     #[test]
     fn pressure_tap_renders_as_dot() {
-        let bytes = render(&[Stroke {
-            id: "v2_tap".to_string(),
-            style: StrokeStyle::default_solid_round_pressure(),
-            points: vec![
-                StrokePoint { x: 50.0, y: 50.0, t: 0, pressure: Some(1.0) },
-                StrokePoint { x: 50.0, y: 50.0, t: 8, pressure: Some(1.0) },
-            ],
-        }])
+        let bytes = render(
+            Paper::None,
+            &[Stroke {
+                id: "v2_tap".to_string(),
+                style: StrokeStyle::default_solid_round_pressure(),
+                points: vec![
+                    StrokePoint {
+                        x: 50.0,
+                        y: 50.0,
+                        t: 0,
+                        pressure: Some(1.0),
+                    },
+                    StrokePoint {
+                        x: 50.0,
+                        y: 50.0,
+                        t: 8,
+                        pressure: Some(1.0),
+                    },
+                ],
+            }],
+        )
         .expect("thumbnail should render");
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
         let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
@@ -462,18 +581,34 @@ mod tests {
     /// pen — the pressure model only *narrows* below the preset width.
     #[test]
     fn full_pressure_matches_v1_width() {
-        let points = vec![StrokePoint { x: 50.0, y: 50.0, t: 0, pressure: Some(1.0) }];
-        let v2 = render(&[Stroke {
-            id: "v2_full".to_string(),
-            style: StrokeStyle::default_solid_round_pressure(),
-            points: points.clone(),
-        }])
+        let points = vec![StrokePoint {
+            x: 50.0,
+            y: 50.0,
+            t: 0,
+            pressure: Some(1.0),
+        }];
+        let v2 = render(
+            Paper::None,
+            &[Stroke {
+                id: "v2_full".to_string(),
+                style: StrokeStyle::default_solid_round_pressure(),
+                points: points.clone(),
+            }],
+        )
         .expect("v2 thumbnail should render");
-        let v1 = render(&[Stroke {
-            id: "v1".to_string(),
-            style: StrokeStyle::default_solid_round(),
-            points: vec![StrokePoint { x: 50.0, y: 50.0, t: 0, pressure: None }],
-        }])
+        let v1 = render(
+            Paper::None,
+            &[Stroke {
+                id: "v1".to_string(),
+                style: StrokeStyle::default_solid_round(),
+                points: vec![StrokePoint {
+                    x: 50.0,
+                    y: 50.0,
+                    t: 0,
+                    pressure: None,
+                }],
+            }],
+        )
         .expect("v1 thumbnail should render");
         let v2_dot = {
             let pm = Pixmap::decode_png(&v2).expect("decode");
@@ -499,8 +634,18 @@ mod tests {
             id: "valid".to_string(),
             style: StrokeStyle::default_solid_round(),
             points: vec![
-                StrokePoint { x: 0.0, y: 0.0, t: 0, pressure: None },
-                StrokePoint { x: 100.0, y: 60.0, t: 5, pressure: None },
+                StrokePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    t: 0,
+                    pressure: None,
+                },
+                StrokePoint {
+                    x: 100.0,
+                    y: 60.0,
+                    t: 5,
+                    pressure: None,
+                },
             ],
         };
         // v1 style carrying pressure => rejected by stroke.validate(), skipped.
@@ -508,12 +653,22 @@ mod tests {
             id: "far_invalid".to_string(),
             style: StrokeStyle::default_solid_round(),
             points: vec![
-                StrokePoint { x: 5000.0, y: 5000.0, t: 0, pressure: Some(0.5) },
-                StrokePoint { x: 5100.0, y: 5100.0, t: 5, pressure: Some(0.5) },
+                StrokePoint {
+                    x: 5000.0,
+                    y: 5000.0,
+                    t: 0,
+                    pressure: Some(0.5),
+                },
+                StrokePoint {
+                    x: 5100.0,
+                    y: 5100.0,
+                    t: 5,
+                    pressure: Some(0.5),
+                },
             ],
         };
         let span = |strokes: &[Stroke]| {
-            let bytes = render(strokes).expect("thumbnail should render");
+            let bytes = render(Paper::None, strokes).expect("thumbnail should render");
             let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
             let (min_x, max_x, _, _) = ink_bounds(&pixmap);
             max_x - min_x + 1
@@ -531,30 +686,56 @@ mod tests {
     /// pressure value is rejected and skipped.
     #[test]
     fn rejects_pressure_on_v1_but_renders_mixed_v2() {
-        let out = render(&[
-            Stroke {
-                id: "v1_with_pressure".to_string(),
-                style: StrokeStyle::default_solid_round(),
-                points: vec![
-                    StrokePoint { x: 0.0, y: 0.0, t: 0, pressure: Some(0.5) },
-                    StrokePoint { x: 40.0, y: 40.0, t: 5, pressure: Some(0.5) },
-                ],
-            },
-            Stroke {
-                id: "v2_mixed".to_string(),
-                style: StrokeStyle::default_solid_round_pressure(),
-                points: vec![
-                    StrokePoint { x: 60.0, y: 10.0, t: 0, pressure: Some(0.2) },
-                    StrokePoint { x: 120.0, y: 60.0, t: 5, pressure: None },
-                ],
-            },
-        ])
+        let out = render(
+            Paper::None,
+            &[
+                Stroke {
+                    id: "v1_with_pressure".to_string(),
+                    style: StrokeStyle::default_solid_round(),
+                    points: vec![
+                        StrokePoint {
+                            x: 0.0,
+                            y: 0.0,
+                            t: 0,
+                            pressure: Some(0.5),
+                        },
+                        StrokePoint {
+                            x: 40.0,
+                            y: 40.0,
+                            t: 5,
+                            pressure: Some(0.5),
+                        },
+                    ],
+                },
+                Stroke {
+                    id: "v2_mixed".to_string(),
+                    style: StrokeStyle::default_solid_round_pressure(),
+                    points: vec![
+                        StrokePoint {
+                            x: 60.0,
+                            y: 10.0,
+                            t: 0,
+                            pressure: Some(0.2),
+                        },
+                        StrokePoint {
+                            x: 120.0,
+                            y: 60.0,
+                            t: 5,
+                            pressure: None,
+                        },
+                    ],
+                },
+            ],
+        )
         .expect("thumbnail should render");
         assert_eq!(&out[..8], b"\x89PNG\r\n\x1a\n");
         // The invalid v1-with-pressure stroke is skipped; the valid v2 stroke draws.
         let pixmap = Pixmap::decode_png(&out).expect("decode");
         let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
-        assert!(min_x <= max_x && min_y <= max_y, "v2 stroke should be drawn");
+        assert!(
+            min_x <= max_x && min_y <= max_y,
+            "v2 stroke should be drawn"
+        );
     }
 
     // A fixed v1 page (multi-point stroke + a dot) whose rasterization is pinned
@@ -565,31 +746,57 @@ mod tests {
                 id: "v1_line".to_string(),
                 style: StrokeStyle::default_solid_round(),
                 points: vec![
-                    StrokePoint { x: 10.0, y: 20.0, t: 0, pressure: None },
-                    StrokePoint { x: 120.0, y: 90.0, t: 8, pressure: None },
-                    StrokePoint { x: 220.0, y: 30.0, t: 16, pressure: None },
+                    StrokePoint {
+                        x: 10.0,
+                        y: 20.0,
+                        t: 0,
+                        pressure: None,
+                    },
+                    StrokePoint {
+                        x: 120.0,
+                        y: 90.0,
+                        t: 8,
+                        pressure: None,
+                    },
+                    StrokePoint {
+                        x: 220.0,
+                        y: 30.0,
+                        t: 16,
+                        pressure: None,
+                    },
                 ],
             },
             Stroke {
                 id: "v1_dot".to_string(),
                 style: StrokeStyle::default_solid_round(),
-                points: vec![StrokePoint { x: 180.0, y: 110.0, t: 0, pressure: None }],
+                points: vec![StrokePoint {
+                    x: 180.0,
+                    y: 110.0,
+                    t: 0,
+                    pressure: None,
+                }],
             },
         ]
     }
 
-    const V1_GOLDEN_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/v1_canonical_thumbnail.png");
+    const V1_GOLDEN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/testdata/v1_canonical_thumbnail.png"
+    );
 
     /// v1 rasterization must stay byte-identical. Compares decoded RGBA pixels
     /// (robust to PNG encoder differences) against the committed golden.
     #[test]
     fn v1_thumbnail_matches_golden() {
-        let bytes = render(&canonical_v1_page()).expect("thumbnail should render");
+        let bytes = render(Paper::None, &canonical_v1_page()).expect("thumbnail should render");
         let rendered = Pixmap::decode_png(&bytes).expect("rendered thumbnail should decode");
         let golden_bytes = std::fs::read(V1_GOLDEN_PATH)
             .expect("v1 golden present; regenerate with `--ignored regenerate_v1_golden`");
         let golden = Pixmap::decode_png(&golden_bytes).expect("golden should decode");
-        assert_eq!((rendered.width(), rendered.height()), (golden.width(), golden.height()));
+        assert_eq!(
+            (rendered.width(), rendered.height()),
+            (golden.width(), golden.height())
+        );
         assert_eq!(
             rendered.data(),
             golden.data(),
@@ -603,8 +810,225 @@ mod tests {
     #[test]
     #[ignore = "regenerates the committed v1 golden image"]
     fn regenerate_v1_golden() {
-        let bytes = render(&canonical_v1_page()).expect("thumbnail should render");
+        let bytes = render(Paper::None, &canonical_v1_page()).expect("thumbnail should render");
         std::fs::write(V1_GOLDEN_PATH, bytes).expect("golden should be writable");
+    }
+
+    // ---- Paper ----------------------------------------------------------
+
+    const RULED_GOLDEN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/testdata/ruled_margin_narrow_thumbnail.png"
+    );
+
+    /// Rule/grid pixels blend toward white, which preserves their `b > g > r`
+    /// channel ordering — and that ordering is disjoint from the green-dominant
+    /// ink classifier.
+    fn is_rule_pixel(pixel: tiny_skia::PremultipliedColorU8) -> bool {
+        pixel.blue() > pixel.green() && pixel.green() > pixel.red()
+    }
+
+    /// Margin pixels blend toward white preserving `r > g` and `r > b`.
+    fn is_margin_pixel(pixel: tiny_skia::PremultipliedColorU8) -> bool {
+        pixel.red() > pixel.green() && pixel.red() > pixel.blue()
+    }
+
+    fn count_pixels(
+        pixmap: &Pixmap,
+        predicate: impl Fn(tiny_skia::PremultipliedColorU8) -> bool,
+    ) -> u32 {
+        let mut count = 0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                if predicate(pixmap.pixel(x, y).expect("pixel should exist")) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn rendered(paper: Paper, strokes: &[Stroke]) -> Pixmap {
+        let bytes = render(paper, strokes).expect("thumbnail should render");
+        Pixmap::decode_png(&bytes).expect("thumbnail should decode")
+    }
+
+    /// Paper rasterization is pinned as its own golden, so a drift in the mark
+    /// geometry, colours or width floor cannot slip through unnoticed.
+    #[test]
+    fn ruled_margin_narrow_thumbnail_matches_golden() {
+        let bytes = render(Paper::RuledMarginNarrow, &canonical_v1_page())
+            .expect("thumbnail should render");
+        let rendered = Pixmap::decode_png(&bytes).expect("rendered thumbnail should decode");
+        let golden_bytes = std::fs::read(RULED_GOLDEN_PATH).expect(
+            "ruled golden present; regenerate with `--ignored regenerate_ruled_margin_narrow_golden`",
+        );
+        let golden = Pixmap::decode_png(&golden_bytes).expect("golden should decode");
+        assert_eq!(
+            (rendered.width(), rendered.height()),
+            (golden.width(), golden.height())
+        );
+        assert_eq!(
+            rendered.data(),
+            golden.data(),
+            "ruled paper rasterization drifted from the committed golden"
+        );
+    }
+
+    #[test]
+    #[ignore = "regenerates the committed ruled paper golden image"]
+    fn regenerate_ruled_margin_narrow_golden() {
+        let bytes = render(Paper::RuledMarginNarrow, &canonical_v1_page())
+            .expect("thumbnail should render");
+        std::fs::write(RULED_GOLDEN_PATH, bytes).expect("golden should be writable");
+    }
+
+    /// Every paper family actually reaches the pixmap at thumbnail scale, and
+    /// only the margin papers paint a margin.
+    #[test]
+    fn every_paper_draws_and_only_margin_papers_paint_a_margin() {
+        for paper in Paper::ALL {
+            let pixmap = rendered(paper, &canonical_v1_page());
+            let rules = count_pixels(&pixmap, is_rule_pixel);
+            let margin = count_pixels(&pixmap, is_margin_pixel);
+            if paper == Paper::None {
+                assert_eq!(rules, 0, "blank paper draws no rules");
+                assert_eq!(margin, 0, "blank paper draws no margin");
+                continue;
+            }
+            assert!(rules > 0, "{} drew no rules", paper.wire_value());
+            if paper.has_margin() {
+                assert!(margin > 0, "{} drew no margin", paper.wire_value());
+            } else {
+                assert_eq!(margin, 0, "{} should have no margin", paper.wire_value());
+            }
+        }
+    }
+
+    /// Paper goes behind the ink: every fully-covered ink pixel (the stroke
+    /// centreline, painted at the canonical colour with no blending) must be
+    /// byte-identical with and without paper.
+    ///
+    /// Antialiased stroke *edges* are deliberately excluded — those are partial
+    /// coverage, so paper legitimately shows through them. That is what "behind"
+    /// means; if paper were drawn on top, the opaque core would change too.
+    #[test]
+    fn paper_never_overpaints_ink() {
+        const INK: (u8, u8, u8) = (0x00, 0x64, 0x00);
+        let blank = rendered(Paper::None, &canonical_v1_page());
+        let ruled = rendered(Paper::SquaredSmall, &canonical_v1_page());
+        let mut core_pixels = 0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let before = blank.pixel(x, y).expect("pixel should exist");
+                if (before.red(), before.green(), before.blue()) != INK {
+                    continue;
+                }
+                core_pixels += 1;
+                let after = ruled.pixel(x, y).expect("pixel should exist");
+                assert_eq!(
+                    (after.red(), after.green(), after.blue()),
+                    INK,
+                    "paper overpainted the ink core at ({x}, {y})"
+                );
+            }
+        }
+        assert!(
+            core_pixels > 100,
+            "the fixture page should contain a solid ink core to compare"
+        );
+    }
+
+    /// Zoomed far out, a fine paper is culled rather than aliased into a wash.
+    /// A page 3000 world units wide fits at ~0.045 device px per unit, well
+    /// under the 4-px-pitch threshold for 32-unit squares.
+    #[test]
+    fn dense_scale_culls_paper_instead_of_aliasing() {
+        let sprawling = vec![Stroke {
+            id: "wide".to_string(),
+            style: StrokeStyle::default_solid_round(),
+            points: vec![
+                StrokePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    t: 0,
+                    pressure: None,
+                },
+                StrokePoint {
+                    x: 3000.0,
+                    y: 2000.0,
+                    t: 10,
+                    pressure: None,
+                },
+            ],
+        }];
+        let pixmap = rendered(Paper::SquaredSmall, &sprawling);
+        assert_eq!(
+            count_pixels(&pixmap, is_rule_pixel),
+            0,
+            "fine paper should be culled at this scale, not aliased"
+        );
+        // …while the never-culled margin of a margin paper still shows.
+        let pixmap = rendered(Paper::RuledMarginNarrow, &sprawling);
+        assert_eq!(count_pixels(&pixmap, is_rule_pixel), 0, "rules culled");
+        assert!(
+            count_pixels(&pixmap, is_margin_pixel) > 0,
+            "a single margin line has no pitch to alias against and is never culled"
+        );
+    }
+
+    /// The paper width floor is its own 1 px, not the 20 px thumbnail ink floor:
+    /// if that floor leaked, each rule would be a 20-px band and the preview
+    /// would be solid blue.
+    #[test]
+    fn paper_runs_stay_hairline_thin() {
+        let pixmap = rendered(Paper::RuledNarrow, &canonical_v1_page());
+        let mut widest = 0;
+        for x in 0..WIDTH {
+            let mut run = 0;
+            for y in 0..HEIGHT {
+                if is_rule_pixel(pixmap.pixel(x, y).expect("pixel should exist")) {
+                    run += 1;
+                    widest = widest.max(run);
+                } else {
+                    run = 0;
+                }
+            }
+        }
+        assert!(widest > 0, "rules should be drawn at all");
+        assert!(
+            widest <= 3,
+            "rule runs are {widest}px — the 20px thumbnail ink floor leaked into paper"
+        );
+    }
+
+    /// A page whose ink is all erased still produces a plain white thumbnail:
+    /// no paper-only preview, and — critically — the enumeration terminates
+    /// instead of walking the ±INFINITY viewport the bounds fold would yield.
+    #[test]
+    fn inkless_page_renders_blank_white_and_terminates() {
+        for strokes in [
+            Vec::new(),
+            vec![Stroke {
+                id: "empty".to_string(),
+                style: StrokeStyle::default_solid_round(),
+                points: Vec::new(),
+            }],
+        ] {
+            let pixmap = rendered(Paper::SquaredSmall, &strokes);
+            assert_eq!(count_pixels(&pixmap, is_rule_pixel), 0);
+            assert_eq!(count_pixels(&pixmap, is_margin_pixel), 0);
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+                    assert_eq!(
+                        (pixel.red(), pixel.green(), pixel.blue()),
+                        (255, 255, 255),
+                        "inkless page should be blank white at ({x}, {y})"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

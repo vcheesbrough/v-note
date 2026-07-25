@@ -109,9 +109,13 @@ fun PageCanvasScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val toolPreferences = remember(userId) { DrawingToolPreferences(context, userId) }
-    val session = remember(page.id) { PageInkSession(apiClient, page.id, scope) }
+    val paperPreferences = remember(userId) { PaperPreferences(context, userId) }
+    val session = remember(page.id) { PageInkSession(apiClient, page.id, scope, page.paper) }
     var selectedTool by remember(page.id) { mutableStateOf(CanvasTool.Drawing) }
     var paletteOpen by remember(page.id) { mutableStateOf(false) }
+    // Paper is deliberately *not* a CanvasTool: picking it must never deselect
+    // the pen or eraser, so it gets its own open/closed state.
+    var paperPaletteOpen by remember(page.id) { mutableStateOf(false) }
     var drawingStyle by remember(userId) { mutableStateOf(toolPreferences.load()) }
     DisposableEffect(page.id) {
         session.connect()
@@ -134,11 +138,28 @@ fun PageCanvasScreen(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.titleMedium,
             )
+            PaperControl(
+                paper = session.paper,
+                paletteOpen = paperPaletteOpen,
+                enabled = session.canEdit,
+                onClick = {
+                    paperPaletteOpen = !paperPaletteOpen
+                    // Opening either palette closes the other.
+                    paletteOpen = false
+                },
+                onPaletteDismiss = { paperPaletteOpen = false },
+                onPaperChange = { paper ->
+                    session.setPaper(paper)
+                    paperPreferences.save(paper)
+                    paperPaletteOpen = false
+                },
+            )
             DrawingToolControl(
                 style = drawingStyle,
                 selected = selectedTool == CanvasTool.Drawing,
                 paletteOpen = paletteOpen,
                 onClick = {
+                    paperPaletteOpen = false
                     if (selectedTool == CanvasTool.Eraser) {
                         selectedTool = CanvasTool.Drawing
                         paletteOpen = false
@@ -157,6 +178,7 @@ fun PageCanvasScreen(
                 onCheckedChange = {
                     selectedTool = CanvasTool.Eraser
                     paletteOpen = false
+                    paperPaletteOpen = false
                 },
                 modifier =
                     Modifier
@@ -177,6 +199,7 @@ fun PageCanvasScreen(
         }
         InkCanvas(
             strokes = session.strokes,
+            paper = session.paper,
             canEdit = session.canEdit,
             selectedTool = selectedTool,
             drawingStyle = drawingStyle,
@@ -273,6 +296,117 @@ private fun DrawingToolControl(
     }
 }
 
+/**
+ * Top-bar paper picker, structurally the twin of [DrawingToolControl]: a toggle
+ * button whose icon is a live swatch of the current paper, plus an anchored
+ * dropdown palette of all seven choices.
+ *
+ * Paper is **not** a [CanvasTool] — `checked` binds to the palette's own open
+ * state and never touches `selectedTool`, so picking paper leaves the pen or
+ * eraser exactly as it was. Disabled without the edit lease, which the existing
+ * lease banner already explains.
+ */
+@Composable
+private fun PaperControl(
+    paper: Paper,
+    paletteOpen: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    onPaletteDismiss: () -> Unit,
+    onPaperChange: (Paper) -> Unit,
+) {
+    Box {
+        FilledTonalIconToggleButton(
+            checked = paletteOpen,
+            onCheckedChange = { onClick() },
+            enabled = enabled,
+            modifier =
+                Modifier
+                    .size(48.dp)
+                    .testTag("paper-tool")
+                    .semantics {
+                        this.selected = paletteOpen
+                        contentDescription = "Paper"
+                    },
+        ) {
+            PaperPreview(paper = paper, modifier = Modifier.size(width = 32.dp, height = 24.dp))
+        }
+        DropdownMenu(
+            expanded = paletteOpen,
+            onDismissRequest = onPaletteDismiss,
+            modifier = Modifier.width(224.dp).testTag("paper-palette"),
+        ) {
+            Text(
+                "Paper",
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Paper.ALL.forEach { option ->
+                PaperOption(
+                    paper = option,
+                    selected = option == paper,
+                    onClick = { onPaperChange(option) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PaperOption(
+    paper: Paper,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("paper-option-${paper.wireValue}")
+                .semantics {
+                    this.selected = selected
+                    contentDescription = paper.label
+                }
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        PaperPreview(
+            paper = paper,
+            modifier =
+                Modifier
+                    .size(width = 40.dp, height = 30.dp)
+                    .then(
+                        if (selected) {
+                            Modifier.border(3.dp, MaterialTheme.colorScheme.onSurface)
+                        } else {
+                            Modifier.border(1.dp, MaterialTheme.colorScheme.outline)
+                        },
+                    ),
+        )
+        Text(paper.label, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+/**
+ * A live swatch of [paper] on a white ground. Uses the shared
+ * [previewViewport], which raises the scale to clear the density cull —
+ * otherwise a 32×24.dp swatch of 48-unit rules is culled and the icon renders
+ * blank.
+ */
+@Composable
+private fun PaperPreview(
+    paper: Paper,
+    modifier: Modifier,
+) {
+    Box(modifier = modifier.background(Color.White)) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            drawPaperPreview(paper, size)
+        }
+    }
+}
+
 @Composable
 private fun ColorSwatch(
     color: String,
@@ -330,6 +464,7 @@ private fun ToolStrokePreview(
 @OptIn(ExperimentalComposeUiApi::class)
 private fun InkCanvas(
     strokes: List<Stroke>,
+    paper: Paper,
     canEdit: Boolean,
     selectedTool: CanvasTool,
     drawingStyle: StrokeStyle,
@@ -586,6 +721,9 @@ private fun InkCanvas(
             translate(viewport.offset.x, viewport.offset.y)
             scale(viewport.scale, viewport.scale, pivot = Offset.Zero)
         }) {
+            // Paper first, under the ink transform, so it stays locked to the
+            // ink through pan and zoom and can never overpaint a stroke.
+            drawPaperMarks(paper, viewport, this@Canvas.size)
             for (stroke in strokes) {
                 drawInk(
                     stroke.points,
@@ -982,7 +1120,7 @@ private fun buildPressureRibbon(points: List<StrokePoint>, style: StrokeStyle): 
     return path
 }
 
-private fun parseColor(value: String): Color = Color(android.graphics.Color.parseColor(value))
+internal fun parseColor(value: String): Color = Color(android.graphics.Color.parseColor(value))
 
 internal fun findIntersectedStrokes(
     strokes: List<Stroke>,

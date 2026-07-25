@@ -3,6 +3,7 @@ package link.desync.vnote.auth
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import link.desync.vnote.ink.Paper
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -48,12 +49,20 @@ class ApiClient(
             }
         }
 
-    suspend fun createPage(title: String? = null): Result<PageSummary> =
+    suspend fun createPage(
+        title: String? = null,
+        paper: Paper = Paper.None,
+    ): Result<PageSummary> =
         withContext(Dispatchers.IO) {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 val body =
                     JSONObject()
-                        .apply { title?.let { put("title", it) } }
+                        .apply {
+                            title?.let { put("title", it) }
+                            // Sent on create rather than as a post-create
+                            // set-paper: one round trip, no revision bump.
+                            put("paper", paper.wireValue)
+                        }
                         .toString()
                         .toRequestBody(jsonMediaType)
                 authorizedRequest("$baseUrl/api/pages", token)
@@ -321,6 +330,7 @@ data class PageSummary(
     val createdAt: String,
     val updatedAt: String,
     val thumbnail: ThumbnailMetadata = ThumbnailMetadata.Empty,
+    val paper: Paper = Paper.None,
 )
 
 sealed interface ThumbnailMetadata {
@@ -353,6 +363,8 @@ private fun parsePage(json: JSONObject): PageSummary =
         createdAt = json.getString("created_at"),
         updatedAt = json.getString("updated_at"),
         thumbnail = json.optJSONObject("thumbnail")?.let(::parseThumbnail) ?: ThumbnailMetadata.Empty,
+        // Absent on pre-v5 payloads, which render as blank pages.
+        paper = Paper.fromWire(json.optString("paper").ifBlank { null }) ?: Paper.None,
     )
 
 private fun parseThumbnail(json: JSONObject): ThumbnailMetadata =
@@ -451,6 +463,12 @@ sealed interface PageEvent {
         val sessionId: String,
         val lastSeq: Long,
         val leaseHolder: String?,
+        val paper: Paper = Paper.None,
+    ) : PageEvent
+
+    data class PaperChanged(
+        val paper: Paper,
+        val revision: Long,
     ) : PageEvent
 
     data class StrokeBatch(
@@ -513,6 +531,19 @@ class PageSocket(private val webSocket: WebSocket) {
         webSocket.send(encodeCommitBatch(clientBatchId, strokes))
     }
 
+    fun setPaper(
+        clientMutationId: String,
+        paper: Paper,
+    ) {
+        webSocket.send(
+            JSONObject()
+                .put("type", "set-paper")
+                .put("client_mutation_id", clientMutationId)
+                .put("paper", paper.wireValue)
+                .toString(),
+        )
+    }
+
     fun commitTombstones(clientMutationId: String, strokeIds: List<String>) {
         webSocket.send(
             JSONObject()
@@ -535,6 +566,7 @@ private fun parsePageEvent(json: JSONObject): PageEvent? =
                 sessionId = json.getString("session_id"),
                 lastSeq = json.getLong("last_seq"),
                 leaseHolder = json.optString("lease_holder").ifBlank { null },
+                paper = Paper.fromWire(json.optString("paper").ifBlank { null }) ?: Paper.None,
             )
         "stroke-batch" ->
             PageEvent.StrokeBatch(
@@ -552,6 +584,10 @@ private fun parsePageEvent(json: JSONObject): PageEvent? =
                         buildList { for (index in 0 until ids.length()) add(ids.getString(index)) }
                     },
             )
+        "paper-changed" ->
+            Paper.fromWire(json.getString("paper"))?.let { paper ->
+                PageEvent.PaperChanged(paper = paper, revision = json.getLong("revision"))
+            }
         "lease-granted" -> PageEvent.LeaseGranted
         "lease-denied" -> PageEvent.LeaseDenied(json.getString("holder"))
         "lease-changed" -> PageEvent.LeaseChanged(json.optString("holder").ifBlank { null })
