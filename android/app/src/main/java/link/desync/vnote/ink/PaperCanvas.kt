@@ -2,7 +2,11 @@ package link.desync.vnote.ink
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.ImageShader
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 
@@ -107,4 +111,53 @@ internal fun DrawScope.drawPaperPreview(
         color = ruleColor,
         style = DrawStroke(width = 1f),
     )
+}
+
+/**
+ * The repeating grain, built once for the process.
+ *
+ * The tile is a pure function of the shared spec, so it never varies between
+ * pages, users or frames — building it per frame would allocate a 64×64 bitmap
+ * on every pan and zoom step.
+ */
+private val paperTextureBrush: ShaderBrush by lazy {
+    val size = PAPER_TEXTURE_TILE_SIZE
+    val alphas = paperTextureTile()
+    val grain = parseColor(PAPER_TEXTURE_COLOR)
+    val red = (grain.red * 255f).toInt()
+    val green = (grain.green * 255f).toInt()
+    val blue = (grain.blue * 255f).toInt()
+    val pixels = IntArray(alphas.size) { index ->
+        (alphas[index] shl 24) or (red shl 16) or (green shl 8) or blue
+    }
+    val bitmap =
+        android.graphics.Bitmap.createBitmap(
+            pixels,
+            size,
+            size,
+            android.graphics.Bitmap.Config.ARGB_8888,
+        )
+    ShaderBrush(
+        ImageShader(
+            bitmap.asImageBitmap(),
+            TileMode.Repeated,
+            TileMode.Repeated,
+        ),
+    )
+}
+
+/**
+ * Lay the faint paper grain over the whole canvas, under both the rules and the
+ * ink.
+ *
+ * Called **outside** the viewport transform, so the grain tiles in device space
+ * and keeps a constant perceptual size at every zoom. Tiling it in world space
+ * would turn the speckle into visible blocks when zoomed in and dissolve it
+ * entirely when zoomed out.
+ */
+internal fun DrawScope.drawPaperTexture(paper: Paper) {
+    if (!paperHasTexture(paper)) {
+        return
+    }
+    drawRect(brush = paperTextureBrush, size = size)
 }

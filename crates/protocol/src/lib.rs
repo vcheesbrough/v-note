@@ -5,12 +5,13 @@ pub mod paper;
 // Named re-exports only — a glob would pull `Paper::None` into scope and shadow
 // `Option::None` at every call site.
 pub use paper::{
-    is_ink_classified, paper_family_visible, paper_mark_device_width, paper_marks,
-    preview_viewport, visit_paper_marks, Paper, PaperMark, PaperMarkKind, WorldViewport,
-    GRID_SPACING_LARGE, GRID_SPACING_SMALL, MARGIN_COLOR, MARGIN_COLOR_RGB, MARGIN_LINE_WIDTH,
-    MARGIN_X, MAX_EXACT_PAPER_WORLD_EXTENT, MAX_PAPER_MARKS_PER_AXIS, MIN_PAPER_MARK_DEVICE_PITCH,
-    MIN_PAPER_MARK_DEVICE_WIDTH, RULE_COLOR, RULE_COLOR_RGB, RULE_LINE_WIDTH, RULE_SPACING_NARROW,
-    RULE_SPACING_WIDE,
+    is_ink_classified, paper_family_visible, paper_has_texture, paper_mark_device_width,
+    paper_marks, paper_texture_alpha, paper_texture_tile, preview_viewport, visit_paper_marks,
+    Paper, PaperMark, PaperMarkKind, WorldViewport, GRID_SPACING_LARGE, GRID_SPACING_SMALL,
+    MARGIN_COLOR, MARGIN_COLOR_RGB, MARGIN_LINE_WIDTH, MARGIN_X, MAX_EXACT_PAPER_WORLD_EXTENT,
+    MAX_PAPER_MARKS_PER_AXIS, MIN_PAPER_MARK_DEVICE_PITCH, MIN_PAPER_MARK_DEVICE_WIDTH,
+    PAPER_TEXTURE_COLOR, PAPER_TEXTURE_COLOR_RGB, PAPER_TEXTURE_MAX_ALPHA, PAPER_TEXTURE_TILE_SIZE,
+    RULE_COLOR, RULE_COLOR_RGB, RULE_LINE_WIDTH, RULE_SPACING_NARROW, RULE_SPACING_WIDE,
 };
 
 pub const PROTOCOL_VERSION: u32 = 5;

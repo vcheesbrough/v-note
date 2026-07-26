@@ -405,7 +405,7 @@ fn paper_geometry_cases() -> Vec<(&'static str, Paper, WorldViewport)> {
             (
                 "origin-window",
                 paper,
-                WorldViewport::new(-100.0, -100.0, 200.0, 150.0, 1.0),
+                WorldViewport::new(-200.0, -200.0, 400.0, 350.0, 1.0),
             )
         })
         .collect();
@@ -422,12 +422,12 @@ fn paper_geometry_cases() -> Vec<(&'static str, Paper, WorldViewport)> {
         (
             "fine-paper-culled",
             Paper::SquaredSmall,
-            WorldViewport::new(-500.0, -500.0, 500.0, 500.0, 0.1),
+            WorldViewport::new(-500.0, -500.0, 500.0, 500.0, 0.035),
         ),
         (
             "coarse-paper-kept",
             Paper::SquaredLarge,
-            WorldViewport::new(-500.0, -500.0, 500.0, 500.0, 0.1),
+            WorldViewport::new(-500.0, -500.0, 500.0, 500.0, 0.035),
         ),
         (
             "rules-culled-margin-kept",
@@ -438,6 +438,11 @@ fn paper_geometry_cases() -> Vec<(&'static str, Paper, WorldViewport)> {
             "margin-out-of-view",
             Paper::RuledMarginWide,
             WorldViewport::new(500.0, -100.0, 900.0, 100.0, 1.0),
+        ),
+        (
+            "margin-aligned-with-grid",
+            Paper::SquaredSmall,
+            WorldViewport::new(0.0, 0.0, 600.0, 200.0, 1.0),
         ),
         (
             "thumbnail-scale",
@@ -503,10 +508,45 @@ fn paper_geometry_golden() -> serde_json::Value {
             })
         })
         .collect();
+    // The grain is part of the shared spec, so the golden pins it as well.
+    // Sampling plus a checksum keeps the fixture small while still failing on a
+    // single divergent cell.
+    let tile = protocol::paper_texture_tile();
+    let checksum = tile.iter().enumerate().fold(0u64, |acc, (index, alpha)| {
+        acc.wrapping_mul(31)
+            .wrapping_add((index as u64) ^ u64::from(*alpha))
+    });
+    let samples: Vec<serde_json::Value> = [
+        (0u32, 0u32),
+        (1, 0),
+        (7, 3),
+        (13, 29),
+        (31, 31),
+        (32, 48),
+        (63, 63),
+    ]
+    .into_iter()
+    .map(|(x, y)| {
+        serde_json::json!({ "x": x, "y": y, "alpha": protocol::paper_texture_alpha(x, y) })
+    })
+    .collect();
+    let texture = serde_json::json!({
+        "tile_size": protocol::PAPER_TEXTURE_TILE_SIZE,
+        "color": protocol::PAPER_TEXTURE_COLOR,
+        "max_alpha": protocol::PAPER_TEXTURE_MAX_ALPHA,
+        "covered_cells": tile.iter().filter(|alpha| **alpha > 0).count(),
+        // A string, not a number: the fold is a u64 and exceeds both
+        // `Long.MAX_VALUE` and JavaScript's exact-integer range, so any JSON
+        // consumer that parsed it as a number could silently round it.
+        "checksum": checksum.to_string(),
+        "samples": samples,
+    });
+
     serde_json::json!({
         "constants": constants,
         "papers": papers,
         "cases": cases,
+        "texture": texture,
     })
 }
 

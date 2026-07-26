@@ -724,6 +724,10 @@ private fun InkCanvas(
                     }
                 },
     ) {
+        // Grain first, and deliberately *outside* the transform: it tiles in
+        // device space so it keeps a constant size at every zoom, unlike the
+        // rules, which are world-anchored and ride the ink.
+        drawPaperTexture(paper)
         withTransform({
             translate(viewport.offset.x, viewport.offset.y)
             scale(viewport.scale, viewport.scale, pivot = Offset.Zero)

@@ -19,17 +19,51 @@ package link.desync.vnote.ink
  * `|position| < 2^24` ([MAX_EXACT_PAPER_WORLD_EXTENT]).
  */
 
-internal const val RULE_SPACING_NARROW = 48.0
-internal const val RULE_SPACING_WIDE = 72.0
-internal const val GRID_SPACING_SMALL = 32.0
-internal const val GRID_SPACING_LARGE = 64.0
-internal const val MARGIN_X = 96.0
+internal const val RULE_SPACING_NARROW = 96.0
+internal const val RULE_SPACING_WIDE = 144.0
+
+/**
+ * Square pitch — **defined as** [RULE_SPACING_NARROW], not merely equal to it.
+ * The squared papers are the ruled papers plus verticals, so switching between
+ * `ruled-narrow` and `squared-small` must not move a single horizontal line.
+ */
+internal const val GRID_SPACING_SMALL = RULE_SPACING_NARROW
+internal const val GRID_SPACING_LARGE = RULE_SPACING_WIDE
+
+/**
+ * The lowest positive common multiple of both grid pitches (`lcm(96, 144)`), so
+ * the red margin lands exactly on a vertical grid line in **both** squared
+ * papers rather than cutting between two columns.
+ */
+internal const val MARGIN_X = 288.0
 
 internal const val RULE_LINE_WIDTH = 1.5
 internal const val MARGIN_LINE_WIDTH = 2.0
 
 internal const val RULE_COLOR = "#B0C4DE"
 internal const val MARGIN_COLOR = "#E06C6C"
+
+// ---- Paper texture ------------------------------------------------------
+//
+// A faint grain over the whole drawing surface on every paper except None, so
+// a ruled or squared page reads as paper rather than lines on a white void.
+
+/** Edge length of the repeating grain tile, in device pixels. */
+internal const val PAPER_TEXTURE_TILE_SIZE = 64
+
+/**
+ * Grain colour. **Deliberately neutral (`r == g == b`), and load-bearing:** the
+ * grain covers every pixel, so any colour cast would be seen by the repo's
+ * pixel classifiers everywhere — a warm grain reads as margin-coloured, a cool
+ * one as rule-coloured. Neutral grey matches none of their orderings.
+ */
+internal const val PAPER_TEXTURE_COLOR = "#8C8C8C"
+
+/** Alpha ceiling for a grain cell, out of 255. */
+internal const val PAPER_TEXTURE_MAX_ALPHA = 20
+
+/** Percentage of cells carrying any grain — sparse speckle reads as fibre. */
+private const val PAPER_TEXTURE_COVERAGE_PERCENT = 26u
 
 /**
  * Minimum on-screen pitch in device pixels below which a mark *family* is culled
@@ -232,3 +266,60 @@ internal inline fun visitMultiples(
         visit((first + step) * pitch)
     }
 }
+
+/**
+ * Integer hash behind the paper grain — the exact mirror of
+ * `protocol::paper::paper_texture_hash`.
+ *
+ * `UInt` is used because Kotlin's unsigned arithmetic wraps like Rust's
+ * `wrapping_mul`, and `shr` on `UInt` is a logical shift like Rust's `>>` on
+ * `u32`. Using `Int` here would sign-extend on the shifts and silently diverge.
+ */
+private fun paperTextureHash(
+    x: UInt,
+    y: UInt,
+): UInt {
+    var h = (x * 0x27D4EB2Du) xor (y * 0x165667B1u)
+    h = h xor (h shr 15)
+    h *= 0x2545F491u
+    h = h xor (h shr 13)
+    return h
+}
+
+/**
+ * Grain alpha (0..[PAPER_TEXTURE_MAX_ALPHA]) for one cell. A pure function of
+ * its coordinates — no RNG, no state — so it is identical on every device and
+ * every run, which is what lets the tile be part of the shared golden.
+ */
+internal fun paperTextureAlpha(
+    x: Int,
+    y: Int,
+): Int {
+    val h = paperTextureHash(x.toUInt(), y.toUInt())
+    if (h % 100u >= PAPER_TEXTURE_COVERAGE_PERCENT) {
+        return 0
+    }
+    // 1..=MAX so a covered cell is never invisible.
+    return (1u + (h shr 8) % PAPER_TEXTURE_MAX_ALPHA.toUInt()).toInt()
+}
+
+/**
+ * The full repeating grain tile, row-major.
+ *
+ * Built once and repeated in **device space**, so the grain keeps a constant
+ * perceptual size at every zoom. World-anchoring would turn the speckle into
+ * visible blocks when zoomed in and dissolve it when zoomed out.
+ */
+internal fun paperTextureTile(): IntArray {
+    val tile = IntArray(PAPER_TEXTURE_TILE_SIZE * PAPER_TEXTURE_TILE_SIZE)
+    var index = 0
+    for (y in 0 until PAPER_TEXTURE_TILE_SIZE) {
+        for (x in 0 until PAPER_TEXTURE_TILE_SIZE) {
+            tile[index++] = paperTextureAlpha(x, y)
+        }
+    }
+    return tile
+}
+
+/** Whether [paper] carries the background grain. A blank page stays blank. */
+internal fun paperHasTexture(paper: Paper): Boolean = paper != Paper.None
