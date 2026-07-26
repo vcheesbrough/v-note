@@ -5,7 +5,8 @@
       "title": "Meeting notes",
       "created_at": "2026-06-10T22:00:00Z",
       "updated_at": "2026-06-10T22:00:00Z",
-      "thumbnail": { "status": "empty" }
+      "thumbnail": { "status": "empty" },
+      "paper": "squared-large"
     }
   ]
 }

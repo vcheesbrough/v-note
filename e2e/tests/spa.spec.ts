@@ -4,7 +4,7 @@ test('spa loads and renders metadata', async ({ page }) => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: 'v-note' })).toBeVisible();
-  await expect(page.getByText(/Protocol\s+4/)).toBeVisible();
+  await expect(page.getByText(/Protocol\s+5/)).toBeVisible();
 
   const release = (await page.locator('.version-watermark').innerText()).replace(/^v/, '');
   const downloadLink = page.locator('.apk-link a');

@@ -1,0 +1,5 @@
+{
+  "type": "set-paper",
+  "client_mutation_id": "paper_fixture_1",
+  "paper": "ruled-margin-narrow"
+}

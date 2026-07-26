@@ -27,7 +27,11 @@ use crate::config::ObservabilityConfig;
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
-const PROTOCOL_VERSION: &str = "4";
+/// Metric/trace label form of [`protocol::PROTOCOL_VERSION`]. A bare `&str`
+/// because both consumers want a `'static` label, so there is no compile-time
+/// link to the canonical constant — `protocol_version_label_matches_protocol`
+/// below is that link.
+const PROTOCOL_VERSION: &str = "5";
 
 static METRICS: Lazy<Metrics> = Lazy::new(Metrics::new);
 
@@ -481,4 +485,18 @@ fn normalized_route(path: &str) -> String {
         return "/.well-known/*".to_string();
     }
     "/static/*".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PROTOCOL_VERSION;
+
+    /// `PROTOCOL_VERSION` is duplicated across five places, and this one is a
+    /// bare `&str` with no compile-time link to the canonical constant. Without
+    /// this test a bump silently leaves every metric and span labelled with the
+    /// previous protocol version.
+    #[test]
+    fn protocol_version_label_matches_protocol() {
+        assert_eq!(PROTOCOL_VERSION, protocol::PROTOCOL_VERSION.to_string());
+    }
 }

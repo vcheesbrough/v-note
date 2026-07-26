@@ -268,7 +268,13 @@ class PageInkInstrumentedTest {
         assertTrue("commit sent", commitReceived.await(5, TimeUnit.SECONDS))
         assertTrue("rejection clears pending ink", awaitUntil { session.pendingBatchCount == 0 })
         assertEquals("uncommitted ink is not rendered", emptyList<Stroke>(), session.strokes)
-        assertEquals("commit failure shown", "Commit failed", session.statusBanner)
+        // Await rather than read: `handle` publishes strokes before it sets the
+        // banner, so polling on one and immediately reading the other races the
+        // remainder of that handler.
+        assertTrue(
+            "commit failure shown",
+            awaitUntil { session.statusBanner == "Commit failed" },
+        )
         assertEquals("input blocked", false, session.canEdit)
 
         session.disconnect()
@@ -401,7 +407,10 @@ class PageInkInstrumentedTest {
             "failed erase restores the original stroke",
             awaitUntil { session.strokes.singleOrNull()?.id == "seed-stroke" },
         )
-        assertEquals("failure shown", "Could not erase stroke", session.statusBanner)
+        assertTrue(
+            "failure shown",
+            awaitUntil { session.statusBanner == "Could not erase stroke" },
+        )
         assertEquals("input blocked after server failure", false, session.canEdit)
 
         session.disconnect()

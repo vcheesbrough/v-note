@@ -73,6 +73,8 @@ import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.auth.ThumbnailMetadata
 import link.desync.vnote.ink.PageCanvasScreen
+import link.desync.vnote.ink.Paper
+import link.desync.vnote.ink.PaperPreferences
 import link.desync.vnote.ink.normalizedSamsungSpenAction
 import link.desync.vnote.ui.displayTitle
 import link.desync.vnote.ui.displayUpdatedAge
@@ -297,8 +299,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createPage() {
+        // New pages inherit the last paper this user picked on this device. See
+        // `PaperPreferences` — a deliberate interim store, tracked in #260.
+        val session = sessionState.value
+        val paper =
+            if (session is SessionState.SignedIn) {
+                PaperPreferences(this, session.profile.sub).load()
+            } else {
+                Paper.None
+            }
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            apiClient.createPage().fold(
+            apiClient.createPage(paper = paper).fold(
                 onSuccess = { page ->
                     upsertPage(page)
                     selectedPageState.value = page

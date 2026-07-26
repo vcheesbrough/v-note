@@ -1,0 +1,737 @@
+{
+  "cases": [
+    {
+      "marks": [],
+      "name": "origin-window",
+      "paper": "none",
+      "viewport": {
+        "max_x": 400.0,
+        "max_y": 350.0,
+        "min_x": -200.0,
+        "min_y": -200.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#E06C6C",
+          "kind": "margin",
+          "position": 288.0,
+          "world_width": 2.0
+        }
+      ],
+      "name": "origin-window",
+      "paper": "ruled-margin-narrow",
+      "viewport": {
+        "max_x": 400.0,
+        "max_y": 350.0,
+        "min_x": -200.0,
+        "min_y": -200.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#E06C6C",
+          "kind": "margin",
+          "position": 288.0,
+          "world_width": 2.0
+        }
+      ],
+      "name": "origin-window",
+      "paper": "ruled-margin-wide",
+      "viewport": {
+        "max_x": 400.0,
+        "max_y": 350.0,
+        "min_x": -200.0,
+        "min_y": -200.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 288.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "origin-window",
+      "paper": "ruled-narrow",
+      "viewport": {
+        "max_x": 400.0,
+        "max_y": 350.0,
+        "min_x": -200.0,
+        "min_y": -200.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 288.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "origin-window",
+      "paper": "ruled-wide",
+      "viewport": {
+        "max_x": 400.0,
+        "max_y": 350.0,
+        "min_x": -200.0,
+        "min_y": -200.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": -192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": -96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 384.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "origin-window",
+      "paper": "squared-small",
+      "viewport": {
+        "max_x": 400.0,
+        "max_y": 350.0,
+        "min_x": -200.0,
+        "min_y": -200.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": -144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 288.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "origin-window",
+      "paper": "squared-large",
+      "viewport": {
+        "max_x": 400.0,
+        "max_y": 350.0,
+        "min_x": -200.0,
+        "min_y": -200.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 96.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "offset-window",
+      "paper": "squared-small",
+      "viewport": {
+        "max_x": 154.0,
+        "max_y": -19.0,
+        "min_x": 37.0,
+        "min_y": -211.0,
+        "scale": 2.0
+      }
+    },
+    {
+      "marks": [],
+      "name": "fine-paper-culled",
+      "paper": "squared-small",
+      "viewport": {
+        "max_x": 500.0,
+        "max_y": 500.0,
+        "min_x": -500.0,
+        "min_y": -500.0,
+        "scale": 0.035
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -432.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": -144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 432.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": -432.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": -288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": -144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 144.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 432.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "coarse-paper-kept",
+      "paper": "squared-large",
+      "viewport": {
+        "max_x": 500.0,
+        "max_y": 500.0,
+        "min_x": -500.0,
+        "min_y": -500.0,
+        "scale": 0.035
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#E06C6C",
+          "kind": "margin",
+          "position": 288.0,
+          "world_width": 2.0
+        }
+      ],
+      "name": "rules-culled-margin-kept",
+      "paper": "ruled-margin-narrow",
+      "viewport": {
+        "max_x": 5000.0,
+        "max_y": 5000.0,
+        "min_x": -5000.0,
+        "min_y": -5000.0,
+        "scale": 0.001
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "margin-out-of-view",
+      "paper": "ruled-margin-wide",
+      "viewport": {
+        "max_x": 900.0,
+        "max_y": 100.0,
+        "min_x": 500.0,
+        "min_y": -100.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 96.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 192.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 288.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 384.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 480.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "column",
+          "position": 576.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "margin-aligned-with-grid",
+      "paper": "squared-small",
+      "viewport": {
+        "max_x": 600.0,
+        "max_y": 200.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "scale": 1.0
+      }
+    },
+    {
+      "marks": [
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 0.0,
+          "world_width": 1.5
+        },
+        {
+          "color": "#B0C4DE",
+          "kind": "rule",
+          "position": 144.0,
+          "world_width": 1.5
+        }
+      ],
+      "name": "thumbnail-scale",
+      "paper": "ruled-margin-wide",
+      "viewport": {
+        "max_x": 228.0,
+        "max_y": 152.0,
+        "min_x": -12.0,
+        "min_y": -8.0,
+        "scale": 1.0
+      }
+    }
+  ],
+  "constants": {
+    "grid_spacing_large": 144.0,
+    "grid_spacing_small": 96.0,
+    "margin_color": "#E06C6C",
+    "margin_line_width": 2.0,
+    "margin_x": 288.0,
+    "max_paper_marks_per_axis": 4096,
+    "min_paper_mark_device_pitch": 4.0,
+    "min_paper_mark_device_width": 1.0,
+    "rule_color": "#B0C4DE",
+    "rule_line_width": 1.5,
+    "rule_spacing_narrow": 96.0,
+    "rule_spacing_wide": 144.0
+  },
+  "papers": [
+    {
+      "column_spacing": null,
+      "has_margin": false,
+      "label": "None",
+      "rule_spacing": null,
+      "wire_value": "none"
+    },
+    {
+      "column_spacing": null,
+      "has_margin": true,
+      "label": "Ruled, margin, narrow",
+      "rule_spacing": 96.0,
+      "wire_value": "ruled-margin-narrow"
+    },
+    {
+      "column_spacing": null,
+      "has_margin": true,
+      "label": "Ruled, margin, wide",
+      "rule_spacing": 144.0,
+      "wire_value": "ruled-margin-wide"
+    },
+    {
+      "column_spacing": null,
+      "has_margin": false,
+      "label": "Ruled, narrow",
+      "rule_spacing": 96.0,
+      "wire_value": "ruled-narrow"
+    },
+    {
+      "column_spacing": null,
+      "has_margin": false,
+      "label": "Ruled, wide",
+      "rule_spacing": 144.0,
+      "wire_value": "ruled-wide"
+    },
+    {
+      "column_spacing": 96.0,
+      "has_margin": false,
+      "label": "Squared, small",
+      "rule_spacing": 96.0,
+      "wire_value": "squared-small"
+    },
+    {
+      "column_spacing": 144.0,
+      "has_margin": false,
+      "label": "Squared, large",
+      "rule_spacing": 144.0,
+      "wire_value": "squared-large"
+    }
+  ],
+  "texture": {
+    "checksum": "13594342057909762663",
+    "color": "#8C8C8C",
+    "covered_cells": 999,
+    "max_alpha": 20,
+    "samples": [
+      {
+        "alpha": 1,
+        "x": 0,
+        "y": 0
+      },
+      {
+        "alpha": 0,
+        "x": 1,
+        "y": 0
+      },
+      {
+        "alpha": 15,
+        "x": 7,
+        "y": 3
+      },
+      {
+        "alpha": 5,
+        "x": 13,
+        "y": 29
+      },
+      {
+        "alpha": 0,
+        "x": 31,
+        "y": 31
+      },
+      {
+        "alpha": 0,
+        "x": 32,
+        "y": 48
+      },
+      {
+        "alpha": 0,
+        "x": 63,
+        "y": 63
+      }
+    ],
+    "tile_size": 64
+  }
+}
