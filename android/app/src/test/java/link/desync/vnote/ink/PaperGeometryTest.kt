@@ -115,6 +115,69 @@ class PaperGeometryTest {
         assertTrue("golden pins a meaningful number of marks", totalMarks > 40)
     }
 
+    /**
+     * The grain is part of the shared spec, so it is locked from this side too.
+     * A single divergent cell — a sign-extended shift, a non-wrapping multiply —
+     * moves the checksum and fails here.
+     */
+    @Test
+    fun textureTileMatchesTheSharedSpec() {
+        val texture = fixture.getJSONObject("texture")
+        assertEquals(texture.getInt("tile_size"), PAPER_TEXTURE_TILE_SIZE)
+        assertEquals(texture.getString("color"), PAPER_TEXTURE_COLOR)
+        assertEquals(texture.getInt("max_alpha"), PAPER_TEXTURE_MAX_ALPHA)
+
+        val tile = paperTextureTile()
+        assertEquals(PAPER_TEXTURE_TILE_SIZE * PAPER_TEXTURE_TILE_SIZE, tile.size)
+        assertEquals(texture.getInt("covered_cells"), tile.count { it > 0 })
+
+        // Same fold as the Rust generator, in the same order.
+        var checksum = 0uL
+        tile.forEachIndexed { index, alpha ->
+            checksum = checksum * 31uL + (index.toULong() xor alpha.toULong())
+        }
+        assertEquals(texture.getString("checksum"), checksum.toString())
+
+        val samples = texture.getJSONArray("samples")
+        for (index in 0 until samples.length()) {
+            val sample = samples.getJSONObject(index)
+            val x = sample.getInt("x")
+            val y = sample.getInt("y")
+            assertEquals(
+                "grain at $x,$y",
+                sample.getInt("alpha"),
+                paperTextureAlpha(x, y),
+            )
+        }
+
+        assertTrue(paperHasTexture(Paper.RuledNarrow))
+        assertTrue(!paperHasTexture(Paper.None))
+    }
+
+    /**
+     * Squared papers are ruled papers plus verticals: the horizontals must not
+     * move, and the margin must land on a vertical in both grids.
+     */
+    @Test
+    fun gridsAlignWithRulesAndTheMarginLandsOnAVertical() {
+        assertEquals(Paper.RuledNarrow.ruleSpacing, Paper.SquaredSmall.ruleSpacing)
+        assertEquals(Paper.RuledWide.ruleSpacing, Paper.SquaredLarge.ruleSpacing)
+        assertEquals(Paper.RuledMarginNarrow.ruleSpacing, Paper.SquaredSmall.ruleSpacing)
+        assertEquals(Paper.RuledMarginWide.ruleSpacing, Paper.SquaredLarge.ruleSpacing)
+
+        listOf(Paper.SquaredSmall, Paper.SquaredLarge).forEach { paper ->
+            val pitch = paper.columnSpacing!!
+            assertEquals("margin misses the ${paper.wireValue} grid", 0.0, MARGIN_X % pitch, 0.0)
+        }
+
+        val viewport = PaperViewport(-200.0, -200.0, 400.0, 400.0, 1.0)
+        val horizontals = { paper: Paper ->
+            paperMarks(paper, viewport).filter { it.kind == PaperMarkKind.Rule }.map { it.position }
+        }
+        assertEquals(horizontals(Paper.RuledNarrow), horizontals(Paper.SquaredSmall))
+        assertEquals(horizontals(Paper.RuledWide), horizontals(Paper.SquaredLarge))
+    }
+
     @Test
     fun wireValuesRoundTripAndRejectUnknowns() {
         for (paper in Paper.ALL) {

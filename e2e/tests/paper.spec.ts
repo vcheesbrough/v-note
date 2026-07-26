@@ -263,7 +263,7 @@ test.describe('page paper', () => {
     expect(after.updated_at).toBe(before.updated_at);
   });
 
-  test('the SPA renders paper behind the ink, subject to the graded density cull', async ({
+  test('the SPA renders paper, grain and ink together at the default zoom', async ({
     page,
     request,
   }) => {
@@ -295,56 +295,56 @@ test.describe('page paper', () => {
     });
     await expect(page.getByText(/Live · seq 1|Synced · seq 1/)).toBeVisible({ timeout: 5_000 });
 
-    // At the SPA's default (minimum) zoom the margin — a single line with no
-    // pitch to alias against, so never culled — is painted, and the ink is
-    // painted on top of it. Both present at once is what "paper behind the ink"
-    // means in practice.
+    // The viewer always opens fully zoomed out and has no fit-to-content logic.
+    // At the current pitches the finest family is 96 * 0.08 = 7.68 device px
+    // against a 4.0 floor, so everything is there on arrival — rules, the
+    // never-culled margin, the grain, and the ink on top of all of it.
     await expect
-      .poll(async () => countPaperPixels(page, 'margin'), { timeout: 5_000 })
-      .toBeGreaterThan(0);
+      .poll(async () => countPaperPixels(page, 'rule'), { timeout: 5_000 })
+      .toBeGreaterThan(5);
+    expect(await countPaperPixels(page, 'margin')).toBeGreaterThan(0);
+    expect(await countTexturePixels(page)).toBeGreaterThan(50);
     expect(await countInkPixels(page)).toBeGreaterThan(5);
 
-    // 48-unit rules, meanwhile, fall under the 4 device-px cull at this zoom —
-    // the specified graded behaviour, not a bug.
-    expect(await countPaperPixels(page, 'rule')).toBe(0);
-
-    // Zoom in until the rules clear the cull. Zoom is anchored on the cursor,
-    // so this also pans the ink and the margin out of view — the rules are the
-    // only thing asserted from here on.
+    // Paper stays locked to the ink through zoom: the rules travel with it
+    // rather than staying pinned to the screen.
     const canvas = page.getByLabel('Read-only ink canvas');
-    for (let i = 0; i < 40; i += 1) {
+    for (let i = 0; i < 20; i += 1) {
       await canvas.hover();
       await page.mouse.wheel(0, -100);
     }
-
     await expect
       .poll(async () => countPaperPixels(page, 'rule'), { timeout: 5_000 })
       .toBeGreaterThan(5);
+    // The grain is device-space, so zooming never coarsens it.
+    expect(await countTexturePixels(page)).toBeGreaterThan(50);
   });
 
-  test('coarse paper draws at the default zoom while fine paper is culled', async ({
+  test('every ruled and squared paper is visible immediately on open', async ({
     page,
     request,
   }) => {
-    const coarseTitle = uniqueTitle('paper-coarse');
-    const fineTitle = uniqueTitle('paper-fine');
-    await createPage(request, coarseTitle, 'squared-large');
-    await createPage(request, fineTitle, 'squared-small');
+    // Regression guard for the wart the original geometry had: at the old
+    // pitches, narrow rules and small squares were culled at the SPA's default
+    // (and minimum) zoom, so those papers looked broken until the user zoomed
+    // in. Nothing is culled on arrival now.
+    const papers = ['ruled-narrow', 'ruled-wide', 'squared-small', 'squared-large'];
+    const titles: Record<string, string> = {};
+    for (const paper of papers) {
+      titles[paper] = uniqueTitle(`paper-open-${paper}`);
+      await createPage(request, titles[paper], paper);
+    }
     await page.reload({ waitUntil: 'load' });
 
-    // squared-large: 64 world units × 0.08 = 5.12 device px — drawn.
-    await page.getByRole('button', { name: `Open ${coarseTitle}`, exact: true }).click();
-    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
-    await expect
-      .poll(async () => countPaperPixels(page, 'rule'), { timeout: 5_000 })
-      .toBeGreaterThan(5);
-    await page.getByRole('button', { name: 'Back' }).click();
-
-    // squared-small: 32 × 0.08 = 2.56 device px — culled, not aliased.
-    await page.getByRole('button', { name: `Open ${fineTitle}`, exact: true }).click();
-    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
-    await page.waitForTimeout(500);
-    expect(await countPaperPixels(page, 'rule')).toBe(0);
+    for (const paper of papers) {
+      await page.getByRole('button', { name: `Open ${titles[paper]}`, exact: true }).click();
+      await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+      await expect
+        .poll(async () => countPaperPixels(page, 'rule'), { timeout: 5_000 })
+        .toBeGreaterThan(5);
+      expect(await countTexturePixels(page)).toBeGreaterThan(50);
+      await page.getByRole('button', { name: 'Back' }).click();
+    }
   });
 });
 
@@ -378,6 +378,34 @@ async function countPaperPixels(page: Page, kind: 'rule' | 'margin'): Promise<nu
     }
     return count;
   }, kind);
+}
+
+/**
+ * Count paper-grain pixels: strictly neutral (`r == g == b`) and near-white.
+ *
+ * Neutrality is what distinguishes grain from everything else on the canvas —
+ * rules blend bluish, the margin reddish, ink green — so this cannot be fooled
+ * by an antialiased line edge.
+ */
+async function countTexturePixels(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="ink-canvas"]');
+    if (!canvas) return 0;
+    const context = canvas.getContext('2d');
+    if (!context) return 0;
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let count = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const red = pixels[i];
+      const green = pixels[i + 1];
+      const blue = pixels[i + 2];
+      if (pixels[i + 3] === 0) continue;
+      if (red === green && green === blue && red >= 235 && red < 255) {
+        count += 1;
+      }
+    }
+    return count;
+  });
 }
 
 /** The repo's canonical ink classifier, reused so "ink survived" means the same thing everywhere. */

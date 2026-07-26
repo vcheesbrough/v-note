@@ -9,12 +9,15 @@ use js_sys::{Date, Reflect};
 use leptos::prelude::*;
 use leptos::{ev, leptos_dom::helpers::window_event_listener};
 use protocol::{
-    paper_mark_device_width, visit_paper_marks, LibraryEvent, ListPagesResponse, MeResponse,
-    MetaResponse, PageServerMessage, PageSummary, Paper, RealtimeTicketResponse, Stroke,
-    StrokeBatch, ThumbnailMetadata, WorldViewport,
+    paper_has_texture, paper_mark_device_width, paper_texture_tile, visit_paper_marks,
+    LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageServerMessage, PageSummary,
+    Paper, RealtimeTicketResponse, Stroke, StrokeBatch, ThumbnailMetadata, WorldViewport,
+    PAPER_TEXTURE_COLOR_RGB, PAPER_TEXTURE_TILE_SIZE,
 };
 use wasm_bindgen::JsCast;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, PointerEvent, WheelEvent};
+use web_sys::{
+    CanvasPattern, CanvasRenderingContext2d, HtmlCanvasElement, PointerEvent, WheelEvent,
+};
 
 /// CI release tag (`V_NOTE_RELEASE`) when present, else the cargo version for local builds.
 fn release_version() -> &'static str {
@@ -666,6 +669,84 @@ fn world_viewport(
     )
 }
 
+thread_local! {
+    // The grain tile, built once per document and reused for every frame.
+    //
+    // Rebuilding it per frame would mean allocating a 64x64 `ImageData`,
+    // blitting it and constructing a `CanvasPattern` on every pan and zoom
+    // step. The inner `None` means the tile could not be built (no document, or
+    // a 2d context refused) — the texture is then simply skipped, since it is
+    // decoration and must never block the ink from drawing.
+    static PAPER_TEXTURE_PATTERN: std::cell::RefCell<Option<Option<CanvasPattern>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Build the repeating grain pattern from the shared tile.
+fn build_paper_texture_pattern() -> Option<CanvasPattern> {
+    let size = PAPER_TEXTURE_TILE_SIZE as u32;
+    let document = web_sys::window()?.document()?;
+    let tile_canvas = document
+        .create_element("canvas")
+        .ok()?
+        .dyn_into::<HtmlCanvasElement>()
+        .ok()?;
+    tile_canvas.set_width(size);
+    tile_canvas.set_height(size);
+    let tile_context = tile_canvas
+        .get_context("2d")
+        .ok()??
+        .dyn_into::<CanvasRenderingContext2d>()
+        .ok()?;
+
+    let alphas = paper_texture_tile();
+    let [red, green, blue] = PAPER_TEXTURE_COLOR_RGB;
+    let mut rgba = Vec::with_capacity(alphas.len() * 4);
+    for alpha in &alphas {
+        rgba.extend_from_slice(&[red, green, blue, *alpha]);
+    }
+    let image = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+        wasm_bindgen::Clamped(&rgba),
+        size,
+        size,
+    )
+    .ok()?;
+    tile_context.put_image_data(&image, 0.0, 0.0).ok()?;
+    context_pattern(&tile_canvas)
+}
+
+fn context_pattern(tile: &HtmlCanvasElement) -> Option<CanvasPattern> {
+    let document = web_sys::window()?.document()?;
+    let host = document
+        .create_element("canvas")
+        .ok()?
+        .dyn_into::<HtmlCanvasElement>()
+        .ok()?;
+    let context = host
+        .get_context("2d")
+        .ok()??
+        .dyn_into::<CanvasRenderingContext2d>()
+        .ok()?;
+    context
+        .create_pattern_with_html_canvas_element(tile, "repeat")
+        .ok()?
+}
+
+/// Lay the faint paper grain over the whole canvas, under the rules and the ink.
+///
+/// Tiled in **CSS-pixel space** rather than world space, so the grain keeps a
+/// constant perceptual size at every zoom. World-anchoring it would turn the
+/// speckle into visible blocks when zoomed in and dissolve it when zoomed out.
+fn draw_paper_texture(context: &CanvasRenderingContext2d, css_width: f64, css_height: f64) {
+    PAPER_TEXTURE_PATTERN.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        let pattern = cached.get_or_insert_with(build_paper_texture_pattern);
+        if let Some(pattern) = pattern.as_ref() {
+            context.set_fill_style_canvas_pattern(pattern);
+            context.fill_rect(0.0, 0.0, css_width, css_height);
+        }
+    });
+}
+
 /// Paint the page's paper behind the ink, under the same world→CSS mapping the
 /// stroke loop uses, so it stays locked to the ink through pan and zoom.
 fn draw_paper(
@@ -752,7 +833,11 @@ fn draw_canvas(
     context.fill_rect(0.0, 0.0, css_width, css_height);
 
     // Paper goes on after the white fill and before every stroke, so it can
-    // never overpaint ink.
+    // never overpaint ink. The grain sits under the rules, so a rule crossing a
+    // speckle still reads as an unbroken line.
+    if paper_has_texture(paper) {
+        draw_paper_texture(&context, css_width, css_height);
+    }
     let viewport = world_viewport(css_width, css_height, offset_x, offset_y, scale);
     draw_paper(&context, paper, &viewport, offset_x, offset_y, scale);
 
@@ -1208,21 +1293,38 @@ mod tests {
         assert_eq!(page.paper, Paper::RuledMarginWide);
     }
 
-    /// At the SPA's default (minimum) zoom the graded cull leaves the coarse
-    /// papers visible and hides the fine ones. This is specified behaviour, and
-    /// it is why the e2e spec has to zoom in before asserting on narrow rules.
+    /// Every paper is now visible at the SPA's default (minimum) zoom.
+    ///
+    /// The viewer always opens fully zoomed out and has no fit-to-content
+    /// logic, so when the finest pitch was 32 world units the graded cull hid
+    /// small squares and narrow rules until the user zoomed in — paper that
+    /// looked broken on open. At the current pitches the finest family is
+    /// 96 * 0.08 = 7.68 device px against a 4.0 floor, so nothing is culled on
+    /// arrival.
     #[test]
-    fn cull_at_minimum_canvas_scale_is_graded() {
+    fn every_paper_is_visible_at_minimum_canvas_scale() {
         const MIN_CANVAS_SCALE: f64 = 0.08;
-        let visible = |paper: Paper| {
-            let viewport = world_viewport(1200.0, 800.0, 0.0, 0.0, MIN_CANVAS_SCALE);
+        let visible = |paper: Paper, scale: f64| {
+            let viewport = world_viewport(1200.0, 800.0, 0.0, 0.0, scale);
             !protocol::paper_marks(paper, &viewport).is_empty()
         };
-        assert!(visible(Paper::RuledWide));
-        assert!(visible(Paper::SquaredLarge));
-        assert!(!visible(Paper::RuledNarrow));
-        assert!(!visible(Paper::SquaredSmall));
-        // The margin is never culled, so a margin paper still shows one line.
-        assert!(visible(Paper::RuledMarginNarrow));
+        for paper in Paper::ALL {
+            if paper == Paper::None {
+                continue;
+            }
+            assert!(
+                visible(paper, MIN_CANVAS_SCALE),
+                "{} should be visible on open",
+                paper.wire_value()
+            );
+        }
+
+        // The cull still exists — it just takes a much harder zoom-out to reach,
+        // and it is still graded by pitch when it does.
+        assert!(!visible(Paper::SquaredSmall, 0.035));
+        assert!(visible(Paper::SquaredLarge, 0.035));
+        // The margin is never culled, so a margin paper still shows one line
+        // even when its rules are gone.
+        assert!(visible(Paper::RuledMarginNarrow, 0.0001));
     }
 }

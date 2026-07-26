@@ -20,16 +20,30 @@ use serde::{Deserialize, Serialize};
 
 /// Horizontal rule pitch, world units — narrow rules (`ruled-narrow`,
 /// `ruled-margin-narrow`).
-pub const RULE_SPACING_NARROW: f64 = 48.0;
+pub const RULE_SPACING_NARROW: f64 = 96.0;
 /// Horizontal rule pitch, world units — wide rules (`ruled-wide`,
 /// `ruled-margin-wide`).
-pub const RULE_SPACING_WIDE: f64 = 72.0;
+pub const RULE_SPACING_WIDE: f64 = 144.0;
+
 /// Square pitch, world units — `squared-small` (both axes).
-pub const GRID_SPACING_SMALL: f64 = 32.0;
-/// Square pitch, world units — `squared-large` (both axes).
-pub const GRID_SPACING_LARGE: f64 = 64.0;
+///
+/// **Defined as [`RULE_SPACING_NARROW`], not merely equal to it.** The squared
+/// papers are ruled papers plus verticals: switching between `ruled-narrow` and
+/// `squared-small` must not move a single horizontal line. Deriving the constant
+/// makes that structural rather than a coincidence two literals could drift out
+/// of, and [`grid_and_rule_families_align`] pins it.
+pub const GRID_SPACING_SMALL: f64 = RULE_SPACING_NARROW;
+/// Square pitch, world units — `squared-large` (both axes). Defined as
+/// [`RULE_SPACING_WIDE`]; see [`GRID_SPACING_SMALL`].
+pub const GRID_SPACING_LARGE: f64 = RULE_SPACING_WIDE;
+
 /// World `x` of the single red margin rule on the `ruled-margin-*` papers.
-pub const MARGIN_X: f64 = 96.0;
+///
+/// The lowest positive common multiple of both grid pitches (`lcm(96, 144)`),
+/// so the margin lands exactly on a vertical grid line in **both** squared
+/// papers rather than cutting between two of them. Anything smaller misses one
+/// of the two grids; see [`margin_lands_on_a_vertical_in_every_grid`].
+pub const MARGIN_X: f64 = 288.0;
 
 /// Rule/grid line width, world units.
 pub const RULE_LINE_WIDTH: f64 = 1.5;
@@ -76,6 +90,44 @@ pub const MAX_PAPER_MARKS_PER_AXIS: usize = 4096;
 /// `2^24`: the largest magnitude at which an integer world position survives
 /// the `f64 → f32` narrowing every renderer performs, exactly.
 pub const MAX_EXACT_PAPER_WORLD_EXTENT: f64 = 16_777_216.0;
+
+// ---- Paper texture -------------------------------------------------------
+//
+// A faint grain laid over the whole drawing surface (not just where lines
+// fall) on every paper except `None`, so a ruled or squared page reads as
+// *paper* rather than as lines floating on a white void.
+
+/// Edge length of the repeating texture tile, in device pixels.
+///
+/// The tile is filled once per surface and repeated, so this is a memory/
+/// repetition tradeoff, not a quality dial: 64 keeps the tile at 4 KiB while
+/// being large enough that the repeat is not legible at
+/// [`PAPER_TEXTURE_MAX_ALPHA`].
+pub const PAPER_TEXTURE_TILE_SIZE: usize = 64;
+
+/// Texture grain colour, uppercase `#RRGGBB`.
+///
+/// **Deliberately neutral (`r == g == b`), and that is load-bearing.** The
+/// grain covers every pixel of the surface, so any colour cast would be read by
+/// the repo's pixel classifiers on *every* pixel: a warm grain (`r > g > b`)
+/// registers as margin-coloured, a cool one as rule-coloured. Neutral grey
+/// satisfies none of the orderings and so is invisible to all of them — see
+/// [`is_ink_classified`] and `texture_is_invisible_to_every_pixel_classifier`.
+///
+/// A warm off-white paper tint was tried and abandoned for exactly this reason;
+/// it would have required loosening four independent test classifiers to
+/// threshold comparisons, trading real assertion strength for a tint.
+pub const PAPER_TEXTURE_COLOR: &str = "#8C8C8C";
+/// [`PAPER_TEXTURE_COLOR`] as `[r, g, b]` components.
+pub const PAPER_TEXTURE_COLOR_RGB: [u8; 3] = [0x8C, 0x8C, 0x8C];
+
+/// Alpha ceiling for a grain cell, out of 255. Low enough that the texture
+/// reads as tooth rather than as dirt, and far too low to obscure ink.
+pub const PAPER_TEXTURE_MAX_ALPHA: u8 = 20;
+
+/// Percentage of cells that carry any grain at all. A sparse speckle reads as
+/// paper fibre; a dense one reads as noise.
+const PAPER_TEXTURE_COVERAGE_PERCENT: u32 = 26;
 
 /// Rows of rules a swatch aims to show; see [`preview_viewport`].
 const PREVIEW_ROWS: f64 = 4.0;
@@ -378,6 +430,59 @@ pub fn preview_viewport(paper: Paper, width_px: f64, height_px: f64) -> WorldVie
     }
 }
 
+/// Integer hash behind the paper grain.
+///
+/// Written in explicit wrapping `u32` arithmetic so the Kotlin mirror can
+/// reproduce it exactly with `UInt` (which wraps by default) — the tile is part
+/// of the cross-language golden, so "close enough" is not enough. No RNG is
+/// involved and no state is carried between cells: the grain is a pure function
+/// of its coordinates, and therefore identical on every device and every run.
+fn paper_texture_hash(x: u32, y: u32) -> u32 {
+    let mut h = x.wrapping_mul(0x27d4_eb2d) ^ y.wrapping_mul(0x1656_67b1);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2545_f491);
+    h ^= h >> 13;
+    h
+}
+
+/// Grain alpha (0–[`PAPER_TEXTURE_MAX_ALPHA`]) for one cell of the tile.
+///
+/// Most cells return 0; the rest carry a low, varying alpha. Sparse speckle
+/// reads as fibre, where uniform noise reads as a dirty screen.
+pub fn paper_texture_alpha(x: u32, y: u32) -> u8 {
+    let h = paper_texture_hash(x, y);
+    if h % 100 >= PAPER_TEXTURE_COVERAGE_PERCENT {
+        return 0;
+    }
+    // 1..=MAX so a covered cell is never invisible.
+    let span = PAPER_TEXTURE_MAX_ALPHA as u32;
+    (1 + (h >> 8) % span) as u8
+}
+
+/// The full repeating grain tile, row-major, `PAPER_TEXTURE_TILE_SIZE` square.
+///
+/// Renderers build this **once** and repeat it in **device space**, so the
+/// grain keeps a constant perceptual size at every zoom. World-anchoring it
+/// would turn the speckle into visible blocks when zoomed in and dissolve it
+/// entirely when zoomed out — the opposite of a texture that is meant to sit
+/// under everything and never be noticed.
+pub fn paper_texture_tile() -> Vec<u8> {
+    let size = PAPER_TEXTURE_TILE_SIZE;
+    let mut tile = Vec::with_capacity(size * size);
+    for y in 0..size {
+        for x in 0..size {
+            tile.push(paper_texture_alpha(x as u32, y as u32));
+        }
+    }
+    tile
+}
+
+/// Whether `paper` carries the background grain. Every real paper does; a blank
+/// page stays a blank page.
+pub fn paper_has_texture(paper: Paper) -> bool {
+    paper != Paper::None
+}
+
 /// Would an `[r, g, b]` pixel be counted as ink by any of the repo's existing
 /// pixel classifiers?
 ///
@@ -435,16 +540,16 @@ mod tests {
 
     #[test]
     fn geometry_constants_are_locked() {
-        assert_eq!(Paper::RuledNarrow.rule_spacing(), Some(48.0));
-        assert_eq!(Paper::RuledMarginNarrow.rule_spacing(), Some(48.0));
-        assert_eq!(Paper::RuledWide.rule_spacing(), Some(72.0));
-        assert_eq!(Paper::RuledMarginWide.rule_spacing(), Some(72.0));
-        assert_eq!(Paper::SquaredSmall.rule_spacing(), Some(32.0));
-        assert_eq!(Paper::SquaredLarge.rule_spacing(), Some(64.0));
+        assert_eq!(Paper::RuledNarrow.rule_spacing(), Some(96.0));
+        assert_eq!(Paper::RuledMarginNarrow.rule_spacing(), Some(96.0));
+        assert_eq!(Paper::RuledWide.rule_spacing(), Some(144.0));
+        assert_eq!(Paper::RuledMarginWide.rule_spacing(), Some(144.0));
+        assert_eq!(Paper::SquaredSmall.rule_spacing(), Some(96.0));
+        assert_eq!(Paper::SquaredLarge.rule_spacing(), Some(144.0));
         assert_eq!(Paper::None.rule_spacing(), Option::None);
 
-        assert_eq!(Paper::SquaredSmall.column_spacing(), Some(32.0));
-        assert_eq!(Paper::SquaredLarge.column_spacing(), Some(64.0));
+        assert_eq!(Paper::SquaredSmall.column_spacing(), Some(96.0));
+        assert_eq!(Paper::SquaredLarge.column_spacing(), Some(144.0));
         for paper in [
             Paper::None,
             Paper::RuledNarrow,
@@ -463,9 +568,145 @@ mod tests {
             with_margin,
             vec![Paper::RuledMarginNarrow, Paper::RuledMarginWide]
         );
-        assert_eq!(MARGIN_X, 96.0);
+        assert_eq!(MARGIN_X, 288.0);
         assert_eq!(RULE_LINE_WIDTH, 1.5);
         assert_eq!(MARGIN_LINE_WIDTH, 2.0);
+    }
+
+    /// Switching between a ruled paper and its squared counterpart must not
+    /// move a single horizontal line — the squared papers are the ruled papers
+    /// plus verticals, not a different grid that happens to look similar.
+    #[test]
+    fn grid_and_rule_families_align() {
+        for (ruled, squared) in [
+            (Paper::RuledNarrow, Paper::SquaredSmall),
+            (Paper::RuledMarginNarrow, Paper::SquaredSmall),
+            (Paper::RuledWide, Paper::SquaredLarge),
+            (Paper::RuledMarginWide, Paper::SquaredLarge),
+        ] {
+            assert_eq!(
+                ruled.rule_spacing(),
+                squared.rule_spacing(),
+                "{} horizontals must match {}",
+                squared.wire_value(),
+                ruled.wire_value()
+            );
+        }
+
+        // Proved on real enumerations, not just the constants: every horizontal
+        // a ruled paper draws is drawn by its squared counterpart too.
+        let viewport = WorldViewport::new(-1000.0, -1000.0, 1000.0, 1000.0, 1.0);
+        let horizontals = |paper: Paper| -> Vec<f64> {
+            paper_marks(paper, &viewport)
+                .into_iter()
+                .filter(|mark| mark.kind == PaperMarkKind::Rule)
+                .map(|mark| mark.position)
+                .collect()
+        };
+        assert_eq!(
+            horizontals(Paper::RuledNarrow),
+            horizontals(Paper::SquaredSmall)
+        );
+        assert_eq!(
+            horizontals(Paper::RuledWide),
+            horizontals(Paper::SquaredLarge)
+        );
+    }
+
+    /// The red margin must sit on a vertical grid line in *both* squared
+    /// papers, so it never cuts between two columns.
+    #[test]
+    fn margin_lands_on_a_vertical_in_every_grid() {
+        for paper in [Paper::SquaredSmall, Paper::SquaredLarge] {
+            let pitch = paper.column_spacing().expect("squared paper has columns");
+            assert_eq!(
+                MARGIN_X % pitch,
+                0.0,
+                "margin at {MARGIN_X} misses the {} grid (pitch {pitch})",
+                paper.wire_value()
+            );
+        }
+
+        // And it is the *lowest* such position: anything smaller misses a grid,
+        // which is what pins 288 rather than some larger common multiple.
+        let pitches: Vec<f64> = [Paper::SquaredSmall, Paper::SquaredLarge]
+            .into_iter()
+            .filter_map(Paper::column_spacing)
+            .collect();
+        let lower = (1..(MARGIN_X as u32)).find(|candidate| {
+            pitches
+                .iter()
+                .all(|pitch| f64::from(*candidate) % pitch == 0.0)
+        });
+        assert_eq!(lower, Option::None, "a smaller common multiple exists");
+
+        // The enumeration agrees: a squared viewport reaching MARGIN_X puts a
+        // column exactly there.
+        let viewport = WorldViewport::new(0.0, 0.0, MARGIN_X * 2.0, 100.0, 1.0);
+        for paper in [Paper::SquaredSmall, Paper::SquaredLarge] {
+            assert!(
+                paper_marks(paper, &viewport)
+                    .iter()
+                    .any(|mark| mark.kind == PaperMarkKind::Column && mark.position == MARGIN_X),
+                "{} has no column at the margin",
+                paper.wire_value()
+            );
+        }
+    }
+
+    /// The grain must be a pure, reproducible function of position — it is part
+    /// of the cross-language golden, so any drift between runs, devices or
+    /// languages would be a parity break.
+    #[test]
+    fn texture_tile_is_deterministic_and_subtle() {
+        let tile = paper_texture_tile();
+        assert_eq!(
+            tile.len(),
+            PAPER_TEXTURE_TILE_SIZE * PAPER_TEXTURE_TILE_SIZE
+        );
+        assert_eq!(tile, paper_texture_tile(), "regenerating must be identical");
+
+        for (index, alpha) in tile.iter().enumerate() {
+            assert!(
+                *alpha <= PAPER_TEXTURE_MAX_ALPHA,
+                "cell {index} exceeds the alpha ceiling"
+            );
+            let x = (index % PAPER_TEXTURE_TILE_SIZE) as u32;
+            let y = (index / PAPER_TEXTURE_TILE_SIZE) as u32;
+            assert_eq!(
+                *alpha,
+                paper_texture_alpha(x, y),
+                "tile disagrees at {x},{y}"
+            );
+        }
+
+        // Sparse but present: neither a blank tile nor a uniform wash.
+        let covered = tile.iter().filter(|alpha| **alpha > 0).count();
+        let ratio = covered as f64 / tile.len() as f64;
+        assert!(
+            (0.15..0.40).contains(&ratio),
+            "grain coverage {ratio} is not a sparse speckle"
+        );
+
+        assert!(paper_has_texture(Paper::RuledNarrow));
+        assert!(!paper_has_texture(Paper::None), "a blank page stays blank");
+    }
+
+    /// The grain covers every pixel of the surface, so a colour cast would be
+    /// seen by the pixel classifiers *everywhere*. Neutrality is what keeps it
+    /// invisible to all of them.
+    #[test]
+    fn texture_is_invisible_to_every_pixel_classifier() {
+        let [red, green, blue] = PAPER_TEXTURE_COLOR_RGB;
+        assert_eq!(red, green, "grain must be neutral");
+        assert_eq!(green, blue, "grain must be neutral");
+        assert!(!is_ink_classified(PAPER_TEXTURE_COLOR_RGB));
+        // Neither the rule ordering (b > g > r) nor the margin ordering
+        // (r > g, r > b) can ever match a neutral pixel.
+        assert!(!(blue > green && green > red));
+        assert!(!(red > green && red > blue));
+        let hex = format!("#{red:02X}{green:02X}{blue:02X}");
+        assert_eq!(hex, PAPER_TEXTURE_COLOR);
     }
 
     /// Paper must be invisible to every existing ink pixel classifier, or
@@ -501,13 +742,27 @@ mod tests {
             assert!(!paper_family_visible(pitch, boundary * 0.99));
             assert!(paper_family_visible(pitch, boundary * 1.01));
         }
-        // At the SPA's minimum zoom the coarse families draw and the fine ones
-        // are culled — the specified graded behaviour, not a bug.
+        // Since the pitches doubled, *every* family now clears the cull at the
+        // SPA's minimum zoom — the finest is 96 * 0.08 = 7.68 device px against
+        // a 4.0 floor. This retires the wart the original spec documented,
+        // where narrow rules and small squares were invisible until the user
+        // zoomed in on a viewer that always opens fully zoomed out.
         let min_canvas_scale = 0.08;
-        assert!(paper_family_visible(RULE_SPACING_WIDE, min_canvas_scale));
-        assert!(paper_family_visible(GRID_SPACING_LARGE, min_canvas_scale));
-        assert!(!paper_family_visible(RULE_SPACING_NARROW, min_canvas_scale));
-        assert!(!paper_family_visible(GRID_SPACING_SMALL, min_canvas_scale));
+        for pitch in [
+            RULE_SPACING_NARROW,
+            RULE_SPACING_WIDE,
+            GRID_SPACING_SMALL,
+            GRID_SPACING_LARGE,
+        ] {
+            assert!(
+                paper_family_visible(pitch, min_canvas_scale),
+                "pitch {pitch} should be visible at the SPA's default zoom"
+            );
+        }
+        // The grading itself still exists, just further out: between these two
+        // scales the fine family is culled while the coarse one survives.
+        assert!(!paper_family_visible(RULE_SPACING_NARROW, 0.035));
+        assert!(paper_family_visible(RULE_SPACING_WIDE, 0.035));
         // Degenerate scales never draw.
         assert!(!paper_family_visible(RULE_SPACING_WIDE, 0.0));
         assert!(!paper_family_visible(RULE_SPACING_WIDE, f64::NAN));
@@ -539,7 +794,8 @@ mod tests {
     /// including negatives.
     #[test]
     fn marks_are_ordered_anchored_and_cover_negatives() {
-        let viewport = WorldViewport::new(-100.0, -100.0, 100.0, 100.0, 1.0);
+        // Wide enough to reach MARGIN_X so the margin's draw order is covered.
+        let viewport = WorldViewport::new(-200.0, -200.0, 400.0, 400.0, 1.0);
 
         let ruled = paper_marks(Paper::RuledMarginNarrow, &viewport);
         let rules: Vec<f64> = ruled
@@ -547,7 +803,7 @@ mod tests {
             .filter(|mark| mark.kind == PaperMarkKind::Rule)
             .map(|mark| mark.position)
             .collect();
-        assert_eq!(rules, vec![-96.0, -48.0, 0.0, 48.0, 96.0]);
+        assert_eq!(rules, vec![-192.0, -96.0, 0.0, 96.0, 192.0, 288.0, 384.0]);
         assert_eq!(
             ruled.last().map(|mark| (mark.kind, mark.position)),
             Some((PaperMarkKind::Margin, MARGIN_X)),
@@ -573,7 +829,10 @@ mod tests {
             .iter()
             .map(|mark| mark.position)
             .collect();
-        assert_eq!(columns, vec![-96.0, -64.0, -32.0, 0.0, 32.0, 64.0, 96.0]);
+        // Columns share the rule pitch, so a squared page is a ruled page plus
+        // verticals — and one of those verticals lands exactly on MARGIN_X.
+        assert_eq!(columns, vec![-192.0, -96.0, 0.0, 96.0, 192.0, 288.0, 384.0]);
+        assert!(columns.contains(&MARGIN_X));
         assert!(
             squared
                 .iter()
@@ -593,9 +852,9 @@ mod tests {
     /// margin paper's never-culled margin still draws.
     #[test]
     fn families_are_culled_independently_and_margin_survives() {
-        // 0.1 device px per world unit: 32*0.1 = 3.2 px (culled),
-        // 72*0.1 = 7.2 px (drawn).
-        let viewport = WorldViewport::new(-500.0, -500.0, 500.0, 500.0, 0.1);
+        // 0.035 device px per world unit: 96*0.035 = 3.36 px (culled),
+        // 144*0.035 = 5.04 px (drawn).
+        let viewport = WorldViewport::new(-500.0, -500.0, 500.0, 500.0, 0.035);
         assert!(paper_marks(Paper::SquaredSmall, &viewport).is_empty());
         assert!(!paper_marks(Paper::SquaredLarge, &viewport).is_empty());
 

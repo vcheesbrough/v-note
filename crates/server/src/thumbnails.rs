@@ -269,6 +269,56 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
     pixmap.encode_png().map_err(|error| error.to_string())
 }
 
+/// Lay the faint paper grain over the whole pixmap, under both the rules and
+/// the ink.
+///
+/// Tiled in **device space**, so the grain keeps a constant size regardless of
+/// how far the page's ink had to be scaled to fit the preview — exactly as it
+/// does on the live canvases. Composited straight into the pixmap rather than
+/// through a `Pattern` shader: the tile is small, the surface is 240×160, and a
+/// direct blend keeps the alpha maths obvious and identical to the clients'.
+fn draw_paper_texture(pixmap: &mut Pixmap, paper: Paper) {
+    if !protocol::paper_has_texture(paper) {
+        return;
+    }
+    let tile = protocol::paper_texture_tile();
+    let size = protocol::PAPER_TEXTURE_TILE_SIZE;
+    let [grain_r, grain_g, grain_b] = protocol::PAPER_TEXTURE_COLOR_RGB;
+    let width = pixmap.width() as usize;
+    let height = pixmap.height() as usize;
+    let pixels = pixmap.pixels_mut();
+
+    for y in 0..height {
+        for x in 0..width {
+            let alpha = tile[(y % size) * size + (x % size)];
+            if alpha == 0 {
+                continue;
+            }
+            let index = y * width + x;
+            let base = pixels[index];
+            // Source-over with an opaque backdrop, so the result stays opaque
+            // and the blend is a plain lerp toward the grain colour.
+            let blend = |dst: u8, src: u8| -> u8 {
+                let dst = u32::from(dst);
+                let src = u32::from(src);
+                let a = u32::from(alpha);
+                ((src * a + dst * (255 - a) + 127) / 255) as u8
+            };
+            if let Some(mixed) = tiny_skia::ColorU8::from_rgba(
+                blend(base.red(), grain_r),
+                blend(base.green(), grain_g),
+                blend(base.blue(), grain_b),
+                255,
+            )
+            .premultiply()
+            .into()
+            {
+                pixels[index] = mixed;
+            }
+        }
+    }
+}
+
 /// Rasterize the page's paper behind the ink, under the *same* transform the
 /// stroke loop uses. The world viewport is the exact inverse of that transform
 /// over the whole `0..WIDTH × 0..HEIGHT` pixmap, so marks are enumerated for
@@ -282,6 +332,7 @@ fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offs
     if paper == Paper::None || scale <= 0.0 || !scale.is_finite() {
         return;
     }
+    draw_paper_texture(pixmap, paper);
     let to_world = |device: f32, offset: f32| ((device - offset) / scale) as f64;
     let viewport = WorldViewport::new(
         to_world(0.0, offset_x),
@@ -834,6 +885,50 @@ mod tests {
         "/testdata/ruled_margin_narrow_thumbnail.png"
     );
 
+    /// A page whose fitted viewport reaches past `MARGIN_X`, so the margin is
+    /// actually in frame. `canonical_v1_page` spans only x 10..220 and fits to a
+    /// viewport ending near x 232 — fine for the ink goldens it exists for, but
+    /// with the margin now at 288 it would silently exercise none of the margin
+    /// behaviour these tests are about.
+    fn margin_reaching_page() -> Vec<Stroke> {
+        vec![
+            Stroke {
+                id: "wide_line".to_string(),
+                style: StrokeStyle::default_solid_round(),
+                points: vec![
+                    StrokePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        t: 0,
+                        pressure: None,
+                    },
+                    StrokePoint {
+                        x: 300.0,
+                        y: 240.0,
+                        t: 8,
+                        pressure: None,
+                    },
+                    StrokePoint {
+                        x: 600.0,
+                        y: 60.0,
+                        t: 16,
+                        pressure: None,
+                    },
+                ],
+            },
+            Stroke {
+                id: "wide_dot".to_string(),
+                style: StrokeStyle::default_solid_round(),
+                points: vec![StrokePoint {
+                    x: 460.0,
+                    y: 290.0,
+                    t: 0,
+                    pressure: None,
+                }],
+            },
+        ]
+    }
+
     /// Rule/grid pixels blend toward white, which preserves their `b > g > r`
     /// channel ordering — and that ordering is disjoint from the green-dominant
     /// ink classifier.
@@ -870,7 +965,7 @@ mod tests {
     /// geometry, colours or width floor cannot slip through unnoticed.
     #[test]
     fn ruled_margin_narrow_thumbnail_matches_golden() {
-        let bytes = render(Paper::RuledMarginNarrow, &canonical_v1_page())
+        let bytes = render(Paper::RuledMarginNarrow, &margin_reaching_page())
             .expect("thumbnail should render");
         let rendered = Pixmap::decode_png(&bytes).expect("rendered thumbnail should decode");
         let golden_bytes = std::fs::read(RULED_GOLDEN_PATH).expect(
@@ -891,7 +986,7 @@ mod tests {
     #[test]
     #[ignore = "regenerates the committed ruled paper golden image"]
     fn regenerate_ruled_margin_narrow_golden() {
-        let bytes = render(Paper::RuledMarginNarrow, &canonical_v1_page())
+        let bytes = render(Paper::RuledMarginNarrow, &margin_reaching_page())
             .expect("thumbnail should render");
         std::fs::write(RULED_GOLDEN_PATH, bytes).expect("golden should be writable");
     }
@@ -901,7 +996,7 @@ mod tests {
     #[test]
     fn every_paper_draws_and_only_margin_papers_paint_a_margin() {
         for paper in Paper::ALL {
-            let pixmap = rendered(paper, &canonical_v1_page());
+            let pixmap = rendered(paper, &margin_reaching_page());
             let rules = count_pixels(&pixmap, is_rule_pixel);
             let margin = count_pixels(&pixmap, is_margin_pixel);
             if paper == Paper::None {
@@ -916,6 +1011,77 @@ mod tests {
                 assert_eq!(margin, 0, "{} should have no margin", paper.wire_value());
             }
         }
+    }
+
+    /// The grain reaches the pixmap, stays neutral, and stays subtle.
+    ///
+    /// Neutrality is the load-bearing part: the grain touches roughly a quarter
+    /// of every pixel on the surface, so a colour cast would be picked up by the
+    /// rule and margin classifiers everywhere and quietly invalidate every other
+    /// paper assertion in this file.
+    #[test]
+    fn texture_covers_the_surface_without_tinting_it() {
+        // Exercised in isolation, so antialiased rule edges cannot be mistaken
+        // for grain.
+        let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("pixmap should allocate");
+        pixmap.fill(Color::WHITE);
+        draw_paper_texture(&mut pixmap, Paper::RuledNarrow);
+
+        let mut grain = 0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+                let (red, green, blue) = (pixel.red(), pixel.green(), pixel.blue());
+                if (red, green, blue) == (255, 255, 255) {
+                    continue;
+                }
+                grain += 1;
+                assert_eq!(red, green, "grain must stay neutral at ({x}, {y})");
+                assert_eq!(green, blue, "grain must stay neutral at ({x}, {y})");
+                assert!(
+                    red >= 240,
+                    "grain must stay subtle, got {red} at ({x}, {y})"
+                );
+                assert!(!is_rule_pixel(pixel) && !is_margin_pixel(pixel));
+            }
+        }
+        assert!(
+            grain > 500,
+            "grain should cover the surface, got {grain} cells"
+        );
+
+        // A blank page is left completely untouched.
+        let mut blank = Pixmap::new(WIDTH, HEIGHT).expect("pixmap should allocate");
+        blank.fill(Color::WHITE);
+        draw_paper_texture(&mut blank, Paper::None);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = blank.pixel(x, y).expect("pixel should exist");
+                assert_eq!(
+                    (pixel.red(), pixel.green(), pixel.blue()),
+                    (255, 255, 255),
+                    "Paper::None must stay ungrained"
+                );
+            }
+        }
+
+        // And `render` really applies it — counting only strictly neutral
+        // near-white pixels, which an antialiased (bluish) rule edge never is.
+        let full = rendered(Paper::RuledNarrow, &margin_reaching_page());
+        let mut neutral = 0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = full.pixel(x, y).expect("pixel should exist");
+                let (red, green, blue) = (pixel.red(), pixel.green(), pixel.blue());
+                if red == green && green == blue && (240..255).contains(&red) {
+                    neutral += 1;
+                }
+            }
+        }
+        assert!(
+            neutral > 500,
+            "render should lay the grain, got {neutral} cells"
+        );
     }
 
     /// Paper goes behind the ink: every fully-covered ink pixel (the stroke
@@ -968,8 +1134,8 @@ mod tests {
                     pressure: None,
                 },
                 StrokePoint {
-                    x: 3000.0,
-                    y: 2000.0,
+                    x: 6000.0,
+                    y: 4000.0,
                     t: 10,
                     pressure: None,
                 },
