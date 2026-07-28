@@ -13,7 +13,10 @@ use crate::AppState;
 const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
 const PADDING: f32 = 12.0;
-const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 20.0;
+// Preview-only width floor so heavily scaled-down ink stays visible without
+// turning into hairlines. Was 20.0, which on a full page of handwriting (small
+// scale, so the floor dominates every stroke) merged all ink into blobs.
+const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 4.0;
 
 pub fn recover_pending(state: AppState) {
     let Some(pool) = state.db.clone() else {
@@ -326,8 +329,9 @@ fn draw_paper_texture(pixmap: &mut Pixmap, paper: Paper) {
 ///
 /// Marks use `Butt` caps (a `Round` cap would bulge each line's ends past the
 /// viewport edge) and the paper's own [`protocol::MIN_PAPER_MARK_DEVICE_WIDTH`]
-/// floor — emphatically *not* [`MIN_THUMBNAIL_STROKE_WIDTH`], which is 20 px and
-/// would turn a 240×160 preview solid blue.
+/// floor — emphatically *not* the ink preview floor
+/// [`MIN_THUMBNAIL_STROKE_WIDTH`], which would thicken the rules well past the
+/// hairlines they are on the live canvases.
 fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offset_y: f32) {
     if paper == Paper::None || scale <= 0.0 || !scale.is_finite() {
         return;
@@ -434,7 +438,12 @@ fn render_pressure_stroke(
         .iter()
         .map(|point| nib_px(point.pressure))
         .fold(0.0_f32, f32::max);
-    if stroke.points.len() == 1 || extent * scale < max_nib {
+    // Classify against the *unboosted* nib: "is the stroke shorter than its own
+    // pen width" is a property of the ink, not of the preview floor. Comparing
+    // against the boosted nib collapsed every letter-sized stroke on a dense
+    // page (where the floor dominates) into a circle. The dot itself still
+    // renders at the boosted width so genuine taps stay visible.
+    if stroke.points.len() == 1 || extent * scale < max_nib / boost {
         let center_x = ((min_x + max_x) / 2.0) as f32;
         let center_y = ((min_y + max_y) / 2.0) as f32;
         if let Some(dot) = PathBuilder::from_circle(center_x, center_y, max_nib / (2.0 * scale)) {
@@ -547,8 +556,8 @@ mod tests {
         .expect("thumbnail should render");
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
         let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
-        assert!((18..=22).contains(&(max_x - min_x + 1)));
-        assert!((18..=22).contains(&(max_y - min_y + 1)));
+        assert!((3..=6).contains(&(max_x - min_x + 1)));
+        assert!((3..=6).contains(&(max_y - min_y + 1)));
         assert!((min_x + max_x).abs_diff(WIDTH - 1) <= 1);
         assert!((min_y + max_y).abs_diff(HEIGHT - 1) <= 1);
     }
@@ -640,46 +649,12 @@ mod tests {
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
         let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
         // A visible, roughly round blob (not an empty thumbnail).
-        assert!((max_x - min_x + 1) >= 10, "tap dot has visible width");
-        assert!((max_y - min_y + 1) >= 10, "tap dot has visible height");
+        assert!((max_x - min_x + 1) >= 3, "tap dot has visible width");
+        assert!((max_y - min_y + 1) >= 3, "tap dot has visible height");
     }
 
-    /// A genuine short **diagonal** v2 stroke (Δx ≈ Δy, each individually
-    /// under the nib width, but the true diagonal distance over it) must
-    /// still render as an elongated line — not collapse to a dot/circle via
-    /// the `max(Δx, Δy)` extent heuristic.
-    #[test]
-    fn pressure_stroke_short_diagonal_stays_a_line() {
-        let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("thumbnail pixmap should allocate");
-        pixmap.fill(Color::WHITE);
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(0, 0, 0, 0xff);
-        let stroke = Stroke {
-            id: "diag".to_string(),
-            style: StrokeStyle::default_solid_round_pressure(),
-            points: vec![
-                StrokePoint {
-                    x: 0.0,
-                    y: 0.0,
-                    t: 0,
-                    pressure: Some(1.0),
-                },
-                StrokePoint {
-                    x: 16.0,
-                    y: 16.0,
-                    t: 8,
-                    pressure: Some(1.0),
-                },
-            ],
-        };
-        render_pressure_stroke(
-            &mut pixmap,
-            &stroke,
-            &paint,
-            Transform::from_scale(1.0, 1.0),
-            1.0,
-        );
-
+    /// Ink bounds of everything drawn on a raw pixmap (any non-white pixel).
+    fn drawn_bounds(pixmap: &Pixmap) -> (u32, u32, u32, u32) {
         let mut min_x = WIDTH;
         let mut max_x = 0;
         let mut min_y = HEIGHT;
@@ -695,19 +670,133 @@ mod tests {
                 }
             }
         }
-        assert!(min_x <= max_x, "diagonal stroke should render some ink");
+        assert!(min_x <= max_x, "expected some ink to be drawn");
+        (min_x, max_x, min_y, max_y)
+    }
+
+    /// A genuine short **diagonal** v2 stroke (Δx and Δy each individually
+    /// under the nib width, but the true diagonal distance over it) must
+    /// still render as an elongated line — not collapse to a dot/circle via
+    /// the old `max(Δx, Δy)` extent heuristic.
+    #[test]
+    fn pressure_stroke_short_diagonal_stays_a_line() {
+        let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("thumbnail pixmap should allocate");
+        pixmap.fill(Color::WHITE);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(0, 0, 0, 0xff);
+        // Δx = Δy = 3 world units at scale 1: each axis alone is under the 4px
+        // full-pressure nib, the √2 diagonal (≈4.24) is over it.
+        let stroke = Stroke {
+            id: "diag".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![
+                StrokePoint {
+                    x: 20.0,
+                    y: 20.0,
+                    t: 0,
+                    pressure: Some(1.0),
+                },
+                StrokePoint {
+                    x: 23.0,
+                    y: 23.0,
+                    t: 8,
+                    pressure: Some(1.0),
+                },
+            ],
+        };
+        render_pressure_stroke(
+            &mut pixmap,
+            &stroke,
+            &paint,
+            Transform::from_scale(1.0, 1.0),
+            1.0,
+        );
+
+        let (min_x, max_x, min_y, max_y) = drawn_bounds(&pixmap);
         let width = max_x - min_x + 1;
         let height = max_y - min_y + 1;
-        // The old `max(Δx, Δy)` heuristic wrongly collapsed this stroke to a
-        // ~20px circle (nib diameter); the real diagonal segment plus round
-        // caps spans further in both axes.
+        // A collapsed dot spans just the 4px nib; the real segment plus its
+        // round caps spans the 3px travel on top of that in both axes.
         assert!(
-            width > 25,
+            width >= 6,
             "diagonal stroke should render as a line, not a dot (width={width})"
         );
         assert!(
-            height > 25,
+            height >= 6,
             "diagonal stroke should render as a line, not a dot (height={height})"
+        );
+    }
+
+    /// On a dense page (large world extent, so the preview scale is small and
+    /// the width floor dominates), letter-sized strokes must still render as
+    /// short lines. The old classification compared the stroke extent against
+    /// the *boosted* nib, which collapsed every such stroke into a ~20px
+    /// circle — a full page of handwriting became rows of circles.
+    #[test]
+    fn dense_page_short_strokes_stay_lines_not_circles() {
+        // A long stroke across the top fixes the page bounds (scale ≈ 0.14);
+        // a letter-sized horizontal stroke sits alone in the bottom half.
+        let long = Stroke {
+            id: "long".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: (0..=10)
+                .map(|i| StrokePoint {
+                    x: i as f64 * 150.0,
+                    y: 0.0,
+                    t: i as i64,
+                    pressure: Some(0.7),
+                })
+                .collect(),
+        };
+        let short = Stroke {
+            id: "short".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![
+                StrokePoint {
+                    x: 700.0,
+                    y: 800.0,
+                    t: 0,
+                    pressure: Some(0.7),
+                },
+                StrokePoint {
+                    x: 730.0,
+                    y: 800.0,
+                    t: 8,
+                    pressure: Some(0.7),
+                },
+            ],
+        };
+        let bytes = render(Paper::None, &[long, short]).expect("thumbnail should render");
+        let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
+
+        // Bounds of the short stroke only: scan the bottom half of the preview.
+        let mut min_x = WIDTH;
+        let mut max_x = 0;
+        let mut min_y = HEIGHT;
+        let mut max_y = 0;
+        for y in HEIGHT / 2..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+                if pixel.green() > pixel.red() && pixel.green() > pixel.blue() {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(min_x <= max_x, "short stroke should render some ink");
+        let width = max_x - min_x + 1;
+        let height = max_y - min_y + 1;
+        // The old collapse drew a ~20px circle here; the fixed renderer draws a
+        // floored-width line: a few px tall, wider than tall.
+        assert!(
+            height <= 8,
+            "short stroke should stay a thin line, not a circle (height={height})"
+        );
+        assert!(
+            width > height,
+            "short stroke should be elongated, not round (width={width} height={height})"
         );
     }
 
