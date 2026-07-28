@@ -425,7 +425,10 @@ fn render_pressure_stroke(
             )
         },
     );
-    let extent = (max_x - min_x).max(max_y - min_y) as f32;
+    // Bounding-box diagonal, not axis-aligned max — a diagonal stroke's
+    // traveled distance is up to √2 larger than either axis alone, and using
+    // just the max wrongly collapsed genuine short diagonal strokes into dots.
+    let extent = (max_x - min_x).hypot(max_y - min_y) as f32;
     let max_nib = stroke
         .points
         .iter()
@@ -639,6 +642,73 @@ mod tests {
         // A visible, roughly round blob (not an empty thumbnail).
         assert!((max_x - min_x + 1) >= 10, "tap dot has visible width");
         assert!((max_y - min_y + 1) >= 10, "tap dot has visible height");
+    }
+
+    /// A genuine short **diagonal** v2 stroke (Δx ≈ Δy, each individually
+    /// under the nib width, but the true diagonal distance over it) must
+    /// still render as an elongated line — not collapse to a dot/circle via
+    /// the `max(Δx, Δy)` extent heuristic.
+    #[test]
+    fn pressure_stroke_short_diagonal_stays_a_line() {
+        let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("thumbnail pixmap should allocate");
+        pixmap.fill(Color::WHITE);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(0, 0, 0, 0xff);
+        let stroke = Stroke {
+            id: "diag".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![
+                StrokePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    t: 0,
+                    pressure: Some(1.0),
+                },
+                StrokePoint {
+                    x: 16.0,
+                    y: 16.0,
+                    t: 8,
+                    pressure: Some(1.0),
+                },
+            ],
+        };
+        render_pressure_stroke(
+            &mut pixmap,
+            &stroke,
+            &paint,
+            Transform::from_scale(1.0, 1.0),
+            1.0,
+        );
+
+        let mut min_x = WIDTH;
+        let mut max_x = 0;
+        let mut min_y = HEIGHT;
+        let mut max_y = 0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+                if pixel.red() < 255 || pixel.green() < 255 || pixel.blue() < 255 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(min_x <= max_x, "diagonal stroke should render some ink");
+        let width = max_x - min_x + 1;
+        let height = max_y - min_y + 1;
+        // The old `max(Δx, Δy)` heuristic wrongly collapsed this stroke to a
+        // ~20px circle (nib diameter); the real diagonal segment plus round
+        // caps spans further in both axes.
+        assert!(
+            width > 25,
+            "diagonal stroke should render as a line, not a dot (width={width})"
+        );
+        assert!(
+            height > 25,
+            "diagonal stroke should render as a line, not a dot (height={height})"
+        );
     }
 
     /// At full pressure a v2 stroke reaches the same nib width as the constant v1
