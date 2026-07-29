@@ -145,37 +145,40 @@ test.describe('ink page channel', () => {
     // out to a near-invisible hairline instead. Both only reproduce once real
     // ink spans a wide enough world extent to shrink the server's fitted
     // preview scale — a single short stroke alone on a page does not trigger
-    // either bug, so this submits one long anchor stroke (to fix a small
-    // scale) plus several short "letter" strokes at well-separated locations.
+    // either bug.
+    //
+    // Two single-point "anchor" taps at opposite corners fix that scale
+    // without drawing a line through the canvas (a line anchor would risk
+    // visually overlapping a letter and letting its ink alone satisfy the
+    // assertions below). Three short "letter" strokes sit well inside those
+    // corners; each is checked in its own cropped region so a regression
+    // that makes the letters vanish or shrink to dots can't hide behind
+    // the anchors or the other letters.
     const title = uniqueTitle('dense-ink');
     const pageId = await createPage(request, title);
     const ticket = await realtimeTicket(request);
 
-    const anchor = {
-      id: `stroke-anchor-${crypto.randomUUID()}`,
-      style: {
-        tool_kind: 'solid_round',
-        style_version: 2,
-        parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' },
-      },
-      points: [
-        { x: 0.0, y: 0.0, t: 0, pressure: 0.7 },
-        { x: 1500.0, y: 1000.0, t: 1, pressure: 0.7 },
-      ],
+    const pressureStyle = {
+      tool_kind: 'solid_round',
+      style_version: 2,
+      parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' },
     };
-    // Short, separated "letters" so a regression that merges ink into one
-    // blob (circles) or washes it to invisibility both show up distinctly.
-    const letters = [
+    const anchors = [
+      [0, 0],
+      [1500, 1000],
+    ].map(([x, y], index) => ({
+      id: `stroke-anchor-${index}-${crypto.randomUUID()}`,
+      style: pressureStyle,
+      points: [{ x, y, t: 0, pressure: 0.7 }],
+    }));
+    const letterOrigins: [number, number][] = [
       [200, 100],
       [700, 400],
       [1200, 850],
-    ].map(([x, y], index) => ({
+    ];
+    const letters = letterOrigins.map(([x, y], index) => ({
       id: `stroke-letter-${index}-${crypto.randomUUID()}`,
-      style: {
-        tool_kind: 'solid_round',
-        style_version: 2,
-        parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' },
-      },
+      style: pressureStyle,
       points: [
         { x, y, t: 0, pressure: 0.7 },
         { x: x + 30, y, t: 1, pressure: 0.7 },
@@ -189,7 +192,7 @@ test.describe('ink page channel', () => {
         { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
-          message: { type: 'commit-batch', client_batch_id: 'dense-ink-1', strokes: [anchor, ...letters] },
+          message: { type: 'commit-batch', client_batch_id: 'dense-ink-1', strokes: [...anchors, ...letters] },
         },
       ],
       settleMs: 500,
@@ -210,12 +213,37 @@ test.describe('ink page channel', () => {
     expect(image.status()).toBe(200);
     const pngBase64 = (await image.body()).toString('base64');
 
+    // Mirrors the fitted-scale/offset math in crates/server/src/thumbnails.rs
+    // render(): world bounds come from the two corner anchors (0,0) and
+    // (1500,1000), which dominate the three inset letters.
+    const THUMB_WIDTH = 240;
+    const THUMB_HEIGHT = 160;
+    const PADDING = 12;
+    const boundsW = 1500;
+    const boundsH = 1000;
+    const scale = Math.min((THUMB_WIDTH - PADDING * 2) / boundsW, (THUMB_HEIGHT - PADDING * 2) / boundsH);
+    const offsetX = (THUMB_WIDTH - boundsW * scale) / 2;
+    const offsetY = (THUMB_HEIGHT - boundsH * scale) / 2;
+    // Per-letter crop window in device px, generous enough to survive
+    // antialiasing/round-cap spread but well short of reaching a neighbor.
+    const MARGIN = 12;
+    const letterWindows = letterOrigins.map(([x, y]) => {
+      const cx = (x + 15) * scale + offsetX;
+      const cy = y * scale + offsetY;
+      return {
+        minX: Math.max(0, Math.round(cx - MARGIN)),
+        maxX: Math.min(THUMB_WIDTH - 1, Math.round(cx + MARGIN)),
+        minY: Math.max(0, Math.round(cy - MARGIN)),
+        maxY: Math.min(THUMB_HEIGHT - 1, Math.round(cy + MARGIN)),
+      };
+    });
+
     // Decode via the browser's own PNG decoder (canvas), so no extra e2e
     // dependency is needed — the page under test already runs in a real
     // browser context.
-    const analysis = await page.evaluate(
-      ({ base64 }) =>
-        new Promise<{ darkestGreen: number; inkedFraction: number }>((resolve, reject) => {
+    const perLetter = await page.evaluate(
+      ({ base64, windows }) =>
+        new Promise<{ darkestGreen: number; width: number; height: number }[]>((resolve, reject) => {
           const img = new Image();
           img.onload = () => {
             const canvas = document.createElement('canvas');
@@ -223,33 +251,48 @@ test.describe('ink page channel', () => {
             canvas.height = img.height;
             const ctx = canvas.getContext('2d')!;
             ctx.drawImage(img, 0, 0);
-            const { data, width, height } = ctx.getImageData(0, 0, img.width, img.height);
-            let darkestGreen = 255;
-            let inked = 0;
-            for (let i = 0; i < data.length; i += 4) {
-              const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
-              if (g > r && g > b) {
-                inked++;
-                darkestGreen = Math.min(darkestGreen, g);
+            const results = windows.map((w: any) => {
+              const { data } = ctx.getImageData(w.minX, w.minY, w.maxX - w.minX + 1, w.maxY - w.minY + 1);
+              const regionW = w.maxX - w.minX + 1;
+              let darkestGreen = 255;
+              let minX = regionW;
+              let maxX = 0;
+              let minY = w.maxY - w.minY + 1;
+              let maxY = 0;
+              for (let py = 0; py < w.maxY - w.minY + 1; py++) {
+                for (let px = 0; px < regionW; px++) {
+                  const i = (py * regionW + px) * 4;
+                  const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
+                  if (g > r && g > b) {
+                    darkestGreen = Math.min(darkestGreen, g);
+                    minX = Math.min(minX, px);
+                    maxX = Math.max(maxX, px);
+                    minY = Math.min(minY, py);
+                    maxY = Math.max(maxY, py);
+                  }
+                }
               }
-            }
-            resolve({ darkestGreen, inkedFraction: inked / (width * height) });
+              return { darkestGreen, width: maxX >= minX ? maxX - minX + 1 : 0, height: maxY >= minY ? maxY - minY + 1 : 0 };
+            });
+            resolve(results);
           };
           img.onerror = () => reject(new Error('thumbnail PNG failed to decode'));
           img.src = `data:image/png;base64,${base64}`;
         }),
-      { base64: pngBase64 },
+      { base64: pngBase64, windows: letterWindows },
     );
 
-    // Canonical ink (#006400) has green=100; a near-invisible wash (the
-    // width-double-scaling bug) never gets ink dark enough.
-    expect(analysis.darkestGreen, 'thumbnail should contain solid ink, not a faint wash').toBeLessThanOrEqual(150);
-    // Three short, separated strokes on a 240x160 preview should cover a small
-    // fraction of it; the circle-collapse bug drew large overlapping circles
-    // that covered much more.
-    expect(analysis.inkedFraction, 'thumbnail should be mostly legible whitespace, not merged circles').toBeLessThan(
-      0.15,
-    );
+    perLetter.forEach((result, index) => {
+      // Canonical ink (#006400) has green=100; a near-invisible wash (the
+      // width-double-scaling bug) never gets ink dark enough.
+      expect(result.darkestGreen, `letter ${index} should be solid ink, not a faint wash`).toBeLessThanOrEqual(150);
+      expect(result.width, `letter ${index} should render as visible ink`).toBeGreaterThan(0);
+      // The circle-collapse bug drew a ~20px circle (roughly as tall as
+      // wide); a correctly rendered short horizontal stroke is elongated.
+      expect(result.width, `letter ${index} should be elongated, not round (w=${result.width} h=${result.height})`).toBeGreaterThan(
+        result.height,
+      );
+    });
   });
 
   test('commits a stroke batch and assigns a monotonic sequence', async ({ page, request }) => {
