@@ -244,9 +244,15 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
             continue;
         }
 
+        // `stroke_path`/`fill_path` apply `transform` to width the same as to
+        // geometry (confirmed empirically: a world-space width scales with the
+        // transform's scale factor), so the floor must be expressed in world
+        // units — dividing the device-space floor by `scale` — rather than
+        // pre-multiplying by `scale` and letting the transform scale it again.
+        let width_world =
+            (stroke.style.parameters.width as f32).max(MIN_THUMBNAIL_STROKE_WIDTH / scale);
         let pen = SkiaStroke {
-            // Fitting wide world-space ink must not turn the preview into hairlines.
-            width: (stroke.style.parameters.width as f32 * scale).max(MIN_THUMBNAIL_STROKE_WIDTH),
+            width: width_world,
             line_cap: LineCap::Round,
             line_join: LineJoin::Round,
             ..Default::default()
@@ -254,7 +260,7 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         if stroke.points.len() == 1 {
             let point = &stroke.points[0];
             if let Some(dot) =
-                PathBuilder::from_circle(point.x as f32, point.y as f32, pen.width / (2.0 * scale))
+                PathBuilder::from_circle(point.x as f32, point.y as f32, width_world / 2.0)
             {
                 pixmap.fill_path(&dot, &paint, FillRule::Winding, transform, None);
             }
@@ -454,7 +460,11 @@ fn render_pressure_stroke(
 
     for pair in stroke.points.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
-        let seg_width = (nib_px(a.pressure) + nib_px(b.pressure)) / 2.0;
+        // nib_px is a device-space diameter; stroke_path scales width by
+        // `transform` the same as geometry, so convert to world space here
+        // (matching the dot branch's `max_nib / (2.0 * scale)` above) instead
+        // of letting the transform's scale apply a second time.
+        let seg_width = (nib_px(a.pressure) + nib_px(b.pressure)) / (2.0 * scale);
         let pen = SkiaStroke {
             width: seg_width,
             line_cap: LineCap::Round,
