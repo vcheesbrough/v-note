@@ -138,6 +138,120 @@ test.describe('ink page channel', () => {
     expect((await request.get(firstSummary.thumbnail.url)).status()).toBe(410);
   });
 
+  test('a dense page of short pressure strokes renders as legible ink, not circles', async ({ page, request }) => {
+    // Regression coverage for iteration 21 (#281): the thumbnail renderer once
+    // collapsed every letter-sized v2 stroke on a dense page into a filled
+    // circle, and a follow-up bug double-scaled stroke width so lines washed
+    // out to a near-invisible hairline instead. Both only reproduce once real
+    // ink spans a wide enough world extent to shrink the server's fitted
+    // preview scale — a single short stroke alone on a page does not trigger
+    // either bug, so this submits one long anchor stroke (to fix a small
+    // scale) plus several short "letter" strokes at well-separated locations.
+    const title = uniqueTitle('dense-ink');
+    const pageId = await createPage(request, title);
+    const ticket = await realtimeTicket(request);
+
+    const anchor = {
+      id: `stroke-anchor-${crypto.randomUUID()}`,
+      style: {
+        tool_kind: 'solid_round',
+        style_version: 2,
+        parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' },
+      },
+      points: [
+        { x: 0.0, y: 0.0, t: 0, pressure: 0.7 },
+        { x: 1500.0, y: 1000.0, t: 1, pressure: 0.7 },
+      ],
+    };
+    // Short, separated "letters" so a regression that merges ink into one
+    // blob (circles) or washes it to invisibility both show up distinctly.
+    const letters = [
+      [200, 100],
+      [700, 400],
+      [1200, 850],
+    ].map(([x, y], index) => ({
+      id: `stroke-letter-${index}-${crypto.randomUUID()}`,
+      style: {
+        tool_kind: 'solid_round',
+        style_version: 2,
+        parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' },
+      },
+      points: [
+        { x, y, t: 0, pressure: 0.7 },
+        { x: x + 30, y, t: 1, pressure: 0.7 },
+      ],
+    }));
+
+    await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 100,
+          message: { type: 'commit-batch', client_batch_id: 'dense-ink-1', strokes: [anchor, ...letters] },
+        },
+      ],
+      settleMs: 500,
+    });
+
+    await expect
+      .poll(async () => {
+        const summary = (await (await request.get('/api/pages')).json()).pages.find(
+          (item: any) => item.id === pageId,
+        );
+        return summary?.thumbnail?.status;
+      })
+      .toBe('available');
+    const summary = (await (await request.get('/api/pages')).json()).pages.find(
+      (item: any) => item.id === pageId,
+    );
+    const image = await request.get(summary.thumbnail.url);
+    expect(image.status()).toBe(200);
+    const pngBase64 = (await image.body()).toString('base64');
+
+    // Decode via the browser's own PNG decoder (canvas), so no extra e2e
+    // dependency is needed — the page under test already runs in a real
+    // browser context.
+    const analysis = await page.evaluate(
+      ({ base64 }) =>
+        new Promise<{ darkestGreen: number; inkedFraction: number }>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d')!;
+            ctx.drawImage(img, 0, 0);
+            const { data, width, height } = ctx.getImageData(0, 0, img.width, img.height);
+            let darkestGreen = 255;
+            let inked = 0;
+            for (let i = 0; i < data.length; i += 4) {
+              const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
+              if (g > r && g > b) {
+                inked++;
+                darkestGreen = Math.min(darkestGreen, g);
+              }
+            }
+            resolve({ darkestGreen, inkedFraction: inked / (width * height) });
+          };
+          img.onerror = () => reject(new Error('thumbnail PNG failed to decode'));
+          img.src = `data:image/png;base64,${base64}`;
+        }),
+      { base64: pngBase64 },
+    );
+
+    // Canonical ink (#006400) has green=100; a near-invisible wash (the
+    // width-double-scaling bug) never gets ink dark enough.
+    expect(analysis.darkestGreen, 'thumbnail should contain solid ink, not a faint wash').toBeLessThanOrEqual(150);
+    // Three short, separated strokes on a 240x160 preview should cover a small
+    // fraction of it; the circle-collapse bug drew large overlapping circles
+    // that covered much more.
+    expect(analysis.inkedFraction, 'thumbnail should be mostly legible whitespace, not merged circles').toBeLessThan(
+      0.15,
+    );
+  });
+
   test('commits a stroke batch and assigns a monotonic sequence', async ({ page, request }) => {
     const pageId = await createPage(request, uniqueTitle('ink-commit'));
     const ticket = await realtimeTicket(request);
