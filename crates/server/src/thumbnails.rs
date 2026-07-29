@@ -780,10 +780,15 @@ mod tests {
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
 
         // Bounds of the short stroke only: scan the bottom half of the preview.
+        // Track the darkest green channel seen too — a stroke rendered at
+        // near-zero coverage (e.g. the width-double-scaling bug that made
+        // lines ~2px and near-transparent) would still satisfy a bounds-only
+        // check while being invisible to a user.
         let mut min_x = WIDTH;
         let mut max_x = 0;
         let mut min_y = HEIGHT;
         let mut max_y = 0;
+        let mut darkest_green = 255u8;
         for y in HEIGHT / 2..HEIGHT {
             for x in 0..WIDTH {
                 let pixel = pixmap.pixel(x, y).expect("pixel should exist");
@@ -792,6 +797,7 @@ mod tests {
                     max_x = max_x.max(x);
                     min_y = min_y.min(y);
                     max_y = max_y.max(y);
+                    darkest_green = darkest_green.min(pixel.green());
                 }
             }
         }
@@ -807,6 +813,12 @@ mod tests {
         assert!(
             width > height,
             "short stroke should be elongated, not round (width={width} height={height})"
+        );
+        // Canonical ink (#006400) has green=100; require getting most of the
+        // way there so a near-invisible wash (high green, low coverage) fails.
+        assert!(
+            darkest_green <= 150,
+            "short stroke should reach near-full ink opacity, not a faint wash (darkest green channel = {darkest_green})"
         );
     }
 
@@ -1325,9 +1337,9 @@ mod tests {
         );
     }
 
-    /// The paper width floor is its own 1 px, not the 20 px thumbnail ink floor:
-    /// if that floor leaked, each rule would be a 20-px band and the preview
-    /// would be solid blue.
+    /// The paper width floor is its own 1 px, not the thumbnail ink floor
+    /// ([`MIN_THUMBNAIL_STROKE_WIDTH`]): if that floor leaked, each rule would
+    /// be a multi-px band instead of a hairline.
     #[test]
     fn paper_runs_stay_hairline_thin() {
         let pixmap = rendered(Paper::RuledNarrow, &canonical_v1_page());
@@ -1346,7 +1358,7 @@ mod tests {
         assert!(widest > 0, "rules should be drawn at all");
         assert!(
             widest <= 3,
-            "rule runs are {widest}px — the 20px thumbnail ink floor leaked into paper"
+            "rule runs are {widest}px — the thumbnail ink floor leaked into paper"
         );
     }
 
