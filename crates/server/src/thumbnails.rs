@@ -435,10 +435,12 @@ fn render_pressure_stroke(
             )
         },
     );
-    // Bounding-box diagonal, not axis-aligned max — a diagonal stroke's
-    // traveled distance is up to √2 larger than either axis alone, and using
-    // just the max wrongly collapsed genuine short diagonal strokes into dots.
-    let extent = (max_x - min_x).hypot(max_y - min_y) as f32;
+    // Axis-aligned max, matching Android's live-canvas heuristic
+    // (`maxOf(maxX - minX, maxY - minY) < maxWidth` in PageCanvas.kt) — a
+    // bounding-box diagonal would classify some short diagonal strokes
+    // differently than Android does for the same ink, so the library preview
+    // would disagree with the page itself about the shape of a stroke.
+    let extent = (max_x - min_x).max(max_y - min_y) as f32;
     let max_nib = stroke
         .points
         .iter()
@@ -684,18 +686,20 @@ mod tests {
         (min_x, max_x, min_y, max_y)
     }
 
-    /// A genuine short **diagonal** v2 stroke (Δx and Δy each individually
-    /// under the nib width, but the true diagonal distance over it) must
-    /// still render as an elongated line — not collapse to a dot/circle via
-    /// the old `max(Δx, Δy)` extent heuristic.
+    /// A short **diagonal** v2 stroke (Δx and Δy each individually under the
+    /// nib width) must collapse to a dot, matching Android's live-canvas
+    /// `maxOf(Δx, Δy) < maxWidth` classifier exactly (`PageCanvas.kt`) — even
+    /// though the true diagonal distance is technically larger. Using the
+    /// bounding-box diagonal instead would make the library preview disagree
+    /// with what the page itself renders for the same stroke.
     #[test]
-    fn pressure_stroke_short_diagonal_stays_a_line() {
+    fn pressure_stroke_short_diagonal_matches_android_and_collapses_to_dot() {
         let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("thumbnail pixmap should allocate");
         pixmap.fill(Color::WHITE);
         let mut paint = Paint::default();
         paint.set_color_rgba8(0, 0, 0, 0xff);
         // Δx = Δy = 3 world units at scale 1: each axis alone is under the 4px
-        // full-pressure nib, the √2 diagonal (≈4.24) is over it.
+        // full-pressure nib, though the √2 diagonal (≈4.24) is over it.
         let stroke = Stroke {
             id: "diag".to_string(),
             style: StrokeStyle::default_solid_round_pressure(),
@@ -725,15 +729,11 @@ mod tests {
         let (min_x, max_x, min_y, max_y) = drawn_bounds(&pixmap);
         let width = max_x - min_x + 1;
         let height = max_y - min_y + 1;
-        // A collapsed dot spans just the 4px nib; the real segment plus its
-        // round caps spans the 3px travel on top of that in both axes.
+        // A dot is roughly as wide as tall (the 4px nib); a line would be
+        // visibly elongated along the diagonal.
         assert!(
-            width >= 6,
-            "diagonal stroke should render as a line, not a dot (width={width})"
-        );
-        assert!(
-            height >= 6,
-            "diagonal stroke should render as a line, not a dot (height={height})"
+            width <= 6 && height <= 6,
+            "short diagonal stroke should collapse to a dot, matching Android (width={width} height={height})"
         );
     }
 
