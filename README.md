@@ -1,5 +1,7 @@
 # v-note
 
+
+
 Self-hosted ink note capture and sync: native Android stylus authoring, owner-only pages, realtime replay on a read-only web SPA, and handwriting search over private LAN or mesh.
 
 ## Status
@@ -66,4 +68,3 @@ just e2e
 Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). This is **not** an OSI-approved open source license.
 
 **Commercial use** requires a separate license. See [LICENSE-TIER.md](LICENSE-TIER.md).
-
