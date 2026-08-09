@@ -138,6 +138,163 @@ test.describe('ink page channel', () => {
     expect((await request.get(firstSummary.thumbnail.url)).status()).toBe(410);
   });
 
+  test('a dense page of short pressure strokes renders as legible ink, not circles', async ({ page, request }) => {
+    // Regression coverage for iteration 21 (#281): the thumbnail renderer once
+    // collapsed every letter-sized v2 stroke on a dense page into a filled
+    // circle, and a follow-up bug double-scaled stroke width so lines washed
+    // out to a near-invisible hairline instead. Both only reproduce once real
+    // ink spans a wide enough world extent to shrink the server's fitted
+    // preview scale — a single short stroke alone on a page does not trigger
+    // either bug.
+    //
+    // Two single-point "anchor" taps at opposite corners fix that scale
+    // without drawing a line through the canvas (a line anchor would risk
+    // visually overlapping a letter and letting its ink alone satisfy the
+    // assertions below). Three short "letter" strokes sit well inside those
+    // corners; each is checked in its own cropped region so a regression
+    // that makes the letters vanish or shrink to dots can't hide behind
+    // the anchors or the other letters.
+    const title = uniqueTitle('dense-ink');
+    const pageId = await createPage(request, title);
+    const ticket = await realtimeTicket(request);
+
+    const pressureStyle = {
+      tool_kind: 'solid_round',
+      style_version: 2,
+      parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' },
+    };
+    const anchors = [
+      [0, 0],
+      [1500, 1000],
+    ].map(([x, y], index) => ({
+      id: `stroke-anchor-${index}-${crypto.randomUUID()}`,
+      style: pressureStyle,
+      points: [{ x, y, t: 0, pressure: 0.7 }],
+    }));
+    const letterOrigins: [number, number][] = [
+      [200, 100],
+      [700, 400],
+      [1200, 850],
+    ];
+    const letters = letterOrigins.map(([x, y], index) => ({
+      id: `stroke-letter-${index}-${crypto.randomUUID()}`,
+      style: pressureStyle,
+      points: [
+        { x, y, t: 0, pressure: 0.7 },
+        { x: x + 30, y, t: 1, pressure: 0.7 },
+      ],
+    }));
+
+    await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 100,
+          message: { type: 'commit-batch', client_batch_id: 'dense-ink-1', strokes: [...anchors, ...letters] },
+        },
+      ],
+      settleMs: 500,
+    });
+
+    await expect
+      .poll(async () => {
+        const summary = (await (await request.get('/api/pages')).json()).pages.find(
+          (item: any) => item.id === pageId,
+        );
+        return summary?.thumbnail?.status;
+      })
+      .toBe('available');
+    const summary = (await (await request.get('/api/pages')).json()).pages.find(
+      (item: any) => item.id === pageId,
+    );
+    const image = await request.get(summary.thumbnail.url);
+    expect(image.status()).toBe(200);
+    const pngBase64 = (await image.body()).toString('base64');
+
+    // Mirrors the fitted-scale/offset math in crates/server/src/thumbnails.rs
+    // render(): world bounds come from the two corner anchors (0,0) and
+    // (1500,1000), which dominate the three inset letters.
+    const THUMB_WIDTH = 240;
+    const THUMB_HEIGHT = 160;
+    const PADDING = 12;
+    const boundsW = 1500;
+    const boundsH = 1000;
+    const scale = Math.min((THUMB_WIDTH - PADDING * 2) / boundsW, (THUMB_HEIGHT - PADDING * 2) / boundsH);
+    const offsetX = (THUMB_WIDTH - boundsW * scale) / 2;
+    const offsetY = (THUMB_HEIGHT - boundsH * scale) / 2;
+    // Per-letter crop window in device px, generous enough to survive
+    // antialiasing/round-cap spread but well short of reaching a neighbor.
+    const MARGIN = 12;
+    const letterWindows = letterOrigins.map(([x, y]) => {
+      const cx = (x + 15) * scale + offsetX;
+      const cy = y * scale + offsetY;
+      return {
+        minX: Math.max(0, Math.round(cx - MARGIN)),
+        maxX: Math.min(THUMB_WIDTH - 1, Math.round(cx + MARGIN)),
+        minY: Math.max(0, Math.round(cy - MARGIN)),
+        maxY: Math.min(THUMB_HEIGHT - 1, Math.round(cy + MARGIN)),
+      };
+    });
+
+    // Decode via the browser's own PNG decoder (canvas), so no extra e2e
+    // dependency is needed — the page under test already runs in a real
+    // browser context.
+    const perLetter = await page.evaluate(
+      ({ base64, windows }) =>
+        new Promise<{ darkestGreen: number; width: number; height: number }[]>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d')!;
+            ctx.drawImage(img, 0, 0);
+            const results = windows.map((w: any) => {
+              const { data } = ctx.getImageData(w.minX, w.minY, w.maxX - w.minX + 1, w.maxY - w.minY + 1);
+              const regionW = w.maxX - w.minX + 1;
+              let darkestGreen = 255;
+              let minX = regionW;
+              let maxX = 0;
+              let minY = w.maxY - w.minY + 1;
+              let maxY = 0;
+              for (let py = 0; py < w.maxY - w.minY + 1; py++) {
+                for (let px = 0; px < regionW; px++) {
+                  const i = (py * regionW + px) * 4;
+                  const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
+                  if (g > r && g > b) {
+                    darkestGreen = Math.min(darkestGreen, g);
+                    minX = Math.min(minX, px);
+                    maxX = Math.max(maxX, px);
+                    minY = Math.min(minY, py);
+                    maxY = Math.max(maxY, py);
+                  }
+                }
+              }
+              return { darkestGreen, width: maxX >= minX ? maxX - minX + 1 : 0, height: maxY >= minY ? maxY - minY + 1 : 0 };
+            });
+            resolve(results);
+          };
+          img.onerror = () => reject(new Error('thumbnail PNG failed to decode'));
+          img.src = `data:image/png;base64,${base64}`;
+        }),
+      { base64: pngBase64, windows: letterWindows },
+    );
+
+    perLetter.forEach((result, index) => {
+      // Canonical ink (#006400) has green=100; a near-invisible wash (the
+      // width-double-scaling bug) never gets ink dark enough.
+      expect(result.darkestGreen, `letter ${index} should be solid ink, not a faint wash`).toBeLessThanOrEqual(150);
+      expect(result.width, `letter ${index} should render as visible ink`).toBeGreaterThan(0);
+      // The circle-collapse bug drew a ~20px circle (roughly as tall as
+      // wide); a correctly rendered short horizontal stroke is elongated.
+      expect(result.width, `letter ${index} should be elongated, not round (w=${result.width} h=${result.height})`).toBeGreaterThan(
+        result.height,
+      );
+    });
+  });
+
   test('commits a stroke batch and assigns a monotonic sequence', async ({ page, request }) => {
     const pageId = await createPage(request, uniqueTitle('ink-commit'));
     const ticket = await realtimeTicket(request);

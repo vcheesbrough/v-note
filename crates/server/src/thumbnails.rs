@@ -13,7 +13,10 @@ use crate::AppState;
 const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
 const PADDING: f32 = 12.0;
-const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 20.0;
+// Preview-only width floor so heavily scaled-down ink stays visible without
+// turning into hairlines. Was 20.0, which on a full page of handwriting (small
+// scale, so the floor dominates every stroke) merged all ink into blobs.
+const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 4.0;
 
 pub fn recover_pending(state: AppState) {
     let Some(pool) = state.db.clone() else {
@@ -241,9 +244,15 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
             continue;
         }
 
+        // `stroke_path`/`fill_path` apply `transform` to width the same as to
+        // geometry (confirmed empirically: a world-space width scales with the
+        // transform's scale factor), so the floor must be expressed in world
+        // units — dividing the device-space floor by `scale` — rather than
+        // pre-multiplying by `scale` and letting the transform scale it again.
+        let width_world =
+            (stroke.style.parameters.width as f32).max(MIN_THUMBNAIL_STROKE_WIDTH / scale);
         let pen = SkiaStroke {
-            // Fitting wide world-space ink must not turn the preview into hairlines.
-            width: (stroke.style.parameters.width as f32 * scale).max(MIN_THUMBNAIL_STROKE_WIDTH),
+            width: width_world,
             line_cap: LineCap::Round,
             line_join: LineJoin::Round,
             ..Default::default()
@@ -251,7 +260,7 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         if stroke.points.len() == 1 {
             let point = &stroke.points[0];
             if let Some(dot) =
-                PathBuilder::from_circle(point.x as f32, point.y as f32, pen.width / (2.0 * scale))
+                PathBuilder::from_circle(point.x as f32, point.y as f32, width_world / 2.0)
             {
                 pixmap.fill_path(&dot, &paint, FillRule::Winding, transform, None);
             }
@@ -326,8 +335,9 @@ fn draw_paper_texture(pixmap: &mut Pixmap, paper: Paper) {
 ///
 /// Marks use `Butt` caps (a `Round` cap would bulge each line's ends past the
 /// viewport edge) and the paper's own [`protocol::MIN_PAPER_MARK_DEVICE_WIDTH`]
-/// floor — emphatically *not* [`MIN_THUMBNAIL_STROKE_WIDTH`], which is 20 px and
-/// would turn a 240×160 preview solid blue.
+/// floor — emphatically *not* the ink preview floor
+/// [`MIN_THUMBNAIL_STROKE_WIDTH`], which would thicken the rules well past the
+/// hairlines they are on the live canvases.
 fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offset_y: f32) {
     if paper == Paper::None || scale <= 0.0 || !scale.is_finite() {
         return;
@@ -425,13 +435,23 @@ fn render_pressure_stroke(
             )
         },
     );
+    // Axis-aligned max, matching Android's live-canvas heuristic
+    // (`maxOf(maxX - minX, maxY - minY) < maxWidth` in PageCanvas.kt) — a
+    // bounding-box diagonal would classify some short diagonal strokes
+    // differently than Android does for the same ink, so the library preview
+    // would disagree with the page itself about the shape of a stroke.
     let extent = (max_x - min_x).max(max_y - min_y) as f32;
     let max_nib = stroke
         .points
         .iter()
         .map(|point| nib_px(point.pressure))
         .fold(0.0_f32, f32::max);
-    if stroke.points.len() == 1 || extent * scale < max_nib {
+    // Classify against the *unboosted* nib: "is the stroke shorter than its own
+    // pen width" is a property of the ink, not of the preview floor. Comparing
+    // against the boosted nib collapsed every letter-sized stroke on a dense
+    // page (where the floor dominates) into a circle. The dot itself still
+    // renders at the boosted width so genuine taps stay visible.
+    if stroke.points.len() == 1 || extent * scale < max_nib / boost {
         let center_x = ((min_x + max_x) / 2.0) as f32;
         let center_y = ((min_y + max_y) / 2.0) as f32;
         if let Some(dot) = PathBuilder::from_circle(center_x, center_y, max_nib / (2.0 * scale)) {
@@ -442,7 +462,11 @@ fn render_pressure_stroke(
 
     for pair in stroke.points.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
-        let seg_width = (nib_px(a.pressure) + nib_px(b.pressure)) / 2.0;
+        // nib_px is a device-space diameter; stroke_path scales width by
+        // `transform` the same as geometry, so convert to world space here
+        // (matching the dot branch's `max_nib / (2.0 * scale)` above) instead
+        // of letting the transform's scale apply a second time.
+        let seg_width = (nib_px(a.pressure) + nib_px(b.pressure)) / (2.0 * scale);
         let pen = SkiaStroke {
             width: seg_width,
             line_cap: LineCap::Round,
@@ -544,8 +568,8 @@ mod tests {
         .expect("thumbnail should render");
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
         let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
-        assert!((18..=22).contains(&(max_x - min_x + 1)));
-        assert!((18..=22).contains(&(max_y - min_y + 1)));
+        assert!((3..=6).contains(&(max_x - min_x + 1)));
+        assert!((3..=6).contains(&(max_y - min_y + 1)));
         assert!((min_x + max_x).abs_diff(WIDTH - 1) <= 1);
         assert!((min_y + max_y).abs_diff(HEIGHT - 1) <= 1);
     }
@@ -637,8 +661,165 @@ mod tests {
         let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
         let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
         // A visible, roughly round blob (not an empty thumbnail).
-        assert!((max_x - min_x + 1) >= 10, "tap dot has visible width");
-        assert!((max_y - min_y + 1) >= 10, "tap dot has visible height");
+        assert!((max_x - min_x + 1) >= 3, "tap dot has visible width");
+        assert!((max_y - min_y + 1) >= 3, "tap dot has visible height");
+    }
+
+    /// Ink bounds of everything drawn on a raw pixmap (any non-white pixel).
+    fn drawn_bounds(pixmap: &Pixmap) -> (u32, u32, u32, u32) {
+        let mut min_x = WIDTH;
+        let mut max_x = 0;
+        let mut min_y = HEIGHT;
+        let mut max_y = 0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+                if pixel.red() < 255 || pixel.green() < 255 || pixel.blue() < 255 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(min_x <= max_x, "expected some ink to be drawn");
+        (min_x, max_x, min_y, max_y)
+    }
+
+    /// A short **diagonal** v2 stroke (Δx and Δy each individually under the
+    /// nib width) must collapse to a dot, matching Android's live-canvas
+    /// `maxOf(Δx, Δy) < maxWidth` classifier exactly (`PageCanvas.kt`) — even
+    /// though the true diagonal distance is technically larger. Using the
+    /// bounding-box diagonal instead would make the library preview disagree
+    /// with what the page itself renders for the same stroke.
+    #[test]
+    fn pressure_stroke_short_diagonal_matches_android_and_collapses_to_dot() {
+        let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("thumbnail pixmap should allocate");
+        pixmap.fill(Color::WHITE);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(0, 0, 0, 0xff);
+        // Δx = Δy = 3 world units at scale 1: each axis alone is under the 4px
+        // full-pressure nib, though the √2 diagonal (≈4.24) is over it.
+        let stroke = Stroke {
+            id: "diag".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![
+                StrokePoint {
+                    x: 20.0,
+                    y: 20.0,
+                    t: 0,
+                    pressure: Some(1.0),
+                },
+                StrokePoint {
+                    x: 23.0,
+                    y: 23.0,
+                    t: 8,
+                    pressure: Some(1.0),
+                },
+            ],
+        };
+        render_pressure_stroke(
+            &mut pixmap,
+            &stroke,
+            &paint,
+            Transform::from_scale(1.0, 1.0),
+            1.0,
+        );
+
+        let (min_x, max_x, min_y, max_y) = drawn_bounds(&pixmap);
+        let width = max_x - min_x + 1;
+        let height = max_y - min_y + 1;
+        // A dot is roughly as wide as tall (the 4px nib); a line would be
+        // visibly elongated along the diagonal.
+        assert!(
+            width <= 6 && height <= 6,
+            "short diagonal stroke should collapse to a dot, matching Android (width={width} height={height})"
+        );
+    }
+
+    /// On a dense page (large world extent, so the preview scale is small and
+    /// the width floor dominates), letter-sized strokes must still render as
+    /// short lines. The old classification compared the stroke extent against
+    /// the *boosted* nib, which collapsed every such stroke into a ~20px
+    /// circle — a full page of handwriting became rows of circles.
+    #[test]
+    fn dense_page_short_strokes_stay_lines_not_circles() {
+        // A long stroke across the top fixes the page bounds (scale ≈ 0.14);
+        // a letter-sized horizontal stroke sits alone in the bottom half.
+        let long = Stroke {
+            id: "long".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: (0..=10)
+                .map(|i| StrokePoint {
+                    x: i as f64 * 150.0,
+                    y: 0.0,
+                    t: i as i64,
+                    pressure: Some(0.7),
+                })
+                .collect(),
+        };
+        let short = Stroke {
+            id: "short".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
+            points: vec![
+                StrokePoint {
+                    x: 700.0,
+                    y: 800.0,
+                    t: 0,
+                    pressure: Some(0.7),
+                },
+                StrokePoint {
+                    x: 730.0,
+                    y: 800.0,
+                    t: 8,
+                    pressure: Some(0.7),
+                },
+            ],
+        };
+        let bytes = render(Paper::None, &[long, short]).expect("thumbnail should render");
+        let pixmap = Pixmap::decode_png(&bytes).expect("thumbnail should decode");
+
+        // Bounds of the short stroke only: scan the bottom half of the preview.
+        // Track the darkest green channel seen too — a stroke rendered at
+        // near-zero coverage (e.g. the width-double-scaling bug that made
+        // lines ~2px and near-transparent) would still satisfy a bounds-only
+        // check while being invisible to a user.
+        let mut min_x = WIDTH;
+        let mut max_x = 0;
+        let mut min_y = HEIGHT;
+        let mut max_y = 0;
+        let mut darkest_green = 255u8;
+        for y in HEIGHT / 2..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+                if pixel.green() > pixel.red() && pixel.green() > pixel.blue() {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                    darkest_green = darkest_green.min(pixel.green());
+                }
+            }
+        }
+        assert!(min_x <= max_x, "short stroke should render some ink");
+        let width = max_x - min_x + 1;
+        let height = max_y - min_y + 1;
+        // The old collapse drew a ~20px circle here; the fixed renderer draws a
+        // floored-width line: a few px tall, wider than tall.
+        assert!(
+            height <= 8,
+            "short stroke should stay a thin line, not a circle (height={height})"
+        );
+        assert!(
+            width > height,
+            "short stroke should be elongated, not round (width={width} height={height})"
+        );
+        // Canonical ink (#006400) has green=100; require getting most of the
+        // way there so a near-invisible wash (high green, low coverage) fails.
+        assert!(
+            darkest_green <= 150,
+            "short stroke should reach near-full ink opacity, not a faint wash (darkest green channel = {darkest_green})"
+        );
     }
 
     /// At full pressure a v2 stroke reaches the same nib width as the constant v1
@@ -1156,9 +1337,9 @@ mod tests {
         );
     }
 
-    /// The paper width floor is its own 1 px, not the 20 px thumbnail ink floor:
-    /// if that floor leaked, each rule would be a 20-px band and the preview
-    /// would be solid blue.
+    /// The paper width floor is its own 1 px, not the thumbnail ink floor
+    /// ([`MIN_THUMBNAIL_STROKE_WIDTH`]): if that floor leaked, each rule would
+    /// be a multi-px band instead of a hairline.
     #[test]
     fn paper_runs_stay_hairline_thin() {
         let pixmap = rendered(Paper::RuledNarrow, &canonical_v1_page());
@@ -1177,7 +1358,7 @@ mod tests {
         assert!(widest > 0, "rules should be drawn at all");
         assert!(
             widest <= 3,
-            "rule runs are {widest}px — the 20px thumbnail ink floor leaked into paper"
+            "rule runs are {widest}px — the thumbnail ink floor leaked into paper"
         );
     }
 
