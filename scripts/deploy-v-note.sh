@@ -59,7 +59,11 @@ fi
 # compose turns it into the docker secret of the same name — see deploy/docker-compose.yml.
 # POSTGRES_PASSWORD stays here because the postgres service consumes it directly
 # (same value lives in both OpenBao and sovereign-config — see card #273).
-for name in REGISTRY_USER REGISTRY_PASSWORD POSTGRES_PASSWORD SOVEREIGN_CONFIG_ACCESS_URL_FILE; do
+# V_NOTE_METRICS_ADDR is required rather than defaulted: it comes from the same
+# sovereign-config leaf the app reads, via the Woodpecker broker, so a broken
+# config link must fail the deploy instead of silently labelling the container
+# with a scrape port the listener may not be using.
+for name in REGISTRY_USER REGISTRY_PASSWORD POSTGRES_PASSWORD SOVEREIGN_CONFIG_ACCESS_URL_FILE V_NOTE_METRICS_ADDR; do
   require_env "$name"
 done
 
@@ -102,19 +106,24 @@ esac
 docker volume create "$db_volume"
 docker pull "registry.desync.link/v-note:$release_tag"
 
-# Single source for the metrics listener in a deployment. The app override and
-# Alloy's scrape-discovery labels are both derived from it, so the listener and
-# the thing scraping it cannot disagree — previously the labels hardcoded
-# `scrape=true` and port 9090 while `observability/metrics-addr` was freely
-# configurable, so moving or disabling the listener silently lost metrics.
+# Alloy's scrape-discovery labels are derived from the metrics listener address,
+# so the listener and the thing scraping it cannot disagree — previously the
+# labels hardcoded `scrape=true` and port 9090 while `observability/metrics-addr`
+# was freely configurable, so moving or disabling the listener silently lost
+# metrics.
 #
 # This step cannot read sovereign-config itself (it runs in a docker CLI image and
-# the connection is gRPC), so the value lives here for now. When the Woodpecker
-# sovereign-config broker lands it will supply this from
-# `observability/metrics-addr`, making it literally the same value in both places.
-metrics_addr="${V_NOTE_METRICS_ADDR:-0.0.0.0:9090}"
+# the connection is gRPC), so the Woodpecker sovereign-config broker supplies it:
+# `v_note_{dev,prod}_metrics_addr` is an *alias* of
+# `/v-note/{dev,prod}/server/observability/metrics-addr`, one stored value at two
+# canonical paths. The container is no longer given an env override — the app
+# reads that same leaf directly through its own sovereign-config client.
+metrics_addr="$V_NOTE_METRICS_ADDR"
 case "$metrics_addr" in
-  disabled|"")
+  # The app also treats an empty metrics-addr as disabled, but an empty value
+  # here is indistinguishable from a secret that failed to resolve, so the
+  # require_env above rejects it — spell it `disabled` in sovereign-config.
+  disabled)
     metrics_scrape="false"
     metrics_port="9090"
     ;;
@@ -133,13 +142,11 @@ compose_up() {
   V_NOTE_IMAGE_TAG="$release_tag" \
   APP_VERSION="$release_tag" \
   APP_ENV="$app_env" \
-  VNOTE_PROTOCOL_VERSION="${VNOTE_PROTOCOL_VERSION:-2}" \
   V_NOTE_HOST="$v_note_host" \
   V_NOTE_CONTAINER_NAME="$v_note_container_name" \
   DB_VOLUME="$db_volume" \
   POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
-  VNOTE__OBSERVABILITY__METRICS_ADDR="$metrics_addr" \
   V_NOTE_METRICS_PORT="$metrics_port" \
   V_NOTE_METRICS_SCRAPE="$metrics_scrape" \
   docker compose -p "$project" $compose_files up -d "$@"

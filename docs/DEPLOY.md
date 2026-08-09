@@ -38,13 +38,18 @@ Operator reproduction from a Woodpecker-equivalent shell:
 
 ---
 
-## Secrets (OpenBao)
+## Secrets
 
-**Never commit values.** Two OpenBao paths:
+**Never commit values.** CI secrets come from sovereign-config through the
+Woodpecker broker; local compose secrets still come from OpenBao.
 
-### Woodpecker mini deploy
+### Woodpecker mini deploy (sovereign-config broker)
 
-`secret/woodpecker/repos/vcheesbrough/v-note` (broker layout, same as bored):
+Mini points `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at the
+`sovereign-config-woodpecker-broker`, whose layers are
+`/woodpecker/shared,/woodpecker/repos/{repo.owner}/{repo.name}` — so a
+`from_secret: <name>` in [`.woodpecker/build.yml`](../.woodpecker/build.yml)
+resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
 
 | Woodpecker secret key | Used for |
 | --- | --- |
@@ -54,17 +59,42 @@ Operator reproduction from a Woodpecker-equivalent shell:
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
 | `v_note_prod_sovereign_access_url` | Access URL for the `/v-note/prod/server` sovereign-config subtree |
+| `v_note_dev_metrics_addr` | **Alias** of `/v-note/dev/server/observability/metrics-addr` — see below |
+| `v_note_prod_metrics_addr` | **Alias** of `/v-note/prod/server/observability/metrics-addr` |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
 | Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
-Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
+Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
+`/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
+— **no `.env` on the host**.
+
+**The two `*_metrics_addr` entries are aliases, not copies.** `AddValuePath`
+exposes one stored value at several canonical paths, so the pipeline and the app
+read the *same* leaf: the app resolves `observability/metrics-addr` through its
+own sovereign-config client, and `deploy-v-note.sh` reads the alias to derive the
+Alloy `observability.metrics.port` / `.scrape` container labels, which docker
+writes at container-create time and nothing inside the container can influence.
+Create them with:
+
+```bash
+sovereign-config alias add /v-note/dev/server/observability/metrics-addr \
+  /woodpecker/repos/vcheesbrough/v-note/v_note_dev_metrics_addr
+sovereign-config alias add /v-note/prod/server/observability/metrics-addr \
+  /woodpecker/repos/vcheesbrough/v-note/v_note_prod_metrics_addr
+```
+
+This aliases *into* `/woodpecker/...`, the opposite direction to the broker
+README's advice. That advice is about repository-independent values whose natural
+home is the broker root; this value's canonical home is the app subtree, so the
+alias points the other way. Aliasing widens read access — every v-note pipeline
+can read it — which is immaterial here because it is a plain leaf, not a secret.
 
 App Links JSON is **not** in this list: since iteration 19 it lives in sovereign-config
 at `android/assetlinks-json`. The former `v_note_{dev,prod}_assetlinks_json` keys have
 been deleted — rotating a signing certificate means rewriting that leaf (see
-[Set App Links JSON](#set-app-links-json) below), not patching OpenBao.
+[Set App Links JSON](#set-app-links-json) below), not patching a CI secret.
 
-### Local compose (WSL / laptop)
+### Local compose (WSL / laptop) — OpenBao
 
 `secret/v-note-stack/env`:
 
@@ -123,17 +153,26 @@ and **fails closed on protocol mismatch**; if that server is upgraded, bump
 
 | Variable (example) | Purpose |
 | --- | --- |
-| `V_NOTE_HOST` | `v-notes.desync.link` vs `v-notes-dev.desync.link` |
+| `V_NOTE_HOST` | `v-notes.desync.link` vs `v-notes-dev.desync.link` — **compose-level only**, for the Traefik router rules; the container is not given it |
 | `V_NOTE_CONTAINER_NAME` | `v-note` vs `v-note-dev` |
 | `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
-| `APP_ENV` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.env` labels |
-| `APP_VERSION` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.release` labels (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
+| `APP_ENV` | compose-level only — the `observability.env` discovery label |
+| `APP_VERSION` | compose-level only — the `observability.release` discovery label (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
 | `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
-| `V_NOTE_METRICS_ADDR` | `0.0.0.0:9090` or `disabled` — **one** source for the listener *and* Alloy's scrape labels, so they cannot drift. `deploy-v-note.sh` derives `VNOTE__OBSERVABILITY__METRICS_ADDR`, `observability.metrics.port` and `observability.metrics.scrape` from it. Being an env override it out-ranks the sovereign `observability/metrics-addr` leaf for deployments; the planned Woodpecker sovereign-config broker will feed this from that same leaf |
+| `V_NOTE_METRICS_ADDR` | compose-level only — `host:port` or `disabled`, supplied by the `v_note_{dev,prod}_metrics_addr` broker alias of `observability/metrics-addr`. `deploy-v-note.sh` derives `observability.metrics.port` and `observability.metrics.scrape` from it, so the listener and the thing scraping it read one value. **Required** — a missing value fails the deploy rather than defaulting |
 
-Everything else (database, OIDC, OTLP, metrics address, App Links JSON) now comes
+The **container's only environment variable is `SOVEREIGN_CONFIG_ACCESS_URL_FILE`.**
+Everything else (database, OIDC, OTLP, metrics address, App Links JSON) comes
 from sovereign-config, overridable per-deploy through the `VNOTE__*` env layer
-documented in [`DEV.md`](DEV.md).
+documented in [`DEV.md`](DEV.md) — a layer the deploy path deliberately no longer
+uses.
+
+There is deliberately **no `observability.protocol` label**. The protocol version
+is a compile-time constant, not configuration; the compose copy sat at `2` while
+the constant moved to `5`, and Alloy's relabelling pushed that stale value onto
+every v-note series. `v_note_build_info{protocol=…}` now states it from the same
+constant the binary uses. To filter other series by protocol, join:
+`… * on(instance) group_left(protocol) v_note_build_info`.
 
 **OIDC is mandatory** — the server exits non-zero at startup if `oidc/issuer-url` or
 related leaves are missing; deploy reads them from sovereign-config, local compose
@@ -200,17 +239,36 @@ All four repo-built images set [OCI Image Spec](https://github.com/opencontainer
 | **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}-api{29\|36}` |
 | **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
 
-Label sources (no `LABEL` instructions in Dockerfiles — all set at build time):
+**Each Dockerfile owns its own labels.** Static values are `LABEL` instructions in
+the Dockerfile; only the three per-build values arrive as build args, so every
+build path — CI, `just run-compose`, a bare `docker build` — emits the same label
+set:
 
 | Label | Source |
 | --- | --- |
-| Static (title, description, licenses, url, authors, vendor, documentation, base.name, base.digest) | **`docker build --label`** in [`.woodpecker/build.yml`](../.woodpecker/build.yml), or compose **`build.labels`** (deploy compose, e2e playwright) |
-| `org.opencontainers.image.version` | `docker build --label` or compose `build.labels` (`.release-tag` / `OCI_IMAGE_VERSION`) |
-| `org.opencontainers.image.revision` | `docker build --label` or compose `build.labels` (`CI_COMMIT_SHA` / `OCI_IMAGE_REVISION`) |
-| `org.opencontainers.image.source` | `docker build --label` or compose `build.labels` |
-| `org.opencontainers.image.created` | `docker build --label` or compose `build.labels` (UTC RFC 3339 at build time) |
+| Static (title, description, licenses, url, source, authors, vendor, documentation) | `LABEL` in the Dockerfile |
+| `org.opencontainers.image.base.name` / `.base.digest` | `LABEL` in the Dockerfile, fed from the same `BASE_IMAGE_NAME` / `BASE_IMAGE_DIGEST` args as its `FROM`, so the labels cannot describe a different base than the one built on |
+| `org.opencontainers.image.version` | `--build-arg OCI_IMAGE_VERSION` (`.release-tag` in CI, `git describe` locally) |
+| `org.opencontainers.image.revision` | `--build-arg OCI_IMAGE_REVISION` (`CI_COMMIT_SHA` / `git rev-parse HEAD`) |
+| `org.opencontainers.image.created` | `--build-arg OCI_IMAGE_CREATED` — **`git log -1 --format=%cI`, not the wall clock**, so rebuilding a commit reproduces the same label (and the same image config blob) |
 
-Woodpecker applies these labels to every repo-built image. The **`e2e-web`** step also runs **`scripts/check-image-metadata.sh`** against the Playwright image and fails if labels are missing or the version/revision does not match.
+The Playwright and legacy-migration fixture images are the exception: they are
+defined as `dockerfile_inline` in `e2e/docker-compose.test.yml` with compose
+`build.labels`, because they have no Dockerfile and no second build path.
+
+**`scripts/check-image-metadata.sh`** runs against the **web**, **android** and
+**instrumented** images in their build steps, and against the Playwright image in
+`e2e-web` — it fails if any required label is missing or if version/revision do
+not match what the step passed in. It previously ran only against the Playwright
+image, which is why the web image shipped for several releases with no `authors`
+or `vendor` label despite both being required.
+
+**Compose and image builds.** `deploy/docker-compose.yml` has **no `build:`
+block** and must not gain one. Compose may build images that exist *only* for
+that stack (the e2e Playwright and fixture images), but never the production
+application image: that has a canonical CI build, and a second definition means a
+second, drifting label set and a `docker compose up --build` on mini that would
+deploy host source instead of the tested image.
 
 **Build context:** each image uses a Dockerfile-paired ignore file (BuildKit convention) so `COPY . .` cache is not busted by unrelated tree changes:
 
@@ -221,26 +279,17 @@ Woodpecker applies these labels to every repo-built image. The **`e2e-web`** ste
 | Android instrumented | `Dockerfile.android-instrumented.dockerignore` |
 | Playwright e2e | `e2e/.dockerignore` (compose `context: e2e/`) |
 
-Local check after build — copy `--label` flags from `.woodpecker/build.yml` (`build-web`, `build-android`, `android-instrumented`); substitute `0.3.0-local`, `$SHA`, and `$CREATED` for version/revision/created. Example (web):
+Local check after build — the same three build args CI passes. Example (web):
 
 ```bash
 SHA=$(git rev-parse HEAD)
-CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CREATED="$(git log -1 --format=%cI)"
 
 docker build -f Dockerfile.web \
-  --label org.opencontainers.image.title=v-note \
-  --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
-  --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
-  --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-  --label org.opencontainers.image.authors="Vincent Cheesbrough" \
-  --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
-  --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
-  --label org.opencontainers.image.base.name=debian:trixie-slim \
-  --label org.opencontainers.image.base.digest=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 \
-  --label org.opencontainers.image.version=0.3.0-local \
-  --label org.opencontainers.image.revision="$SHA" \
-  --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
-  --label org.opencontainers.image.created="$CREATED" \
+  --secret id=github_token,env=GITHUB_TOKEN \
+  --build-arg OCI_IMAGE_VERSION=0.3.0-local \
+  --build-arg OCI_IMAGE_REVISION="$SHA" \
+  --build-arg OCI_IMAGE_CREATED="$CREATED" \
   -t v-note:local .
 ./scripts/check-image-metadata.sh v-note:local 0.3.0-local "$SHA"
 
