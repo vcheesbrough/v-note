@@ -170,6 +170,10 @@ steps:
         # support image is held to — this is the check that caught the missing
         # authors/vendor labels the old --label flags never set.
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        # Both gated before the push: the deploy step and the e2e stack below now
+        # wait on this image's own healthcheck, so an image whose probe is broken
+        # would not fail loudly — it would hang until a timeout.
+        ./scripts/test-container-health.sh "$$IMAGE"
         START=$$(date +%s)
         docker push "$$IMAGE"
         echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"

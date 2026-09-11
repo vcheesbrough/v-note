@@ -24,7 +24,7 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
-4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the app's `/health` from inside the compose network and fails the deploy (dumping container status + logs) if it never serves. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy.
+4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
 Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
@@ -80,8 +80,10 @@ Those checks are exercised by
 [`scripts/test-deploy-v-note.sh`](../scripts/test-deploy-v-note.sh), run in the
 `deploy-script-validation` pipeline step. It puts a stub `docker` on `PATH` and
 asserts each bad input fails *with no docker call at all*, plus that the scrape
-labels track the listener port and that the recreate still happens — the deploy
-steps themselves only ever exercise the happy path. It runs on the docker CLI
+labels track the listener port, that the recreate still happens, and that the
+health gate behaves on each state the container can report (`starting` is waited
+out; `unhealthy`, a crash loop, and an image with no healthcheck each fail the
+deploy with the reason) — the deploy steps themselves only ever exercise the happy path. It runs on the docker CLI
 image because the pre-flight cases need the real compose plugin to fire the `:?`
 guards, but needs no docker socket: `compose config` resolves the model
 client-side.
