@@ -25,36 +25,89 @@ set -eu
 #                                      passed straight through to compose
 # Optional:
 #   V_NOTE_IMAGE_TAG                   overrides the tag in .release-tag
-#   DOCKER_NETWORK                     network for the health probe (default v-note-net)
+#   DOCKER_NETWORK                     compose network name (default v-note-net)
 
-# Minimal image used to probe the app's /health from inside the docker network.
-# busybox wget speaks HTTPS and exits non-zero on DNS failure or any non-200.
-HEALTH_PROBE_IMAGE="alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
 HEALTH_TIMEOUT_SECONDS=120
+
+# Everything the old external probe could not say. .State.Health.Log holds the
+# last five attempts with their exit code and captured output — curl's own error
+# text, which is usually the whole answer — and the old `wget -q -O /dev/null
+# 2>&1` threw all of it away.
+health_diagnostics() {
+  container="$1"
+  echo "--- docker ps ---" >&2
+  docker ps -a --filter "name=$container" --format '{{.Names}}\t{{.Status}}' >&2 || true
+  echo "--- last health probe attempts ---" >&2
+  docker inspect -f '{{range .State.Health.Log}}exit={{.ExitCode}} {{.Output}}{{end}}' \
+    "$container" >&2 2>/dev/null || true
+  echo "--- last 50 log lines from $container ---" >&2
+  docker logs --tail 50 "$container" >&2 2>&1 || true
+}
 
 # `docker compose up -d` returns as soon as the container is *created*, so an app
 # that starts and then immediately exits (bad config, unreachable dependency)
 # still looks like a successful deploy — a crash-looping container once reached
-# CI as "green". Poll the app's own /health over the compose network and fail the
-# deploy if it never serves.
+# CI as "green".
+#
+# The gate is the container's own healthcheck, baked into the image by
+# Dockerfile.web, rather than a second probe run from out here. One definition of
+# healthy: this passes on exactly the condition `docker ps` reports to whoever
+# looks next. It also means both failures are decided rather than waited out —
+# a dead process is caught by its run state, and `unhealthy` is terminal because
+# docker has already applied the image's configured retries. The deadline below
+# is now only for an app that stays up and never finishes starting.
 wait_for_health() {
   container="$1"
-  network="$2"
   deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
 
-  echo "==> waiting for $container to serve /health (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
+  echo "==> waiting for $container to report healthy (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
   while :; do
-    if docker run --rm --network "$network" "$HEALTH_PROBE_IMAGE" \
-        wget --no-check-certificate -q -O /dev/null "https://$container/health" >/dev/null 2>&1; then
-      echo "==> $container is healthy"
-      return 0
-    fi
+    # Run state and health in one call, because the two failures look nothing
+    # alike. A container whose process dies on bad config never reports
+    # unhealthy — it exits (or, under `restart: unless-stopped`, loops through
+    # `restarting`) while its health status sits at whatever it last was. That
+    # is the crash-loop this gate exists for, and watching run state is what
+    # catches it in seconds rather than at the deadline.
+    state=$(docker inspect \
+      -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+      "$container" 2>/dev/null || echo "missing missing")
+    run_state=${state%% *}
+    status=${state#* }
+
+    case "$run_state" in
+      exited|dead|restarting)
+        echo "ERROR: $container is $run_state — it did not stay up long enough to be healthy" >&2
+        health_diagnostics "$container"
+        return 1
+        ;;
+      missing)
+        # compose created it moments ago; absent now means removed under us.
+        echo "ERROR: $container does not exist" >&2
+        return 1
+        ;;
+    esac
+
+    case "$status" in
+      healthy)
+        echo "==> $container is healthy"
+        return 0
+        ;;
+      unhealthy)
+        echo "ERROR: $container reported unhealthy" >&2
+        health_diagnostics "$container"
+        return 1
+        ;;
+      none)
+        # Rolling back to a tag built before the image carried a HEALTHCHECK.
+        # Say so rather than polling a status that will never arrive.
+        echo "ERROR: $container has no healthcheck — the deployed image predates" >&2
+        echo "       the HEALTHCHECK in Dockerfile.web, so there is nothing to gate on" >&2
+        return 1
+        ;;
+    esac
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo "ERROR: $container did not serve /health within ${HEALTH_TIMEOUT_SECONDS}s" >&2
-      echo "--- docker ps ---" >&2
-      docker ps -a --filter "name=$container" --format '{{.Names}}\t{{.Status}}' >&2 || true
-      echo "--- last 50 log lines from $container ---" >&2
-      docker logs --tail 50 "$container" >&2 2>&1 || true
+      echo "ERROR: $container did not report healthy within ${HEALTH_TIMEOUT_SECONDS}s (last status: $run_state/$status)" >&2
+      health_diagnostics "$container"
       return 1
     fi
     sleep 3
@@ -153,12 +206,13 @@ docker compose up -d
 # The server snapshots sovereign-config once at startup, and that config lives
 # *outside* the compose model — so changing a leaf, or rotating the access URL,
 # produces no model change and the `up -d` above is a no-op. The old container
-# keeps serving stale database/OIDC/App Links values, and the health probe below
-# would pass against it, reporting a green deploy that changed nothing.
+# keeps serving stale database/OIDC/App Links values, and the health gate below
+# would pass against it — it is still healthy — reporting a green deploy that
+# changed nothing.
 #
 # Before iteration 19 config was compose env, so a config change moved the model
 # and forced a recreate; that coupling is gone. Recreate the app explicitly. It is
 # stateless so this is cheap, and `--no-deps` leaves postgres untouched.
 docker compose up -d --force-recreate --no-deps v-note
 
-wait_for_health "$V_NOTE_CONTAINER_NAME" "${DOCKER_NETWORK:-v-note-net}"
+wait_for_health "$V_NOTE_CONTAINER_NAME"
