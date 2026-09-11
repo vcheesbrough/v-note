@@ -40,8 +40,11 @@ RUN --mount=type=cache,id=v-note-cargo-registry,target=/usr/local/cargo/registry
 
 FROM ${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST}
 
+# curl is here for one reason: it is the HEALTHCHECK probe below. The base image
+# ships no HTTP client, and `--no-install-recommends` keeps it to libcurl and its
+# transitive libraries rather than the suggested tooling around it.
 RUN apt-get update \
-    && apt-get install -y ca-certificates openssl \
+    && apt-get install -y --no-install-recommends ca-certificates curl openssl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /tmp/server ./server
@@ -59,6 +62,33 @@ ENV VNOTE__SERVER__TLS-CERT=/app/cert.pem
 ENV VNOTE__SERVER__TLS-KEY=/app/key.pem
 ENV VNOTE__SERVER__STATIC-DIR=/app/dist
 EXPOSE 443
+# The single definition of "this container is up", owned by the image so every
+# consumer inherits it: the deploy gate (scripts/deploy-v-note.sh polls this
+# status rather than running its own probe), the e2e stack's `service_healthy`
+# conditions, and a bare `docker run`.
+#
+# -k, not --cacert: the cert above is self-signed (CN=v-note) and this request
+# never leaves loopback. Pinning /app/cert.pem would verify for real but break
+# the moment VNOTE__SERVER__TLS-CERT points somewhere else.
+# -sS, not -s: curl's error text is what lands in .State.Health.Log, which is the
+# first thing anyone reads when a deploy fails the gate.
+# `|| exit 1` normalises curl's exit codes — docker reserves 2, curl uses it.
+#
+# interval=30s deliberately, not 10s: every probe is a real request, so it emits
+# a request log line and increments v_note_http_requests_total{route="/health"}
+# (crates/server/src/observability.rs). At 10s that is ~8.6k lines/day/container
+# of pure noise. start-interval keeps startup detection at ~1s despite the slow
+# steady-state interval; a pre-25 daemon ignores it and falls back to interval,
+# which costs startup latency but nothing else. The e2e stack overrides these
+# timings (e2e/docker-compose.test.yml) so its gate does not inherit the
+# production-tuned interval.
+#
+# start-period=60s is deliberately generous because the deploy gate treats
+# `unhealthy` as *terminal*: it must mean "broken", never "started slower than we
+# guessed". Nothing is lost by waiting — a process that dies on bad config is
+# caught by its run state, not by this probe.
+HEALTHCHECK --interval=30s --start-interval=1s --timeout=3s --start-period=60s --retries=3 \
+    CMD curl -fsS -k --max-time 3 https://127.0.0.1:443/health || exit 1
 CMD ["./server"]
 
 # OCI image metadata, owned here so every build path (CI, `just run-compose`, a

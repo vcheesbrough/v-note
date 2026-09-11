@@ -86,6 +86,15 @@ services:
       VNOTE__DATABASE__USER: v_note
       VNOTE__DATABASE__PASSWORD: test-password
       VNOTE__DATABASE__NAME: v_note
+    # `test` is deliberately absent: the probe command is inherited from the
+    # image (Dockerfile.web), so there is still exactly one definition of what
+    # "healthy" means. Only the timings are overridden, because the image is
+    # tuned for a long-lived production container and a test run should not wait
+    # up to 30s for the first probe.
+    healthcheck:
+      interval: 1s
+      start_period: 2s
+      retries: 60
     depends_on:
       mock-oidc:
         condition: service_started
@@ -135,7 +144,7 @@ services:
       retries: 20
     depends_on:
       app:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
     networks:
@@ -176,7 +185,7 @@ services:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
       app:
-        condition: service_started
+        condition: service_healthy
       mock-oidc:
         condition: service_started
       legacy-migration-fixture:

@@ -252,7 +252,7 @@ See **[`docs/DEPLOY.md`](DEPLOY.md)** — Woodpecker auto-dev deploy after green
 - **Metrics:** `GET /metrics` exposes Prometheus text for HTTP, auth failures, page/ink mutations, thumbnail generation duration/queue depth/recovery/artifact size, realtime events, active realtime connections, and build/protocol metadata. Deploy labels use mini-config Alloy Docker discovery: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
 - **Tracing:** server exports OTLP traces to Alloy when the `observability/otlp-endpoint` config leaf is set; deploy sets `http://monitor-alloy:4317` on `proxy-backend`.
 - **Logs:** stdout/stderr are structured JSON for Docker scraping. Environment, release, and protocol metadata come from Docker labels, while high-cardinality details stay in log fields.
-- **Health:** `GET /health` is process-up; readiness subchecks may be added when needed.
+- **Health:** `GET /health` is process-up; readiness subchecks may be added when needed. The web image carries a `HEALTHCHECK` that curls it over loopback TLS, and that container status is the single definition of "up" consumed by the deploy gate (`scripts/deploy-v-note.sh`), the e2e stack's `service_healthy` conditions, and `docker ps`. Its interval is 30s deliberately: each probe is a real request, so it emits a request log line and increments `v_note_http_requests_total{route="/health"}`.
 
 ### Dependency & security hygiene
 
