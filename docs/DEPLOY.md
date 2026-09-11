@@ -73,8 +73,18 @@ What the script keeps is the shell that is awkward to inline into a Woodpecker
 `commands:` block: the metrics-addr → scrape-label derivation (one value with two
 consumers — passing it in pre-split would reintroduce the drift it exists to
 prevent), the explicit recreate and its rationale, the health gate, and the
-parameter checks — the four-name guard and the compose pre-flight. It is also the only form of the deploy that can be run by hand
-or checked with `sh -n` outside CI.
+parameter checks — the four-name guard and the compose pre-flight. It is also the
+only form of the deploy that can be run by hand or checked outside CI.
+
+Those checks are exercised by
+[`scripts/test-deploy-v-note.sh`](../scripts/test-deploy-v-note.sh), run in the
+`deploy-script-validation` pipeline step. It puts a stub `docker` on `PATH` and
+asserts each bad input fails *with no docker call at all*, plus that the scrape
+labels track the listener port and that the recreate still happens — the deploy
+steps themselves only ever exercise the happy path. It runs on the docker CLI
+image because the pre-flight cases need the real compose plugin to fire the `:?`
+guards, but needs no docker socket: `compose config` resolves the model
+client-side.
 
 Operator reproduction from a Woodpecker-equivalent shell — export the parameters
 for the environment you want, exactly as the pipeline step sets them, then:
@@ -89,6 +99,16 @@ export REGISTRY_USER=… REGISTRY_PASSWORD=… POSTGRES_PASSWORD=…
 export SOVEREIGN_CONFIG_ACCESS_URL_FILE=… V_NOTE_METRICS_ADDR=0.0.0.0:9090
 ./scripts/deploy-v-note.sh
 ```
+
+> **Watch out on a developer box.** `COMPOSE_FILE=deploy/…` makes `deploy/` the
+> compose *project directory*, and compose auto-loads `deploy/.env` from there.
+> That file is gitignored and absent from CI's fresh clone, so the pipeline is
+> unaffected — but locally `scripts/fetch-compose-env.sh` fills it with the
+> **local** stack's values (`V_NOTE_CONTAINER_NAME=v-note-local`,
+> `V_NOTE_HOST=localhost`, `DB_VOLUME=v-note-local-db`, `V_NOTE_IMAGE_TAG=local`).
+> A hand-run that forgets one of the exports above silently picks those up instead
+> of failing. Run the deploy from a clean checkout, or pass
+> `--env-file /dev/null`, if you need the guards to behave as they do in CI.
 
 ---
 
@@ -301,7 +321,7 @@ set:
 | Label | Source |
 | --- | --- |
 | Static (title, description, licenses, url, source, authors, vendor, documentation) | `LABEL` in the Dockerfile |
-| `org.opencontainers.image.base.name` / `.base.digest` | `LABEL` in the Dockerfile, fed from the same `BASE_IMAGE_NAME` / `BASE_IMAGE_DIGEST` args as its `FROM`, so the labels cannot describe a different base than the one built on |
+| `org.opencontainers.image.base.name` / `.base.digest` | `LABEL` in the Dockerfile, fed from the same `BASE_IMAGE_NAME` / `BASE_IMAGE_DIGEST` args as its `FROM`, so the labels cannot describe a different base than the one built on. For the android-build-box images those two args are also held against `scripts/android-build-box-image.ref` by `scripts/check-android-build-box-image.sh` — a file that spells the pin out must spell out the *current* one, whether as a whole `name@sha256:…` or as the two halves |
 | `org.opencontainers.image.version` | `--build-arg OCI_IMAGE_VERSION` (`.release-tag` in CI, `git describe` locally) |
 | `org.opencontainers.image.revision` | `--build-arg OCI_IMAGE_REVISION` (`CI_COMMIT_SHA` / `git rev-parse HEAD`) |
 | `org.opencontainers.image.created` | `--build-arg OCI_IMAGE_CREATED` — **`git log -1 --format=%cI`, not the wall clock**, so rebuilding a commit reproduces the same label (and the same image config blob) |

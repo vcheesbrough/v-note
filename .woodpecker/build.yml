@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push: compute-version ∥ contract-validation ∥ build-android ∥ Android API 29/36 instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
+# Push: compute-version ∥ contract-validation ∥ deploy-script-validation ∥ build-android ∥ Android API 29/36 instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
 # Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release
 
 when:
@@ -72,6 +72,22 @@ steps:
         START=$$(date +%s)
         docker push "$$IMAGE"
         echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
+
+  # deploy-v-note.sh takes no arguments: every environment-specific value is a
+  # parameter set by the deploy steps below, so a missing one is not a crash but a
+  # silently wrong deploy (prod labelled env=dev, a parallel compose project, an
+  # app with no runtime config). The deploy steps only ever exercise the happy
+  # path, so the guards get their own test. Runs on the docker CLI image for the
+  # compose plugin — `compose config` resolves the model client-side, so this
+  # needs no docker socket. Placed here only because it uses the *docker-image
+  # anchor defined above; `depends_on: []` keeps it in the first parallel stage.
+  deploy-script-validation:
+    when:
+      - event: [push, manual]
+    depends_on: []
+    image: *docker-image
+    commands:
+      - ./scripts/test-deploy-v-note.sh
 
   android-instrumented-api-29:
     when:
