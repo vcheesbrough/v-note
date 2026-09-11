@@ -1,14 +1,36 @@
 #!/bin/sh
 set -eu
 
+# Deploy one v-note environment. Takes no arguments and ignores any: every
+# environment-specific value is a parameter supplied by the calling pipeline step
+# (.woodpecker/build.yml), so this script has no idea dev and prod exist and no
+# branch to keep in sync with them.
+#
+# What stays here is the shell that is awkward to inline: the metrics-label
+# derivation (one value, two consumers, so it cannot be passed in pre-split
+# without reintroducing drift), the recreate step and its rationale, the health
+# gate, and a guard on the handful of parameters that would otherwise fail
+# silently.
+#
+# Required parameters:
+#   REGISTRY_USER / REGISTRY_PASSWORD  registry.desync.link credentials
+#   POSTGRES_PASSWORD                  consumed directly by the postgres service
+#   SOVEREIGN_CONFIG_ACCESS_URL_FILE   unlocks the app's sovereign-config subtree;
+#                                      which URL is injected selects the environment
+#   V_NOTE_METRICS_ADDR                `host:port` or `disabled`
+#   COMPOSE_PROJECT_NAME               compose project (read by docker compose itself)
+#   COMPOSE_FILE                       `:`-separated compose files (likewise)
+#   V_NOTE_IMAGE_REPOS                 space-separated repos to pull at the release tag
+#   V_NOTE_HOST, V_NOTE_CONTAINER_NAME, DB_VOLUME, APP_ENV
+#                                      passed straight through to compose
+# Optional:
+#   V_NOTE_IMAGE_TAG                   overrides the tag in .release-tag
+#   DOCKER_NETWORK                     network for the health probe (default v-note-net)
+
 # Minimal image used to probe the app's /health from inside the docker network.
 # busybox wget speaks HTTPS and exits non-zero on DNS failure or any non-200.
 HEALTH_PROBE_IMAGE="alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
 HEALTH_TIMEOUT_SECONDS=120
-
-usage() {
-  echo "Usage: $0 dev|prod" >&2
-}
 
 # `docker compose up -d` returns as soon as the container is *created*, so an app
 # that starts and then immediately exits (bad config, unreachable dependency)
@@ -47,112 +69,86 @@ require_env() {
   fi
 }
 
-target="${1:-}"
-if [ "$target" != "dev" ] && [ "$target" != "prod" ]; then
-  usage
-  exit 1
-fi
-
-# Runtime app config (database/oidc/observability/android) now comes from
-# sovereign-config; the only app secret this script handles is the access URL that
-# unlocks it. It arrives as SOVEREIGN_CONFIG_ACCESS_URL_FILE (Woodpecker secret) and
-# compose turns it into the docker secret of the same name — see deploy/docker-compose.yml.
-# POSTGRES_PASSWORD stays here because the postgres service consumes it directly
-# (same value lives in both OpenBao and sovereign-config — see card #273).
-# V_NOTE_METRICS_ADDR is required rather than defaulted: it comes from the same
-# sovereign-config leaf the app reads, via the Woodpecker broker, so a broken
-# config link must fail the deploy instead of silently labelling the container
-# with a scrape port the listener may not be using.
-for name in REGISTRY_USER REGISTRY_PASSWORD POSTGRES_PASSWORD SOVEREIGN_CONFIG_ACCESS_URL_FILE V_NOTE_METRICS_ADDR; do
+# Only the parameters that would otherwise fail *silently* are checked here.
+# Everything else already fails loudly on its own and a second check would just
+# rot: `set -u` catches any unset variable this script dereferences;
+# POSTGRES_PASSWORD, V_NOTE_HOST, V_NOTE_CONTAINER_NAME and DB_VOLUME carry `:?`
+# guards in deploy/docker-compose.yml, fired early by the `compose config`
+# pre-flight below along with a missing or wrong COMPOSE_FILE; empty registry
+# credentials fail `docker login`; and an empty V_NOTE_METRICS_ADDR is rejected by
+# the case below.
+#
+# These four are different — each has a default that is silently wrong:
+#   APP_ENV                           compose falls back to `dev`, so a prod
+#                                     deploy would label itself `env=dev`
+#   COMPOSE_PROJECT_NAME              compose falls back to the compose file's
+#                                     directory name (`deploy`), deploying into a
+#                                     parallel project and orphaning the real one
+#   SOVEREIGN_CONFIG_ACCESS_URL_FILE  compose is happy with a blank secret; the
+#                                     app then starts with no runtime config at
+#                                     all, which is also what a broker secret
+#                                     that failed to resolve looks like
+#   V_NOTE_IMAGE_REPOS                the pull loop below just does nothing
+for name in APP_ENV COMPOSE_PROJECT_NAME SOVEREIGN_CONFIG_ACCESS_URL_FILE V_NOTE_IMAGE_REPOS; do
   require_env "$name"
 done
-
-if [ -n "${V_NOTE_IMAGE_TAG:-}" ]; then
-  release_tag="$V_NOTE_IMAGE_TAG"
-else
-  release_tag="$(cat .release-tag)"
-fi
-
-echo "$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$REGISTRY_USER" --password-stdin
-
-case "$target" in
-  dev)
-    project="v-note-dev"
-    db_volume="v-note-dev-db"
-    # Canonical environment name, matching the sovereign-config
-    # `observability/environment` leaf the server uses for the OTEL
-    # `deployment.environment` trace attribute. Previously this was the branch
-    # name, which split one deployment across two values: traces said `dev` while
-    # the metrics/log discovery labels said e.g. `feat/foo`, so no single
-    # environment filter matched all three signals. The build is already
-    # identified by `observability.release` (the release tag) and the image's
-    # `org.opencontainers.image.revision`, so the branch is not needed here.
-    app_env="dev"
-    v_note_host="v-notes-dev.desync.link"
-    v_note_container_name="v-note-dev"
-    compose_files="-f deploy/docker-compose.yml -f deploy/docker-compose.android-apk.yml"
-    docker pull "registry.desync.link/v-note-android:$release_tag"
-    ;;
-  prod)
-    project="v-note"
-    db_volume="v-note-prod-db"
-    app_env="production"
-    v_note_host="v-notes.desync.link"
-    v_note_container_name="v-note"
-    compose_files="-f deploy/docker-compose.yml"
-    ;;
-esac
-
-docker volume create "$db_volume"
-docker pull "registry.desync.link/v-note:$release_tag"
 
 # Alloy's scrape-discovery labels are derived from the metrics listener address,
 # so the listener and the thing scraping it cannot disagree — previously the
 # labels hardcoded `scrape=true` and port 9090 while `observability/metrics-addr`
 # was freely configurable, so moving or disabling the listener silently lost
-# metrics.
+# metrics. Derived here rather than passed in pre-split precisely so there is one
+# value: two parameters could drift from each other and from the listener.
 #
 # This step cannot read sovereign-config itself (it runs in a docker CLI image and
 # the connection is gRPC), so the Woodpecker sovereign-config broker supplies it:
 # `v_note_{dev,prod}_metrics_addr` is an *alias* of
 # `/v-note/{dev,prod}/server/observability/metrics-addr`, one stored value at two
-# canonical paths. The container is no longer given an env override — the app
-# reads that same leaf directly through its own sovereign-config client.
-metrics_addr="$V_NOTE_METRICS_ADDR"
-case "$metrics_addr" in
+# canonical paths. The container is not given an env override — the app reads that
+# same leaf directly through its own sovereign-config client.
+case "$V_NOTE_METRICS_ADDR" in
   # The app also treats an empty metrics-addr as disabled, but an empty value
-  # here is indistinguishable from a secret that failed to resolve, so the
-  # require_env above rejects it — spell it `disabled` in sovereign-config.
+  # here is indistinguishable from a secret that failed to resolve, so it falls
+  # through to the error below — spell it `disabled` in sovereign-config.
   disabled)
-    metrics_scrape="false"
-    metrics_port="9090"
+    V_NOTE_METRICS_SCRAPE="false"
+    V_NOTE_METRICS_PORT="9090"
     ;;
   *:*)
-    metrics_scrape="true"
-    metrics_port="${metrics_addr##*:}"
+    V_NOTE_METRICS_SCRAPE="true"
+    V_NOTE_METRICS_PORT="${V_NOTE_METRICS_ADDR##*:}"
     ;;
   *)
-    echo "ERROR: V_NOTE_METRICS_ADDR must be host:port or 'disabled' (got: '$metrics_addr')" >&2
+    echo "ERROR: V_NOTE_METRICS_ADDR must be host:port or 'disabled' (got: '$V_NOTE_METRICS_ADDR')" >&2
     exit 1
     ;;
 esac
 
-# `docker compose up -d` with the deploy environment; extra args are appended.
-compose_up() {
-  V_NOTE_IMAGE_TAG="$release_tag" \
-  APP_VERSION="$release_tag" \
-  APP_ENV="$app_env" \
-  V_NOTE_HOST="$v_note_host" \
-  V_NOTE_CONTAINER_NAME="$v_note_container_name" \
-  DB_VOLUME="$db_volume" \
-  POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  SOVEREIGN_CONFIG_ACCESS_URL_FILE="$SOVEREIGN_CONFIG_ACCESS_URL_FILE" \
-  V_NOTE_METRICS_PORT="$metrics_port" \
-  V_NOTE_METRICS_SCRAPE="$metrics_scrape" \
-  docker compose -p "$project" $compose_files up -d "$@"
-}
+# The remaining parameters are enforced by compose's own `:?` guards, which would
+# otherwise not fire until `up` — after a registry login and a pull. Resolving the
+# model first is client-side only (no daemon, no network), so every parameter is
+# now checked before anything with a side effect happens. It also catches an unset
+# or wrong COMPOSE_FILE and any schema error in the compose files themselves.
+docker compose config --quiet
 
-compose_up
+# Every input is validated above this line; everything below has side effects.
+release_tag="${V_NOTE_IMAGE_TAG:-$(cat .release-tag)}"
+
+echo "$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$REGISTRY_USER" --password-stdin
+
+docker volume create "$DB_VOLUME"
+for repo in $V_NOTE_IMAGE_REPOS; do
+  docker pull "$repo:$release_tag"
+done
+
+# Everything else compose needs is already in the environment, passed in by the
+# pipeline step. These four are the only values this script computes.
+export V_NOTE_IMAGE_TAG="$release_tag"
+export APP_VERSION="$release_tag"
+export V_NOTE_METRICS_PORT
+export V_NOTE_METRICS_SCRAPE
+
+docker compose up -d
 
 # The server snapshots sovereign-config once at startup, and that config lives
 # *outside* the compose model — so changing a leaf, or rotating the access URL,
@@ -160,9 +156,9 @@ compose_up
 # keeps serving stale database/OIDC/App Links values, and the health probe below
 # would pass against it, reporting a green deploy that changed nothing.
 #
-# Before this migration config was compose env, so a config change moved the model
+# Before iteration 19 config was compose env, so a config change moved the model
 # and forced a recreate; that coupling is gone. Recreate the app explicitly. It is
 # stateless so this is cheap, and `--no-deps` leaves postgres untouched.
-compose_up --force-recreate --no-deps v-note
+docker compose up -d --force-recreate --no-deps v-note
 
-wait_for_health "$v_note_container_name" "${DOCKER_NETWORK:-v-note-net}"
+wait_for_health "$V_NOTE_CONTAINER_NAME" "${DOCKER_NETWORK:-v-note-net}"
