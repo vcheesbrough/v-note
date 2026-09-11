@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: v_note
       POSTGRES_USER: v_note
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, OpenBao in CI)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, the v_note_{dev,prod}_postgres_password broker secret in CI)}
     volumes:
       - v-note-db:/var/lib/postgresql/data
     networks:

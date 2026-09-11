@@ -24,16 +24,70 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
-4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the app's `/health` from inside the compose network and fails the deploy (dumping container status + logs) if it never serves. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy.
+4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the app's `/health` from inside the compose network and fails the deploy (dumping container status + logs) if it never serves. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
-Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
+Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
 
-Operator reproduction from a Woodpecker-equivalent shell:
+### The deploy script takes no arguments
+
+`scripts/deploy-v-note.sh` has **one entry point and no modes**. It does not know
+that dev and prod exist: every environment-specific value is a parameter set by
+the calling step in [`.woodpecker/build.yml`](../.woodpecker/build.yml), where
+the dev block is defined once and reused by `auto-deploy-dev` via a YAML anchor.
+Adding an environment means adding a step, not editing the script.
+
+| Parameter | Purpose |
+| --- | --- |
+| `REGISTRY_USER` / `REGISTRY_PASSWORD` | `registry.desync.link` credentials |
+| `POSTGRES_PASSWORD` | consumed directly by the `postgres` service |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | unlocks the app's sovereign-config subtree; **which URL is injected selects the environment** |
+| `V_NOTE_METRICS_ADDR` | `host:port` or `disabled` — see the broker alias above |
+| `COMPOSE_PROJECT_NAME` | compose project; read by `docker compose` itself, so the script passes no `-p` |
+| `COMPOSE_FILE` | `:`-separated compose files; likewise no `-f` |
+| `V_NOTE_IMAGE_REPOS` | space-separated repos to pull at the release tag (dev adds `v-note-android`) |
+| `V_NOTE_HOST`, `V_NOTE_CONTAINER_NAME`, `DB_VOLUME`, `APP_ENV` | passed straight through to compose |
+
+All of these are required. The script explicitly checks only the four whose
+absence would otherwise be **silent** — `APP_ENV` (compose falls back to `dev`,
+so a prod deploy would label itself `env=dev`), `COMPOSE_PROJECT_NAME` (compose
+falls back to the compose file's directory name, deploying into a parallel
+project), `SOVEREIGN_CONFIG_ACCESS_URL_FILE` (compose accepts a blank secret and
+the app starts with no runtime config), and `V_NOTE_IMAGE_REPOS` (the pull loop
+does nothing). The rest already fail loudly on their own: `set -u` catches any
+unset variable the script dereferences, `POSTGRES_PASSWORD` / `V_NOTE_HOST` /
+`V_NOTE_CONTAINER_NAME` / `DB_VOLUME` carry `:?` guards in
+`deploy/docker-compose.yml`, empty registry credentials fail `docker login`, and
+a malformed or empty `V_NOTE_METRICS_ADDR` is rejected by the script's own
+`case`. `V_NOTE_IMAGE_TAG` (overrides `.release-tag`) and `DOCKER_NETWORK` are
+optional.
+
+**Nothing with a side effect runs until every parameter has been checked.** The
+compose `:?` guards would otherwise not fire until `up` — after a registry login
+and an image pull — so the script resolves the model first with `docker compose
+config --quiet`. That is client-side only (no daemon, no network) and also
+catches a missing or wrong `COMPOSE_FILE` and any schema error in the compose
+files themselves.
+
+What the script keeps is the shell that is awkward to inline into a Woodpecker
+`commands:` block: the metrics-addr → scrape-label derivation (one value with two
+consumers — passing it in pre-split would reintroduce the drift it exists to
+prevent), the explicit recreate and its rationale, the health gate, and the
+parameter checks — the four-name guard and the compose pre-flight. It is also the only form of the deploy that can be run by hand
+or checked with `sh -n` outside CI.
+
+Operator reproduction from a Woodpecker-equivalent shell — export the parameters
+for the environment you want, exactly as the pipeline step sets them, then:
 
 ```bash
-./scripts/deploy-v-note.sh dev
-./scripts/deploy-v-note.sh prod
+export COMPOSE_PROJECT_NAME=v-note-dev
+export COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.android-apk.yml
+export V_NOTE_IMAGE_REPOS="registry.desync.link/v-note registry.desync.link/v-note-android"
+export V_NOTE_HOST=v-notes-dev.desync.link V_NOTE_CONTAINER_NAME=v-note-dev
+export DB_VOLUME=v-note-dev-db APP_ENV=dev
+export REGISTRY_USER=… REGISTRY_PASSWORD=… POSTGRES_PASSWORD=…
+export SOVEREIGN_CONFIG_ACCESS_URL_FILE=… V_NOTE_METRICS_ADDR=0.0.0.0:9090
+./scripts/deploy-v-note.sh
 ```
 
 ---

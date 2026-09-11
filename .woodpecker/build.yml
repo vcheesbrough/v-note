@@ -254,7 +254,10 @@ steps:
       - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
-    environment:
+    # The whole dev environment, defined once and reused by auto-deploy-dev.
+    # deploy-v-note.sh takes no arguments and knows nothing about dev vs prod —
+    # every environment-specific value is right here.
+    environment: &deploy-dev-environment
       REGISTRY_USER:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
@@ -267,11 +270,28 @@ steps:
         from_secret: v_note_dev_sovereign_access_url
       # Alias of /v-note/dev/server/observability/metrics-addr — the same stored
       # value the app reads, exposed to the broker so the deploy can derive the
-      # Alloy scrape labels docker writes at container-create time.
+      # Alloy scrape labels docker writes at container-create time. A plain
+      # value, not a secret; `from_secret` is Woodpecker's only broker channel.
       V_NOTE_METRICS_ADDR:
         from_secret: v_note_dev_metrics_addr
-    commands:
-      - ./scripts/deploy-v-note.sh dev
+      # Read by `docker compose` itself, so the script needs no -p/-f flags.
+      COMPOSE_PROJECT_NAME: v-note-dev
+      COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.android-apk.yml
+      V_NOTE_IMAGE_REPOS: registry.desync.link/v-note registry.desync.link/v-note-android
+      V_NOTE_HOST: v-notes-dev.desync.link
+      V_NOTE_CONTAINER_NAME: v-note-dev
+      DB_VOLUME: v-note-dev-db
+      # Canonical environment name, matching the sovereign-config
+      # `observability/environment` leaf the server uses for the OTEL
+      # `deployment.environment` trace attribute. Deliberately not the branch
+      # name: that split one deployment across two values, so traces said `dev`
+      # while the metrics/log discovery labels said e.g. `feat/foo` and no single
+      # environment filter matched all three signals. The build is already
+      # identified by `observability.release` and the image's
+      # `org.opencontainers.image.revision`.
+      APP_ENV: dev
+    commands: &deploy-commands
+      - ./scripts/deploy-v-note.sh
 
   auto-deploy-dev:
     when:
@@ -281,24 +301,8 @@ steps:
       - apply-authentik-blueprint-auto-dev
     image: *docker-image
     volumes: *docker-socket
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-      POSTGRES_PASSWORD:
-        from_secret: v_note_dev_postgres_password
-      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
-      # itself selects the environment.
-      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
-        from_secret: v_note_dev_sovereign_access_url
-      # Alias of /v-note/dev/server/observability/metrics-addr — the same stored
-      # value the app reads, exposed to the broker so the deploy can derive the
-      # Alloy scrape labels docker writes at container-create time.
-      V_NOTE_METRICS_ADDR:
-        from_secret: v_note_dev_metrics_addr
-    commands:
-      - ./scripts/deploy-v-note.sh dev
+    environment: *deploy-dev-environment
+    commands: *deploy-commands
 
   tag-release-auto-dev:
     when:
@@ -336,8 +340,15 @@ steps:
       # Alias of /v-note/prod/server/observability/metrics-addr — see deploy-dev.
       V_NOTE_METRICS_ADDR:
         from_secret: v_note_prod_metrics_addr
-    commands:
-      - ./scripts/deploy-v-note.sh prod
+      # No android-apk overlay on prod: the APK delivery image is dev-only.
+      COMPOSE_PROJECT_NAME: v-note
+      COMPOSE_FILE: deploy/docker-compose.yml
+      V_NOTE_IMAGE_REPOS: registry.desync.link/v-note
+      V_NOTE_HOST: v-notes.desync.link
+      V_NOTE_CONTAINER_NAME: v-note
+      DB_VOLUME: v-note-prod-db
+      APP_ENV: production
+    commands: *deploy-commands
 
   tag-release-dev:
     when:
