@@ -42,6 +42,26 @@ if [ "$1" = "compose" ] && [ "$2" = "up" ]; then
   echo "metrics scrape=$V_NOTE_METRICS_SCRAPE port=$V_NOTE_METRICS_PORT" >> "$DOCKER_CALLS"
   echo "tag=$V_NOTE_IMAGE_TAG version=$APP_VERSION" >> "$DOCKER_CALLS"
 fi
+# The health gate reads the container's own state, so the stub has to answer
+# `docker inspect` — a stub that just exits 0 would return an empty status and
+# leave every happy-path case spinning until the 120s deadline.
+# STUB_HEALTH_SEQUENCE is `<run-state>:<health>` per poll, the last entry
+# repeating, which is what lets the cases below drive `starting` -> `healthy`,
+# `unhealthy`, a crash-looping container, and an image with no healthcheck.
+if [ "$1" = "inspect" ]; then
+  case "$*" in
+    *State.Health.Log*)
+      echo "exit=1 curl: (7) Failed to connect to 127.0.0.1 port 443"
+      exit 0
+      ;;
+  esac
+  index=$(cat "$STUB_HEALTH_INDEX" 2>/dev/null || echo 1)
+  echo $(( index + 1 )) > "$STUB_HEALTH_INDEX"
+  entry=$(echo "$STUB_HEALTH_SEQUENCE" | cut -d' ' -f"$index")
+  [ -n "$entry" ] || entry=$(echo "$STUB_HEALTH_SEQUENCE" | awk '{print $NF}')
+  echo "${entry%%:*} ${entry#*:}"
+  exit 0
+fi
 exit 0
 STUB
 chmod +x "$WORK/bin/docker"
@@ -60,6 +80,8 @@ fail() { echo "  FAIL — $1" >&2; FAILURES=$((FAILURES + 1)); }
 # Every parameter a healthy deploy-dev step supplies. Each case mutates one.
 base_env() {
   export DOCKER_CALLS="$CALLS" REAL_DOCKER
+  export STUB_HEALTH_INDEX="$WORK/health-index"
+  export STUB_HEALTH_SEQUENCE=running:healthy
   export PATH="$WORK/bin:$PATH"
   export REGISTRY_USER=user REGISTRY_PASSWORD=pass POSTGRES_PASSWORD=pw
   export SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/access-url
@@ -78,6 +100,7 @@ base_env() {
 # exit code; leaves stdout+stderr in $WORK/out and docker calls in $CALLS.
 run_deploy() {
   : > "$CALLS"
+  rm -f "$WORK/health-index"
   local rc=0
   (
     cd "$ROOT"
@@ -115,6 +138,24 @@ assert_succeeds() {
   rc=$(run_deploy "$mutation")
   if [ "$rc" -ne 0 ]; then
     fail "$desc: expected success, got $rc: $(cat "$WORK/out")"
+    return
+  fi
+  pass "$desc"
+}
+
+# The health gate runs *after* the deploy has done its work, so unlike the guard
+# cases these assert on the exit code and the message, not on docker being
+# untouched.
+assert_gate_fails() {
+  local desc="$1" mutation="$2" expect_msg="$3"
+  local rc
+  rc=$(run_deploy "$mutation")
+  if [ "$rc" -eq 0 ]; then
+    fail "$desc: expected non-zero exit, got 0"
+    return
+  fi
+  if ! grep -qF "$expect_msg" "$WORK/out"; then
+    fail "$desc: exited $rc but message missing '$expect_msg': $(cat "$WORK/out")"
     return
   fi
   pass "$desc"
@@ -176,6 +217,29 @@ assert_succeeds "a non-default metrics port is carried through" \
   "V_NOTE_METRICS_ADDR=0.0.0.0:9191"
 assert_recorded "scrape port tracks the listener, not a hardcoded 9090" \
   "metrics scrape=true port=9191"
+
+echo "==> the health gate reads the container's own healthcheck status"
+# Iteration 23 replaced an external wget probe with the container's own status.
+# The happy-path cases above already cover "healthy immediately"; these cover the
+# outcomes the old probe could not distinguish at all — it saw only "did not
+# answer yet" and burned the full timeout on every one of them.
+assert_succeeds "a container still starting is waited out" \
+  "STUB_HEALTH_SEQUENCE='running:starting running:healthy'"
+assert_gate_fails "an unhealthy container fails the deploy" \
+  "STUB_HEALTH_SEQUENCE=running:unhealthy" "reported unhealthy"
+assert_gate_fails "an unhealthy container dumps the probe attempts" \
+  "STUB_HEALTH_SEQUENCE=running:unhealthy" "last health probe attempts"
+# The crash loop the gate exists for: the process dies on bad config, so the
+# container never reports unhealthy at all — its health status stays wherever it
+# was while docker restarts it. Run state is the only thing that shows this.
+assert_gate_fails "a crash-looping container fails the deploy" \
+  "STUB_HEALTH_SEQUENCE=restarting:starting" "did not stay up long enough"
+assert_gate_fails "an exited container fails the deploy" \
+  "STUB_HEALTH_SEQUENCE=exited:starting" "did not stay up long enough"
+# Rolling back to an image tag built before the HEALTHCHECK existed: there is no
+# status to wait for, so say so instead of polling until the deadline.
+assert_gate_fails "an image with no healthcheck fails the deploy" \
+  "STUB_HEALTH_SEQUENCE=running:none" "has no healthcheck"
 
 echo "==> the script takes no arguments and ignores any"
 # Documented consequence of dropping the dev|prod positional: a stray argument is

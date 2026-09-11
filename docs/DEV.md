@@ -270,6 +270,10 @@ Or run the two steps by hand: the `docker build` from `just run-compose`, then
 - **API + SPA:** `https://localhost:8443` (self-signed — use `curl -k`)
 - **Metrics:** `http://localhost:9090/metrics`
 - **Postgres:** internal only (`postgres:5432`)
+- **Health:** the container probes `/health` itself — `docker ps` shows
+  `(healthy)`, and when it is not,
+  `docker inspect -f '{{json .State.Health}}' v-note-local` shows the last five
+  probe attempts with curl's own error text
 
 Mini deploy uses `deploy/docker-compose.yml` only (Traefik `proxy-backend`, `lan-vpn-only@docker`). Local dev adds `deploy/docker-compose.local.yml` (mock OIDC on `:18080`, published `:8443`, Traefik off). The server talks to **`mock-oidc:8080`** on the compose network; the browser sign-in redirect uses **`http://localhost:18080`** via optional **`OIDC_AUTHORIZE_URL`**.
 
@@ -288,9 +292,15 @@ export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>
 
 docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --build-arg OCI_IMAGE_* for a labelled image (see DEPLOY.md)
 cargo test -p protocol -p server
+./scripts/test-container-health.sh v-note:local   # HEALTHCHECK config + a real unhealthy transition
+./scripts/test-deploy-v-note.sh                   # deploy parameter guards + health gate (no docker socket needed)
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright
 ```
+
+The e2e stack waits on the app's healthcheck (`service_healthy`), so a container
+that never becomes healthy fails the run with `dependency failed to start`
+instead of surfacing as a confusing Playwright timeout.
 
 Verify GitHub status after push:
 
