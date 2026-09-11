@@ -1,5 +1,6 @@
 # Local temporary dev overlay — bypass Traefik, publish HTTPS on localhost, mock OIDC for sign-in.
-# Usage: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build
+# Usage: `just run-compose` (builds the web image first — neither compose file has a
+# `build:` block), or `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up`
 
 services:
   mock-oidc:

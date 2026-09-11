@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push: compute-version ∥ contract-validation ∥ build-android ∥ Android API 29/36 instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
+# Push: compute-version ∥ contract-validation ∥ deploy-script-validation ∥ build-android ∥ Android API 29/36 instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
 # Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release
 
 when:
@@ -63,24 +63,31 @@ steps:
         docker build -f Dockerfile.android \
           --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
           --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
-          --label org.opencontainers.image.title=v-note-android \
-          --label "org.opencontainers.image.description=v-note Android APK delivery image (nginx; devDebug APK for remote dev sideload)" \
-          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
-          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.authors="Vincent Cheesbrough" \
-          --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
-          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
-          --label org.opencontainers.image.base.name=nginx:alpine \
-          --label org.opencontainers.image.base.digest=sha256:8b1e78743a03dbb2c95171cc58639fef29abc8816598e27fb910ed2e621e589a \
-          --label org.opencontainers.image.version="$$RELEASE_TAG" \
-          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
-          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --build-arg OCI_IMAGE_VERSION="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_REVISION="$$CI_COMMIT_SHA" \
+          --build-arg OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)" \
           -t "$$IMAGE" .
         echo "timing: docker build Dockerfile.android took $$(( $$(date +%s) - $$START ))s"
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
         START=$$(date +%s)
         docker push "$$IMAGE"
         echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
+
+  # deploy-v-note.sh takes no arguments: every environment-specific value is a
+  # parameter set by the deploy steps below, so a missing one is not a crash but a
+  # silently wrong deploy (prod labelled env=dev, a parallel compose project, an
+  # app with no runtime config). The deploy steps only ever exercise the happy
+  # path, so the guards get their own test. Runs on the docker CLI image for the
+  # compose plugin — `compose config` resolves the model client-side, so this
+  # needs no docker socket. Placed here only because it uses the *docker-image
+  # anchor defined above; `depends_on: []` keeps it in the first parallel stage.
+  deploy-script-validation:
+    when:
+      - event: [push, manual]
+    depends_on: []
+    image: *docker-image
+    commands:
+      - ./scripts/test-deploy-v-note.sh
 
   android-instrumented-api-29:
     when:
@@ -95,24 +102,21 @@ steps:
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
+        # The pin lives in scripts/android-build-box-image.ref; split it on `@` so
+        # the FROM and the OCI base.* labels are fed from that one value.
+        BUILD_BOX_REF=$$(cat scripts/android-build-box-image.ref)
         START=$$(date +%s)
         docker build -f Dockerfile.android-instrumented \
-          --build-arg ANDROID_BUILD_BOX_IMAGE=$$(cat scripts/android-build-box-image.ref) \
+          --build-arg BASE_IMAGE_NAME="$${BUILD_BOX_REF%@*}" \
+          --build-arg BASE_IMAGE_DIGEST="$${BUILD_BOX_REF#*@}" \
           --build-arg ANDROID_API_LEVEL="$$ANDROID_API_LEVEL" \
           --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
-          --label org.opencontainers.image.title=v-note-android-instrumented \
-          --label "org.opencontainers.image.description=v-note Android API $$ANDROID_API_LEVEL CI image (devDebug instrumented tests + emulator)" \
-          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
-          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
-          --label org.opencontainers.image.base.name=mingc/android-build-box:master \
-          --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
-          --label org.opencontainers.image.version="$$RELEASE_TAG" \
-          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
-          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --build-arg OCI_IMAGE_VERSION="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_REVISION="$$CI_COMMIT_SHA" \
+          --build-arg OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)" \
           -t "$$IMAGE" .
         echo "timing: docker build Dockerfile.android-instrumented took $$(( $$(date +%s) - $$START ))s"
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
       - |
         START=$$(date +%s)
         if [ -c /dev/kvm ]; then
@@ -157,19 +161,15 @@ steps:
         docker build -f Dockerfile.web \
           --secret id=github_token,env=GITHUB_TOKEN \
           --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
-          --label org.opencontainers.image.title=v-note \
-          --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
-          --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
-          --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
-          --label org.opencontainers.image.base.name=debian:trixie-slim \
-          --label org.opencontainers.image.base.digest=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 \
-          --label org.opencontainers.image.version="$$RELEASE_TAG" \
-          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
-          --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
-          --label org.opencontainers.image.created="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --build-arg OCI_IMAGE_VERSION="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_REVISION="$$CI_COMMIT_SHA" \
+          --build-arg OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)" \
           -t "$$IMAGE" .
         echo "timing: docker build Dockerfile.web took $$(( $$(date +%s) - $$START ))s"
+        # The image that actually ships, gated on the same label contract the e2e
+        # support image is held to — this is the check that caught the missing
+        # authors/vendor labels the old --label flags never set.
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
         START=$$(date +%s)
         docker push "$$IMAGE"
         echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
@@ -186,7 +186,7 @@ steps:
         RELEASE_TAG=$$(cat .release-tag)
         export OCI_IMAGE_VERSION="$$RELEASE_TAG"
         export OCI_IMAGE_REVISION="$$CI_COMMIT_SHA"
-        export OCI_IMAGE_CREATED="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        export OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)"
         REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
         START=$$(date +%s)
         TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml build playwright v-note-android-apk legacy-migration-fixture
@@ -270,7 +270,10 @@ steps:
       - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
-    environment:
+    # The whole dev environment, defined once and reused by auto-deploy-dev.
+    # deploy-v-note.sh takes no arguments and knows nothing about dev vs prod —
+    # every environment-specific value is right here.
+    environment: &deploy-dev-environment
       REGISTRY_USER:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
@@ -281,8 +284,30 @@ steps:
       # itself selects the environment.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_dev_sovereign_access_url
-    commands:
-      - ./scripts/deploy-v-note.sh dev
+      # Alias of /v-note/dev/server/observability/metrics-addr — the same stored
+      # value the app reads, exposed to the broker so the deploy can derive the
+      # Alloy scrape labels docker writes at container-create time. A plain
+      # value, not a secret; `from_secret` is Woodpecker's only broker channel.
+      V_NOTE_METRICS_ADDR:
+        from_secret: v_note_dev_metrics_addr
+      # Read by `docker compose` itself, so the script needs no -p/-f flags.
+      COMPOSE_PROJECT_NAME: v-note-dev
+      COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.android-apk.yml
+      V_NOTE_IMAGE_REPOS: registry.desync.link/v-note registry.desync.link/v-note-android
+      V_NOTE_HOST: v-notes-dev.desync.link
+      V_NOTE_CONTAINER_NAME: v-note-dev
+      DB_VOLUME: v-note-dev-db
+      # Canonical environment name, matching the sovereign-config
+      # `observability/environment` leaf the server uses for the OTEL
+      # `deployment.environment` trace attribute. Deliberately not the branch
+      # name: that split one deployment across two values, so traces said `dev`
+      # while the metrics/log discovery labels said e.g. `feat/foo` and no single
+      # environment filter matched all three signals. The build is already
+      # identified by `observability.release` and the image's
+      # `org.opencontainers.image.revision`.
+      APP_ENV: dev
+    commands: &deploy-commands
+      - ./scripts/deploy-v-note.sh
 
   auto-deploy-dev:
     when:
@@ -292,19 +317,8 @@ steps:
       - apply-authentik-blueprint-auto-dev
     image: *docker-image
     volumes: *docker-socket
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-      POSTGRES_PASSWORD:
-        from_secret: v_note_dev_postgres_password
-      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
-      # itself selects the environment.
-      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
-        from_secret: v_note_dev_sovereign_access_url
-    commands:
-      - ./scripts/deploy-v-note.sh dev
+    environment: *deploy-dev-environment
+    commands: *deploy-commands
 
   tag-release-auto-dev:
     when:
@@ -339,8 +353,18 @@ steps:
       # Unlocks the /v-note/prod/server sovereign-config subtree.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: v_note_prod_sovereign_access_url
-    commands:
-      - ./scripts/deploy-v-note.sh prod
+      # Alias of /v-note/prod/server/observability/metrics-addr — see deploy-dev.
+      V_NOTE_METRICS_ADDR:
+        from_secret: v_note_prod_metrics_addr
+      # No android-apk overlay on prod: the APK delivery image is dev-only.
+      COMPOSE_PROJECT_NAME: v-note
+      COMPOSE_FILE: deploy/docker-compose.yml
+      V_NOTE_IMAGE_REPOS: registry.desync.link/v-note
+      V_NOTE_HOST: v-notes.desync.link
+      V_NOTE_CONTAINER_NAME: v-note
+      DB_VOLUME: v-note-prod-db
+      APP_ENV: production
+    commands: *deploy-commands
 
   tag-release-dev:
     when:

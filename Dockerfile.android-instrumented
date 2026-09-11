@@ -4,8 +4,12 @@
 # Requires --privileged and /dev/kvm on the Woodpecker agent.
 # Emulator + system image are baked here so runtime does not re-download SDK packages.
 # Base image pin: scripts/android-build-box-image.ref (override via --build-arg in CI).
-ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
-FROM ${ANDROID_BUILD_BOX_IMAGE}
+# Declared as name + digest rather than one ref so the `FROM` and the OCI
+# `base.*` labels at the end are built from the same values; CI splits the ref
+# file on `@` and passes both, so the pin still has exactly one home.
+ARG BASE_IMAGE_NAME=mingc/android-build-box:master
+ARG BASE_IMAGE_DIGEST=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
+FROM ${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST}
 
 ARG ANDROID_API_LEVEL=36
 ENV ANDROID_HOME=/opt/android-sdk
@@ -36,3 +40,23 @@ RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked
         :app:assembleDevDebug \
         :app:assembleDevDebugAndroidTest
 CMD ["bash", "scripts/run-android-instrumented-ci.sh"]
+
+# OCI image metadata — see Dockerfile.web for the rationale.
+ARG BASE_IMAGE_NAME
+ARG BASE_IMAGE_DIGEST
+ARG OCI_IMAGE_VERSION=
+ARG OCI_IMAGE_REVISION=
+ARG OCI_IMAGE_CREATED=
+LABEL org.opencontainers.image.title="v-note-android-instrumented" \
+      org.opencontainers.image.description="v-note Android API ${ANDROID_API_LEVEL} CI image (devDebug instrumented tests + emulator)" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.url="https://github.com/vcheesbrough/v-note" \
+      org.opencontainers.image.source="https://github.com/vcheesbrough/v-note" \
+      org.opencontainers.image.authors="Vincent Cheesbrough" \
+      org.opencontainers.image.vendor="Vincent Cheesbrough" \
+      org.opencontainers.image.documentation="https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md" \
+      org.opencontainers.image.base.name="${BASE_IMAGE_NAME}" \
+      org.opencontainers.image.base.digest="${BASE_IMAGE_DIGEST}" \
+      org.opencontainers.image.version="${OCI_IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${OCI_IMAGE_REVISION}" \
+      org.opencontainers.image.created="${OCI_IMAGE_CREATED}"

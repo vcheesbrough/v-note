@@ -24,27 +24,106 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
-4. **deploy** — `scripts/deploy-v-note.sh dev|prod` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the app's `/health` from inside the compose network and fails the deploy (dumping container status + logs) if it never serves. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy.
+4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the app's `/health` from inside the compose network and fails the deploy (dumping container status + logs) if it never serves. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
-Push auto-dev deploy uses the same script and the same dev secrets as manual `deploy-dev`, but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
+Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
 
-Operator reproduction from a Woodpecker-equivalent shell:
+### The deploy script takes no arguments
+
+`scripts/deploy-v-note.sh` has **one entry point and no modes**. It does not know
+that dev and prod exist: every environment-specific value is a parameter set by
+the calling step in [`.woodpecker/build.yml`](../.woodpecker/build.yml), where
+the dev block is defined once and reused by `auto-deploy-dev` via a YAML anchor.
+Adding an environment means adding a step, not editing the script.
+
+| Parameter | Purpose |
+| --- | --- |
+| `REGISTRY_USER` / `REGISTRY_PASSWORD` | `registry.desync.link` credentials |
+| `POSTGRES_PASSWORD` | consumed directly by the `postgres` service |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | unlocks the app's sovereign-config subtree; **which URL is injected selects the environment** |
+| `V_NOTE_METRICS_ADDR` | `host:port` or `disabled` — see the broker alias above |
+| `COMPOSE_PROJECT_NAME` | compose project; read by `docker compose` itself, so the script passes no `-p` |
+| `COMPOSE_FILE` | `:`-separated compose files; likewise no `-f` |
+| `V_NOTE_IMAGE_REPOS` | space-separated repos to pull at the release tag (dev adds `v-note-android`) |
+| `V_NOTE_HOST`, `V_NOTE_CONTAINER_NAME`, `DB_VOLUME`, `APP_ENV` | passed straight through to compose |
+
+All of these are required. The script explicitly checks only the four whose
+absence would otherwise be **silent** — `APP_ENV` (compose falls back to `dev`,
+so a prod deploy would label itself `env=dev`), `COMPOSE_PROJECT_NAME` (compose
+falls back to the compose file's directory name, deploying into a parallel
+project), `SOVEREIGN_CONFIG_ACCESS_URL_FILE` (compose accepts a blank secret and
+the app starts with no runtime config), and `V_NOTE_IMAGE_REPOS` (the pull loop
+does nothing). The rest already fail loudly on their own: `set -u` catches any
+unset variable the script dereferences, `POSTGRES_PASSWORD` / `V_NOTE_HOST` /
+`V_NOTE_CONTAINER_NAME` / `DB_VOLUME` carry `:?` guards in
+`deploy/docker-compose.yml`, empty registry credentials fail `docker login`, and
+a malformed or empty `V_NOTE_METRICS_ADDR` is rejected by the script's own
+`case`. `V_NOTE_IMAGE_TAG` (overrides `.release-tag`) and `DOCKER_NETWORK` are
+optional.
+
+**Nothing with a side effect runs until every parameter has been checked.** The
+compose `:?` guards would otherwise not fire until `up` — after a registry login
+and an image pull — so the script resolves the model first with `docker compose
+config --quiet`. That is client-side only (no daemon, no network) and also
+catches a missing or wrong `COMPOSE_FILE` and any schema error in the compose
+files themselves.
+
+What the script keeps is the shell that is awkward to inline into a Woodpecker
+`commands:` block: the metrics-addr → scrape-label derivation (one value with two
+consumers — passing it in pre-split would reintroduce the drift it exists to
+prevent), the explicit recreate and its rationale, the health gate, and the
+parameter checks — the four-name guard and the compose pre-flight. It is also the
+only form of the deploy that can be run by hand or checked outside CI.
+
+Those checks are exercised by
+[`scripts/test-deploy-v-note.sh`](../scripts/test-deploy-v-note.sh), run in the
+`deploy-script-validation` pipeline step. It puts a stub `docker` on `PATH` and
+asserts each bad input fails *with no docker call at all*, plus that the scrape
+labels track the listener port and that the recreate still happens — the deploy
+steps themselves only ever exercise the happy path. It runs on the docker CLI
+image because the pre-flight cases need the real compose plugin to fire the `:?`
+guards, but needs no docker socket: `compose config` resolves the model
+client-side.
+
+Operator reproduction from a Woodpecker-equivalent shell — export the parameters
+for the environment you want, exactly as the pipeline step sets them, then:
 
 ```bash
-./scripts/deploy-v-note.sh dev
-./scripts/deploy-v-note.sh prod
+export COMPOSE_PROJECT_NAME=v-note-dev
+export COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.android-apk.yml
+export V_NOTE_IMAGE_REPOS="registry.desync.link/v-note registry.desync.link/v-note-android"
+export V_NOTE_HOST=v-notes-dev.desync.link V_NOTE_CONTAINER_NAME=v-note-dev
+export DB_VOLUME=v-note-dev-db APP_ENV=dev
+export REGISTRY_USER=… REGISTRY_PASSWORD=… POSTGRES_PASSWORD=…
+export SOVEREIGN_CONFIG_ACCESS_URL_FILE=… V_NOTE_METRICS_ADDR=0.0.0.0:9090
+./scripts/deploy-v-note.sh
 ```
+
+> **Watch out on a developer box.** `COMPOSE_FILE=deploy/…` makes `deploy/` the
+> compose *project directory*, and compose auto-loads `deploy/.env` from there.
+> That file is gitignored and absent from CI's fresh clone, so the pipeline is
+> unaffected — but locally `scripts/fetch-compose-env.sh` fills it with the
+> **local** stack's values (`V_NOTE_CONTAINER_NAME=v-note-local`,
+> `V_NOTE_HOST=localhost`, `DB_VOLUME=v-note-local-db`, `V_NOTE_IMAGE_TAG=local`).
+> A hand-run that forgets one of the exports above silently picks those up instead
+> of failing. Run the deploy from a clean checkout, or pass
+> `--env-file /dev/null`, if you need the guards to behave as they do in CI.
 
 ---
 
-## Secrets (OpenBao)
+## Secrets
 
-**Never commit values.** Two OpenBao paths:
+**Never commit values.** CI secrets come from sovereign-config through the
+Woodpecker broker; local compose secrets still come from OpenBao.
 
-### Woodpecker mini deploy
+### Woodpecker mini deploy (sovereign-config broker)
 
-`secret/woodpecker/repos/vcheesbrough/v-note` (broker layout, same as bored):
+Mini points `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at the
+`sovereign-config-woodpecker-broker`, whose layers are
+`/woodpecker/shared,/woodpecker/repos/{repo.owner}/{repo.name}` — so a
+`from_secret: <name>` in [`.woodpecker/build.yml`](../.woodpecker/build.yml)
+resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
 
 | Woodpecker secret key | Used for |
 | --- | --- |
@@ -54,17 +133,42 @@ Operator reproduction from a Woodpecker-equivalent shell:
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
 | `v_note_prod_sovereign_access_url` | Access URL for the `/v-note/prod/server` sovereign-config subtree |
+| `v_note_dev_metrics_addr` | **Alias** of `/v-note/dev/server/observability/metrics-addr` — see below |
+| `v_note_prod_metrics_addr` | **Alias** of `/v-note/prod/server/observability/metrics-addr` |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
 | Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
-Rotate with `bao kv patch` on mini. CI injects these via Woodpecker — **no `.env` on the host**.
+Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
+`/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
+— **no `.env` on the host**.
+
+**The two `*_metrics_addr` entries are aliases, not copies.** `AddValuePath`
+exposes one stored value at several canonical paths, so the pipeline and the app
+read the *same* leaf: the app resolves `observability/metrics-addr` through its
+own sovereign-config client, and `deploy-v-note.sh` reads the alias to derive the
+Alloy `observability.metrics.port` / `.scrape` container labels, which docker
+writes at container-create time and nothing inside the container can influence.
+Create them with:
+
+```bash
+sovereign-config alias add /v-note/dev/server/observability/metrics-addr \
+  /woodpecker/repos/vcheesbrough/v-note/v_note_dev_metrics_addr
+sovereign-config alias add /v-note/prod/server/observability/metrics-addr \
+  /woodpecker/repos/vcheesbrough/v-note/v_note_prod_metrics_addr
+```
+
+This aliases *into* `/woodpecker/...`, the opposite direction to the broker
+README's advice. That advice is about repository-independent values whose natural
+home is the broker root; this value's canonical home is the app subtree, so the
+alias points the other way. Aliasing widens read access — every v-note pipeline
+can read it — which is immaterial here because it is a plain leaf, not a secret.
 
 App Links JSON is **not** in this list: since iteration 19 it lives in sovereign-config
 at `android/assetlinks-json`. The former `v_note_{dev,prod}_assetlinks_json` keys have
 been deleted — rotating a signing certificate means rewriting that leaf (see
-[Set App Links JSON](#set-app-links-json) below), not patching OpenBao.
+[Set App Links JSON](#set-app-links-json) below), not patching a CI secret.
 
-### Local compose (WSL / laptop)
+### Local compose (WSL / laptop) — OpenBao
 
 `secret/v-note-stack/env`:
 
@@ -123,17 +227,26 @@ and **fails closed on protocol mismatch**; if that server is upgraded, bump
 
 | Variable (example) | Purpose |
 | --- | --- |
-| `V_NOTE_HOST` | `v-notes.desync.link` vs `v-notes-dev.desync.link` |
+| `V_NOTE_HOST` | `v-notes.desync.link` vs `v-notes-dev.desync.link` — **compose-level only**, for the Traefik router rules; the container is not given it |
 | `V_NOTE_CONTAINER_NAME` | `v-note` vs `v-note-dev` |
 | `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
-| `APP_ENV` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.env` labels |
-| `APP_VERSION` | compose-level only — `OTEL_RESOURCE_ATTRIBUTES` + `observability.release` labels (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
+| `APP_ENV` | compose-level only — the `observability.env` discovery label |
+| `APP_VERSION` | compose-level only — the `observability.release` discovery label (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
 | `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
-| `V_NOTE_METRICS_ADDR` | `0.0.0.0:9090` or `disabled` — **one** source for the listener *and* Alloy's scrape labels, so they cannot drift. `deploy-v-note.sh` derives `VNOTE__OBSERVABILITY__METRICS_ADDR`, `observability.metrics.port` and `observability.metrics.scrape` from it. Being an env override it out-ranks the sovereign `observability/metrics-addr` leaf for deployments; the planned Woodpecker sovereign-config broker will feed this from that same leaf |
+| `V_NOTE_METRICS_ADDR` | compose-level only — `host:port` or `disabled`, supplied by the `v_note_{dev,prod}_metrics_addr` broker alias of `observability/metrics-addr`. `deploy-v-note.sh` derives `observability.metrics.port` and `observability.metrics.scrape` from it, so the listener and the thing scraping it read one value. **Required** — a missing value fails the deploy rather than defaulting |
 
-Everything else (database, OIDC, OTLP, metrics address, App Links JSON) now comes
+The **container's only environment variable is `SOVEREIGN_CONFIG_ACCESS_URL_FILE`.**
+Everything else (database, OIDC, OTLP, metrics address, App Links JSON) comes
 from sovereign-config, overridable per-deploy through the `VNOTE__*` env layer
-documented in [`DEV.md`](DEV.md).
+documented in [`DEV.md`](DEV.md) — a layer the deploy path deliberately no longer
+uses.
+
+There is deliberately **no `observability.protocol` label**. The protocol version
+is a compile-time constant, not configuration; the compose copy sat at `2` while
+the constant moved to `5`, and Alloy's relabelling pushed that stale value onto
+every v-note series. `v_note_build_info{protocol=…}` now states it from the same
+constant the binary uses. To filter other series by protocol, join:
+`… * on(instance) group_left(protocol) v_note_build_info`.
 
 **OIDC is mandatory** — the server exits non-zero at startup if `oidc/issuer-url` or
 related leaves are missing; deploy reads them from sovereign-config, local compose
@@ -200,17 +313,36 @@ All four repo-built images set [OCI Image Spec](https://github.com/opencontainer
 | **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}-api{29\|36}` |
 | **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
 
-Label sources (no `LABEL` instructions in Dockerfiles — all set at build time):
+**Each Dockerfile owns its own labels.** Static values are `LABEL` instructions in
+the Dockerfile; only the three per-build values arrive as build args, so every
+build path — CI, `just run-compose`, a bare `docker build` — emits the same label
+set:
 
 | Label | Source |
 | --- | --- |
-| Static (title, description, licenses, url, authors, vendor, documentation, base.name, base.digest) | **`docker build --label`** in [`.woodpecker/build.yml`](../.woodpecker/build.yml), or compose **`build.labels`** (deploy compose, e2e playwright) |
-| `org.opencontainers.image.version` | `docker build --label` or compose `build.labels` (`.release-tag` / `OCI_IMAGE_VERSION`) |
-| `org.opencontainers.image.revision` | `docker build --label` or compose `build.labels` (`CI_COMMIT_SHA` / `OCI_IMAGE_REVISION`) |
-| `org.opencontainers.image.source` | `docker build --label` or compose `build.labels` |
-| `org.opencontainers.image.created` | `docker build --label` or compose `build.labels` (UTC RFC 3339 at build time) |
+| Static (title, description, licenses, url, source, authors, vendor, documentation) | `LABEL` in the Dockerfile |
+| `org.opencontainers.image.base.name` / `.base.digest` | `LABEL` in the Dockerfile, fed from the same `BASE_IMAGE_NAME` / `BASE_IMAGE_DIGEST` args as its `FROM`, so the labels cannot describe a different base than the one built on. For the android-build-box images those two args are also held against `scripts/android-build-box-image.ref` by `scripts/check-android-build-box-image.sh` — a file that spells the pin out must spell out the *current* one, whether as a whole `name@sha256:…` or as the two halves |
+| `org.opencontainers.image.version` | `--build-arg OCI_IMAGE_VERSION` (`.release-tag` in CI, `git describe` locally) |
+| `org.opencontainers.image.revision` | `--build-arg OCI_IMAGE_REVISION` (`CI_COMMIT_SHA` / `git rev-parse HEAD`) |
+| `org.opencontainers.image.created` | `--build-arg OCI_IMAGE_CREATED` — **`git log -1 --format=%cI`, not the wall clock**, so rebuilding a commit reproduces the same label (and the same image config blob) |
 
-Woodpecker applies these labels to every repo-built image. The **`e2e-web`** step also runs **`scripts/check-image-metadata.sh`** against the Playwright image and fails if labels are missing or the version/revision does not match.
+The Playwright and legacy-migration fixture images are the exception: they are
+defined as `dockerfile_inline` in `e2e/docker-compose.test.yml` with compose
+`build.labels`, because they have no Dockerfile and no second build path.
+
+**`scripts/check-image-metadata.sh`** runs against the **web**, **android** and
+**instrumented** images in their build steps, and against the Playwright image in
+`e2e-web` — it fails if any required label is missing or if version/revision do
+not match what the step passed in. It previously ran only against the Playwright
+image, which is why the web image shipped for several releases with no `authors`
+or `vendor` label despite both being required.
+
+**Compose and image builds.** `deploy/docker-compose.yml` has **no `build:`
+block** and must not gain one. Compose may build images that exist *only* for
+that stack (the e2e Playwright and fixture images), but never the production
+application image: that has a canonical CI build, and a second definition means a
+second, drifting label set and a `docker compose up --build` on mini that would
+deploy host source instead of the tested image.
 
 **Build context:** each image uses a Dockerfile-paired ignore file (BuildKit convention) so `COPY . .` cache is not busted by unrelated tree changes:
 
@@ -221,26 +353,17 @@ Woodpecker applies these labels to every repo-built image. The **`e2e-web`** ste
 | Android instrumented | `Dockerfile.android-instrumented.dockerignore` |
 | Playwright e2e | `e2e/.dockerignore` (compose `context: e2e/`) |
 
-Local check after build — copy `--label` flags from `.woodpecker/build.yml` (`build-web`, `build-android`, `android-instrumented`); substitute `0.3.0-local`, `$SHA`, and `$CREATED` for version/revision/created. Example (web):
+Local check after build — the same three build args CI passes. Example (web):
 
 ```bash
 SHA=$(git rev-parse HEAD)
-CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CREATED="$(git log -1 --format=%cI)"
 
 docker build -f Dockerfile.web \
-  --label org.opencontainers.image.title=v-note \
-  --label "org.opencontainers.image.description=v-note server (Axum API + Leptos SPA static)" \
-  --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
-  --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-  --label org.opencontainers.image.authors="Vincent Cheesbrough" \
-  --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
-  --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
-  --label org.opencontainers.image.base.name=debian:trixie-slim \
-  --label org.opencontainers.image.base.digest=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 \
-  --label org.opencontainers.image.version=0.3.0-local \
-  --label org.opencontainers.image.revision="$SHA" \
-  --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
-  --label org.opencontainers.image.created="$CREATED" \
+  --secret id=github_token,env=GITHUB_TOKEN \
+  --build-arg OCI_IMAGE_VERSION=0.3.0-local \
+  --build-arg OCI_IMAGE_REVISION="$SHA" \
+  --build-arg OCI_IMAGE_CREATED="$CREATED" \
   -t v-note:local .
 ./scripts/check-image-metadata.sh v-note:local 0.3.0-local "$SHA"
 
