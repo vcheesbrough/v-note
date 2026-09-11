@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
+# Runtime base, declared once. The `FROM` below and the OCI `base.*` labels are
+# both derived from these args, so they cannot end up describing different
+# images — previously the digest was restated in compose, CI and the docs.
+ARG BASE_IMAGE_NAME=debian:trixie-slim
+ARG BASE_IMAGE_DIGEST=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
+
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS builder
 RUN rustup target add wasm32-unknown-unknown && cargo install trunk
 WORKDIR /app
@@ -32,7 +38,7 @@ RUN --mount=type=cache,id=v-note-cargo-registry,target=/usr/local/cargo/registry
     cargo build --release -p server \
     && cp /app/target/release/server /tmp/server
 
-FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
+FROM ${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST}
 
 RUN apt-get update \
     && apt-get install -y ca-certificates openssl \
@@ -54,3 +60,26 @@ ENV VNOTE__SERVER__TLS-KEY=/app/key.pem
 ENV VNOTE__SERVER__STATIC-DIR=/app/dist
 EXPOSE 443
 CMD ["./server"]
+
+# OCI image metadata, owned here so every build path (CI, `just run-compose`, a
+# bare `docker build`) produces the same label set. Only the three per-build
+# values are passed in; keeping this block last means changing them rebuilds one
+# metadata layer and nothing else.
+ARG BASE_IMAGE_NAME
+ARG BASE_IMAGE_DIGEST
+ARG OCI_IMAGE_VERSION=
+ARG OCI_IMAGE_REVISION=
+ARG OCI_IMAGE_CREATED=
+LABEL org.opencontainers.image.title="v-note" \
+      org.opencontainers.image.description="v-note server (Axum API + Leptos SPA static)" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.url="https://github.com/vcheesbrough/v-note" \
+      org.opencontainers.image.source="https://github.com/vcheesbrough/v-note" \
+      org.opencontainers.image.authors="Vincent Cheesbrough" \
+      org.opencontainers.image.vendor="Vincent Cheesbrough" \
+      org.opencontainers.image.documentation="https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md" \
+      org.opencontainers.image.base.name="${BASE_IMAGE_NAME}" \
+      org.opencontainers.image.base.digest="${BASE_IMAGE_DIGEST}" \
+      org.opencontainers.image.version="${OCI_IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${OCI_IMAGE_REVISION}" \
+      org.opencontainers.image.created="${OCI_IMAGE_CREATED}"

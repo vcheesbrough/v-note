@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: v_note
       POSTGRES_USER: v_note
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, OpenBao in CI)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, the v_note_{dev,prod}_postgres_password broker secret in CI)}
     volumes:
       - v-note-db:/var/lib/postgresql/data
     networks:
@@ -20,49 +20,23 @@ services:
       retries: 5
 
   v-note:
+    # No `build:` here on purpose: this file defines production and the web image
+    # has a canonical CI build (.woodpecker/build.yml `build-web`). Compose may
+    # build images that exist only for one stack (the e2e Playwright and
+    # legacy-migration fixtures) — never the deployed application image. Local
+    # dev builds the same image with the same Dockerfile via `just run-compose`.
     image: registry.desync.link/v-note:${V_NOTE_IMAGE_TAG:-local}
-    build:
-      context: ..
-      dockerfile: Dockerfile.web
-      # sovereign-config-provider is a git dep on a private repo, so the cargo
-      # layers need a credential — the same one CI passes via --secret. Set
-      # GITHUB_TOKEN before `--build`; see docs/DEV.md.
-      secrets:
-        - github_token
-      labels:
-        org.opencontainers.image.title: v-note
-        org.opencontainers.image.description: v-note server (Axum API + Leptos SPA static)
-        org.opencontainers.image.licenses: PolyForm-Noncommercial-1.0.0
-        org.opencontainers.image.url: https://github.com/vcheesbrough/v-note
-        org.opencontainers.image.authors: Vincent Cheesbrough
-        org.opencontainers.image.vendor: Vincent Cheesbrough
-        org.opencontainers.image.documentation: https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md
-        org.opencontainers.image.base.name: debian:trixie-slim
-        org.opencontainers.image.base.digest: sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
-        org.opencontainers.image.version: ${OCI_IMAGE_VERSION:-local}
-        org.opencontainers.image.revision: ${OCI_IMAGE_REVISION:-dev}
-        org.opencontainers.image.source: https://github.com/vcheesbrough/v-note
-        org.opencontainers.image.created: ${OCI_IMAGE_CREATED:-unknown}
     container_name: ${V_NOTE_CONTAINER_NAME:?V_NOTE_CONTAINER_NAME is required}
     restart: unless-stopped
     environment:
       # Runtime config (database / oidc / observability / android) comes from
-      # sovereign-config, reached via the access-URL secret below. Only build,
-      # orchestration and image-internal values stay here — see card #273.
+      # sovereign-config, reached via the access-URL secret below — including
+      # `observability/metrics-addr`, which the deploy step reads through the
+      # Woodpecker broker to derive the Alloy scrape labels further down.
       # Set to an empty value (docker-compose.local.yml) to disable the
       # sovereign-config layer and fall back to plain VNOTE__* env.
       # Points at the docker secret below; the provider reads the URL from that file.
       SOVEREIGN_CONFIG_ACCESS_URL_FILE: /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
-      V_NOTE_HOST: ${V_NOTE_HOST:?V_NOTE_HOST is required}
-      # The metrics listener and Alloy's scrape-discovery labels below are derived
-      # from one value in deploy-v-note.sh, so they cannot drift apart. Snake_case
-      # because a shell cannot assign a name containing `-`; the server accepts
-      # both spellings. Once the Woodpecker sovereign-config broker lands this will
-      # be fed from `observability/metrics-addr`, making it the same value the app
-      # would otherwise read directly.
-      VNOTE__OBSERVABILITY__METRICS_ADDR: ${VNOTE__OBSERVABILITY__METRICS_ADDR:-0.0.0.0:9090}
-      VNOTE_PROTOCOL_VERSION: ${VNOTE_PROTOCOL_VERSION:-2}
-      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=${APP_ENV:-dev},service.version=${APP_VERSION:-0.11.0},vnote.protocol=${VNOTE_PROTOCOL_VERSION:-2}}
     secrets:
       - SOVEREIGN_CONFIG_ACCESS_URL_FILE
     depends_on:
@@ -74,20 +48,30 @@ services:
     labels:
       - traefik.enable=true
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.entrypoints=websecure
-      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.rule=Host(`${V_NOTE_HOST}`)
+      # `:?` here is the only thing that makes V_NOTE_HOST required: it is a
+      # compose-level variable (Traefik routing), never container env, so an
+      # unset value would otherwise resolve to an unroutable Host(``).
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.rule=Host(`${V_NOTE_HOST:?V_NOTE_HOST is required}`)
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls=true
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls.certresolver=myresolver
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,crowdsec@docker,security-headers@docker
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.scheme=https
+      # Derived by deploy-v-note.sh from the one `observability/metrics-addr`
+      # value the app itself reads, so the listener and the thing scraping it
+      # cannot disagree. Written by docker at container-create time, which is why
+      # they must be resolved outside the container.
       - observability.metrics.scrape=${V_NOTE_METRICS_SCRAPE:-true}
       - observability.metrics.port=${V_NOTE_METRICS_PORT:-9090}
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
       - observability.service=v-note
       - observability.env=${APP_ENV:-dev}
-      - observability.release=${APP_VERSION:-0.11.0}
-      - observability.protocol=${VNOTE_PROTOCOL_VERSION:-2}
+      - observability.release=${APP_VERSION:-unknown}
+      # No `observability.protocol` label: the protocol version is a compile-time
+      # constant, not configuration. `v_note_build_info{protocol=…}` states it
+      # from the same constant the binary uses and cannot go stale. Join with
+      # `… * on(instance) group_left(protocol) v_note_build_info` to filter.
 
 secrets:
   # Sourced straight from the Woodpecker secret v_note_{dev,prod}_sovereign_access_url,
@@ -98,12 +82,6 @@ secrets:
   # var to disable the sovereign layer entirely.
   SOVEREIGN_CONFIG_ACCESS_URL_FILE:
     environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE
-
-  # Build-time only (v-note.build.secrets), never mounted into the running
-  # container: lets a local `--build` fetch the private sovereign-config git dep
-  # the same way CI does. Deploys pull a prebuilt image and never reference it.
-  github_token:
-    environment: GITHUB_TOKEN
 
 volumes:
   v-note-db:

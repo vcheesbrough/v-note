@@ -9,9 +9,21 @@ run-server:
 run-spa:
     trunk serve --config frontend/Trunk.toml frontend/index.html
 
+# Build the web image, then bring the local stack up on it. deploy/docker-compose.yml
+# has no `build:` block — it defines production, and the web image's canonical build
+# is CI — so the build happens here, from the same Dockerfile with the same args.
 run-compose:
     ./scripts/fetch-compose-env.sh
-    docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build
+    VERSION="$(git describe --tags --always --dirty)" && \
+    docker build -f Dockerfile.web -t registry.desync.link/v-note:local \
+      --secret id=github_token,env=GITHUB_TOKEN \
+      --build-arg V_NOTE_RELEASE="$VERSION" \
+      --build-arg OCI_IMAGE_VERSION="$VERSION" \
+      --build-arg OCI_IMAGE_REVISION="$(git rev-parse HEAD)" \
+      --build-arg OCI_IMAGE_CREATED="$(git log -1 --format=%cI)" \
+      .
+    APP_VERSION="$(git describe --tags --always --dirty)" \
+    docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up
 
 # Host JDK + SDK (Android Studio). Builds devLocal (loopback). See docs/DEV.md → Android.
 build-android:
@@ -27,23 +39,14 @@ build-android-docker:
 # CI-parity instrumented tests (emulator inside container; needs --privileged + /dev/kvm).
 android-instrumented-docker api="36":
     ./scripts/sync-version.sh
-    CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" SHA="$(git rev-parse HEAD)" && \
+    REF='{{android_build_box_image}}' && \
     docker build -f Dockerfile.android-instrumented \
-      --build-arg ANDROID_BUILD_BOX_IMAGE={{android_build_box_image}} \
+      --build-arg BASE_IMAGE_NAME="${REF%@*}" \
+      --build-arg BASE_IMAGE_DIGEST="${REF#*@}" \
       --build-arg ANDROID_API_LEVEL={{api}} \
-      --label org.opencontainers.image.title=v-note-android-instrumented \
-      --label "org.opencontainers.image.description=v-note Android API {{api}} CI image (devDebug instrumented tests + emulator)" \
-      --label org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0 \
-      --label org.opencontainers.image.url=https://github.com/vcheesbrough/v-note \
-      --label org.opencontainers.image.authors="Vincent Cheesbrough" \
-      --label org.opencontainers.image.vendor="Vincent Cheesbrough" \
-      --label org.opencontainers.image.documentation=https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md \
-      --label org.opencontainers.image.base.name=mingc/android-build-box:master \
-      --label org.opencontainers.image.base.digest=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c \
-      --label org.opencontainers.image.version=local \
-      --label org.opencontainers.image.revision="$SHA" \
-      --label org.opencontainers.image.source=https://github.com/vcheesbrough/v-note \
-      --label org.opencontainers.image.created="$CREATED" \
+      --build-arg OCI_IMAGE_VERSION="$(git describe --tags --always --dirty)" \
+      --build-arg OCI_IMAGE_REVISION="$(git rev-parse HEAD)" \
+      --build-arg OCI_IMAGE_CREATED="$(git log -1 --format=%cI)" \
       -t v-note-android-instrumented:local-api{{api}} .
     if [ -c /dev/kvm ]; then
       docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:local-api{{api}}
@@ -66,7 +69,7 @@ android-run: android-install
     adb shell am start -n link.desync.vnote.dev/link.desync.vnote.MainActivity
 
 e2e:
-    export OCI_IMAGE_VERSION=local OCI_IMAGE_REVISION="$(git rev-parse HEAD)" OCI_IMAGE_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" && \
+    export OCI_IMAGE_VERSION=local OCI_IMAGE_REVISION="$(git rev-parse HEAD)" OCI_IMAGE_CREATED="$(git log -1 --format=%cI)" && \
     TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright
 
 contract-validation:

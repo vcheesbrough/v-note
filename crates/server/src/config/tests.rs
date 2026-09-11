@@ -23,6 +23,31 @@ fn cfg(entries: &[(&str, &str)]) -> Config {
         .expect("config should build")
 }
 
+/// As [`cfg`], but with a stand-in for the sovereign-config layer between the
+/// defaults and the env source — the same order, and the same `Trimmed` wrapper,
+/// that `build_config` uses when an access URL is present. Keys are the canonical
+/// dotted paths the real source emits (`observability.metrics-addr`).
+fn cfg_with_sovereign(sovereign: &[(&str, &str)], env: &[(&str, &str)]) -> Config {
+    let mut layer = Config::builder();
+    for (key, value) in sovereign {
+        layer = layer
+            .set_override(*key, *value)
+            .expect("sovereign fixture leaf should set");
+    }
+    let layer = layer.build().expect("sovereign fixture should build");
+
+    let source: HashMap<String, String> = env
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect();
+    apply_defaults(Config::builder())
+        .expect("defaults should apply")
+        .add_source(Trimmed(layer))
+        .add_source(Trimmed(env_source().source(Some(source))))
+        .build()
+        .expect("config should build")
+}
+
 fn database_env() -> Vec<(&'static str, &'static str)> {
     vec![
         ("VNOTE__DATABASE__HOST", "postgres"),
@@ -801,4 +826,53 @@ fn sovereign_source_is_disabled_without_an_access_url() {
     // Guards the local-dev / e2e path: no access URL in this test process, so the
     // sovereign layer must be skipped and config must come from defaults + env.
     assert!(!sovereign_source_enabled());
+}
+
+/// Deploys used to inject `VNOTE__OBSERVABILITY__METRICS_ADDR` so the deploy script
+/// and the app agreed on the listener address. Iteration 22 removed that override:
+/// the script now reads the same `observability/metrics-addr` leaf through the
+/// Woodpecker broker, and the app reads it from its own sovereign layer. That only
+/// works if a sovereign leaf out-ranks the built-in default with no env var
+/// present — which nothing asserted before.
+#[test]
+fn sovereign_layer_supplies_metrics_addr_with_no_env_override() {
+    let env = [("VNOTE__OBSERVABILITY__ENVIRONMENT", "dev")];
+
+    let defaults_only: ObservabilityConfig =
+        load_group(&cfg(&env), "observability").expect("loads");
+    let with_sovereign: ObservabilityConfig = load_group(
+        &cfg_with_sovereign(&[("observability.metrics-addr", "0.0.0.0:9191")], &env),
+        "observability",
+    )
+    .expect("loads");
+
+    assert_eq!(
+        with_sovereign.metrics_socket_addr(),
+        Some("0.0.0.0:9191".parse().expect("addr")),
+        "the sovereign leaf must beat the built-in default"
+    );
+    assert_ne!(
+        defaults_only.metrics_socket_addr(),
+        with_sovereign.metrics_socket_addr(),
+        "the fixture must differ from the default, or this proves nothing"
+    );
+}
+
+/// The env layer is still the per-deploy escape hatch above sovereign-config —
+/// removing the deploy's use of it must not quietly remove the capability.
+#[test]
+fn env_layer_still_overrides_the_sovereign_metrics_addr() {
+    let config = cfg_with_sovereign(
+        &[("observability.metrics-addr", "0.0.0.0:9191")],
+        &[
+            ("VNOTE__OBSERVABILITY__ENVIRONMENT", "dev"),
+            ("VNOTE__OBSERVABILITY__METRICS_ADDR", "127.0.0.1:9292"),
+        ],
+    );
+    let observability: ObservabilityConfig = load_group(&config, "observability").expect("loads");
+
+    assert_eq!(
+        observability.metrics_socket_addr(),
+        Some("127.0.0.1:9292".parse().expect("addr"))
+    );
 }

@@ -242,22 +242,30 @@ WSL builds/install via `adb` (USB or emulator started on Windows); `just android
 ```bash
 export BAO_ADDR=https://secrets.desync.link
 export BAO_TOKEN=<token with read on secret/v-note-stack/env>
-export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>  # only for --build
+export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>  # for the image build
 ./scripts/fetch-compose-env.sh   # writes deploy/.env from OpenBao + deploy/compose.env
 just run-compose
 ```
 
-`just run-compose` builds the image, and the cargo layers fetch the **private**
-`sovereign-config` git dep — so `GITHUB_TOKEN` must be set. Compose passes it as a
-build secret (`v-note.build.secrets`), the same credential path CI uses; it is
-build-time only and never mounted into the running container.
+`just run-compose` builds `registry.desync.link/v-note:local` from `Dockerfile.web`
+and then brings the stack up on it — one command, but two steps, because
+`deploy/docker-compose.yml` defines production and deliberately has no `build:`
+block (see [`DEPLOY.md`](DEPLOY.md) → OCI image metadata). The cargo layers fetch
+the **private** `sovereign-config` git dep, so `GITHUB_TOKEN` must be set; it is
+passed as a BuildKit secret (`--secret id=github_token,env=GITHUB_TOKEN`), the same
+credential path CI uses, and is never mounted into the running container.
+
+The build also stamps `OCI_IMAGE_VERSION` / `OCI_IMAGE_REVISION` /
+`OCI_IMAGE_CREATED` and `V_NOTE_RELEASE` from git, so a local image's version
+label, `/api/meta` and `v_note_build_info{version=…}` all agree.
 
 Non-secret compose defaults are in **`deploy/compose.env`** (committed). Secrets (**`POSTGRES_PASSWORD`**, **`OIDC_CLIENT_SECRET`**) live in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator).
 
 The local overlay maps those into the `VNOTE__*` layer and blanks
 `SOVEREIGN_CONFIG_ACCESS_URL_FILE`, so local dev never talks to sovereign-config.
 
-Or: `./scripts/fetch-compose-env.sh` then `docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up --build`
+Or run the two steps by hand: the `docker build` from `just run-compose`, then
+`docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up`
 
 - **API + SPA:** `https://localhost:8443` (self-signed — use `curl -k`)
 - **Metrics:** `http://localhost:9090/metrics`
@@ -278,7 +286,7 @@ credentials directly.)
 ```bash
 export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>
 
-docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --label flags from .woodpecker/build.yml build-web for OCI metadata
+docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --build-arg OCI_IMAGE_* for a labelled image (see DEPLOY.md)
 cargo test -p protocol -p server
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright
