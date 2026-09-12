@@ -559,9 +559,11 @@ fn required_scope_with_surrounding_whitespace_is_trimmed() {
 
     assert_eq!(oidc.required_scope, "v-note:dev:access");
     // The comparison auth.rs performs must now succeed.
-    assert!("openid profile v-note:dev:access"
-        .split_whitespace()
-        .any(|value| value == oidc.required_scope));
+    assert!(
+        "openid profile v-note:dev:access"
+            .split_whitespace()
+            .any(|value| value == oidc.required_scope)
+    );
 }
 
 /// Trimming is applied to every string leaf, not a curated list — including

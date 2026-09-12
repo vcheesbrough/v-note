@@ -1,11 +1,14 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/protocol", "crates/server", "frontend"]
 default-members = ["crates/protocol", "crates/server"]
 
 [workspace.package]
-version = "0.24.0"
-edition = "2021"
+version = "0.25.0"
+edition = "2024"
+# MSRV. Resolver 3 only honours `rust-version` when one is declared, so this
+# is what makes the resolver bump above mean anything.
+rust-version = "1.98"
 license = "PolyForm-Noncommercial-1.0.0"
 
 [workspace.dependencies]

@@ -10,7 +10,7 @@ Self-hosted ink note capture and sync: native Android stylus authoring, owner-on
 
 ## Quick start
 
-Prerequisites: **Rust**, **Docker**, **Trunk** (`cargo install trunk`), **Node.js** (e2e), **JDK 17** + **Android SDK** (Android builds). See [`docs/DEV.md`](docs/DEV.md).
+Prerequisites: **Rust** (pinned by `rust-toolchain.toml`), **Docker**, **Trunk** (`cargo install trunk --version 0.21.14 --locked`), **Node.js** (e2e), **JDK 17** + **Android SDK** (Android builds). See [`docs/DEV.md`](docs/DEV.md).
 
 ```bash
 # Server (HTTP on :8080)

@@ -1,18 +1,18 @@
 use futures_util::{
-    future::{AbortHandle, Abortable},
     SinkExt, StreamExt,
+    future::{AbortHandle, Abortable},
 };
 use gloo_net::http::Request;
-use gloo_net::websocket::{futures::WebSocket, Message};
+use gloo_net::websocket::{Message, futures::WebSocket};
 use gloo_timers::future::TimeoutFuture;
 use js_sys::{Date, Reflect};
 use leptos::prelude::*;
 use leptos::{ev, leptos_dom::helpers::window_event_listener};
 use protocol::{
-    paper_has_texture, paper_mark_device_width, paper_texture_tile, visit_paper_marks,
-    LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PageServerMessage, PageSummary,
-    Paper, RealtimeTicketResponse, Stroke, StrokeBatch, ThumbnailMetadata, WorldViewport,
-    PAPER_TEXTURE_COLOR_RGB, PAPER_TEXTURE_TILE_SIZE,
+    LibraryEvent, ListPagesResponse, MeResponse, MetaResponse, PAPER_TEXTURE_COLOR_RGB,
+    PAPER_TEXTURE_TILE_SIZE, PageServerMessage, PageSummary, Paper, RealtimeTicketResponse, Stroke,
+    StrokeBatch, ThumbnailMetadata, WorldViewport, paper_has_texture, paper_mark_device_width,
+    paper_texture_tile, visit_paper_marks,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{

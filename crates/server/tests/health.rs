@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use protocol::HealthResponse;
 use server::auth::{AuthConfig, JwksCache};
 use server::build_router;
-use server::observability::{metrics, metrics_handler, CORRELATION_ID_HEADER, REQUEST_ID_HEADER};
+use server::observability::{CORRELATION_ID_HEADER, REQUEST_ID_HEADER, metrics, metrics_handler};
 use tower::util::ServiceExt;
 
 fn test_router() -> axum::Router {

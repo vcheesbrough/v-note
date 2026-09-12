@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use config::{Config, ConfigBuilder, Environment};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use sovereign_config_provider::SovereignConfigSource;
 use url::Url;
 

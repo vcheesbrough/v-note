@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Path, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
     Extension, Json,
+    extract::{Path, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
 use protocol::{
@@ -12,8 +12,8 @@ use protocol::{
 use tracing::Instrument as _;
 use uuid::Uuid;
 
-use crate::auth::Claims;
 use crate::AppState;
+use crate::auth::Claims;
 
 #[derive(sqlx::FromRow)]
 struct PageRow {

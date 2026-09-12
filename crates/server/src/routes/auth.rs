@@ -1,8 +1,8 @@
 use axum::{
+    Extension, Json,
     extract::{OriginalUri, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
-    Extension, Json,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
@@ -10,8 +10,8 @@ use rand::RngCore;
 use serde::Deserialize;
 use tracing::Instrument as _;
 
-use crate::auth::{Claims, AUTH_COOKIE, STATE_COOKIE};
 use crate::AppState;
+use crate::auth::{AUTH_COOKIE, Claims, STATE_COOKIE};
 
 const STATE_COOKIE_MAX_AGE_SECS: i64 = 300;
 const AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24;

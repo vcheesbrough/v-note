@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
-    },
-    http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
     Extension, Json,
+    extract::{
+        Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::SplitSink;
@@ -22,8 +22,8 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 
-use crate::auth::{validate_jwt, Claims};
 use crate::AppState;
+use crate::auth::{Claims, validate_jwt};
 
 const TICKET_TTL_SECONDS: i64 = 60;
 const LIBRARY_CHANNEL_CAPACITY: usize = 64;
