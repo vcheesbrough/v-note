@@ -36,7 +36,8 @@ import kotlin.random.Random
  *
  * ```
  * ./gradlew :app:connectedDevDebugAndroidTest \
- *   -Pandroid.testInstrumentationRunnerArguments.class=link.desync.vnote.DensePageSeeder#seedDensePage
+ *   -Pandroid.testInstrumentationRunnerArguments.class=link.desync.vnote.DensePageSeeder#seedDensePage \
+ *   -Pandroid.testInstrumentationRunnerArguments.strokes=1200
  * ```
  *
  * It runs in the app's own process, so it reads the **real** signed-in session
