@@ -26,6 +26,10 @@ steps:
     # `Dockerfile.web` and the channel in `rust-toolchain.toml` (host dev).
     image: rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf
     environment:
+      # The image already *is* the pinned toolchain. Without this, rust-toolchain.toml
+      # — present in the clone, since .dockerignore only applies to `docker build` —
+      # makes rustup pull rustfmt/clippy/wasm-std, which this step never uses.
+      RUSTUP_TOOLCHAIN: "1.98.1"
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
