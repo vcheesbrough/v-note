@@ -2,9 +2,12 @@
 # images in `Dockerfile.web` (builder `FROM`) and `.woodpecker/build.yml`
 # (contract-validation) — all three move together on a toolchain bump.
 #
-# Dockerignored from every build context: the builder image already *is* this
-# toolchain, and letting rustup re-resolve it there would make each cargo layer
-# stop to download the components below.
+# Kept out of CI two different ways, because the images there already *are* this
+# toolchain and re-resolving it would only download the components below:
+#   - `docker build` contexts — via the three `Dockerfile.*.dockerignore` files;
+#   - the `contract-validation` step — via `RUSTUP_TOOLCHAIN` in
+#     `.woodpecker/build.yml`, since Woodpecker clones the repo directly and
+#     `.dockerignore` has no effect there.
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
