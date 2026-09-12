@@ -9,6 +9,7 @@ import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.DpRect
@@ -47,6 +48,7 @@ class PageLibraryOrderingInstrumentedTest {
     private val edited = AtomicBoolean(false)
     private val pageListRequests = AtomicInteger(0)
     private val librarySocket = AtomicReference<WebSocket>()
+    private val realtimeUpgrades = AtomicInteger(0)
     private val leaseGranted = CountDownLatch(1)
 
     private val environmentRule =
@@ -94,6 +96,54 @@ class PageLibraryOrderingInstrumentedTest {
 
     @get:Rule
     val rules: TestRule = RuleChain.outerRule(environmentRule).around(composeRule)
+
+    /**
+     * A close the *server* starts — a restart or a deploy — must surface as a
+     * disconnect and a reconnect, not a silently dead channel.
+     *
+     * This exercises the client's own close-handshake reply: the mock never
+     * answers here, because a server that initiates a close is not the peer
+     * that echoes it. Without `ApiClient.openLibrarySocket`'s `onClosing`,
+     * OkHttp never reports `onClosed`, so the banner below never appears and
+     * the library keeps a dead socket — no page, thumbnail or re-sort events,
+     * and no further `/api/realtime` upgrade to assert on.
+     */
+    @Test
+    fun serverInitiatedLibraryCloseSurfacesAndReconnects() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            pageListRequests.get() >= 1 && pageIsBefore("page_new", "page_old")
+        }
+        composeRule.waitUntil(timeoutMillis = 5_000) { librarySocket.get() != null }
+        val upgradesBeforeClose = realtimeUpgrades.get()
+        val fetchesBeforeClose = pageListRequests.get()
+
+        assertTrue(
+            "server closed the library channel",
+            librarySocket.get()?.close(1000, "server going away") == true,
+        )
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching {
+                composeRule.onNodeWithText("Realtime disconnected").assertIsDisplayed()
+                true
+            }.getOrDefault(false)
+        }
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            realtimeUpgrades.get() > upgradesBeforeClose && pageListRequests.get() > fetchesBeforeClose
+        }
+        assertTrue("library channel reconnected", realtimeUpgrades.get() > upgradesBeforeClose)
+
+        // The reconnected channel is live: an event on it still re-sorts.
+        composeRule.waitUntil(timeoutMillis = 5_000) { librarySocket.get() != null }
+        assertTrue(
+            "page-updated event sent on the new socket",
+            librarySocket.get()?.send(
+                """{"type":"page-updated","page_id":"page_old","updated_at":"2026-07-15T10:00:00Z"}""",
+            ) == true,
+        )
+        composeRule.waitUntil(timeoutMillis = 5_000) { pageIsBefore("page_old", "page_new") }
+        assertTrue("edited page is first", pageIsBefore("page_old", "page_new"))
+    }
 
     @Test
     fun editedPageMovesToTopWhenReturningToLibrary() {
@@ -286,6 +336,7 @@ class PageLibraryOrderingInstrumentedTest {
                                     webSocket: WebSocket,
                                     response: okhttp3.Response,
                                 ) {
+                                    realtimeUpgrades.incrementAndGet()
                                     librarySocket.set(webSocket)
                                 }
 

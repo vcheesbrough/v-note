@@ -29,6 +29,10 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
+// Enough batches that a per-batch publish would be unmistakable, while keeping
+// the MockWebServer exchange quick.
+private const val REPLAY_STROKES = 25
+
 private val seedStrokeMessage =
     """
     {
@@ -454,6 +458,164 @@ class PageInkInstrumentedTest {
 
         session.disconnect()
     }
+
+    /**
+     * The server replays one `stroke-batch` per stored batch, so a page with N
+     * strokes arrives as N messages. They must land on the canvas as one paint
+     * at `synced`, not N — that stepwise reveal is the bug in #312.
+     *
+     * `lease-granted` is sent *after* the batches and the channel is ordered, so
+     * `canEdit` proves every batch has already been handled: the emptiness
+     * asserted here is held-back ink, not ink that has yet to arrive.
+     */
+    @Test
+    fun replayIsWithheldUntilSyncedThenPublishedInOneStep() {
+        val socket = AtomicReference<WebSocket>()
+        openPage(socket) { webSocket, type ->
+            if (type == "subscribe") {
+                repeat(REPLAY_STROKES) { index -> webSocket.send(replayBatch(index)) }
+            }
+        }
+
+        val session = openSession()
+
+        assertTrue("replay delivered", awaitUntil { session.canEdit })
+        assertEquals("no ink painted mid-replay", 0, session.strokes.size)
+
+        socket.get().send("""{"type":"synced","last_seq":$REPLAY_STROKES}""")
+
+        assertTrue("whole page painted at synced", awaitUntil { session.strokes.size == REPLAY_STROKES })
+        session.disconnect()
+    }
+
+    /** A tombstone inside the replay is applied in that same single publish. */
+    @Test
+    fun replayAppliesItsOwnTombstonesBeforePublishing() {
+        val socket = AtomicReference<WebSocket>()
+        openPage(socket) { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send(replayBatch(0))
+                webSocket.send(replayBatch(1))
+                webSocket.send(
+                    """{"type":"tombstone-batch","revision":1,"client_mutation_id":"m1",""" +
+                        """"stroke_ids":["replay-stroke-0"]}""",
+                )
+            }
+        }
+
+        val session = openSession()
+
+        assertTrue("replay delivered", awaitUntil { session.canEdit })
+        assertEquals(0, session.strokes.size)
+
+        socket.get().send("""{"type":"synced","last_seq":2}""")
+
+        assertTrue("surviving stroke painted", awaitUntil { session.strokes.size == 1 })
+        assertEquals("replay-stroke-1", session.strokes[0].id)
+        session.disconnect()
+    }
+
+    /** `replay_failed` must show the ink that did arrive, not a blank page. */
+    @Test
+    fun failureDuringReplayPublishesWhatArrived() {
+        openPage { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send(replayBatch(0))
+                webSocket.send(replayBatch(1))
+                webSocket.send(
+                    """{"type":"error","code":"replay_failed","message":"could not load page ink"}""",
+                )
+            }
+        }
+
+        val session = openSession()
+
+        assertTrue("partial ink painted", awaitUntil { session.strokes.size == 2 })
+        assertTrue("error surfaced", awaitUntil { session.statusBanner != null })
+        session.disconnect()
+    }
+
+    /** Nor may a socket that drops before `synced` leave the page blank. */
+    @Test
+    fun socketCloseDuringReplayPublishesWhatArrived() {
+        openPage { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send(replayBatch(0))
+                webSocket.send(replayBatch(1))
+                webSocket.close(1000, "dropped mid-replay")
+            }
+        }
+
+        val session = openSession()
+
+        assertTrue("partial ink painted", awaitUntil { session.strokes.size == 2 })
+        session.disconnect()
+    }
+
+    private fun openSession(): PageInkSession {
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        session.connect()
+        return session
+    }
+
+    /**
+     * Enqueue a page channel that welcomes, grants the lease, and delegates
+     * every client message to [onMessage]. The lease reply is sent after
+     * [onMessage] has run, preserving replay-then-lease ordering.
+     */
+    private fun openPage(
+        socket: AtomicReference<WebSocket>? = null,
+        onMessage: (WebSocket, String) -> Unit,
+    ) {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        socket?.set(webSocket)
+                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                    }
+
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        val type = JSONObject(text).getString("type")
+                        onMessage(webSocket, type)
+                        when (type) {
+                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                            "release-lease" -> webSocket.close(1000, "lease released")
+                        }
+                    }
+                },
+            ),
+        )
+    }
+
+    private fun replayBatch(index: Int): String =
+        """
+        {
+          "type": "stroke-batch",
+          "seq": ${index + 1},
+          "client_batch_id": "replay-$index",
+          "strokes": [{
+            "id": "replay-stroke-$index",
+            "style": {
+              "tool_kind": "solid_round",
+              "style_version": 1,
+              "parameters": {
+                "color": "#006400",
+                "width": 4.0,
+                "cap_style": "round",
+                "join_style": "round"
+              }
+            },
+            "points": [{"x": ${index * 10}.0, "y": 2.0, "t": 0}]
+          }]
+        }
+        """.trimIndent()
 
     private fun awaitUntil(
         timeoutMs: Long = 5_000,

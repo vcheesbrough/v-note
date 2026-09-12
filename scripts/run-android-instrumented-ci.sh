@@ -14,6 +14,12 @@ BOOT_TIMEOUT_SEC="${BOOT_TIMEOUT_SEC:-900}"
 APP_APK="${APP_APK:-/workspace/android/app/build/outputs/apk/dev/debug/app-dev-debug.apk}"
 TEST_APK="${TEST_APK:-/workspace/android/app/build/outputs/apk/androidTest/dev/debug/app-dev-debug-androidTest.apk}"
 TEST_RUNNER="${TEST_RUNNER:-link.desync.vnote.dev.test/androidx.test.runner.AndroidJUnitRunner}"
+# Measurement fixtures are run by hand against a real device, never by CI. They
+# are excluded here rather than skipped at runtime, because the result check
+# below treats *any* negative status code as a failure — including the -4 an
+# assumption failure reports. Keeping that check strict is the point: a test
+# that silently stops running must not leave CI green.
+EXCLUDED_ANNOTATION="${EXCLUDED_ANNOTATION:-link.desync.vnote.MeasurementFixture}"
 
 ensure_avd() {
   if avdmanager list avd 2>/dev/null | grep -q "Name: ${AVD_NAME}"; then
@@ -95,7 +101,8 @@ if [ -f "$APP_APK" ] && [ -f "$TEST_APK" ]; then
   echo "Running instrumentation: $TEST_RUNNER"
   INSTRUMENTATION_OUTPUT=$(mktemp)
   set +e
-  adb shell am instrument -r -w "$TEST_RUNNER" 2>&1 | tee "$INSTRUMENTATION_OUTPUT"
+  adb shell am instrument -r -w -e notAnnotation "$EXCLUDED_ANNOTATION" "$TEST_RUNNER" 2>&1 |
+    tee "$INSTRUMENTATION_OUTPUT"
   INSTRUMENTATION_RC=${PIPESTATUS[0]}
   set -e
   if [ "$INSTRUMENTATION_RC" -ne 0 ]; then
@@ -113,5 +120,6 @@ if [ -f "$APP_APK" ] && [ -f "$TEST_APK" ]; then
 else
   echo "Prebuilt APKs not found; falling back to Gradle connected test" >&2
   ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir="$ANDROID_HOME" \
+    -Pandroid.testInstrumentationRunnerArguments.notAnnotation="$EXCLUDED_ANNOTATION" \
     :app:connectedDevDebugAndroidTest
 fi
