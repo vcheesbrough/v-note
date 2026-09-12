@@ -120,6 +120,19 @@ class ApiClient(
                     )
                 }
 
+                // Same handshake reply as the page channel: unanswered, a
+                // server-initiated close never reaches `onClosed`, so the
+                // library would sit on a dead socket with no banner and no
+                // reconnect — live page, thumbnail and re-sort events silently
+                // stop arriving.
+                override fun onClosing(
+                    webSocket: WebSocket,
+                    code: Int,
+                    reason: String,
+                ) {
+                    webSocket.close(NORMAL_CLOSURE, null)
+                }
+
                 override fun onClosed(
                     webSocket: WebSocket,
                     code: Int,
@@ -174,6 +187,10 @@ class ApiClient(
                     // Without this reply the channel would go quiet with no
                     // disconnect ever surfaced — and since a replay is painted
                     // only when it ends, the page would stay blank.
+                    //
+                    // Answering is all this needs to do: `onClosed` follows and
+                    // notifies the listener, so there is one notification path
+                    // rather than two that happen to be idempotent.
                     override fun onClosing(
                         webSocket: WebSocket,
                         code: Int,
@@ -182,7 +199,6 @@ class ApiClient(
                         // Always 1000: `close` rejects most codes a peer may
                         // legitimately send back (1001, 1011, …).
                         webSocket.close(NORMAL_CLOSURE, null)
-                        listener.onClosed()
                     }
 
                     override fun onClosed(
