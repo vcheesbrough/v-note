@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 private const val REQUEST_ID_HEADER = "X-Request-Id"
 private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
 private const val LOG_TAG = "VNoteApi"
+private const val NORMAL_CLOSURE = 1000
 
 class ApiClient(
     private val baseUrl: String,
@@ -166,6 +167,22 @@ class ApiClient(
                                 response,
                             ),
                         )
+                    }
+
+                    // A close the *server* initiates arrives here, and OkHttp
+                    // reports `onClosed` only once the handshake is answered.
+                    // Without this reply the channel would go quiet with no
+                    // disconnect ever surfaced — and since a replay is painted
+                    // only when it ends, the page would stay blank.
+                    override fun onClosing(
+                        webSocket: WebSocket,
+                        code: Int,
+                        reason: String,
+                    ) {
+                        // Always 1000: `close` rejects most codes a peer may
+                        // legitimately send back (1001, 1011, …).
+                        webSocket.close(NORMAL_CLOSURE, null)
+                        listener.onClosed()
                     }
 
                     override fun onClosed(

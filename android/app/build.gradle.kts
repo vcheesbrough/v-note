@@ -187,6 +187,9 @@ dependencies {
     implementation("net.openid:appauth:0.11.1")
     implementation("androidx.browser:browser:1.8.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // Named trace sections around the ink draw layers, so a Perfetto capture on
+    // a real tablet shows which layer a frame was spent in. See card #312.
+    implementation("androidx.tracing:tracing-ktx:1.2.0")
 
     testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     testImplementation("org.json:json:20240303")
