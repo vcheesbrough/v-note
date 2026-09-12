@@ -1,0 +1,11 @@
+# Host-dev toolchain pin. Keep the channel byte-identical with the `rust:<ver>`
+# images in `Dockerfile.web` (builder `FROM`) and `.woodpecker/build.yml`
+# (contract-validation) — all three move together on a toolchain bump.
+#
+# Dockerignored from every build context: the builder image already *is* this
+# toolchain, and letting rustup re-resolve it there would make each cargo layer
+# stop to download the components below.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

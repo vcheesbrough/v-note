@@ -1,8 +1,8 @@
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
 use serde::Serialize;
-use server::auth::{validate_jwt, AuthConfig, JwksCache};
+use server::auth::{AuthConfig, JwksCache, validate_jwt};
 use server::build_router;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,8 +11,7 @@ use tower::util::ServiceExt;
 
 const TEST_JWT_KID: &str = "test-kid";
 const TEST_RSA_PRIVATE_PEM: &str = include_str!("fixtures/test_rsa_private.pem");
-const TEST_RSA_N: &str =
-    "n2LSwWaKa37_PfC0fQehlQkhj4KFZc5htmDM5PDWOvnwuxmQ9AC48APxN-p1gjxR6O7MRsui-73c2pbk2Fp7nLQPmhupMEMw2bXDKV3iUaqppBGgMnbG43RnK6ho814E1aeaDdoicAlOUZQhp2PkRRd-2xemtazForez00ig-HN7W_JAh00ZaXP6JifiPqseSLKB1DnaNj1rIxfyPBdxrKyvDtKTudT3pn1yI8Wkl3mI57upEG7CCssZcLmKhWB3dMdHOaT2dnFqeOka4e3dt7i6jJj6h7LuAb4mfuYYAfJDhq5Ls8x9kb_I4U2NoCLYUtC3UlnwUIacvLzp4_iVkQ";
+const TEST_RSA_N: &str = "n2LSwWaKa37_PfC0fQehlQkhj4KFZc5htmDM5PDWOvnwuxmQ9AC48APxN-p1gjxR6O7MRsui-73c2pbk2Fp7nLQPmhupMEMw2bXDKV3iUaqppBGgMnbG43RnK6ho814E1aeaDdoicAlOUZQhp2PkRRd-2xemtazForez00ig-HN7W_JAh00ZaXP6JifiPqseSLKB1DnaNj1rIxfyPBdxrKyvDtKTudT3pn1yI8Wkl3mI57upEG7CCssZcLmKhWB3dMdHOaT2dnFqeOka4e3dt7i6jJj6h7LuAb4mfuYYAfJDhq5Ls8x9kb_I4U2NoCLYUtC3UlnwUIacvLzp4_iVkQ";
 const TEST_RSA_E: &str = "AQAB";
 
 fn test_auth_config() -> Arc<AuthConfig> {

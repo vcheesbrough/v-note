@@ -8,9 +8,9 @@
 
 | Tool | Purpose |
 | --- | --- |
-| **Rust** (stable) | Server, `crates/protocol`, Leptos frontend |
+| **Rust** | Server, `crates/protocol`, Leptos frontend — version pinned by [`rust-toolchain.toml`](../rust-toolchain.toml); rustup honours it automatically |
 | **Docker** + Compose | Local stack, e2e reproduction |
-| **Trunk** | `cargo install trunk` — Leptos SPA |
+| **Trunk** | `cargo install trunk --version 0.21.14 --locked` — Leptos SPA. `--locked` is required: an unlocked resolution of 0.21.14 no longer compiles |
 | **Node.js** 18+ | Playwright (`e2e/`) |
 | **just** | Convenience targets (`justfile`) |
 | **Android Studio** (Windows) | Emulator, USB device, SDK, `adb` — **recommended on WSL** |
