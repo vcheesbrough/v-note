@@ -1,5 +1,7 @@
 package link.desync.vnote.ink
 
+import android.os.SystemClock
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -74,6 +76,18 @@ class PageInkSession(
     private val pendingErasures = linkedMapOf<String, Set<String>>()
     private var socket: PageSocket? = null
     private var leaseRenewJob: Job? = null
+
+    // True from `subscribe` until the server's `synced`.
+    //
+    // The server replays one `stroke-batch` per stored batch and Android
+    // commits one stroke per batch, so opening a page delivers one message per
+    // stroke. Publishing each one repainted the whole page N times — the
+    // stroke-by-stroke reveal — and cost O(N²) list work on the way. The
+    // batches are still applied as they arrive; only the publish waits, so the
+    // page paints once, complete.
+    private var replaying = false
+    private var replayBatches = 0
+    private var replayStartedAt = 0L
 
     fun connect() {
         statusBanner = CONNECTING
@@ -168,6 +182,7 @@ class PageInkSession(
                 // A fresh connection supersedes anything still in flight.
                 pendingPaper = null
                 // Catch up on persisted ink, then take the lease if it is free.
+                beginReplay()
                 socket?.subscribe(lastSeq)
                 if (event.leaseHolder == null || event.leaseHolder == sessionId) {
                     socket?.acquireLease()
@@ -180,9 +195,13 @@ class PageInkSession(
                 if (seenBatchIds.add(event.clientBatchId)) {
                     confirmedStrokes.addAll(event.strokes)
                     pendingBatches.remove(event.clientBatchId)
+                    if (replaying) {
+                        replayBatches += 1
+                    }
                     // One state assignment swaps optimistic ink for the
                     // confirmed batch, so Compose cannot render a blank gap.
-                    publishRenderableStrokes()
+                    // Held back mid-replay; `Synced` publishes the whole page.
+                    publishUnlessReplaying()
                 }
                 if (event.seq > lastSeq) {
                     lastSeq = event.seq
@@ -192,6 +211,7 @@ class PageInkSession(
                 if (event.lastSeq > lastSeq) {
                     lastSeq = event.lastSeq
                 }
+                endReplay()
             }
             is PageEvent.TombstoneBatch -> {
                 val locallyErasedIds = pendingErasures.remove(event.clientMutationId).orEmpty()
@@ -199,7 +219,7 @@ class PageInkSession(
                 confirmedStrokes.removeAll { it.id in deletedIds }
                 pendingBatches.replaceAll { _, strokes -> strokes.filterNot { it.id in deletedIds } }
                 pendingBatches.entries.removeAll { (_, strokes) -> strokes.isEmpty() }
-                publishRenderableStrokes()
+                publishUnlessReplaying()
             }
             is PageEvent.PaperChanged -> {
                 paperState = event.paper
@@ -248,6 +268,9 @@ class PageInkSession(
                 }
             }
             is PageEvent.Failure -> {
+                // A replay that ends in an error still shows whatever arrived
+                // before it — `replay_failed` must not leave the page blank.
+                endReplay()
                 if (event.code == TOMBSTONE_FAILED) {
                     restorePendingErasure(event.clientMutationId)
                 }
@@ -283,6 +306,33 @@ class PageInkSession(
         leaseRenewJob = null
     }
 
+    private fun beginReplay() {
+        replaying = true
+        replayBatches = 0
+        replayStartedAt = SystemClock.elapsedRealtime()
+    }
+
+    // Close the replay window and paint what arrived. Idempotent, because the
+    // window can be closed by `synced`, by an error, or by the socket dropping.
+    private fun endReplay() {
+        if (!replaying) {
+            return
+        }
+        replaying = false
+        Log.d(
+            TAG,
+            "page replay applied: batches=$replayBatches " +
+                "durationMs=${SystemClock.elapsedRealtime() - replayStartedAt}",
+        )
+        publishRenderableStrokes()
+    }
+
+    private fun publishUnlessReplaying() {
+        if (!replaying) {
+            publishRenderableStrokes()
+        }
+    }
+
     private fun publishRenderableStrokes() {
         val erasedIds = pendingErasures.values.flatten().toSet()
         strokes =
@@ -314,6 +364,9 @@ class PageInkSession(
     }
 
     private fun handleDisconnected(message: String) {
+        // A socket that drops mid-replay never sends `synced`, so publish the
+        // partial page rather than withholding it until the next connect.
+        endReplay()
         canEdit = false
         stopLeaseRenewal()
         revertUnconfirmedPaper()
@@ -334,6 +387,7 @@ class PageInkSession(
     }
 
     companion object {
+        private const val TAG = "PageInkSession"
         private const val LEASE_RENEW_INTERVAL_MS = 10_000L
         private const val TOMBSTONE_FAILED = "tombstone_failed"
         private const val PAPER_FAILED = "paper_failed"

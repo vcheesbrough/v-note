@@ -454,6 +454,70 @@ class PageCanvasInputInstrumentedTest {
         }
     }
 
+    /**
+     * The in-progress stroke is drawn by its own canvas layer, above the
+     * committed ink. Rasterizing it before ACTION_UP — with the committed seed
+     * ink still underneath — is what proves the two layers paint independently:
+     * a stylus sample reaches the screen without redrawing the whole page.
+     */
+    @Test
+    fun liveStrokeIsRasterizedBeforeLiftWithCommittedInkIntact() {
+        openEditor()
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 240f, LIVE_STROKE_Y, downTime = downTime)
+        for (x in 260..460 step 20) {
+            sendStylus(MotionEvent.ACTION_MOVE, x.toFloat(), LIVE_STROKE_Y, downTime = downTime)
+        }
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching { hasInkAt(360, LIVE_STROKE_Y.toInt()) }.getOrDefault(false)
+        }
+        assertTrue("live ink painted before lift", hasInkAt(360, LIVE_STROKE_Y.toInt()))
+        assertTrue("committed ink still painted", hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()))
+
+        sendStylus(MotionEvent.ACTION_UP, 460f, LIVE_STROKE_Y, downTime = downTime)
+    }
+
+    /**
+     * Committed geometry is cached per stroke id, so an erase has to evict it
+     * and repaint the layer. Without that the stroke would stay on screen after
+     * its tombstone was accepted.
+     */
+    @Test
+    fun erasedStrokeLeavesTheCommittedLayer() {
+        openEditor()
+        assertTrue("seed painted", hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()))
+        composeRule.onNodeWithTag("eraser-tool").performClick().assertIsSelected()
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 300f, FIRST_STROKE_Y, downTime = downTime)
+        assertTombstoneBeforeLift("seed-first")
+        sendStylus(MotionEvent.ACTION_UP, 300f, FIRST_STROKE_Y, downTime = downTime)
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching { !hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }.getOrDefault(false)
+        }
+        assertTrue(
+            "erased stroke cleared from the cached layer",
+            !hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()),
+        )
+        assertTrue(
+            "the untouched stroke is still cached and drawn",
+            hasInkAt(SEED_ASSERTION_X, SECOND_STROKE_Y.toInt()),
+        )
+    }
+
+    // Any non-white pixel: the canvas is white and this page has no paper, so
+    // colour does not matter — only whether something was drawn there.
+    private fun hasInkAt(
+        x: Int,
+        y: Int,
+    ): Boolean {
+        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+        return pixels[x, y] != Color.White
+    }
+
     private fun assertTombstoneBeforeLift(expectedStrokeId: String) {
         val message = awaitMutation("commit-tombstones")
         assertNotNull("tombstone sent before ACTION_UP", message)
@@ -617,6 +681,9 @@ class PageCanvasInputInstrumentedTest {
     companion object {
         private const val FIRST_STROKE_Y = 200f
         private const val SECOND_STROKE_Y = 400f
+
+        // The clear band between the two seed strokes.
+        private const val LIVE_STROKE_Y = 300f
         private const val SEED_ASSERTION_X = 300
         private const val SPEN_BUTTON_STATE = MotionEvent.BUTTON_STYLUS_PRIMARY
         private const val NOTE9_SPEN_ACTION_DOWN = 211
