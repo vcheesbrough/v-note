@@ -48,7 +48,11 @@ import kotlin.random.Random
  * message per stored batch, so N strokes means N messages on open.
  *
  * Delete the page from the library when the measurement is done.
+ *
+ * [MeasurementFixture] keeps it out of the CI suite; the `strokes` guard below
+ * also makes it inert in any run that does not explicitly ask for it.
  */
+@MeasurementFixture
 @RunWith(AndroidJUnit4::class)
 class DensePageSeeder {
     @Test
