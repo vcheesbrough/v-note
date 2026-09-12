@@ -43,11 +43,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerType
@@ -61,6 +59,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.tracing.trace
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.Stroke
@@ -494,11 +493,15 @@ private fun InkCanvas(
     var hoverShowsEraser by remember { mutableStateOf(false) }
     var hoverButtonEraserArmed by remember { mutableStateOf(false) }
     val eraserRadiusPx = with(LocalDensity.current) { 12.dp.toPx() }
+    // Committed ink is rebuilt only when a stroke arrives, leaves or changes
+    // style. Deliberately not Compose state: it is touched during the draw
+    // phase, where a write must not schedule a recomposition.
+    val strokeGeometry = remember { StrokeGeometryCache() }
     DisposableEffect(Unit) {
         onDispose { momentumJob?.cancel() }
     }
 
-    Canvas(
+    Box(
         modifier =
             modifier
                 .clipToBounds()
@@ -724,40 +727,56 @@ private fun InkCanvas(
                     }
                 },
     ) {
-        // Grain first, and deliberately *outside* the transform: it tiles in
-        // device space so it keeps a constant size at every zoom, unlike the
-        // rules, which are world-anchored and ride the ink.
-        drawPaperTexture(paper)
-        withTransform({
-            translate(viewport.offset.x, viewport.offset.y)
-            scale(viewport.scale, viewport.scale, pivot = Offset.Zero)
-        }) {
-            // Paper first, under the ink transform, so it stays locked to the
-            // ink through pan and zoom and can never overpaint a stroke.
-            drawPaperMarks(paper, viewport, this@Canvas.size)
-            for (stroke in strokes) {
-                drawInk(
-                    stroke.points,
-                    stroke.style,
-                    parseColor(stroke.style.parameters.color),
-                )
+        // Paper and committed ink, in their own render layer.
+        //
+        // Splitting them off the live stroke is what keeps inking cheap: a draw
+        // node is invalidated by the state *it* reads, so a stylus sample now
+        // dirties only the live canvas below. This layer's display list is
+        // replayed as-is instead of re-recorded, and its draw block — the one
+        // whose cost grows with the page — does not run again until the ink,
+        // the paper or the viewport actually changes.
+        Canvas(modifier = Modifier.fillMaxSize().graphicsLayer()) {
+            trace("v-note:ink-committed") {
+                val canvasSize = size
+                // Grain first, and deliberately *outside* the transform: it tiles in
+                // device space so it keeps a constant size at every zoom, unlike the
+                // rules, which are world-anchored and ride the ink.
+                drawPaperTexture(paper)
+                withTransform({
+                    translate(viewport.offset.x, viewport.offset.y)
+                    scale(viewport.scale, viewport.scale, pivot = Offset.Zero)
+                }) {
+                    // Paper first, under the ink transform, so it stays locked to the
+                    // ink through pan and zoom and can never overpaint a stroke.
+                    drawPaperMarks(paper, viewport, canvasSize)
+                    strokeGeometry.visitRenderable(strokes) { geometry, color ->
+                        drawInkGeometry(geometry, color)
+                    }
+                }
             }
-            if (liveStroke.isNotEmpty()) {
-                val liveStyle = capturedDrawingStyle ?: drawingStyle
-                drawInk(
-                    liveStroke,
-                    liveStyle,
-                    parseColor(liveStyle.parameters.color),
-                )
-            }
-            val eraserCursor = liveEraserPath.lastOrNull() ?: hoverEraserPoint.takeIf { hoverShowsEraser }
-            if (eraserCursor != null) {
-                drawCircle(
-                    color = Color.Black,
-                    radius = eraserRadiusPx / viewport.scale,
-                    center = Offset(eraserCursor.x.toFloat(), eraserCursor.y.toFloat()),
-                    style = DrawStroke(width = 1.dp.toPx() / viewport.scale),
-                )
+        }
+        // The stroke under the nib, plus the eraser cursor — everything that
+        // changes between frames of a single gesture.
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            trace("v-note:ink-live") {
+                withTransform({
+                    translate(viewport.offset.x, viewport.offset.y)
+                    scale(viewport.scale, viewport.scale, pivot = Offset.Zero)
+                }) {
+                    if (liveStroke.isNotEmpty()) {
+                        val liveStyle = capturedDrawingStyle ?: drawingStyle
+                        drawInk(liveStroke, liveStyle, parseColor(liveStyle.parameters.color))
+                    }
+                    val eraserCursor = liveEraserPath.lastOrNull() ?: hoverEraserPoint.takeIf { hoverShowsEraser }
+                    if (eraserCursor != null) {
+                        drawCircle(
+                            color = Color.Black,
+                            radius = eraserRadiusPx / viewport.scale,
+                            center = Offset(eraserCursor.x.toFloat(), eraserCursor.y.toFloat()),
+                            style = DrawStroke(width = 1.dp.toPx() / viewport.scale),
+                        )
+                    }
+                }
             }
         }
     }
@@ -1012,123 +1031,6 @@ private fun toWorldPoint(
         y = world.y.toDouble(),
         t = System.currentTimeMillis() - startTime,
     )
-}
-
-private fun DrawScope.drawInk(
-    points: List<StrokePoint>,
-    style: StrokeStyle,
-    color: Color,
-) {
-    if (points.isEmpty()) {
-        return
-    }
-    if (points.size == 1) {
-        drawCircle(
-            color = color,
-            radius = (style.renderedWidth(points[0].pressure) / 2.0).toFloat(),
-            center = Offset(points[0].x.toFloat(), points[0].y.toFloat()),
-        )
-        return
-    }
-    // Constant-width (v1) ink: a single round-capped polyline. Byte-identical to
-    // the pre-pressure renderer.
-    if (!style.isPressureSensitive) {
-        val path = Path()
-        path.moveTo(points[0].x.toFloat(), points[0].y.toFloat())
-        for (index in 1 until points.size) {
-            path.lineTo(points[index].x.toFloat(), points[index].y.toFloat())
-        }
-        drawPath(
-            path = path,
-            color = color,
-            style =
-                DrawStroke(
-                    width = style.parameters.width.toFloat(),
-                    cap = StrokeCap.Round,
-                    join = StrokeJoin.Round,
-                ),
-        )
-        return
-    }
-    // A tap/dot commits (near-)coincident points; the ribbon would collapse to a
-    // zero-area sliver and vanish. If the stroke's extent is smaller than its own
-    // nib, render a dot at the largest pressure width (v1 drew these via round
-    // caps).
-    val minX = points.minOf { it.x }
-    val maxX = points.maxOf { it.x }
-    val minY = points.minOf { it.y }
-    val maxY = points.maxOf { it.y }
-    val maxWidth = points.maxOf { style.renderedWidth(it.pressure) }
-    if (maxOf(maxX - minX, maxY - minY) < maxWidth) {
-        drawCircle(
-            color = color,
-            radius = (maxWidth / 2.0).toFloat(),
-            center = Offset(((minX + maxX) / 2.0).toFloat(), ((minY + maxY) / 2.0).toFloat()),
-        )
-        return
-    }
-    // Pressure-modulated (v2) ink: build one filled variable-width ribbon and
-    // draw it in a single call. Per-segment stroking was O(points) draw calls
-    // per stroke, re-run for every committed stroke every frame — the source of
-    // the multi-stroke latency. A single fill restores ~constant-width cost.
-    drawPath(path = buildPressureRibbon(points, style), color = color)
-}
-
-// One filled polygon approximating a variable-width stroke: walk the left offset
-// forward, then the right offset back, and close (flat end caps). Per-vertex
-// averaged normals keep joins smooth. Filled once (NonZero), this replaces the
-// O(points) per-segment stroking that scaled badly across many strokes.
-private fun buildPressureRibbon(points: List<StrokePoint>, style: StrokeStyle): Path {
-    val n = points.size
-    val px = FloatArray(n) { points[it].x.toFloat() }
-    val py = FloatArray(n) { points[it].y.toFloat() }
-    val radius = FloatArray(n) { (style.renderedWidth(points[it].pressure) / 2.0).toFloat() }
-
-    // Left-side unit normal per vertex, averaged from the incident segments so
-    // the offset edges meet smoothly at joins.
-    val nx = FloatArray(n)
-    val ny = FloatArray(n)
-    for (i in 0 until n) {
-        var ax = 0f
-        var ay = 0f
-        if (i > 0) {
-            val dx = px[i] - px[i - 1]
-            val dy = py[i] - py[i - 1]
-            val len = sqrt(dx * dx + dy * dy)
-            if (len > 1e-3f) {
-                ax += -dy / len
-                ay += dx / len
-            }
-        }
-        if (i < n - 1) {
-            val dx = px[i + 1] - px[i]
-            val dy = py[i + 1] - py[i]
-            val len = sqrt(dx * dx + dy * dy)
-            if (len > 1e-3f) {
-                ax += -dy / len
-                ay += dx / len
-            }
-        }
-        val len = sqrt(ax * ax + ay * ay)
-        if (len > 1e-3f) {
-            nx[i] = ax / len
-            ny[i] = ay / len
-        } else {
-            nx[i] = 0f
-            ny[i] = 1f
-        }
-    }
-
-    val path = Path()
-    path.moveTo(px[0] + nx[0] * radius[0], py[0] + ny[0] * radius[0])
-    for (i in 1 until n) {
-        path.lineTo(px[i] + nx[i] * radius[i], py[i] + ny[i] * radius[i])
-    }
-    for (i in n - 1 downTo 0) {
-        path.lineTo(px[i] - nx[i] * radius[i], py[i] - ny[i] * radius[i])
-    }
-    path.close()
-    return path
 }
 
 internal fun parseColor(value: String): Color = Color(android.graphics.Color.parseColor(value))
