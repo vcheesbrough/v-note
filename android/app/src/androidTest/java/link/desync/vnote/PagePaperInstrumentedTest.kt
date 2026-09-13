@@ -17,12 +17,12 @@ import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.ink.PaperPreferences
+import mockwebserver3.Dispatcher
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.Dispatcher
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.RecordedRequest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -93,7 +93,7 @@ class PagePaperInstrumentedTest {
                 val context = InstrumentationRegistry.getInstrumentation().targetContext
                 DrawingToolPreferences.clear(context)
                 PaperPreferences.clear(context)
-                if (::server.isInitialized) server.shutdown()
+                if (::server.isInitialized) server.close()
             }
         }
 
@@ -318,13 +318,13 @@ class PagePaperInstrumentedTest {
     private fun testDispatcher(): Dispatcher =
         object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
-                val path = request.requestUrl?.encodedPath
+                val path = request.url.encodedPath
                 requestPaths.add("${request.method} $path")
                 return when {
                     path == "/api/me" ->
                         jsonResponse("""{"sub":"$TEST_USER_ID","email":"test@example.com"}""")
                     path == "/api/pages" && request.method == "POST" -> {
-                        createRequestBodies.add(request.body.readUtf8())
+                        createRequestBodies.add(request.body?.utf8().orEmpty())
                         jsonResponse(
                             """{"page":{"id":"page_new","title":"Untitled page","created_at":"2026-07-25T00:00:00Z","updated_at":"2026-07-25T00:00:00Z","paper":"squared-large"}}""",
                         )
@@ -336,91 +336,95 @@ class PagePaperInstrumentedTest {
                     path == "/api/realtime" -> librarySocketResponse()
                     path == "/api/pages/page_paper/realtime" -> pageSocketResponse()
                     path == "/api/pages/page_new/realtime" -> pageSocketResponse()
-                    else -> MockResponse().setResponseCode(404)
+                    else -> MockResponse(code = 404)
                 }
             }
         }
 
     private fun librarySocketResponse(): MockResponse =
-        MockResponse().withWebSocketUpgrade(
-            object : WebSocketListener() {
-                override fun onClosing(
-                    webSocket: WebSocket,
-                    code: Int,
-                    reason: String,
-                ) {
-                    webSocket.close(code, reason)
-                }
-            },
-        )
+        MockResponse
+            .Builder()
+            .webSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onClosing(
+                        webSocket: WebSocket,
+                        code: Int,
+                        reason: String,
+                    ) {
+                        webSocket.close(code, reason)
+                    }
+                },
+            ).build()
 
     private fun pageSocketResponse(): MockResponse =
-        MockResponse().withWebSocketUpgrade(
-            object : WebSocketListener() {
-                override fun onOpen(
-                    webSocket: WebSocket,
-                    response: okhttp3.Response,
-                ) {
-                    webSocket.send(
-                        """{"type":"welcome","session_id":"paper-editor","last_seq":1,"paper":"$welcomePaper"}""",
-                    )
-                }
-
-                override fun onMessage(
-                    webSocket: WebSocket,
-                    text: String,
-                ) {
-                    pageMessages.add(text)
-                    val message = JSONObject(text)
-                    when (message.getString("type")) {
-                        "subscribe" -> {
-                            webSocket.send(seedStrokeBatch)
-                            webSocket.send("""{"type":"synced","last_seq":1}""")
-                            seedDelivered.countDown()
-                        }
-                        "acquire-lease" ->
-                            if (denyLease.get()) {
-                                webSocket.send("""{"type":"lease-denied","holder":"other-device"}""")
-                            } else {
-                                webSocket.send("""{"type":"lease-granted"}""")
-                                leaseGranted.countDown()
-                            }
-                        "set-paper" -> {
-                            mutations.offer(message)
-                            if (failPaper.get()) {
-                                webSocket.send(
-                                    JSONObject()
-                                        .put("type", "error")
-                                        .put("code", "paper_failed")
-                                        .put("message", "could not persist the page paper")
-                                        .put(
-                                            "client_mutation_id",
-                                            message.getString("client_mutation_id"),
-                                        ).toString(),
-                                )
-                            } else {
-                                webSocket.send(
-                                    JSONObject()
-                                        .put("type", "paper-changed")
-                                        .put("paper", message.getString("paper"))
-                                        .put("revision", 2)
-                                        .toString(),
-                                )
-                            }
-                        }
-                        "release-lease" -> webSocket.close(1000, "lease released")
+        MockResponse
+            .Builder()
+            .webSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        webSocket.send(
+                            """{"type":"welcome","session_id":"paper-editor","last_seq":1,"paper":"$welcomePaper"}""",
+                        )
                     }
-                }
 
-                override fun onClosing(
-                    webSocket: WebSocket,
-                    code: Int,
-                    reason: String,
-                ) {
-                    webSocket.close(code, reason)
-                }
-            },
-        )
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        pageMessages.add(text)
+                        val message = JSONObject(text)
+                        when (message.getString("type")) {
+                            "subscribe" -> {
+                                webSocket.send(seedStrokeBatch)
+                                webSocket.send("""{"type":"synced","last_seq":1}""")
+                                seedDelivered.countDown()
+                            }
+                            "acquire-lease" ->
+                                if (denyLease.get()) {
+                                    webSocket.send("""{"type":"lease-denied","holder":"other-device"}""")
+                                } else {
+                                    webSocket.send("""{"type":"lease-granted"}""")
+                                    leaseGranted.countDown()
+                                }
+                            "set-paper" -> {
+                                mutations.offer(message)
+                                if (failPaper.get()) {
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "error")
+                                            .put("code", "paper_failed")
+                                            .put("message", "could not persist the page paper")
+                                            .put(
+                                                "client_mutation_id",
+                                                message.getString("client_mutation_id"),
+                                            ).toString(),
+                                    )
+                                } else {
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "paper-changed")
+                                            .put("paper", message.getString("paper"))
+                                            .put("revision", 2)
+                                            .toString(),
+                                    )
+                                }
+                            }
+                            "release-lease" -> webSocket.close(1000, "lease released")
+                        }
+                    }
+
+                    override fun onClosing(
+                        webSocket: WebSocket,
+                        code: Int,
+                        reason: String,
+                    ) {
+                        webSocket.close(code, reason)
+                    }
+                },
+            ).build()
 
     private val seedStrokeBatch =
         """{"type":"stroke-batch","seq":1,"client_batch_id":"seed","strokes":[""" +
@@ -436,7 +440,9 @@ class PagePaperInstrumentedTest {
 }
 
 private fun jsonResponse(body: String): MockResponse =
-    MockResponse()
-        .setResponseCode(200)
-        .setBody(body)
+    MockResponse
+        .Builder()
+        .code(200)
+        .body(body)
         .addHeader("Content-Type", "application/json")
+        .build()

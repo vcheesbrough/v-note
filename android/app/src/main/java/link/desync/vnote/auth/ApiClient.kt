@@ -249,7 +249,7 @@ class ApiClient(
                     IllegalStateException(requestFailureMessage("GET /api/me failed", response)),
                 )
             }
-            val body = response.body?.string().orEmpty()
+            val body = response.body.string()
             val json = JSONObject(body)
             return Result.success(
                 MeProfile(
@@ -282,7 +282,7 @@ class ApiClient(
                     IllegalStateException(requestFailureMessage("API request failed", response)),
                 )
             }
-            return Result.success(response.body?.string().orEmpty())
+            return Result.success(response.body.string())
         }
     }
 
@@ -304,7 +304,7 @@ class ApiClient(
                 logHttpFailure("thumbnail request", response)
                 return Result.failure(IllegalStateException(requestFailureMessage("Thumbnail request failed", response)))
             }
-            return Result.success(response.body?.bytes() ?: byteArrayOf())
+            return Result.success(response.body.bytes())
         }
     }
 
