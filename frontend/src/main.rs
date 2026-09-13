@@ -176,7 +176,9 @@ fn App() -> impl IntoView {
             </header>
                 }.into_any()
             } else {
-                view! {}.into_any()
+                // `view! {}` expands to `()`; spell the unit out so the empty
+                // branch does not trip `unused_unit`/`unit_arg` inside the macro.
+                ().into_any()
             }}
 
             {move || match me.get() {
@@ -439,14 +441,14 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                     }
                 }
                 on:pointermove=move |event: PointerEvent| {
-                    if let Some((pointer_id, last_x, last_y)) = dragging.get_untracked() {
-                        if pointer_id == event.pointer_id() {
+                    if let Some((pointer_id, last_x, last_y)) = dragging.get_untracked()
+                        && pointer_id == event.pointer_id()
+                    {
                             let x = event.client_x() as f64;
                             let y = event.client_y() as f64;
                             offset_x.update(|value| *value += x - last_x);
                             offset_y.update(|value| *value += y - last_y);
                             dragging.set(Some((pointer_id, x, y)));
-                        }
                     }
                 }
                 on:pointerup=move |event: PointerEvent| {
@@ -1025,14 +1027,13 @@ fn apply_event(
 ) {
     // Clearing a deleted page's selection is the only cross-signal effect; the
     // list mutation itself is a pure reducer so it can be unit-tested.
-    if let LibraryEvent::PageDeleted { page_id } = &event {
-        if selected_page
+    if let LibraryEvent::PageDeleted { page_id } = &event
+        && selected_page
             .get_untracked()
             .as_ref()
             .is_some_and(|page| &page.id == page_id)
-        {
-            selected_page.set(None);
-        }
+    {
+        selected_page.set(None);
     }
     pages.update(|items| apply_library_event_to_pages(items, event));
 }
@@ -1049,10 +1050,10 @@ fn apply_library_event_to_pages(items: &mut Vec<PageSummary>, event: LibraryEven
         }
         LibraryEvent::PageDeleted { page_id } => items.retain(|page| page.id != page_id),
         LibraryEvent::PageThumbnailUpdated { page_id, thumbnail } => {
-            if let Some(page) = items.iter_mut().find(|page| page.id == page_id) {
-                if thumbnail_seq(&thumbnail) >= thumbnail_seq(&page.thumbnail) {
-                    page.thumbnail = thumbnail;
-                }
+            if let Some(page) = items.iter_mut().find(|page| page.id == page_id)
+                && thumbnail_seq(&thumbnail) >= thumbnail_seq(&page.thumbnail)
+            {
+                page.thumbnail = thumbnail;
             }
         }
         LibraryEvent::PageUpdated {

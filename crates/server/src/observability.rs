@@ -351,10 +351,10 @@ pub struct TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(provider) = self.provider.take() {
-            if let Err(error) = provider.shutdown() {
-                eprintln!("OpenTelemetry shutdown failed: {error}");
-            }
+        if let Some(provider) = self.provider.take()
+            && let Err(error) = provider.shutdown()
+        {
+            eprintln!("OpenTelemetry shutdown failed: {error}");
         }
     }
 }
