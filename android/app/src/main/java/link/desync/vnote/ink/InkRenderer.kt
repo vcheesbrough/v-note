@@ -21,13 +21,21 @@ import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
  */
 internal sealed interface InkGeometry {
     /** A tap, or a stroke whose extent is smaller than its own nib. */
-    data class Dot(val center: Offset, val radius: Float) : InkGeometry
+    data class Dot(
+        val center: Offset,
+        val radius: Float,
+    ) : InkGeometry
 
     /** Constant-width (v1) ink: one round-capped, round-joined polyline. */
-    data class Polyline(val path: Path, val width: Float) : InkGeometry
+    data class Polyline(
+        val path: Path,
+        val width: Float,
+    ) : InkGeometry
 
     /** Pressure-modulated (v2) ink: one filled variable-width ribbon. */
-    data class Ribbon(val path: Path) : InkGeometry
+    data class Ribbon(
+        val path: Path,
+    ) : InkGeometry
 }
 
 /**
@@ -185,7 +193,10 @@ private fun buildPressureRibbon(
 }
 
 /** Everything needed to draw one stroke, derived once and then reused. */
-internal data class RenderedInk(val geometry: InkGeometry, val color: Color)
+internal data class RenderedInk(
+    val geometry: InkGeometry,
+    val color: Color,
+)
 
 internal fun renderedInk(stroke: Stroke): RenderedInk? =
     buildInkGeometry(stroke.points, stroke.style)?.let { geometry ->

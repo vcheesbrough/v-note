@@ -37,8 +37,10 @@ internal class DrawingToolPreferences(
     fun save(style: StrokeStyle) {
         require(
             style.toolKind == SOLID_ROUND_TOOL &&
-                (style.styleVersion == SOLID_ROUND_STYLE_VERSION ||
-                    style.styleVersion == SOLID_ROUND_PRESSURE_STYLE_VERSION),
+                (
+                    style.styleVersion == SOLID_ROUND_STYLE_VERSION ||
+                        style.styleVersion == SOLID_ROUND_PRESSURE_STYLE_VERSION
+                ),
         )
         require(isCanonicalColor(style.parameters.color))
         require(isValidWidth(style.parameters.width))
@@ -65,8 +67,7 @@ internal class DrawingToolPreferences(
                 .commit()
         }
 
-        private fun isCanonicalColor(color: String?): Boolean =
-            color != null && COLOR_PATTERN.matches(color)
+        private fun isCanonicalColor(color: String?): Boolean = color != null && COLOR_PATTERN.matches(color)
 
         private fun isValidWidth(width: Double?): Boolean =
             width != null &&

@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-class TokenStore(context: Context) {
+class TokenStore(
+    context: Context,
+) {
     private val prefs =
         EncryptedSharedPreferences.create(
             context,
@@ -26,8 +28,7 @@ class TokenStore(context: Context) {
             .putLong(
                 KEY_ACCESS_EXPIRY,
                 accessTokenExpiryEpochSeconds ?: 0L,
-            )
-            .apply()
+            ).apply()
     }
 
     fun accessToken(): String? = prefs.getString(KEY_ACCESS_TOKEN, null)

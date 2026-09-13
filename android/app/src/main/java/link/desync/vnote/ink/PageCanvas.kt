@@ -60,15 +60,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tracing.trace
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.PageSummary
 import link.desync.vnote.auth.Stroke
 import link.desync.vnote.auth.StrokePoint
 import link.desync.vnote.auth.StrokeStyle
 import link.desync.vnote.ui.displayTitle
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
@@ -372,8 +372,7 @@ private fun PaperOption(
                 .semantics {
                     this.selected = selected
                     contentDescription = paper.label
-                }
-                .clickable(onClick = onClick)
+                }.clickable(onClick = onClick)
                 .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -427,8 +426,7 @@ private fun ColorSwatch(
                 .semantics {
                     this.selected = selected
                     contentDescription = "Colour $color"
-                }
-                .clickable(onClick = onClick),
+                }.clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Box(
@@ -454,7 +452,10 @@ private fun ToolStrokePreview(
 ) {
     Surface(modifier = modifier) {
         Canvas(modifier = Modifier.fillMaxSize().padding(2.dp)) {
-            val previewWidth = style.parameters.width.toFloat().coerceIn(2f, size.height - 2f)
+            val previewWidth =
+                style.parameters.width
+                    .toFloat()
+                    .coerceIn(2f, size.height - 2f)
             drawLine(
                 color = parseColor(style.parameters.color),
                 start = Offset(2f, size.height / 2f),
@@ -699,8 +700,7 @@ private fun InkCanvas(
                         }
                         else -> activeStylusTool != null
                     }
-                }
-                .pointerInput(canEdit) {
+                }.pointerInput(canEdit) {
                     awaitEachGesture {
                         val firstDown = awaitFirstDown(requireUnconsumed = false)
                         if (
@@ -796,9 +796,11 @@ internal fun shouldHandleCanvasMotion(
         action == MotionEvent.ACTION_DOWN -> hoverButtonEraserArmed || stylusButtonPressed
         else ->
             activeStylusGesture &&
-                (action == MotionEvent.ACTION_MOVE ||
-                    action == MotionEvent.ACTION_UP ||
-                    action == MotionEvent.ACTION_CANCEL)
+                (
+                    action == MotionEvent.ACTION_MOVE ||
+                        action == MotionEvent.ACTION_UP ||
+                        action == MotionEvent.ACTION_CANCEL
+                )
     }
 }
 
@@ -821,8 +823,8 @@ internal fun effectiveCanvasTool(
     toolType: Int,
     buttonState: Int,
     hoverButtonEraserArmed: Boolean = false,
-): CanvasTool {
-    return if (
+): CanvasTool =
+    if (
         selectedTool == CanvasTool.Eraser ||
         toolType == MotionEvent.TOOL_TYPE_ERASER ||
         buttonState and STYLUS_ERASER_BUTTON_MASK != 0 ||
@@ -832,7 +834,6 @@ internal fun effectiveCanvasTool(
     } else {
         CanvasTool.Drawing
     }
-}
 
 private const val STYLUS_ERASER_BUTTON_MASK =
     MotionEvent.BUTTON_STYLUS_PRIMARY or
@@ -840,8 +841,7 @@ private const val STYLUS_ERASER_BUTTON_MASK =
         MotionEvent.BUTTON_SECONDARY or
         MotionEvent.BUTTON_TERTIARY
 
-private fun MotionEvent.hasStylusButtonPressed(): Boolean =
-    buttonState and STYLUS_ERASER_BUTTON_MASK != 0
+private fun MotionEvent.hasStylusButtonPressed(): Boolean = buttonState and STYLUS_ERASER_BUTTON_MASK != 0
 
 internal fun nextHoverButtonEraserArmed(
     currentlyArmed: Boolean,
@@ -876,8 +876,8 @@ internal fun nextHoverButtonEraserArmed(
     }
 }
 
-/// Recompute the armed eraser latch at stylus lift so it cannot stay stuck when
-/// the misclassified Samsung contact stream never emits an ACTION_BUTTON_RELEASE.
+// / Recompute the armed eraser latch at stylus lift so it cannot stay stuck when
+// / the misclassified Samsung contact stream never emits an ACTION_BUTTON_RELEASE.
 private fun disarmEraserOnLift(
     event: MotionEvent,
     action: Int,
@@ -931,11 +931,12 @@ internal fun normalizePressure(
     return raw.toDouble().coerceIn(0.0, 1.0)
 }
 
-private fun MotionEvent.capturedPressure(sensitive: Boolean): Double? =
-    normalizePressure(pressure, sensitive)
+private fun MotionEvent.capturedPressure(sensitive: Boolean): Double? = normalizePressure(pressure, sensitive)
 
-private fun MotionEvent.capturedHistoricalPressure(index: Int, sensitive: Boolean): Double? =
-    normalizePressure(getHistoricalPressure(index), sensitive)
+private fun MotionEvent.capturedHistoricalPressure(
+    index: Int,
+    sensitive: Boolean,
+): Double? = normalizePressure(getHistoricalPressure(index), sensitive)
 
 private fun eraseAtPoint(
     point: StrokePoint,
@@ -1046,8 +1047,7 @@ internal fun findIntersectedStrokes(
         .filter { stroke ->
             val hitRadius = eraserRadius.toDouble() + stroke.style.parameters.width / 2.0
             pathsWithinDistance(eraserPath, stroke.points, hitRadius)
-        }
-        .mapTo(linkedSetOf()) { it.id }
+        }.mapTo(linkedSetOf()) { it.id }
 }
 
 private fun pathsWithinDistance(

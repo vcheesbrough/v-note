@@ -155,8 +155,14 @@ internal data class PaperViewport(
 ) {
     val isDrawable: Boolean
         get() =
-            minX.isFinite() && minY.isFinite() && maxX.isFinite() && maxY.isFinite() &&
-                scale.isFinite() && scale > 0.0 && maxX >= minX && maxY >= minY
+            minX.isFinite() &&
+                minY.isFinite() &&
+                maxX.isFinite() &&
+                maxY.isFinite() &&
+                scale.isFinite() &&
+                scale > 0.0 &&
+                maxX >= minX &&
+                maxY >= minY
 }
 
 /** Whether a family with [pitchWorld] spacing is dense enough to draw at [scale]. */
@@ -164,7 +170,10 @@ internal fun paperFamilyVisible(
     pitchWorld: Double,
     scale: Double,
 ): Boolean =
-    pitchWorld.isFinite() && scale.isFinite() && pitchWorld > 0.0 && scale > 0.0 &&
+    pitchWorld.isFinite() &&
+        scale.isFinite() &&
+        pitchWorld > 0.0 &&
+        scale > 0.0 &&
         pitchWorld * scale >= MIN_PAPER_MARK_DEVICE_PITCH
 
 /** Device-space stroke width for a mark, floored at [MIN_PAPER_MARK_DEVICE_WIDTH]. */

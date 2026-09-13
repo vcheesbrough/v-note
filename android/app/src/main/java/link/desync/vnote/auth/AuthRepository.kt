@@ -125,7 +125,8 @@ open class AuthRepository(
                     bodyBuilder.add(key, value)
                 }
                 val request =
-                    Request.Builder()
+                    Request
+                        .Builder()
                         .url(tokenRequest.configuration.tokenEndpoint.toString())
                         .header("Accept", "application/json")
                         .post(bodyBuilder.build())
@@ -135,7 +136,8 @@ open class AuthRepository(
                     val json = if (body.isBlank()) JSONObject() else JSONObject(body)
                     if (!response.isSuccessful) {
                         val error =
-                            json.optString("error_description")
+                            json
+                                .optString("error_description")
                                 .ifBlank { json.optString("error") }
                                 .ifBlank { "HTTP ${response.code}" }
                         throw IllegalStateException("Token request failed: $error")

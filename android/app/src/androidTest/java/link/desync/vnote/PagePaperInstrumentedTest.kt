@@ -344,7 +344,11 @@ class PagePaperInstrumentedTest {
     private fun librarySocketResponse(): MockResponse =
         MockResponse().withWebSocketUpgrade(
             object : WebSocketListener() {
-                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                override fun onClosing(
+                    webSocket: WebSocket,
+                    code: Int,
+                    reason: String,
+                ) {
                     webSocket.close(code, reason)
                 }
             },
@@ -353,13 +357,19 @@ class PagePaperInstrumentedTest {
     private fun pageSocketResponse(): MockResponse =
         MockResponse().withWebSocketUpgrade(
             object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                override fun onOpen(
+                    webSocket: WebSocket,
+                    response: okhttp3.Response,
+                ) {
                     webSocket.send(
                         """{"type":"welcome","session_id":"paper-editor","last_seq":1,"paper":"$welcomePaper"}""",
                     )
                 }
 
-                override fun onMessage(webSocket: WebSocket, text: String) {
+                override fun onMessage(
+                    webSocket: WebSocket,
+                    text: String,
+                ) {
                     pageMessages.add(text)
                     val message = JSONObject(text)
                     when (message.getString("type")) {
@@ -386,8 +396,7 @@ class PagePaperInstrumentedTest {
                                         .put(
                                             "client_mutation_id",
                                             message.getString("client_mutation_id"),
-                                        )
-                                        .toString(),
+                                        ).toString(),
                                 )
                             } else {
                                 webSocket.send(
@@ -403,7 +412,11 @@ class PagePaperInstrumentedTest {
                     }
                 }
 
-                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                override fun onClosing(
+                    webSocket: WebSocket,
+                    code: Int,
+                    reason: String,
+                ) {
                     webSocket.close(code, reason)
                 }
             },
