@@ -444,11 +444,11 @@ fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
                     if let Some((pointer_id, last_x, last_y)) = dragging.get_untracked()
                         && pointer_id == event.pointer_id()
                     {
-                            let x = event.client_x() as f64;
-                            let y = event.client_y() as f64;
-                            offset_x.update(|value| *value += x - last_x);
-                            offset_y.update(|value| *value += y - last_y);
-                            dragging.set(Some((pointer_id, x, y)));
+                        let x = event.client_x() as f64;
+                        let y = event.client_y() as f64;
+                        offset_x.update(|value| *value += x - last_x);
+                        offset_y.update(|value| *value += y - last_y);
+                        dragging.set(Some((pointer_id, x, y)));
                     }
                 }
                 on:pointerup=move |event: PointerEvent| {
