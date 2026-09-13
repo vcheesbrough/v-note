@@ -6,8 +6,16 @@
 ARG BASE_IMAGE_NAME=debian:trixie-slim
 ARG BASE_IMAGE_DIGEST=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
 
-FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS builder
-RUN rustup target add wasm32-unknown-unknown && cargo install trunk
+# Rust toolchain pin. Three places hold this version and must move together:
+# here, `.woodpecker/build.yml` (contract-validation image), and `rust-toolchain.toml`
+# (host dev). rust-toolchain.toml is dockerignored so rustup does not re-resolve
+# inside the build — this image already *is* the pinned toolchain.
+FROM rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS builder
+# `--locked` is load-bearing: an unlocked resolution of trunk 0.21.14 no longer
+# compiles (lightningcss pulls cssparser 0.33 and 0.37 into one graph). 0.21.14 is
+# the newest *stable* trunk; 0.22 has only ever shipped betas.
+RUN rustup target add wasm32-unknown-unknown \
+    && cargo install trunk --version 0.21.14 --locked
 WORKDIR /app
 # CI passes the computed release tag so the SPA version watermark matches the
 # deployed image + /api/meta; read at compile time via option_env! in the frontend.

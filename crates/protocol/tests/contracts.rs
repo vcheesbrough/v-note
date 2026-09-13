@@ -2,13 +2,13 @@ use std::fs;
 use std::path::Path;
 
 use protocol::{
-    paper_marks, CreatePageRequest, HealthResponse, LibraryEvent, ListPagesResponse, MeResponse,
-    MetaResponse, PageClientMessage, PageReplay, PageServerMessage, PageSummary, Paper,
-    RealtimeTicketResponse, Stroke, StrokeBatch, StrokePoint, StrokeStyle, WorldViewport,
-    DEFAULT_PEN_WIDTH, GRID_SPACING_LARGE, GRID_SPACING_SMALL, MARGIN_COLOR, MARGIN_LINE_WIDTH,
-    MARGIN_X, MAX_PAPER_MARKS_PER_AXIS, MIN_PAPER_MARK_DEVICE_PITCH, MIN_PAPER_MARK_DEVICE_WIDTH,
-    MIN_PRESSURE_WIDTH, PROTOCOL_VERSION, RULE_COLOR, RULE_LINE_WIDTH, RULE_SPACING_NARROW,
-    RULE_SPACING_WIDE, SOLID_ROUND_PRESSURE_STYLE_VERSION,
+    CreatePageRequest, DEFAULT_PEN_WIDTH, GRID_SPACING_LARGE, GRID_SPACING_SMALL, HealthResponse,
+    LibraryEvent, ListPagesResponse, MARGIN_COLOR, MARGIN_LINE_WIDTH, MARGIN_X,
+    MAX_PAPER_MARKS_PER_AXIS, MIN_PAPER_MARK_DEVICE_PITCH, MIN_PAPER_MARK_DEVICE_WIDTH,
+    MIN_PRESSURE_WIDTH, MeResponse, MetaResponse, PROTOCOL_VERSION, PageClientMessage, PageReplay,
+    PageServerMessage, PageSummary, Paper, RULE_COLOR, RULE_LINE_WIDTH, RULE_SPACING_NARROW,
+    RULE_SPACING_WIDE, RealtimeTicketResponse, SOLID_ROUND_PRESSURE_STYLE_VERSION, Stroke,
+    StrokeBatch, StrokePoint, StrokeStyle, WorldViewport, paper_marks,
 };
 
 fn fixture_path(path: &str) -> std::path::PathBuf {

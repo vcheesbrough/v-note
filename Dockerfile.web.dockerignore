@@ -25,6 +25,10 @@ crates/server/tests/
 Dockerfile
 Dockerfile.*
 
+# Host-dev toolchain pin — the build images already are the pinned toolchain;
+# shipping this in would make rustup re-resolve components in every cargo layer.
+rust-toolchain.toml
+
 # Scripts — only the git-credential helper is sourced by the cargo layers.
 # Exclude contents (glob, not the dir, so the negation below is honoured) then
 # re-include the one file the build needs.

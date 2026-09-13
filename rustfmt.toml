@@ -1,2 +1,4 @@
 max_width = 100
-edition = "2021"
+edition = "2024"
+# Pin the style guide explicitly rather than inheriting it from `edition`.
+style_edition = "2024"

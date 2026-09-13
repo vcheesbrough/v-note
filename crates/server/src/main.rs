@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use axum_server::tls_rustls::RustlsConfig;
 use server::build_app_router;
 use server::config::{
-    build_config, load_group, AndroidConfig, DatabaseConfig, ObservabilityConfig, OidcConfig,
-    ServerConfig,
+    AndroidConfig, DatabaseConfig, ObservabilityConfig, OidcConfig, ServerConfig, build_config,
+    load_group,
 };
 use server::observability::{init_tracing, run_metrics_server};
 
