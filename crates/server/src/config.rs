@@ -456,13 +456,13 @@ impl AndroidConfig {
 impl ValidatedConfig for AndroidConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         // Single string leaf parsed in-app: reject a non-empty value that isn't valid JSON.
-        if let Some(json) = self.assetlinks_json() {
-            if serde_json::from_str::<serde_json::Value>(json).is_err() {
-                return Err(ConfigError::invalid(
-                    "android.assetlinks-json",
-                    "must be valid JSON",
-                ));
-            }
+        if let Some(json) = self.assetlinks_json()
+            && serde_json::from_str::<serde_json::Value>(json).is_err()
+        {
+            return Err(ConfigError::invalid(
+                "android.assetlinks-json",
+                "must be valid JSON",
+            ));
         }
         Ok(())
     }
