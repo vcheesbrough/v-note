@@ -13,10 +13,10 @@ import link.desync.vnote.auth.StrokePoint
 import link.desync.vnote.auth.StrokeStyle
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -85,7 +85,7 @@ class PageInkInstrumentedTest {
     fun tearDown() {
         apiClient.shutdown()
         tokenStore.clear()
-        server.shutdown()
+        server.close()
     }
 
     @Test
@@ -93,43 +93,45 @@ class PageInkInstrumentedTest {
         val committed = AtomicReference<String>()
         val commitLatch = CountDownLatch(1)
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
-                    }
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                        }
 
-                    override fun onMessage(
-                        webSocket: WebSocket,
-                        text: String,
-                    ) {
-                        when (JSONObject(text).getString("type")) {
-                            "subscribe" -> {
-                                webSocket.send(seedStrokeMessage)
-                                webSocket.send("""{"type":"synced","last_seq":1}""")
-                            }
-                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
-                            "release-lease" -> webSocket.close(1000, "lease released")
-                            "commit-batch" -> {
-                                committed.set(text)
-                                val obj = JSONObject(text)
-                                webSocket.send(
-                                    JSONObject()
-                                        .put("type", "stroke-batch")
-                                        .put("seq", 2)
-                                        .put("client_batch_id", obj.getString("client_batch_id"))
-                                        .put("strokes", obj.getJSONArray("strokes"))
-                                        .toString(),
-                                )
-                                commitLatch.countDown()
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            when (JSONObject(text).getString("type")) {
+                                "subscribe" -> {
+                                    webSocket.send(seedStrokeMessage)
+                                    webSocket.send("""{"type":"synced","last_seq":1}""")
+                                }
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                                "commit-batch" -> {
+                                    committed.set(text)
+                                    val obj = JSONObject(text)
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "stroke-batch")
+                                            .put("seq", 2)
+                                            .put("client_batch_id", obj.getString("client_batch_id"))
+                                            .put("strokes", obj.getJSONArray("strokes"))
+                                            .toString(),
+                                    )
+                                    commitLatch.countDown()
+                                }
                             }
                         }
-                    }
-                },
-            ),
+                    },
+                ).build(),
         )
 
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
@@ -153,7 +155,14 @@ class PageInkInstrumentedTest {
 
         val commitJson = JSONObject(committed.get())
         assertEquals("commit-batch", commitJson.getString("type"))
-        assertEquals(2, commitJson.getJSONArray("strokes").getJSONObject(0).getJSONArray("points").length())
+        assertEquals(
+            2,
+            commitJson
+                .getJSONArray("strokes")
+                .getJSONObject(0)
+                .getJSONArray("points")
+                .length(),
+        )
         val style = commitJson.getJSONArray("strokes").getJSONObject(0).getJSONObject("style")
         assertEquals("solid_round", style.getString("tool_kind"))
         assertEquals("#C62828", style.getJSONObject("parameters").getString("color"))
@@ -173,42 +182,44 @@ class PageInkInstrumentedTest {
         val releaseEcho = CountDownLatch(1)
         val echoesSent = CountDownLatch(1)
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
-                    }
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                        }
 
-                    override fun onMessage(
-                        webSocket: WebSocket,
-                        text: String,
-                    ) {
-                        when (JSONObject(text).getString("type")) {
-                            "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
-                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
-                            "release-lease" -> webSocket.close(1000, "lease released")
-                            "commit-batch" -> {
-                                val commit = JSONObject(text)
-                                commitReceived.countDown()
-                                releaseEcho.await(5, TimeUnit.SECONDS)
-                                val echo =
-                                    JSONObject()
-                                        .put("type", "stroke-batch")
-                                        .put("seq", 1)
-                                        .put("client_batch_id", commit.getString("client_batch_id"))
-                                        .put("strokes", commit.getJSONArray("strokes"))
-                                        .toString()
-                                webSocket.send(echo)
-                                webSocket.send(echo)
-                                echoesSent.countDown()
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            when (JSONObject(text).getString("type")) {
+                                "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                                "commit-batch" -> {
+                                    val commit = JSONObject(text)
+                                    commitReceived.countDown()
+                                    releaseEcho.await(5, TimeUnit.SECONDS)
+                                    val echo =
+                                        JSONObject()
+                                            .put("type", "stroke-batch")
+                                            .put("seq", 1)
+                                            .put("client_batch_id", commit.getString("client_batch_id"))
+                                            .put("strokes", commit.getJSONArray("strokes"))
+                                            .toString()
+                                    webSocket.send(echo)
+                                    webSocket.send(echo)
+                                    echoesSent.countDown()
+                                }
                             }
                         }
-                    }
-                },
-            ),
+                    },
+                ).build(),
         )
 
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
@@ -235,33 +246,35 @@ class PageInkInstrumentedTest {
     fun clearsPendingInkWhenServerRejectsCommit() {
         val commitReceived = CountDownLatch(1)
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
-                    }
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                        }
 
-                    override fun onMessage(
-                        webSocket: WebSocket,
-                        text: String,
-                    ) {
-                        when (JSONObject(text).getString("type")) {
-                            "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
-                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
-                            "release-lease" -> webSocket.close(1000, "lease released")
-                            "commit-batch" -> {
-                                commitReceived.countDown()
-                                webSocket.send(
-                                    """{"type":"error","code":"commit_failed","message":"Commit failed"}""",
-                                )
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            when (JSONObject(text).getString("type")) {
+                                "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                                "commit-batch" -> {
+                                    commitReceived.countDown()
+                                    webSocket.send(
+                                        """{"type":"error","code":"commit_failed","message":"Commit failed"}""",
+                                    )
+                                }
                             }
                         }
-                    }
-                },
-            ),
+                    },
+                ).build(),
         )
 
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
@@ -289,46 +302,47 @@ class PageInkInstrumentedTest {
         val tombstone = AtomicReference<String>()
         val tombstoneLatch = CountDownLatch(1)
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":1}""")
-                    }
-
-                    override fun onMessage(
-                        webSocket: WebSocket,
-                        text: String,
-                    ) {
-                        when (JSONObject(text).getString("type")) {
-                            "subscribe" -> {
-                                webSocket.send(seedStrokeMessage)
-                                webSocket.send("""{"type":"synced","last_seq":1}""")
-                            }
-                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
-                            "commit-tombstones" -> {
-                                tombstone.set(text)
-                                val message = JSONObject(text)
-                                webSocket.send(
-                                    JSONObject()
-                                        .put("type", "tombstone-batch")
-                                        .put("revision", 2)
-                                        .put(
-                                            "client_mutation_id",
-                                            message.getString("client_mutation_id"),
-                                        )
-                                        .put("stroke_ids", message.getJSONArray("stroke_ids"))
-                                        .toString(),
-                                )
-                                tombstoneLatch.countDown()
-                            }
-                            "release-lease" -> webSocket.close(1000, "lease released")
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":1}""")
                         }
-                    }
-                },
-            ),
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            when (JSONObject(text).getString("type")) {
+                                "subscribe" -> {
+                                    webSocket.send(seedStrokeMessage)
+                                    webSocket.send("""{"type":"synced","last_seq":1}""")
+                                }
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "commit-tombstones" -> {
+                                    tombstone.set(text)
+                                    val message = JSONObject(text)
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "tombstone-batch")
+                                            .put("revision", 2)
+                                            .put(
+                                                "client_mutation_id",
+                                                message.getString("client_mutation_id"),
+                                            ).put("stroke_ids", message.getJSONArray("stroke_ids"))
+                                            .toString(),
+                                    )
+                                    tombstoneLatch.countDown()
+                                }
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
         )
 
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
@@ -354,44 +368,46 @@ class PageInkInstrumentedTest {
         val allowFailure = CountDownLatch(1)
         val mutationId = AtomicReference<String>()
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":1}""")
-                    }
-
-                    override fun onMessage(
-                        webSocket: WebSocket,
-                        text: String,
-                    ) {
-                        when (JSONObject(text).getString("type")) {
-                            "subscribe" -> {
-                                webSocket.send(seedStrokeMessage)
-                                webSocket.send("""{"type":"synced","last_seq":1}""")
-                            }
-                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
-                            "commit-tombstones" -> {
-                                val message = JSONObject(text)
-                                mutationId.set(message.getString("client_mutation_id"))
-                                tombstoneReceived.countDown()
-                                allowFailure.await(5, TimeUnit.SECONDS)
-                                webSocket.send(
-                                    JSONObject()
-                                        .put("type", "error")
-                                        .put("code", "tombstone_failed")
-                                        .put("message", "Could not erase stroke")
-                                        .put("client_mutation_id", mutationId.get())
-                                        .toString(),
-                                )
-                            }
-                            "release-lease" -> webSocket.close(1000, "lease released")
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":1}""")
                         }
-                    }
-                },
-            ),
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            when (JSONObject(text).getString("type")) {
+                                "subscribe" -> {
+                                    webSocket.send(seedStrokeMessage)
+                                    webSocket.send("""{"type":"synced","last_seq":1}""")
+                                }
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "commit-tombstones" -> {
+                                    val message = JSONObject(text)
+                                    mutationId.set(message.getString("client_mutation_id"))
+                                    tombstoneReceived.countDown()
+                                    allowFailure.await(5, TimeUnit.SECONDS)
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "error")
+                                            .put("code", "tombstone_failed")
+                                            .put("message", "Could not erase stroke")
+                                            .put("client_mutation_id", mutationId.get())
+                                            .toString(),
+                                    )
+                                }
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
         )
 
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
@@ -423,28 +439,30 @@ class PageInkInstrumentedTest {
     @Test
     fun blocksInkWhenAnotherSessionHoldsLease() {
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        webSocket.send(
-                            """{"type":"welcome","session_id":"me","last_seq":0,"lease_holder":"other"}""",
-                        )
-                    }
-
-                    override fun onMessage(
-                        webSocket: WebSocket,
-                        text: String,
-                    ) {
-                        when (JSONObject(text).getString("type")) {
-                            "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
-                            "release-lease" -> webSocket.close(1000, "lease released")
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send(
+                                """{"type":"welcome","session_id":"me","last_seq":0,"lease_holder":"other"}""",
+                            )
                         }
-                    }
-                },
-            ),
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            when (JSONObject(text).getString("type")) {
+                                "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
         )
 
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
@@ -568,29 +586,31 @@ class PageInkInstrumentedTest {
         onMessage: (WebSocket, String) -> Unit,
     ) {
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        socket?.set(webSocket)
-                        webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
-                    }
-
-                    override fun onMessage(
-                        webSocket: WebSocket,
-                        text: String,
-                    ) {
-                        val type = JSONObject(text).getString("type")
-                        onMessage(webSocket, type)
-                        when (type) {
-                            "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
-                            "release-lease" -> webSocket.close(1000, "lease released")
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            socket?.set(webSocket)
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
                         }
-                    }
-                },
-            ),
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            val type = JSONObject(text).getString("type")
+                            onMessage(webSocket, type)
+                            when (type) {
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
         )
     }
 

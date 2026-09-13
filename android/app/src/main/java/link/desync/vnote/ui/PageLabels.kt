@@ -5,9 +5,9 @@ import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
 
-private const val UntitledPage = "Untitled page"
+private const val UNTITLED_PAGE = "Untitled page"
 
-fun PageSummary.hasDisplayTitle(): Boolean = title.trim().isNotEmpty() && title.trim() != UntitledPage
+fun PageSummary.hasDisplayTitle(): Boolean = title.trim().isNotEmpty() && title.trim() != UNTITLED_PAGE
 
 fun PageSummary.displayTitle(): String =
     if (hasDisplayTitle()) {

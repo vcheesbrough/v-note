@@ -3,16 +3,16 @@ package link.desync.vnote
 import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.runBlocking
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
-import kotlinx.coroutines.runBlocking
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationResponse
 import net.openid.appauth.AuthorizationServiceConfiguration
 import net.openid.appauth.ResponseTypeValues
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -61,7 +61,7 @@ class AuthRepositoryInstrumentedTest {
     fun tearDown() {
         authRepository.shutdown()
         tokenStore.clear()
-        server.shutdown()
+        server.close()
     }
 
     @Test
@@ -90,8 +90,8 @@ class AuthRepositoryInstrumentedTest {
         assertEquals("refresh-token", tokenStore.refreshToken())
 
         val request = server.takeRequest()
-        assertEquals("/token", request.path)
-        val body = request.body.readUtf8()
+        assertEquals("/token", request.target)
+        val body = request.body?.utf8().orEmpty()
         assertTrue(body.contains("client_id=v-note-android-dev"))
         assertTrue(body.contains("grant_type=authorization_code"))
         assertTrue(body.contains("code=auth-code"))
@@ -126,7 +126,12 @@ class AuthRepositoryInstrumentedTest {
         assertEquals("fresh-access", tokenStore.accessToken())
         assertEquals("new-refresh", tokenStore.refreshToken())
 
-        val body = server.takeRequest().body.readUtf8()
+        val body =
+            server
+                .takeRequest()
+                .body
+                ?.utf8()
+                .orEmpty()
         assertTrue(body.contains("client_id=v-note-android-dev"))
         assertTrue(body.contains("grant_type=refresh_token"))
         assertTrue(body.contains("refresh_token=old-refresh"))
@@ -151,8 +156,10 @@ class AuthRepositoryInstrumentedTest {
     }
 
     private fun jsonResponse(body: String): MockResponse =
-        MockResponse()
-            .setResponseCode(200)
-            .setBody(body)
+        MockResponse
+            .Builder()
+            .code(200)
+            .body(body)
             .addHeader("Content-Type", "application/json")
+            .build()
 }

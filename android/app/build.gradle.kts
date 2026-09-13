@@ -1,8 +1,8 @@
 import java.io.File
+import javax.inject.Inject
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jlleitschuh.gradle.ktlint")
 }
@@ -32,12 +32,12 @@ val appVersionCode =
 
 android {
     namespace = "link.desync.vnote"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "link.desync.vnote"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = appVersionCode
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -162,10 +162,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -173,48 +169,64 @@ android {
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    val composeBom = platform("androidx.compose:compose-bom:2026.06.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.core:core-ktx:1.18.0")
+    implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp:5.4.0")
     implementation("net.openid:appauth:0.11.1")
-    implementation("androidx.browser:browser:1.8.0")
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.browser:browser:1.10.0")
+    implementation("androidx.security:security-crypto:1.1.0")
     // Named trace sections around the ink draw layers, so a Perfetto capture on
     // a real tablet shows which layer a frame was spent in. See card #312.
-    implementation("androidx.tracing:tracing-ktx:1.2.0")
+    implementation("androidx.tracing:tracing-ktx:2.0.2")
 
-    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-    testImplementation("org.json:json:20240303")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    testImplementation("org.json:json:20260814")
 
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver3:5.4.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 
-tasks.register("syncVersionFromWorkspace") {
-    doLast {
-        val script = File(repoRoot, "scripts/sync-version.sh")
+// Gradle 9 removed Project.exec, and this task sits on the path of every build
+// (every pre*Build task depends on it). ExecOperations is the supported
+// replacement: it is injected into a real task class, runs at execution time
+// like the old doLast did, and is configuration-cache clean.
+abstract class SyncVersionFromWorkspace : DefaultTask() {
+    @get:Inject
+    abstract val execOps: ExecOperations
+
+    @get:Internal
+    abstract val workspaceRoot: DirectoryProperty
+
+    @TaskAction
+    fun sync() {
+        val root = workspaceRoot.get().asFile
+        val script = File(root, "scripts/sync-version.sh")
         if (!script.exists()) {
             throw GradleException("Missing ${script.absolutePath}")
         }
-        project.exec {
-            workingDir = repoRoot
+        execOps.exec {
+            workingDir = root
             commandLine("bash", script.absolutePath)
         }
     }
+}
+
+tasks.register<SyncVersionFromWorkspace>("syncVersionFromWorkspace") {
+    workspaceRoot.set(repoRoot)
 }
 
 tasks.matching { it.name.startsWith("pre") && it.name.contains("Build") }.configureEach {

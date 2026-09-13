@@ -10,15 +10,14 @@ import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.browser.customtabs.CustomTabsIntent
-import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -44,8 +43,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,6 +58,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -70,8 +70,8 @@ import link.desync.vnote.auth.LibraryEvent
 import link.desync.vnote.auth.LibraryEventListener
 import link.desync.vnote.auth.MeProfile
 import link.desync.vnote.auth.PageSummary
-import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.auth.ThumbnailMetadata
+import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageCanvasScreen
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.ink.PaperPreferences
@@ -191,11 +191,10 @@ class MainActivity : ComponentActivity() {
                     completedIntent = authPendingIntent(AUTH_COMPLETED_ACTION, AUTH_COMPLETED_REQUEST_CODE),
                     canceledIntent = authPendingIntent(AUTH_CANCELED_ACTION, AUTH_CANCELED_REQUEST_CODE),
                 )
+            }.onFailure { error ->
+                sessionState.value =
+                    SessionState.Error(error.message ?: "Unable to start sign in")
             }
-                .onFailure { error ->
-                    sessionState.value =
-                        SessionState.Error(error.message ?: "Unable to start sign in")
-                }
         }
     }
 
@@ -353,11 +352,14 @@ class MainActivity : ComponentActivity() {
                                 is LibraryEvent.PageCreated -> upsertPage(event.page)
                                 is LibraryEvent.PageDeleted -> removePage(event.pageId)
                                 is LibraryEvent.PageThumbnailUpdated -> {
-                                    pagesState.value = pagesState.value.map { page ->
-                                        if (page.id == event.pageId && event.thumbnail.sourceSeq() >= page.thumbnail.sourceSeq()) {
-                                            page.copy(thumbnail = event.thumbnail)
-                                        } else page
-                                    }
+                                    pagesState.value =
+                                        pagesState.value.map { page ->
+                                            if (page.id == event.pageId && event.thumbnail.sourceSeq() >= page.thumbnail.sourceSeq()) {
+                                                page.copy(thumbnail = event.thumbnail)
+                                            } else {
+                                                page
+                                            }
+                                        }
                                 }
                                 is LibraryEvent.PageUpdated -> {
                                     val current = pagesState.value.firstOrNull { it.id == event.pageId }
@@ -368,9 +370,10 @@ class MainActivity : ComponentActivity() {
                                                 .map { page ->
                                                     if (page.id == event.pageId) {
                                                         page.copy(updatedAt = event.updatedAt)
-                                                    } else page
-                                                }
-                                                .sortedByDescending { it.updatedAt }
+                                                    } else {
+                                                        page
+                                                    }
+                                                }.sortedByDescending { it.updatedAt }
                                     }
                                 }
                             }
@@ -423,9 +426,13 @@ private sealed interface SessionState {
 
     data object SignedOut : SessionState
 
-    data class SignedIn(val profile: MeProfile) : SessionState
+    data class SignedIn(
+        val profile: MeProfile,
+    ) : SessionState
 
-    data class Error(val message: String) : SessionState
+    data class Error(
+        val message: String,
+    ) : SessionState
 }
 
 @Composable
@@ -470,7 +477,8 @@ private fun AppScreen(
                 runCatching {
                     val client = okhttp3.OkHttpClient()
                     val request =
-                        okhttp3.Request.Builder()
+                        okhttp3.Request
+                            .Builder()
                             .url("${BuildConfig.BASE_URL}/health")
                             .get()
                             .build()
@@ -758,11 +766,14 @@ private fun PagePreview(
     modifier: Modifier = Modifier,
 ) {
     val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = thumbnail, key2 = unavailable) {
-        value = if (!unavailable && thumbnail is ThumbnailMetadata.Available) {
-            apiClient.fetchThumbnail(thumbnail.url).getOrNull()?.let { bytes ->
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        value =
+            if (!unavailable && thumbnail is ThumbnailMetadata.Available) {
+                apiClient.fetchThumbnail(thumbnail.url).getOrNull()?.let { bytes ->
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }
+            } else {
+                null
             }
-        } else null
     }
     Box(
         modifier =
