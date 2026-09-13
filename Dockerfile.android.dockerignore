@@ -19,6 +19,10 @@ schemas/
 Dockerfile
 Dockerfile.*
 
+# Host-dev toolchain pin — the build images already are the pinned toolchain;
+# shipping this in would make rustup re-resolve components in every cargo layer.
+rust-toolchain.toml
+
 # Scripts except those invoked in image builds
 scripts/*
 !scripts/sync-version.sh

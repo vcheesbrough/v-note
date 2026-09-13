@@ -1,15 +1,15 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use axum::Router;
 use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use once_cell::sync::Lazy;
-use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
 use opentelemetry::KeyValue;
+use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use prometheus::{
@@ -19,9 +19,9 @@ use prometheus::{
 use rand::RngCore;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 use crate::config::ObservabilityConfig;
 

@@ -11,16 +11,16 @@ use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use protocol::{HealthResponse, MetaResponse, PROTOCOL_VERSION};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::auth::{auth_middleware, AuthConfig, JwksCache};
+use crate::auth::{AuthConfig, JwksCache, auth_middleware};
 use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig, ServerConfig};
 use crate::observability::request_observability_middleware;
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
-use crate::routes::realtime::{page_socket, realtime_socket, realtime_ticket, RealtimeHub};
+use crate::routes::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 
 #[derive(Clone)]
 pub struct AppState {

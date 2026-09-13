@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::Instrument as _;

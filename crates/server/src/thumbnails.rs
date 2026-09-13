@@ -1,6 +1,6 @@
 use protocol::{
-    paper_mark_device_width, visit_paper_marks, LibraryEvent, Paper, Stroke, ThumbnailMetadata,
-    WorldViewport,
+    LibraryEvent, Paper, Stroke, ThumbnailMetadata, WorldViewport, paper_mark_device_width,
+    visit_paper_marks,
 };
 use sqlx::PgPool;
 use std::time::Instant;
@@ -587,11 +587,7 @@ mod tests {
                 found = true;
             }
         }
-        if found {
-            hi - lo + 1
-        } else {
-            0
-        }
+        if found { hi - lo + 1 } else { 0 }
     }
 
     /// A v2 stroke whose pressure ramps 0 → 1 must be visibly thinner at the
