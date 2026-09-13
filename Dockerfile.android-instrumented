@@ -8,7 +8,7 @@
 # `base.*` labels at the end are built from the same values; CI splits the ref
 # file on `@` and passes both, so the pin still has exactly one home.
 ARG BASE_IMAGE_NAME=mingc/android-build-box:master
-ARG BASE_IMAGE_DIGEST=sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
+ARG BASE_IMAGE_DIGEST=sha256:47a26138302605eb8a37b024e8a263af0812c14800813458bc674df47cc26331
 FROM ${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST}
 
 ARG ANDROID_API_LEVEL=36

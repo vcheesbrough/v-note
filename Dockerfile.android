@@ -3,7 +3,7 @@
 # CI-only: Android devDebug APK + unit tests (Woodpecker build-android).
 # Stage 1 builds the APK; stage 2 (nginx:alpine) delivers it over HTTP for sideloading.
 # Base image pin: scripts/android-build-box-image.ref (override via --build-arg in CI).
-ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:6644d9869eeecf26bc80894d00540483139f52f4aa8668c9f4ee873c82dd054c
+ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:47a26138302605eb8a37b024e8a263af0812c14800813458bc674df47cc26331
 
 # Delivery-stage base, declared once: the `FROM` below and the OCI `base.*`
 # labels at the end are both derived from these args.
