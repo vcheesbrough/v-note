@@ -32,12 +32,12 @@ val appVersionCode =
 
 android {
     namespace = "link.desync.vnote"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "link.desync.vnote"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = appVersionCode
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
