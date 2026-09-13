@@ -4,7 +4,7 @@ members = ["crates/protocol", "crates/server", "frontend"]
 default-members = ["crates/protocol", "crates/server"]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 # MSRV. Resolver 3 only honours `rust-version` when one is declared, so this
 # is what makes the resolver bump above mean anything.
