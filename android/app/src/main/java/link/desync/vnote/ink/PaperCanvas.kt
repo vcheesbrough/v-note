@@ -127,9 +127,10 @@ private val paperTextureBrush: ShaderBrush by lazy {
     val red = (grain.red * 255f).toInt()
     val green = (grain.green * 255f).toInt()
     val blue = (grain.blue * 255f).toInt()
-    val pixels = IntArray(alphas.size) { index ->
-        (alphas[index] shl 24) or (red shl 16) or (green shl 8) or blue
-    }
+    val pixels =
+        IntArray(alphas.size) { index ->
+            (alphas[index] shl 24) or (red shl 16) or (green shl 8) or blue
+        }
     val bitmap =
         android.graphics.Bitmap.createBitmap(
             pixels,
