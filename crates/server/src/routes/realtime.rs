@@ -145,10 +145,10 @@ impl RealtimeHub {
     fn acquire_lease(&self, page_id: &str, session_id: &str) -> LeaseOutcome {
         let now = Utc::now();
         let mut leases = self.leases.lock().expect("lease mutex poisoned");
-        if let Some(existing) = leases.get(page_id) {
-            if existing.expires_at <= now {
-                leases.remove(page_id);
-            }
+        if let Some(existing) = leases.get(page_id)
+            && existing.expires_at <= now
+        {
+            leases.remove(page_id);
         }
         match leases.get_mut(page_id) {
             Some(existing) if existing.holder == session_id => {

@@ -360,26 +360,26 @@ pub fn visit_paper_marks(paper: Paper, viewport: &WorldViewport, mut visit: impl
         return;
     }
 
-    if let Some(pitch) = paper.rule_spacing() {
-        if paper_family_visible(pitch, viewport.scale) {
-            visit_multiples(pitch, viewport.min_y, viewport.max_y, |position| {
-                visit(PaperMark {
-                    kind: PaperMarkKind::Rule,
-                    position,
-                })
-            });
-        }
+    if let Some(pitch) = paper.rule_spacing()
+        && paper_family_visible(pitch, viewport.scale)
+    {
+        visit_multiples(pitch, viewport.min_y, viewport.max_y, |position| {
+            visit(PaperMark {
+                kind: PaperMarkKind::Rule,
+                position,
+            })
+        });
     }
 
-    if let Some(pitch) = paper.column_spacing() {
-        if paper_family_visible(pitch, viewport.scale) {
-            visit_multiples(pitch, viewport.min_x, viewport.max_x, |position| {
-                visit(PaperMark {
-                    kind: PaperMarkKind::Column,
-                    position,
-                })
-            });
-        }
+    if let Some(pitch) = paper.column_spacing()
+        && paper_family_visible(pitch, viewport.scale)
+    {
+        visit_multiples(pitch, viewport.min_x, viewport.max_x, |position| {
+            visit(PaperMark {
+                kind: PaperMarkKind::Column,
+                position,
+            })
+        });
     }
 
     // A single line has no pitch to alias against, so the margin is never

@@ -280,11 +280,10 @@ impl Stroke {
                 Some(_) if !allows_pressure => {
                     return Err("pressure is only permitted on pressure-sensitive styles");
                 }
-                Some(pressure) => {
-                    if !pressure.is_finite() || !(0.0..=1.0).contains(&pressure) {
-                        return Err("pressure must be finite in 0.0..=1.0");
-                    }
+                Some(pressure) if !pressure.is_finite() || !(0.0..=1.0).contains(&pressure) => {
+                    return Err("pressure must be finite in 0.0..=1.0");
                 }
+                Some(_) => {}
             }
         }
         Ok(())
