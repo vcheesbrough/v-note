@@ -1,4 +1,5 @@
 import java.io.File
+import javax.inject.Inject
 
 plugins {
     id("com.android.application")
@@ -204,17 +205,33 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 
-tasks.register("syncVersionFromWorkspace") {
-    doLast {
-        val script = File(repoRoot, "scripts/sync-version.sh")
+// Gradle 9 removed Project.exec, and this task sits on the path of every build
+// (every pre*Build task depends on it). ExecOperations is the supported
+// replacement: it is injected into a real task class, runs at execution time
+// like the old doLast did, and is configuration-cache clean.
+abstract class SyncVersionFromWorkspace : DefaultTask() {
+    @get:Inject
+    abstract val execOps: ExecOperations
+
+    @get:Internal
+    abstract val workspaceRoot: DirectoryProperty
+
+    @TaskAction
+    fun sync() {
+        val root = workspaceRoot.get().asFile
+        val script = File(root, "scripts/sync-version.sh")
         if (!script.exists()) {
             throw GradleException("Missing ${script.absolutePath}")
         }
-        project.exec {
-            workingDir = repoRoot
+        execOps.exec {
+            workingDir = root
             commandLine("bash", script.absolutePath)
         }
     }
+}
+
+tasks.register<SyncVersionFromWorkspace>("syncVersionFromWorkspace") {
+    workspaceRoot.set(repoRoot)
 }
 
 tasks.matching { it.name.startsWith("pre") && it.name.contains("Build") }.configureEach {
