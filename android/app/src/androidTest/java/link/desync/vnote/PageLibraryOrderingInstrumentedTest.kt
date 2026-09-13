@@ -19,12 +19,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
+import mockwebserver3.Dispatcher
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.Dispatcher
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -87,7 +87,7 @@ class PageLibraryOrderingInstrumentedTest {
                 }
                 DrawingToolPreferences.clear(InstrumentationRegistry.getInstrumentation().targetContext)
                 if (::server.isInitialized) {
-                    server.shutdown()
+                    server.close()
                 }
             }
         }
@@ -323,74 +323,78 @@ class PageLibraryOrderingInstrumentedTest {
     private fun testDispatcher(): Dispatcher =
         object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse =
-                when (request.requestUrl?.encodedPath) {
+                when (request.url.encodedPath) {
                     "/api/me" -> jsonResponse("""{"sub":"test-user","email":"test@example.com"}""")
                     "/api/pages" -> {
                         pageListRequests.incrementAndGet()
                         jsonResponse(pageListJson())
                     }
                     "/api/realtime" ->
-                        MockResponse().withWebSocketUpgrade(
-                            object : WebSocketListener() {
-                                override fun onOpen(
-                                    webSocket: WebSocket,
-                                    response: okhttp3.Response,
-                                ) {
-                                    realtimeUpgrades.incrementAndGet()
-                                    librarySocket.set(webSocket)
-                                }
+                        MockResponse
+                            .Builder()
+                            .webSocketUpgrade(
+                                object : WebSocketListener() {
+                                    override fun onOpen(
+                                        webSocket: WebSocket,
+                                        response: okhttp3.Response,
+                                    ) {
+                                        realtimeUpgrades.incrementAndGet()
+                                        librarySocket.set(webSocket)
+                                    }
 
-                                override fun onClosing(
-                                    webSocket: WebSocket,
-                                    code: Int,
-                                    reason: String,
-                                ) {
-                                    webSocket.close(code, reason)
-                                }
-                            },
-                        )
+                                    override fun onClosing(
+                                        webSocket: WebSocket,
+                                        code: Int,
+                                        reason: String,
+                                    ) {
+                                        webSocket.close(code, reason)
+                                    }
+                                },
+                            ).build()
                     "/api/pages/page_old/realtime",
                     "/api/pages/page_new/realtime",
                     -> pageSocketResponse()
-                    else -> MockResponse().setResponseCode(404)
+                    else -> MockResponse(code = 404)
                 }
         }
 
     private fun pageSocketResponse(): MockResponse =
-        MockResponse().withWebSocketUpgrade(
-            object : WebSocketListener() {
-                override fun onOpen(
-                    webSocket: WebSocket,
-                    response: okhttp3.Response,
-                ) {
-                    webSocket.send("""{"type":"welcome","session_id":"editor","last_seq":0}""")
-                }
-
-                override fun onMessage(
-                    webSocket: WebSocket,
-                    text: String,
-                ) {
-                    when {
-                        text.contains("\"type\":\"subscribe\"") ->
-                            webSocket.send("""{"type":"synced","last_seq":0}""")
-                        text.contains("\"type\":\"acquire-lease\"") -> {
-                            webSocket.send("""{"type":"lease-granted"}""")
-                            leaseGranted.countDown()
-                        }
-                        text.contains("\"type\":\"release-lease\"") ->
-                            webSocket.close(1000, "lease released")
+        MockResponse
+            .Builder()
+            .webSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(
+                        webSocket: WebSocket,
+                        response: okhttp3.Response,
+                    ) {
+                        webSocket.send("""{"type":"welcome","session_id":"editor","last_seq":0}""")
                     }
-                }
 
-                override fun onClosing(
-                    webSocket: WebSocket,
-                    code: Int,
-                    reason: String,
-                ) {
-                    webSocket.close(code, reason)
-                }
-            },
-        )
+                    override fun onMessage(
+                        webSocket: WebSocket,
+                        text: String,
+                    ) {
+                        when {
+                            text.contains("\"type\":\"subscribe\"") ->
+                                webSocket.send("""{"type":"synced","last_seq":0}""")
+                            text.contains("\"type\":\"acquire-lease\"") -> {
+                                webSocket.send("""{"type":"lease-granted"}""")
+                                leaseGranted.countDown()
+                            }
+                            text.contains("\"type\":\"release-lease\"") ->
+                                webSocket.close(1000, "lease released")
+                        }
+                    }
+
+                    override fun onClosing(
+                        webSocket: WebSocket,
+                        code: Int,
+                        reason: String,
+                    ) {
+                        webSocket.close(code, reason)
+                    }
+                },
+            ).build()
 
     private fun pageListJson(): String {
         val newer = pageJson("page_new", "Newer", "2026-07-15T09:00:00Z")
@@ -412,7 +416,9 @@ private fun DpRect.precedes(other: DpRect): Boolean = top < other.top || (top ==
 private fun DpRect.width() = right - left
 
 private fun jsonResponse(body: String): MockResponse =
-    MockResponse()
-        .setResponseCode(200)
-        .setBody(body)
+    MockResponse
+        .Builder()
+        .code(200)
+        .body(body)
         .addHeader("Content-Type", "application/json")
+        .build()

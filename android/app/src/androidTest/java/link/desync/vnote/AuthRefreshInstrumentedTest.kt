@@ -7,8 +7,8 @@ import link.desync.vnote.auth.ApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -40,17 +40,19 @@ class AuthRefreshInstrumentedTest {
     @After
     fun tearDown() {
         apiClient?.shutdown()
-        server.shutdown()
+        server.close()
     }
 
     @Test
     fun retriesApiMeAfter401WhenRefreshSucceeds() {
-        server.enqueue(MockResponse().setResponseCode(401))
+        server.enqueue(MockResponse(code = 401))
         server.enqueue(
-            MockResponse()
-                .setResponseCode(200)
-                .setBody("""{"sub":"user-1","email":"user@example.com"}""")
-                .addHeader("Content-Type", "application/json"),
+            MockResponse
+                .Builder()
+                .code(200)
+                .body("""{"sub":"user-1","email":"user@example.com"}""")
+                .addHeader("Content-Type", "application/json")
+                .build(),
         )
 
         val authRepository =
@@ -79,8 +81,8 @@ class AuthRefreshInstrumentedTest {
         }
 
         val first = server.takeRequest()
-        assertEquals("Bearer stale-access", first.getHeader("Authorization"))
+        assertEquals("Bearer stale-access", first.headers["Authorization"])
         val second = server.takeRequest()
-        assertEquals("Bearer fresh-access", second.getHeader("Authorization"))
+        assertEquals("Bearer fresh-access", second.headers["Authorization"])
     }
 }

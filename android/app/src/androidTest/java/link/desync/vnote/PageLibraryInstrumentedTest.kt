@@ -9,10 +9,10 @@ import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.LibraryEvent
 import link.desync.vnote.auth.LibraryEventListener
 import link.desync.vnote.auth.TokenStore
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -52,7 +52,7 @@ class PageLibraryInstrumentedTest {
     fun tearDown() {
         apiClient.shutdown()
         tokenStore.clear()
-        server.shutdown()
+        server.close()
     }
 
     @Test
@@ -65,9 +65,10 @@ class PageLibraryInstrumentedTest {
         server.enqueue(
             jsonResponse(
                 """{"page":{"id":"page_2","title":"Untitled page","created_at":"2026-06-10T22:01:00Z","updated_at":"2026-06-10T22:01:00Z"}}""",
-            ).setResponseCode(201),
+                code = 201,
+            ),
         )
-        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(MockResponse(code = 204))
 
         runBlocking {
             val pages = apiClient.listPages().getOrThrow()
@@ -80,7 +81,7 @@ class PageLibraryInstrumentedTest {
         }
 
         repeat(3) {
-            assertEquals("Bearer access-token", server.takeRequest().getHeader("Authorization"))
+            assertEquals("Bearer access-token", server.takeRequest().headers["Authorization"])
         }
     }
 
@@ -88,19 +89,21 @@ class PageLibraryInstrumentedTest {
     fun librarySocketReceivesPageCreatedEvent() {
         val latch = CountDownLatch(1)
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(
-                        webSocket: WebSocket,
-                        response: okhttp3.Response,
-                    ) {
-                        webSocket.send(
-                            """{"type":"page-created","page":{"id":"page_3","title":"Live","created_at":"2026-06-10T22:02:00Z","updated_at":"2026-06-10T22:02:00Z"}}""",
-                        )
-                        webSocket.close(1000, "event sent")
-                    }
-                },
-            ),
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send(
+                                """{"type":"page-created","page":{"id":"page_3","title":"Live","created_at":"2026-06-10T22:02:00Z","updated_at":"2026-06-10T22:02:00Z"}}""",
+                            )
+                            webSocket.close(1000, "event sent")
+                        }
+                    },
+                ).build(),
         )
 
         val socket =
@@ -120,12 +123,17 @@ class PageLibraryInstrumentedTest {
 
         assertTrue(latch.await(5, TimeUnit.SECONDS))
         socket?.close(1000, "test complete")
-        assertEquals("Bearer access-token", server.takeRequest().getHeader("Authorization"))
+        assertEquals("Bearer access-token", server.takeRequest().headers["Authorization"])
     }
 }
 
-private fun jsonResponse(body: String): MockResponse =
-    MockResponse()
-        .setResponseCode(200)
-        .setBody(body)
+private fun jsonResponse(
+    body: String,
+    code: Int = 200,
+): MockResponse =
+    MockResponse
+        .Builder()
+        .code(code)
+        .body(body)
         .addHeader("Content-Type", "application/json")
+        .build()

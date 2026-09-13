@@ -132,7 +132,7 @@ open class AuthRepository(
                         .post(bodyBuilder.build())
                         .build()
                 http.newCall(request).execute().use { response ->
-                    val body = response.body?.string().orEmpty()
+                    val body = response.body.string()
                     val json = if (body.isBlank()) JSONObject() else JSONObject(body)
                     if (!response.isSuccessful) {
                         val error =
