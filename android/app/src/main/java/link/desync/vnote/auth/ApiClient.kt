@@ -63,8 +63,7 @@ class ApiClient(
                             // Sent on create rather than as a post-create
                             // set-paper: one round trip, no revision bump.
                             put("paper", paper.wireValue)
-                        }
-                        .toString()
+                        }.toString()
                         .toRequestBody(jsonMediaType)
                 authorizedRequest("$baseUrl/api/pages", token)
                     .post(body)
@@ -265,8 +264,9 @@ class ApiClient(
         retryOnUnauthorized: Boolean,
         buildRequest: (String) -> Request,
     ): Result<String> {
-        val accessToken = tokenStore.accessToken()
-            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val accessToken =
+            tokenStore.accessToken()
+                ?: return Result.failure(IllegalStateException("Not signed in"))
 
         http.newCall(buildRequest(accessToken)).execute().use { response ->
             if (response.code == 401 && retryOnUnauthorized) {
@@ -312,7 +312,8 @@ class ApiClient(
         url: String,
         token: String,
     ): Request.Builder =
-        Request.Builder()
+        Request
+            .Builder()
             .url(url)
             .header("Authorization", "Bearer $token")
             .header(REQUEST_ID_HEADER, requestId())
@@ -368,17 +369,39 @@ data class PageSummary(
 
 sealed interface ThumbnailMetadata {
     data object Empty : ThumbnailMetadata
-    data class Generating(val sourceSeq: Long) : ThumbnailMetadata
-    data class Available(val sourceSeq: Long, val url: String) : ThumbnailMetadata
-    data class Failed(val sourceSeq: Long) : ThumbnailMetadata
+
+    data class Generating(
+        val sourceSeq: Long,
+    ) : ThumbnailMetadata
+
+    data class Available(
+        val sourceSeq: Long,
+        val url: String,
+    ) : ThumbnailMetadata
+
+    data class Failed(
+        val sourceSeq: Long,
+    ) : ThumbnailMetadata
 }
 
 sealed interface LibraryEvent {
-    data class PageCreated(val page: PageSummary) : LibraryEvent
+    data class PageCreated(
+        val page: PageSummary,
+    ) : LibraryEvent
 
-    data class PageDeleted(val pageId: String) : LibraryEvent
-    data class PageThumbnailUpdated(val pageId: String, val thumbnail: ThumbnailMetadata) : LibraryEvent
-    data class PageUpdated(val pageId: String, val updatedAt: String) : LibraryEvent
+    data class PageDeleted(
+        val pageId: String,
+    ) : LibraryEvent
+
+    data class PageThumbnailUpdated(
+        val pageId: String,
+        val thumbnail: ThumbnailMetadata,
+    ) : LibraryEvent
+
+    data class PageUpdated(
+        val pageId: String,
+        val updatedAt: String,
+    ) : LibraryEvent
 }
 
 interface LibraryEventListener {
@@ -413,12 +436,16 @@ private fun parseLibraryEvent(json: JSONObject): LibraryEvent =
     when (val type = json.getString("type")) {
         "page-created" -> LibraryEvent.PageCreated(parsePage(json.getJSONObject("page")))
         "page-deleted" -> LibraryEvent.PageDeleted(json.getString("page_id"))
-        "page-thumbnail-updated" -> LibraryEvent.PageThumbnailUpdated(
-            json.getString("page_id"), parseThumbnail(json.getJSONObject("thumbnail")),
-        )
-        "page-updated" -> LibraryEvent.PageUpdated(
-            json.getString("page_id"), json.getString("updated_at"),
-        )
+        "page-thumbnail-updated" ->
+            LibraryEvent.PageThumbnailUpdated(
+                json.getString("page_id"),
+                parseThumbnail(json.getJSONObject("thumbnail")),
+            )
+        "page-updated" ->
+            LibraryEvent.PageUpdated(
+                json.getString("page_id"),
+                json.getString("updated_at"),
+            )
         else -> error("Unknown realtime event type: $type")
     }
 
@@ -510,7 +537,9 @@ sealed interface PageEvent {
         val strokes: List<Stroke>,
     ) : PageEvent
 
-    data class Synced(val lastSeq: Long) : PageEvent
+    data class Synced(
+        val lastSeq: Long,
+    ) : PageEvent
 
     data class TombstoneBatch(
         val revision: Long,
@@ -520,9 +549,13 @@ sealed interface PageEvent {
 
     data object LeaseGranted : PageEvent
 
-    data class LeaseDenied(val holder: String) : PageEvent
+    data class LeaseDenied(
+        val holder: String,
+    ) : PageEvent
 
-    data class LeaseChanged(val holder: String?) : PageEvent
+    data class LeaseChanged(
+        val holder: String?,
+    ) : PageEvent
 
     data class Failure(
         val code: String,
@@ -540,7 +573,9 @@ interface PageEventListener {
 }
 
 // Handle for sending client → server messages on an open page channel.
-class PageSocket(private val webSocket: WebSocket) {
+class PageSocket(
+    private val webSocket: WebSocket,
+) {
     fun subscribe(fromSeq: Long) {
         webSocket.send(JSONObject().put("type", "subscribe").put("from_seq", fromSeq).toString())
     }
@@ -577,7 +612,10 @@ class PageSocket(private val webSocket: WebSocket) {
         )
     }
 
-    fun commitTombstones(clientMutationId: String, strokeIds: List<String>) {
+    fun commitTombstones(
+        clientMutationId: String,
+        strokeIds: List<String>,
+    ) {
         webSocket.send(
             JSONObject()
                 .put("type", "commit-tombstones")
@@ -674,12 +712,13 @@ private fun parseStrokeStyle(json: JSONObject): StrokeStyle {
     return StrokeStyle(
         toolKind = json.getString("tool_kind"),
         styleVersion = json.getInt("style_version"),
-        parameters = SolidRoundParameters(
-            color = parameters.getString("color"),
-            width = parameters.getDouble("width"),
-            capStyle = parameters.getString("cap_style"),
-            joinStyle = parameters.getString("join_style"),
-        ),
+        parameters =
+            SolidRoundParameters(
+                color = parameters.getString("color"),
+                width = parameters.getDouble("width"),
+                capStyle = parameters.getString("cap_style"),
+                joinStyle = parameters.getString("join_style"),
+            ),
     )
 }
 

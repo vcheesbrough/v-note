@@ -41,8 +41,8 @@ import org.junit.rules.RuleChain
 import org.junit.rules.TestRule
 import org.junit.runner.RunWith
 import java.net.InetAddress
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -380,6 +380,7 @@ class PageCanvasInputInstrumentedTest {
         composeRule.activity
             .findViewById<View>(android.R.id.content)
             .getLocationOnScreen(contentLocation)
+
         fun coords(sample: Triple<Float, Float, Float>): MotionEvent.PointerCoords =
             MotionEvent.PointerCoords().apply {
                 x = contentLocation[0] + canvas.left.value * density + sample.first
@@ -634,7 +635,11 @@ class PageCanvasInputInstrumentedTest {
     private fun librarySocketResponse(): MockResponse =
         MockResponse().withWebSocketUpgrade(
             object : WebSocketListener() {
-                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                override fun onClosing(
+                    webSocket: WebSocket,
+                    code: Int,
+                    reason: String,
+                ) {
                     webSocket.close(code, reason)
                 }
             },
@@ -643,11 +648,17 @@ class PageCanvasInputInstrumentedTest {
     private fun pageSocketResponse(): MockResponse =
         MockResponse().withWebSocketUpgrade(
             object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                override fun onOpen(
+                    webSocket: WebSocket,
+                    response: okhttp3.Response,
+                ) {
                     webSocket.send("""{"type":"welcome","session_id":"input-editor","last_seq":1}""")
                 }
 
-                override fun onMessage(webSocket: WebSocket, text: String) {
+                override fun onMessage(
+                    webSocket: WebSocket,
+                    text: String,
+                ) {
                     pageMessages.add(text)
                     val message = JSONObject(text)
                     when (message.getString("type")) {
@@ -666,16 +677,26 @@ class PageCanvasInputInstrumentedTest {
                     }
                 }
 
-                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                override fun onClosing(
+                    webSocket: WebSocket,
+                    code: Int,
+                    reason: String,
+                ) {
                     webSocket.close(code, reason)
                 }
             },
         )
 
     private val seedStrokeBatch =
-        """{"type":"stroke-batch","seq":1,"client_batch_id":"seed","strokes":[${strokeJson("seed-first", FIRST_STROKE_Y)},${strokeJson("seed-second", SECOND_STROKE_Y)}]}"""
+        """{"type":"stroke-batch","seq":1,"client_batch_id":"seed","strokes":[${strokeJson(
+            "seed-first",
+            FIRST_STROKE_Y,
+        )},${strokeJson("seed-second", SECOND_STROKE_Y)}]}"""
 
-    private fun strokeJson(id: String, y: Float): String =
+    private fun strokeJson(
+        id: String,
+        y: Float,
+    ): String =
         """{"id":"$id","style":{"tool_kind":"solid_round","style_version":1,"parameters":{"color":"#006400","width":4.0,"cap_style":"round","join_style":"round"}},"points":[{"x":50.0,"y":$y,"t":0},{"x":1000.0,"y":$y,"t":10}]}"""
 
     companion object {

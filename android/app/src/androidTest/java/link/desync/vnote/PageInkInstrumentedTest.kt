@@ -153,7 +153,14 @@ class PageInkInstrumentedTest {
 
         val commitJson = JSONObject(committed.get())
         assertEquals("commit-batch", commitJson.getString("type"))
-        assertEquals(2, commitJson.getJSONArray("strokes").getJSONObject(0).getJSONArray("points").length())
+        assertEquals(
+            2,
+            commitJson
+                .getJSONArray("strokes")
+                .getJSONObject(0)
+                .getJSONArray("points")
+                .length(),
+        )
         val style = commitJson.getJSONArray("strokes").getJSONObject(0).getJSONObject("style")
         assertEquals("solid_round", style.getString("tool_kind"))
         assertEquals("#C62828", style.getJSONObject("parameters").getString("color"))
@@ -318,8 +325,7 @@ class PageInkInstrumentedTest {
                                         .put(
                                             "client_mutation_id",
                                             message.getString("client_mutation_id"),
-                                        )
-                                        .put("stroke_ids", message.getJSONArray("stroke_ids"))
+                                        ).put("stroke_ids", message.getJSONArray("stroke_ids"))
                                         .toString(),
                                 )
                                 tombstoneLatch.countDown()

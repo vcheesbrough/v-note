@@ -1,0 +1,10 @@
+# ktlint configuration for the Android module.
+#
+# The ktlint engine that came with ktlint-gradle 14.x enables `function-naming`,
+# which flags @Composable functions because Compose deliberately names them in
+# PascalCase. ktlint ships this property for exactly that case, so Composables
+# keep their conventional names instead of the rule being disabled wholesale.
+root = true
+
+[*.{kt,kts}]
+ktlint_function_naming_ignore_when_annotated_with = Composable
