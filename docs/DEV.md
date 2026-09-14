@@ -318,6 +318,11 @@ docker buildx prune --filter type=exec.cachemount  # drop them; the next build i
 Because they are cache, BuildKit's garbage collector may evict them under disk
 pressure — a run after an eviction is slower, never wrong.
 
+Iteration 31 retired the `v-note-cargo-registry` and `v-note-cargo-git` cache ids
+(sharing only those subdirs raced — see `Dockerfile.rust-ci`). Nothing references
+them any more, so on the CI agent they are dead weight until GC reclaims them; they
+are safe to drop by hand.
+
 **Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `deploy`
 (after all three). A commit is green only when every one of them is; the combined
 GitHub status below reflects all of them.
