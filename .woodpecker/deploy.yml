@@ -198,6 +198,9 @@ steps:
   # auto-deploy-dev, so panels go live with the metrics they chart; it does not
   # gate tag-release-auto-dev. grafana_api_token is the shared woodpecker-ci
   # service-account token (/woodpecker/shared, Edit on the Applications folder).
+  # curl/jq are deliberately unpinned: the base image is digest-pinned, and Alpine
+  # removes superseded versions from a stable branch's repo, so `pkg=<ver>` would
+  # break this step on the next security update instead of picking it up.
   publish-grafana-dashboard:
     when:
       - event: push
