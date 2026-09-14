@@ -16,7 +16,7 @@ use prometheus::{
     Encoder, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
     TextEncoder,
 };
-use rand::RngCore;
+use rand::Rng;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::EnvFilter;
@@ -452,7 +452,7 @@ fn is_safe_request_id(value: &str) -> bool {
 
 fn generate_request_id() -> String {
     let mut buffer = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut buffer);
+    rand::rng().fill_bytes(&mut buffer);
     format!(
         "req_{}",
         buffer

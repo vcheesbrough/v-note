@@ -91,7 +91,9 @@ pub fn one_hour_from_now() -> u64 {
         + 3600
 }
 
-pub fn sign_test_token(claims: SignedTokenClaims) -> String {
+/// Signs any claims body with the fixture key — usually a [`SignedTokenClaims`],
+/// or a `serde_json::json!` object when a test needs a claim left out entirely.
+pub fn sign_test_token(claims: impl Serialize) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(TEST_JWT_KID.to_string());
     let encoding_key =
