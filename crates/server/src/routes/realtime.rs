@@ -24,6 +24,8 @@ use sqlx::PgPool;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
 
+use crate::observability::db_query_span;
+
 use crate::AppState;
 use crate::auth::{Claims, validate_jwt};
 
@@ -938,6 +940,7 @@ async fn page_belongs_to_owner(
         .bind(page_id)
         .bind(owner_id)
         .fetch_optional(pool)
+        .instrument(db_query_span("SELECT", "page_belongs_to_owner"))
         .await?;
     Ok(row.is_some())
 }
@@ -949,6 +952,7 @@ async fn current_paper(pool: &PgPool, page_id: &str) -> Result<Paper, sqlx::Erro
     let stored: String = sqlx::query_scalar("SELECT paper FROM pages WHERE id = $1")
         .bind(page_id)
         .fetch_one(pool)
+        .instrument(db_query_span("SELECT", "current_paper"))
         .await?;
     Ok(Paper::from_wire(&stored).unwrap_or_default())
 }
@@ -958,6 +962,7 @@ async fn max_seq(pool: &PgPool, page_id: &str) -> Result<u64, sqlx::Error> {
         sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1")
             .bind(page_id)
             .fetch_one(pool)
+            .instrument(db_query_span("SELECT", "max_seq"))
             .await?;
     Ok(seq as u64)
 }
@@ -985,6 +990,7 @@ async fn load_batches_after(
     .bind(page_id)
     .bind(from_seq as i64)
     .fetch_all(pool)
+    .instrument(db_query_span("SELECT", "load_batches_after"))
     .await?;
 
     Ok(rows
@@ -1020,6 +1026,7 @@ async fn load_page_replay(
     )
     .bind(page_id)
     .fetch_all(pool)
+    .instrument(db_query_span("SELECT", "load_tombstone_batches"))
     .await?
     .into_iter()
     .map(|row| TombstoneBatch {
@@ -1056,7 +1063,10 @@ async fn persist_batch(
     client_batch_id: &str,
     strokes: &[Stroke],
 ) -> Result<PersistedBatch, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool
+        .begin()
+        .instrument(db_query_span("BEGIN", "persist_batch"))
+        .await?;
 
     // Serialize seq allocation for this page against concurrent commits. `paper`
     // is read under the same lock so the thumbnail job records the paper in force
@@ -1066,6 +1076,7 @@ async fn persist_batch(
     )
     .bind(page_id)
     .fetch_one(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_batch_lock_page"))
     .await?;
 
     // Delete-wins: a permanent tombstone for a stroke id suppresses every later
@@ -1079,6 +1090,7 @@ async fn persist_batch(
     .bind(page_id)
     .bind(&submitted_ids)
     .fetch_all(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_batch_tombstoned"))
     .await?
     .into_iter()
     .collect();
@@ -1094,10 +1106,13 @@ async fn persist_batch(
     .bind(page_id)
     .bind(client_batch_id)
     .fetch_optional(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_batch_existing"))
     .await?;
     if let Some((seq, revision)) = existing {
         // Idempotent retry: re-echo only the strokes still visible today.
-        tx.commit().await?;
+        tx.commit()
+            .instrument(db_query_span("COMMIT", "persist_batch"))
+            .await?;
         return Ok(PersistedBatch {
             seq: seq as u64,
             revision: revision as u64,
@@ -1116,8 +1131,11 @@ async fn persist_batch(
         )
         .bind(page_id)
         .fetch_one(&mut *tx)
+        .instrument(db_query_span("SELECT", "persist_batch_head_seq"))
         .await?;
-        tx.commit().await?;
+        tx.commit()
+            .instrument(db_query_span("COMMIT", "persist_batch"))
+            .await?;
         return Ok(PersistedBatch {
             seq: head_seq as u64,
             revision: current_revision as u64,
@@ -1133,6 +1151,7 @@ async fn persist_batch(
     )
     .bind(page_id)
     .fetch_one(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_batch_next_seq"))
     .await?;
     let revision = current_revision + 1;
 
@@ -1145,6 +1164,7 @@ async fn persist_batch(
     .bind(client_batch_id)
     .bind(sqlx::types::Json(&visible_strokes))
     .execute(&mut *tx)
+    .instrument(db_query_span("INSERT", "persist_batch_insert"))
     .await?;
 
     let updated_at = sqlx::query_scalar::<_, DateTime<Utc>>(
@@ -1153,6 +1173,7 @@ async fn persist_batch(
     .bind(page_id)
     .bind(revision)
     .fetch_one(&mut *tx)
+    .instrument(db_query_span("UPDATE", "persist_batch_bump_page"))
     .await?
     .to_rfc3339();
     let thumbnail_job_created = sqlx::query(
@@ -1162,11 +1183,14 @@ async fn persist_batch(
     .bind(revision)
     .bind(&paper)
     .execute(&mut *tx)
+    .instrument(db_query_span("INSERT", "persist_batch_thumbnail_job"))
     .await?
     .rows_affected()
         == 1;
 
-    tx.commit().await?;
+    tx.commit()
+        .instrument(db_query_span("COMMIT", "persist_batch"))
+        .await?;
     Ok(PersistedBatch {
         seq: next as u64,
         revision: revision as u64,
@@ -1193,12 +1217,16 @@ async fn persist_tombstones(
     client_mutation_id: &str,
     requested_ids: &[String],
 ) -> Result<PersistedTombstones, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool
+        .begin()
+        .instrument(db_query_span("BEGIN", "persist_tombstones"))
+        .await?;
     let (owner_id, current_revision, paper) = sqlx::query_as::<_, (String, i64, String)>(
         "SELECT owner_id, ink_revision, paper FROM pages WHERE id = $1 FOR UPDATE",
     )
     .bind(page_id)
     .fetch_one(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_tombstones_lock_page"))
     .await?;
     if let Some((revision, ids)) = sqlx::query_as::<_, (i64, sqlx::types::Json<Vec<String>>)>(
         "SELECT revision, stroke_ids FROM tombstone_batches WHERE page_id = $1 AND client_mutation_id = $2",
@@ -1206,8 +1234,9 @@ async fn persist_tombstones(
     .bind(page_id)
     .bind(client_mutation_id)
     .fetch_optional(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_tombstones_existing"))
     .await? {
-        tx.commit().await?;
+        tx.commit().instrument(db_query_span("COMMIT", "persist_tombstones")).await?;
         return Ok(PersistedTombstones { revision: revision as u64, owner_id, stroke_ids: ids.0, thumbnail_job_created: false, updated_at: None });
     }
 
@@ -1220,6 +1249,10 @@ async fn persist_tombstones(
     .bind(page_id)
     .bind(&ids)
     .fetch_all(&mut *tx)
+    .instrument(db_query_span(
+        "SELECT",
+        "persist_tombstones_already_deleted",
+    ))
     .await?;
     ids.retain(|id| !existing.contains(id));
     let revision = if ids.is_empty() {
@@ -1229,10 +1262,10 @@ async fn persist_tombstones(
     };
     for id in &ids {
         sqlx::query("INSERT INTO stroke_tombstones (page_id, stroke_id, deleted_revision) VALUES ($1, $2, $3)")
-            .bind(page_id).bind(id).bind(revision).execute(&mut *tx).await?;
+            .bind(page_id).bind(id).bind(revision).execute(&mut *tx).instrument(db_query_span("INSERT", "persist_tombstones_insert_stroke")).await?;
     }
     sqlx::query("INSERT INTO tombstone_batches (page_id, client_mutation_id, revision, stroke_ids) VALUES ($1, $2, $3, $4)")
-        .bind(page_id).bind(client_mutation_id).bind(revision).bind(sqlx::types::Json(&ids)).execute(&mut *tx).await?;
+        .bind(page_id).bind(client_mutation_id).bind(revision).bind(sqlx::types::Json(&ids)).execute(&mut *tx).instrument(db_query_span("INSERT", "persist_tombstones_insert_batch")).await?;
     let updated_at = if !ids.is_empty() {
         Some(
             sqlx::query_scalar::<_, DateTime<Utc>>(
@@ -1240,6 +1273,7 @@ async fn persist_tombstones(
             )
             .bind(page_id)
             .fetch_one(&mut *tx)
+            .instrument(db_query_span("UPDATE", "persist_tombstones_bump_page"))
             .await?
             .to_rfc3339(),
         )
@@ -1250,9 +1284,11 @@ async fn persist_tombstones(
         false
     } else {
         sqlx::query("INSERT INTO page_thumbnails (page_id, source_seq, status, paper) VALUES ($1, $2, 'generating', $3) ON CONFLICT (page_id, source_seq) DO NOTHING")
-            .bind(page_id).bind(revision).bind(&paper).execute(&mut *tx).await?.rows_affected() == 1
+            .bind(page_id).bind(revision).bind(&paper).execute(&mut *tx).instrument(db_query_span("INSERT", "persist_tombstones_thumbnail_job")).await?.rows_affected() == 1
     };
-    tx.commit().await?;
+    tx.commit()
+        .instrument(db_query_span("COMMIT", "persist_tombstones"))
+        .await?;
     Ok(PersistedTombstones {
         revision: revision as u64,
         owner_id,
@@ -1287,16 +1323,22 @@ async fn persist_paper(
     page_id: &str,
     paper: Paper,
 ) -> Result<PersistedPaper, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool
+        .begin()
+        .instrument(db_query_span("BEGIN", "persist_paper"))
+        .await?;
     let (owner_id, current_revision, current_paper) = sqlx::query_as::<_, (String, i64, String)>(
         "SELECT owner_id, ink_revision, paper FROM pages WHERE id = $1 FOR UPDATE",
     )
     .bind(page_id)
     .fetch_one(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_paper_lock_page"))
     .await?;
 
     if current_paper == paper.wire_value() {
-        tx.commit().await?;
+        tx.commit()
+            .instrument(db_query_span("COMMIT", "persist_paper"))
+            .await?;
         return Ok(PersistedPaper {
             changed: false,
             revision: current_revision as u64,
@@ -1326,6 +1368,7 @@ async fn persist_paper(
     .bind(page_id)
     .bind(current_revision)
     .fetch_one(&mut *tx)
+    .instrument(db_query_span("SELECT", "persist_paper_has_visible_ink"))
     .await?;
 
     // With visible ink the existing thumbnail is now stale, so bump the revision
@@ -1352,6 +1395,7 @@ async fn persist_paper(
     .bind(paper.wire_value())
     .bind(revision)
     .fetch_one(&mut *tx)
+    .instrument(db_query_span("UPDATE", "persist_paper_update_page"))
     .await?
     .to_rfc3339();
 
@@ -1363,6 +1407,7 @@ async fn persist_paper(
         .bind(revision)
         .bind(paper.wire_value())
         .execute(&mut *tx)
+        .instrument(db_query_span("INSERT", "persist_paper_thumbnail_job"))
         .await?
         .rows_affected()
             == 1
@@ -1370,7 +1415,9 @@ async fn persist_paper(
         false
     };
 
-    tx.commit().await?;
+    tx.commit()
+        .instrument(db_query_span("COMMIT", "persist_paper"))
+        .await?;
     Ok(PersistedPaper {
         changed: true,
         revision: revision as u64,

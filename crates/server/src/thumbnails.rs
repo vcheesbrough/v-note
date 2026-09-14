@@ -8,7 +8,10 @@ use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkiaStroke, Transform,
 };
 
+use tracing::Instrument as _;
+
 use crate::AppState;
+use crate::observability::db_query_span;
 
 const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
@@ -22,43 +25,59 @@ pub fn recover_pending(state: AppState) {
     let Some(pool) = state.db.clone() else {
         return;
     };
-    tokio::spawn(async move {
-        // No paper is carried here on purpose: `generate` reads it from the job
-        // row it is about to render, so a job recovered after a restart can never
-        // pick up a paper the page has moved on to since. See `generate`.
-        let pending = sqlx::query_as::<_, (String, String, i64)>(
-            r#"SELECT t.page_id, p.owner_id, t.source_seq
+    // Runs at startup, detached from any request, so it is a trace of its own.
+    let span = tracing::info_span!(parent: None, "thumbnail.recover");
+    tokio::spawn(
+        async move {
+            // No paper is carried here on purpose: `generate` reads it from the job
+            // row it is about to render, so a job recovered after a restart can never
+            // pick up a paper the page has moved on to since. See `generate`.
+            let pending = sqlx::query_as::<_, (String, String, i64)>(
+                r#"SELECT t.page_id, p.owner_id, t.source_seq
                FROM page_thumbnails t
                JOIN pages p ON p.id = t.page_id
                WHERE t.status = 'generating'"#,
-        )
-        .fetch_all(&pool)
-        .await;
-        let pending = match pending {
-            Ok(pending) => pending,
-            Err(error) => {
-                crate::observability::metrics().record_thumbnail_recovery("error");
-                tracing::error!(%error, "could not recover pending thumbnail generation");
-                return;
+            )
+            .fetch_all(&pool)
+            .instrument(db_query_span("SELECT", "recover_pending_thumbnails"))
+            .await;
+            let pending = match pending {
+                Ok(pending) => pending,
+                Err(error) => {
+                    crate::observability::metrics().record_thumbnail_recovery("error");
+                    tracing::error!(%error, "could not recover pending thumbnail generation");
+                    return;
+                }
+            };
+            for (page_id, owner_id, source_seq) in pending {
+                let source_seq = source_seq as u64;
+                crate::observability::metrics().record_thumbnail_recovery("queued");
+                crate::observability::metrics().thumbnail_generation_queued();
+                state.realtime.publish_library_event(
+                    &owner_id,
+                    LibraryEvent::PageThumbnailUpdated {
+                        page_id: page_id.clone(),
+                        thumbnail: ThumbnailMetadata::Generating { source_seq },
+                    },
+                );
+                enqueue(state.clone(), page_id, owner_id, source_seq);
             }
-        };
-        for (page_id, owner_id, source_seq) in pending {
-            let source_seq = source_seq as u64;
-            crate::observability::metrics().record_thumbnail_recovery("queued");
-            crate::observability::metrics().thumbnail_generation_queued();
-            state.realtime.publish_library_event(
-                &owner_id,
-                LibraryEvent::PageThumbnailUpdated {
-                    page_id: page_id.clone(),
-                    thumbnail: ThumbnailMetadata::Generating { source_seq },
-                },
-            );
-            enqueue(state.clone(), page_id, owner_id, source_seq);
         }
-    });
+        .instrument(span),
+    );
 }
 
 pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u64) {
+    // A detached job, so a trace of its own rather than a child of the request
+    // that queued it (a commit, erase or paper change would otherwise stay open
+    // until the render finished). The link keeps the two navigable in Tempo.
+    let span = tracing::info_span!(
+        parent: None,
+        "thumbnail.generate",
+        page_id = %page_id,
+        source_seq = source_seq,
+    );
+    span.follows_from(tracing::Span::current());
     tokio::spawn(async move {
         let Some(pool) = state.db.as_ref() else {
             return;
@@ -87,6 +106,7 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
                 .bind(&page_id)
                 .bind(source_seq as i64)
                 .execute(pool)
+                .instrument(db_query_span("UPDATE", "thumbnail_mark_failed"))
                 .await;
                 ThumbnailMetadata::Failed { source_seq }
             }
@@ -96,7 +116,7 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
             &owner_id,
             LibraryEvent::PageThumbnailUpdated { page_id, thumbnail },
         );
-    });
+    }.instrument(span));
 }
 
 pub fn thumbnail_url(page_id: &str, source_seq: u64) -> String {
@@ -116,6 +136,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(page_id)
     .bind(source_seq as i64)
     .fetch_optional(pool)
+    .instrument(db_query_span("SELECT", "thumbnail_job_paper"))
     .await
     .map_err(|error| error.to_string())?
     .ok_or("thumbnail job row is missing")?;
@@ -128,6 +149,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(page_id)
     .bind(source_seq as i64)
     .fetch_all(pool)
+    .instrument(db_query_span("SELECT", "thumbnail_strokes"))
     .await
     .map_err(|error| error.to_string())?;
     let tombstones: std::collections::HashSet<String> = sqlx::query_scalar(
@@ -136,6 +158,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(page_id)
     .bind(source_seq as i64)
     .fetch_all(pool)
+    .instrument(db_query_span("SELECT", "thumbnail_tombstones"))
     .await
     .map_err(|error| error.to_string())?
     .into_iter()
@@ -145,7 +168,8 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
         .flat_map(|batch| batch.0)
         .filter(|stroke| !tombstones.contains(&stroke.id))
         .collect();
-    let png = render(paper, &strokes)?;
+    let png = tracing::info_span!("thumbnail.render", strokes = strokes.len())
+        .in_scope(|| render(paper, &strokes))?;
     let png_bytes = png.len();
     sqlx::query(
         "UPDATE page_thumbnails SET status = 'available', png = $3 WHERE page_id = $1 AND source_seq = $2",
@@ -154,6 +178,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(source_seq as i64)
     .bind(png)
     .execute(pool)
+    .instrument(db_query_span("UPDATE", "thumbnail_store_png"))
     .await
     .map_err(|error| error.to_string())?;
     crate::observability::metrics().observe_thumbnail_artifact_bytes(png_bytes);
@@ -499,6 +524,7 @@ async fn cleanup(pool: &PgPool, page_id: &str) -> Result<(), sqlx::Error> {
     )
     .bind(page_id)
     .execute(pool)
+    .instrument(db_query_span("DELETE", "thumbnail_cleanup"))
     .await?;
     Ok(())
 }

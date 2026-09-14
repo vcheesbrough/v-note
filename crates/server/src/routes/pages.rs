@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::Claims;
+use crate::observability::db_query_span;
 
 #[derive(sqlx::FromRow)]
 struct PageRow {
@@ -96,15 +97,6 @@ impl IntoResponse for ApiError {
 
 fn db(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::DB_UNAVAILABLE)
-}
-
-fn db_query_span(operation: &'static str, query_name: &'static str) -> tracing::Span {
-    tracing::info_span!(
-        "db.query",
-        db.system = "postgresql",
-        db.operation = operation,
-        db.query_name = query_name,
-    )
 }
 
 #[tracing::instrument(skip_all)]
