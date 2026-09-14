@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push: compute-version ∥ contract-validation ∥ deploy-script-validation ∥ build-android ∥ Android API 29/36 instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
+# Push: compute-version ∥ lint ∥ contract-validation ∥ deploy-script-validation ∥ build-android ∥ Android API 29/36 instrumented → build-web → e2e-web; all push gates → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
 # Deploy: validate-deployment ∥ compute-version ∥ apply-authentik-blueprint → deploy-* → tag-release
 
 when:
@@ -18,13 +18,42 @@ steps:
       github_token:
         from_secret: github_token
 
+  # Both gates the plan always claimed CI enforced, and until now did not: 17
+  # clippy errors accumulated unnoticed across the 1.98.1 bump because nothing
+  # here ran clippy. Separate from contract-validation so a lint failure reads as
+  # a lint failure, and so it can fail fast in the first parallel stage.
+  lint:
+    when:
+      - event: [push, manual]
+    depends_on: []
+    image: &rust-image rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf
+    environment:
+      # As in contract-validation: the image already *is* the pinned toolchain,
+      # so pin rustup to it rather than let rust-toolchain.toml re-resolve the
+      # same version. The `rust:` images ship a minimal profile, so clippy and
+      # rustfmt genuinely are absent and must be added — that is the one thing
+      # this step needs that contract-validation deliberately avoids.
+      RUSTUP_TOOLCHAIN: "1.98.1"
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - rustup component add clippy rustfmt
+      # sovereign-config-provider is a git+tag dep on a private repo — see
+      # contract-validation for why every workspace member needs this.
+      - export CARGO_NET_GIT_FETCH_WITH_CLI=true
+      - export GIT_CONFIG_COUNT=1
+      - export GIT_CONFIG_KEY_0="url.https://x-access-token:$${GITHUB_TOKEN}@github.com/.insteadOf"
+      - export GIT_CONFIG_VALUE_0="https://github.com/"
+      - cargo fmt --all --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+
   contract-validation:
     when:
       - event: [push, manual]
     depends_on: []
     # Rust toolchain pin — keep byte-identical with the builder `FROM` in
     # `Dockerfile.web` and the channel in `rust-toolchain.toml` (host dev).
-    image: rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf
+    image: *rust-image
     environment:
       # The image already *is* the pinned toolchain. Without this, rust-toolchain.toml
       # — present in the clone, since .dockerignore only applies to `docker build` —
@@ -250,6 +279,7 @@ steps:
     when:
       - event: push
     depends_on:
+      - lint
       - contract-validation
       - build-android
       - android-instrumented-api-29

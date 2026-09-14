@@ -5,9 +5,10 @@
 # Kept out of CI two different ways, because the images there already *are* this
 # toolchain and re-resolving it would only download the components below:
 #   - `docker build` contexts — via the three `Dockerfile.*.dockerignore` files;
-#   - the `contract-validation` step — via `RUSTUP_TOOLCHAIN` in
+#   - the `lint` and `contract-validation` steps — via `RUSTUP_TOOLCHAIN` in
 #     `.woodpecker/build.yml`, since Woodpecker clones the repo directly and
-#     `.dockerignore` has no effect there.
+#     `.dockerignore` has no effect there. `lint` then adds clippy and rustfmt
+#     explicitly: the `rust:` images ship a minimal profile without them.
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
