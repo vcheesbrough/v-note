@@ -615,6 +615,28 @@ where
     }
 }
 
+/// The OpenTelemetry context of the current span, to carry across a channel to
+/// work that happens later on another task (see `realtime::Fanout`). Invalid when
+/// there is no current trace, and then ignored by [`set_remote_parent`].
+pub fn current_span_context() -> opentelemetry::trace::SpanContext {
+    tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .clone()
+}
+
+/// Parents `span` to a span context carried from elsewhere, so it appears inside
+/// that trace. A no-op for an invalid context, which leaves `span` a root.
+pub fn set_remote_parent(span: &tracing::Span, origin: &opentelemetry::trace::SpanContext) {
+    if origin.is_valid() {
+        // Fails only when no OpenTelemetry layer is installed (export is off),
+        // and then there is no trace to join.
+        let _ =
+            span.set_parent(opentelemetry::Context::new().with_remote_span_context(origin.clone()));
+    }
+}
+
 struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
 
 impl Extractor for HeaderExtractor<'_> {

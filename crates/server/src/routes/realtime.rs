@@ -14,6 +14,7 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::SplitSink;
 use futures_util::{Sink, SinkExt, StreamExt};
+use opentelemetry::trace::SpanContext;
 use protocol::{
     LibraryEvent, PageClientMessage, PageServerMessage, Paper, RealtimeTicketResponse, Stroke,
     StrokeBatch, TombstoneBatch,
@@ -37,9 +38,51 @@ const LEASE_TTL_SECONDS: i64 = 30;
 #[derive(Default)]
 pub struct RealtimeHub {
     tickets: Mutex<HashMap<String, Ticket>>,
-    library_channels: Mutex<HashMap<String, broadcast::Sender<LibraryEvent>>>,
-    page_channels: Mutex<HashMap<String, broadcast::Sender<PageServerMessage>>>,
+    library_channels: Mutex<HashMap<String, broadcast::Sender<Fanout<LibraryEvent>>>>,
+    page_channels: Mutex<HashMap<String, broadcast::Sender<Fanout<PageServerMessage>>>>,
     leases: Mutex<HashMap<String, Lease>>,
+}
+
+/// A broadcast message plus the trace context of whoever published it. Each
+/// receiving socket sends it inside a delivery span that joins the publisher's
+/// trace (see [`fanout_delivery_span`]), so a `commit-batch` trace shows the
+/// send to every sibling session instead of the fan-out vanishing into the
+/// receivers' hours-long connection spans.
+#[derive(Clone)]
+struct Fanout<T> {
+    message: T,
+    origin: SpanContext,
+}
+
+impl<T> Fanout<T> {
+    fn from_current_span(message: T) -> Self {
+        Self {
+            message,
+            origin: crate::observability::current_span_context(),
+        }
+    }
+}
+
+/// The span for sending one fanned-out message to one socket: a child of the
+/// publisher's trace and linked to the receiving connection, which is the
+/// current span. Its own trace when the publisher had none (e.g. a lease
+/// released on disconnect outside any request).
+fn fanout_delivery_span(
+    channel: &'static str,
+    message_type: &'static str,
+    origin: &SpanContext,
+) -> tracing::Span {
+    let span = tracing::info_span!(
+        parent: None,
+        "realtime.fanout.deliver",
+        channel,
+        message_type,
+        session_id = tracing::field::Empty,
+        bytes = tracing::field::Empty,
+    );
+    span.follows_from(tracing::Span::current());
+    crate::observability::set_remote_parent(&span, origin);
+    span
 }
 
 #[derive(Clone)]
@@ -83,7 +126,7 @@ impl RealtimeHub {
         (ticket.expires_at > now).then_some(ticket.owner_id)
     }
 
-    fn subscribe_library(&self, owner_id: &str) -> broadcast::Receiver<LibraryEvent> {
+    fn subscribe_library(&self, owner_id: &str) -> broadcast::Receiver<Fanout<LibraryEvent>> {
         let mut channels = self
             .library_channels
             .lock()
@@ -111,10 +154,10 @@ impl RealtimeHub {
                 })
                 .clone()
         };
-        let _ = sender.send(event);
+        let _ = sender.send(Fanout::from_current_span(event));
     }
 
-    fn subscribe_page(&self, page_id: &str) -> broadcast::Receiver<PageServerMessage> {
+    fn subscribe_page(&self, page_id: &str) -> broadcast::Receiver<Fanout<PageServerMessage>> {
         let mut channels = self
             .page_channels
             .lock()
@@ -142,7 +185,7 @@ impl RealtimeHub {
                 })
                 .clone()
         };
-        let _ = sender.send(message);
+        let _ = sender.send(Fanout::from_current_span(message));
     }
 
     /// Acquire (or renew, for the current holder) the single-editor edit lease.
@@ -272,8 +315,8 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: WebSoc
     loop {
         tokio::select! {
             event = receiver.recv() => {
-                let event = match event {
-                    Ok(event) => event,
+                let Fanout { message: event, origin } = match event {
+                    Ok(fanout) => fanout,
                     // Unlike the page channel, a lagged library socket closes.
                     // Counted here so it is visible; recovery is #279.
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -287,7 +330,14 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: WebSoc
                     continue;
                 };
                 let bytes = payload.len();
-                if sender.send(Message::Text(payload.into())).await.is_err() {
+                let delivery = fanout_delivery_span("library", message_type, &origin);
+                delivery.record("bytes", bytes);
+                if sender
+                    .send(Message::Text(payload.into()))
+                    .instrument(delivery)
+                    .await
+                    .is_err()
+                {
                     crate::observability::metrics().record_realtime_event("library", "send_error");
                     break;
                 }
@@ -426,10 +476,20 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
         tokio::select! {
             event = receiver.recv() => {
                 match event {
-                    Ok(message) => {
-                        if !send_page(&mut sender, message).await {
-                            crate::observability::metrics().record_realtime_event("page", "send_error");
-                            break;
+                    Ok(Fanout { message, origin }) => {
+                        let delivery = fanout_delivery_span("page", message.message_type(), &origin);
+                        delivery.record("session_id", session_id.as_str());
+                        match send_page_frame(&mut sender, message)
+                            .instrument(delivery.clone())
+                            .await
+                        {
+                            Some(bytes) => {
+                                delivery.record("bytes", bytes);
+                            }
+                            None => {
+                                crate::observability::metrics().record_realtime_event("page", "send_error");
+                                break;
+                            }
                         }
                     }
                     // Dropped fan-out is still skipped — recovery is #279 — but
@@ -1432,6 +1492,70 @@ async fn persist_paper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs `check` with an OpenTelemetry layer installed, as in production, so
+    /// spans carry real trace context. The provider has no exporter.
+    fn with_otel_layer(check: impl FnOnce()) {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::with_default(subscriber, check);
+    }
+
+    fn trace_id(span: &tracing::Span) -> String {
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        span.context().span().span_context().trace_id().to_string()
+    }
+
+    #[test]
+    fn fanout_carries_the_publishers_trace_into_the_delivery_span() {
+        with_otel_layer(|| {
+            let hub = RealtimeHub::default();
+            let mut receiver = hub.subscribe_page("page_1");
+            let publisher = tracing::info_span!("commit-batch");
+            publisher.in_scope(|| hub.publish_page("page_1", PageServerMessage::LeaseGranted));
+
+            let Fanout { message, origin } = receiver
+                .try_recv()
+                .expect("the published message should reach the subscriber");
+            assert_eq!(message, PageServerMessage::LeaseGranted);
+            assert_eq!(origin.trace_id().to_string(), trace_id(&publisher));
+
+            let delivery = fanout_delivery_span("page", message.message_type(), &origin);
+            assert_eq!(
+                trace_id(&delivery),
+                trace_id(&publisher),
+                "the delivery should sit inside the publisher's trace"
+            );
+        });
+    }
+
+    #[test]
+    fn fanout_without_a_publisher_trace_delivers_in_its_own_trace() {
+        with_otel_layer(|| {
+            let hub = RealtimeHub::default();
+            let mut receiver = hub.subscribe_library("owner_1");
+            hub.publish_library_event(
+                "owner_1",
+                LibraryEvent::PageDeleted {
+                    page_id: "page_1".to_string(),
+                },
+            );
+
+            let Fanout { message, origin } = receiver
+                .try_recv()
+                .expect("the published event should reach the subscriber");
+            assert!(!origin.is_valid());
+
+            let delivery = fanout_delivery_span("library", message.message_type(), &origin);
+            assert_ne!(trace_id(&delivery), "00000000000000000000000000000000");
+        });
+    }
 
     #[test]
     fn edit_lease_grants_then_blocks_second_session() {
