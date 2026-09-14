@@ -480,6 +480,40 @@ test.describe('ink page channel', () => {
     expect(replayedStrokeIds(fresh.messages)).not.toContain(strokeId);
   });
 
+  test('opening a page records realtime frame sizes and replay cost', async ({ page, request }) => {
+    const title = uniqueTitle('ink-metrics');
+    await createPage(request, title);
+    const before = await scrapeMetrics(request);
+
+    const openPage = page.getByRole('button', { name: `Open ${title}`, exact: true });
+    await openPage.waitFor({ state: 'visible', timeout: 5_000 }).catch(async () => {
+      await page.reload({ waitUntil: 'load' });
+      await expect(openPage).toBeVisible({ timeout: 5_000 });
+    });
+    await openPage.click();
+    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
+    await expect(page.getByText(/Synced · seq 0|Connected · seq 0|Live · seq 0/)).toBeVisible({ timeout: 5_000 });
+
+    // /metrics is process-wide and other workers share the app, so assert that
+    // opening this page moved the counters rather than pinning absolute values.
+    const pageFrame = (messageType: string) => ({ channel: 'page', message_type: messageType });
+    await expect
+      .poll(async () => metricValue(await scrapeMetrics(request), 'v_note_realtime_replay_frames_count'))
+      .toBeGreaterThan(metricValue(before, 'v_note_realtime_replay_frames_count'));
+    const after = await scrapeMetrics(request);
+    for (const messageType of ['welcome', 'synced']) {
+      const name = 'v_note_realtime_message_bytes_count';
+      expect(metricValue(after, name, pageFrame(messageType)), `${messageType} frames counted`).toBeGreaterThan(
+        metricValue(before, name, pageFrame(messageType)),
+      );
+      expect(metricValue(after, 'v_note_realtime_message_bytes_sum', pageFrame(messageType))).toBeGreaterThan(0);
+    }
+    expect(metricValue(after, 'v_note_realtime_replay_bytes_sum')).toBeGreaterThan(0);
+    expect(
+      metricValue(after, 'v_note_realtime_message_handling_seconds_count', { message_type: 'subscribe' }),
+    ).toBeGreaterThan(metricValue(before, 'v_note_realtime_message_handling_seconds_count', { message_type: 'subscribe' }));
+  });
+
   test('SPA viewer renders live stroke batches without refresh', async ({ page, request }) => {
     const title = uniqueTitle('ink-spa-live');
     const pageId = await createPage(request, title);
@@ -963,6 +997,24 @@ async function realtimeTicket(ctx: APIRequestContext): Promise<string> {
 
 function uniqueTitle(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+// The internal metrics listener — on the compose network only, never via Traefik.
+async function scrapeMetrics(ctx: APIRequestContext): Promise<string> {
+  const res = await ctx.get('http://app:9090/metrics');
+  expect(res.ok()).toBeTruthy();
+  return res.text();
+}
+
+// Sum of every sample of `name` whose labels include all of `labels`.
+function metricValue(body: string, name: string, labels: Record<string, string> = {}): number {
+  let total = 0;
+  for (const line of body.split('\n')) {
+    if (!line.startsWith(`${name}{`) && !line.startsWith(`${name} `)) continue;
+    if (!Object.entries(labels).every(([key, value]) => line.includes(`${key}="${value}"`))) continue;
+    total += Number(line.slice(line.lastIndexOf(' ') + 1));
+  }
+  return total;
 }
 
 async function otherOwnerContext(): Promise<APIRequestContext> {

@@ -295,6 +295,7 @@ just rust-ci test                                 # CI `rust-test`: cargo test -
 docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --build-arg OCI_IMAGE_* for a labelled image (see DEPLOY.md)
 ./scripts/test-container-health.sh v-note:local   # HEALTHCHECK config + a real unhealthy transition
 ./scripts/test-deploy-v-note.sh                   # deploy parameter guards + health gate (no docker socket needed)
+./scripts/test-grafana-dashboard.sh               # CI `grafana-dashboard-validation`: dashboard JSON + publish payload (needs jq)
 ./scripts/check-android-build-box-image.sh        # CI `android-build-box-pin`
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright

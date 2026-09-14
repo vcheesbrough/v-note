@@ -26,6 +26,7 @@ Normal push builds automatically deploy **dev** once every push workflow passes.
 3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
 4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
+6. **publish-grafana-dashboard** — **master pushes only**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
 Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced. Prod remains manual-only and is never deployed from a push event.
 
@@ -274,6 +275,32 @@ v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 - **Traces:** the `observability` config group sets `otlp-endpoint=http://monitor-alloy:4317`, `otlp-protocol=grpc`, and `service-name=v-note` in both env subtrees; `observability/environment` supplies the OTEL `deployment.environment` attribute (`dev` / `production`).
 - **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
 - **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
+
+### Realtime metrics and spans
+
+The WebSocket channels carry all the ink traffic, so they get size and latency, not just event counts:
+
+| Metric | Type | Labels | What it measures |
+| --- | --- | --- | --- |
+| `v_note_realtime_message_bytes` | histogram | `channel`, `message_type` | serialized size of every frame sent (page and library channels) |
+| `v_note_realtime_replay_bytes` / `_frames` | histogram | — | one observation per completed `Subscribe` replay: every `stroke-batch` + `tombstone-batch` + the closing `synced` |
+| `v_note_realtime_replay_duration_seconds` | histogram | — | `Subscribe` received → `synced` sent |
+| `v_note_realtime_message_handling_seconds` | histogram | `message_type` | server-side handling of one inbound page message. **Not end-to-end freshness** (that needs client timestamps — #154) |
+| `v_note_realtime_events_total` | counter | `channel`, `result` | now includes `lagged`: a subscriber fell behind its broadcast channel (page skips the dropped fan-out, library closes; recovery is #279) |
+
+`message_type` is the frame's serde `type` tag, derived by an exhaustive `match` in `crates/protocol`, so the label set is bounded by the protocol enums. **Cardinality rule:** no metric is ever labelled by `page_id`, `session_id`, `owner_id` or `client_batch_id`. `crates/server/tests/health.rs` scrapes `/metrics` and fails if any series carries one.
+
+Those ids live in **spans** instead. The socket handlers are instrumented (`page_id`, `session_id`), and every inbound page message is its **own trace root** (`handle_page_client_message`, with `message_type`), linked to its connection span rather than nested under it. A connection lasts for hours, so a trace rooted there would not be complete in Tempo until the socket closed.
+
+### Grafana dashboard
+
+**`v-note — overview`** (uid **`v-note-overview`**) lives in Grafana under **Applications / v-note** (folder uid `v-note`). Its source of truth is [`deploy/grafana/v-note-overview.json`](../deploy/grafana/v-note-overview.json): application dashboards ship in the application repo, in the same PR as the metrics they chart.
+
+- **One dashboard, both environments:** an `env` variable (`label_values(v_note_realtime_active_connections, env)`) filters every query. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
+- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **master pushes only**, after `auto-deploy-dev`. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. Feature branches never publish — they would overwrite the shared dashboard — and neither does `deploy-prod`, which could roll it back to an older release.
+- **UI edits are overwritten** on the next master deploy. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
+- **Offline validation:** [`scripts/test-grafana-dashboard.sh`](../scripts/test-grafana-dashboard.sh), run in the `checks` step `grafana-dashboard-validation`, checks that the JSON parses, keeps its uid, has no committed id, filters every query by `env`, references no unbounded id, and charts only metrics `observability.rs` registers. It also checks the publish script's `--dry-run` payload, its input guards, and its live path against a stub `curl` (2xx passes; non-2xx and transport failures fail without leaking the token).
+- **Pre-merge preview:** since publishing is master-only, preview a branch by importing its JSON under a scratch uid in the `v-note` folder (then delete the scratch copy), and record the check in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.
 
 ### Set App Links JSON
 

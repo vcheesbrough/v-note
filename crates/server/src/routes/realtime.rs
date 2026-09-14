@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use axum::{
     Extension, Json,
@@ -12,7 +13,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::SplitSink;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use protocol::{
     LibraryEvent, PageClientMessage, PageServerMessage, Paper, RealtimeTicketResponse, Stroke,
     StrokeBatch, TombstoneBatch,
@@ -209,6 +210,7 @@ pub struct RealtimeQuery {
     ticket: Option<String>,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn realtime_socket(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -250,6 +252,7 @@ async fn authenticate_realtime(
         })
 }
 
+#[tracing::instrument(skip_all)]
 async fn handle_library_socket(state: AppState, owner_id: String, socket: WebSocket) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
     crate::observability::metrics().record_realtime_event("library", "connected");
@@ -259,16 +262,30 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: WebSoc
     loop {
         tokio::select! {
             event = receiver.recv() => {
-                let Ok(event) = event else {
-                    break;
+                let event = match event {
+                    Ok(event) => event,
+                    // Unlike the page channel, a lagged library socket closes.
+                    // Counted here so it is visible; recovery is #279.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        crate::observability::metrics().record_realtime_event("library", "lagged");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 };
+                let message_type = event.message_type();
                 let Ok(payload) = serde_json::to_string(&event) else {
                     continue;
                 };
+                let bytes = payload.len();
                 if sender.send(Message::Text(payload.into())).await.is_err() {
                     crate::observability::metrics().record_realtime_event("library", "send_error");
                     break;
                 }
+                crate::observability::metrics().observe_realtime_message_bytes(
+                    "library",
+                    message_type,
+                    bytes,
+                );
             }
             message = inbound.next() => {
                 match message {
@@ -307,6 +324,7 @@ fn random_hex(bytes: usize) -> String {
 /// Android, realtime ticket for SPA), then enforces owner-only access to the
 /// page before upgrading. Bidirectional: gap-fill/snapshot, edit lease, and
 /// coalesced stroke-batch commits fanned out to the owner's sibling sessions.
+#[tracing::instrument(skip_all, fields(page_id = %page_id))]
 pub async fn page_socket(
     State(state): State<AppState>,
     Path(page_id): Path<String>,
@@ -340,10 +358,12 @@ pub async fn page_socket(
     })
 }
 
+#[tracing::instrument(skip_all, fields(page_id = %page_id, session_id))]
 async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, socket: WebSocket) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
     crate::observability::metrics().record_realtime_event("page", "connected");
     let session_id = format!("session_{}", random_hex(16));
+    tracing::Span::current().record("session_id", session_id.as_str());
     let mut receiver = state.realtime.subscribe_page(&page_id);
     let (mut sender, mut inbound) = socket.split();
 
@@ -397,7 +417,12 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Dropped fan-out is still skipped — recovery is #279 — but
+                    // no longer silently.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        crate::observability::metrics().record_realtime_event("page", "lagged");
+                        continue;
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -434,7 +459,19 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
     }
 }
 
-/// Returns false when the socket should close (send failure).
+/// Parses, dispatches and times one inbound page-channel message. Returns false
+/// when the socket should close (send failure).
+///
+/// Each message is its own trace root, *linked* to the connection span rather
+/// than nested in it: a page socket stays open for hours, and a trace rooted at
+/// the connection would not be complete — or usefully searchable by duration —
+/// in Tempo until the socket closed.
+#[tracing::instrument(
+    skip_all,
+    parent = None,
+    follows_from = [tracing::Span::current().id()],
+    fields(page_id = %page_id, session_id = %session_id, message_type),
+)]
 async fn handle_page_client_message(
     state: &AppState,
     pool: &PgPool,
@@ -443,6 +480,7 @@ async fn handle_page_client_message(
     sender: &mut SplitSink<WebSocket, Message>,
     text: &str,
 ) -> bool {
+    let received = Instant::now();
     let message: PageClientMessage = match serde_json::from_str(text) {
         Ok(message) => message,
         Err(_) => {
@@ -457,46 +495,31 @@ async fn handle_page_client_message(
             .await;
         }
     };
+    let message_type = message.message_type();
+    tracing::Span::current().record("message_type", message_type);
 
+    let keep_open =
+        dispatch_page_client_message(state, pool, page_id, session_id, sender, message, received)
+            .await;
+    // Server-side handling only — parse to the last frame this handler sends.
+    // Not end-to-end freshness, which needs client timestamps (#154).
+    crate::observability::metrics()
+        .observe_realtime_message_handling(message_type, received.elapsed().as_secs_f64());
+    keep_open
+}
+
+async fn dispatch_page_client_message(
+    state: &AppState,
+    pool: &PgPool,
+    page_id: &str,
+    session_id: &str,
+    sender: &mut SplitSink<WebSocket, Message>,
+    message: PageClientMessage,
+    received: Instant,
+) -> bool {
     match message {
         PageClientMessage::Subscribe { from_seq } => {
-            let (batches, tombstones) = match load_page_replay(pool, page_id, from_seq).await {
-                Ok(replay) => replay,
-                Err(error) => {
-                    tracing::error!(error = %error, "stroke replay failed");
-                    crate::observability::metrics().record_realtime_event("page", "replay_error");
-                    return send_page(
-                        sender,
-                        PageServerMessage::Error {
-                            code: "replay_failed".to_string(),
-                            message: "could not load page ink".to_string(),
-                            client_mutation_id: None,
-                        },
-                    )
-                    .await;
-                }
-            };
-            let deleted_ids: HashSet<&str> = tombstones
-                .iter()
-                .flat_map(|batch| batch.stroke_ids.iter().map(String::as_str))
-                .collect();
-            for mut batch in batches {
-                batch
-                    .strokes
-                    .retain(|stroke| !deleted_ids.contains(stroke.id.as_str()));
-                if !send_page(sender, PageServerMessage::StrokeBatch(batch)).await {
-                    return false;
-                }
-            }
-            // Replaying tombstones is required even when `from_seq` skips their
-            // source stroke batches: a reconnecting client may still cache them.
-            for batch in tombstones {
-                if !send_page(sender, PageServerMessage::TombstoneBatch(batch)).await {
-                    return false;
-                }
-            }
-            let last_seq = max_seq(pool, page_id).await.unwrap_or(from_seq);
-            send_page(sender, PageServerMessage::Synced { last_seq }).await
+            replay_page(pool, page_id, sender, from_seq, received).await
         }
         PageClientMessage::AcquireLease => {
             match state.realtime.acquire_lease(page_id, session_id) {
@@ -770,11 +793,127 @@ async fn handle_page_client_message(
     }
 }
 
-async fn send_page(sender: &mut SplitSink<WebSocket, Message>, message: PageServerMessage) -> bool {
-    let Ok(payload) = serde_json::to_string(&message) else {
+/// What one replay put on the wire.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ReplayCost {
+    frames: u64,
+    bytes: u64,
+}
+
+impl ReplayCost {
+    fn add_frame(&mut self, bytes: usize) {
+        self.frames += 1;
+        self.bytes += bytes as u64;
+    }
+}
+
+/// Replays a page to one subscriber: surviving stroke batches, every tombstone
+/// batch, then `synced`. Its frames, bytes and duration are recorded once
+/// `synced` is sent; a replay cut short by a failed read or send records none.
+#[tracing::instrument(skip_all, fields(from_seq = from_seq, frames, bytes))]
+async fn replay_page(
+    pool: &PgPool,
+    page_id: &str,
+    sender: &mut SplitSink<WebSocket, Message>,
+    from_seq: u64,
+    received: Instant,
+) -> bool {
+    let (batches, tombstones) = match load_page_replay(pool, page_id, from_seq).await {
+        Ok(replay) => replay,
+        Err(error) => {
+            tracing::error!(error = %error, "stroke replay failed");
+            crate::observability::metrics().record_realtime_event("page", "replay_error");
+            return send_page(
+                sender,
+                PageServerMessage::Error {
+                    code: "replay_failed".to_string(),
+                    message: "could not load page ink".to_string(),
+                    client_mutation_id: None,
+                },
+            )
+            .await;
+        }
+    };
+    let mut cost = ReplayCost::default();
+    if !send_replay_frames(sender, batches, tombstones, &mut cost).await {
+        return false;
+    }
+    let last_seq = max_seq(pool, page_id).await.unwrap_or(from_seq);
+    let Some(synced_bytes) = send_page_frame(sender, PageServerMessage::Synced { last_seq }).await
+    else {
         return false;
     };
-    sender.send(Message::Text(payload.into())).await.is_ok()
+    cost.add_frame(synced_bytes);
+
+    let span = tracing::Span::current();
+    span.record("frames", cost.frames);
+    span.record("bytes", cost.bytes);
+    crate::observability::metrics().observe_realtime_replay(
+        cost.frames,
+        cost.bytes,
+        received.elapsed().as_secs_f64(),
+    );
+    true
+}
+
+/// Sends a replay's stroke-batch and tombstone-batch frames, adding each to
+/// `cost`. Returns false when a send fails.
+async fn send_replay_frames<S>(
+    sender: &mut S,
+    batches: Vec<StrokeBatch>,
+    tombstones: Vec<TombstoneBatch>,
+    cost: &mut ReplayCost,
+) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    let deleted_ids: HashSet<&str> = tombstones
+        .iter()
+        .flat_map(|batch| batch.stroke_ids.iter().map(String::as_str))
+        .collect();
+    for mut batch in batches {
+        batch
+            .strokes
+            .retain(|stroke| !deleted_ids.contains(stroke.id.as_str()));
+        let Some(bytes) = send_page_frame(sender, PageServerMessage::StrokeBatch(batch)).await
+        else {
+            return false;
+        };
+        cost.add_frame(bytes);
+    }
+    // Replaying tombstones is required even when `from_seq` skips their
+    // source stroke batches: a reconnecting client may still cache them.
+    for batch in tombstones {
+        let Some(bytes) = send_page_frame(sender, PageServerMessage::TombstoneBatch(batch)).await
+        else {
+            return false;
+        };
+        cost.add_frame(bytes);
+    }
+    true
+}
+
+async fn send_page<S>(sender: &mut S, message: PageServerMessage) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    send_page_frame(sender, message).await.is_some()
+}
+
+/// Serializes and sends one page-channel frame, returning its size in bytes, or
+/// `None` when the socket should close. Every server→client page frame passes
+/// through here, so this is where frame size is recorded — after the send, so
+/// the histogram counts only frames that reached the socket.
+async fn send_page_frame<S>(sender: &mut S, message: PageServerMessage) -> Option<usize>
+where
+    S: Sink<Message> + Unpin,
+{
+    let message_type = message.message_type();
+    let payload = serde_json::to_string(&message).ok()?;
+    let bytes = payload.len();
+    sender.send(Message::Text(payload.into())).await.ok()?;
+    crate::observability::metrics().observe_realtime_message_bytes("page", message_type, bytes);
+    Some(bytes)
 }
 
 async fn page_belongs_to_owner(
@@ -1268,5 +1407,97 @@ mod tests {
             hub.acquire_lease("page_1", "session_b"),
             LeaseOutcome::Granted
         ));
+    }
+
+    fn fixture_stroke(id: &str) -> Stroke {
+        let mut stroke: Stroke =
+            serde_json::from_str(include_str!("../../../../contracts/fixtures/stroke.json"))
+                .expect("stroke fixture should parse");
+        stroke.id = id.to_string();
+        stroke
+    }
+
+    fn text_frames(sink: &[Message]) -> Vec<&str> {
+        sink.iter()
+            .map(|message| match message {
+                Message::Text(text) => text.as_str(),
+                other => panic!("expected a text frame, got {other:?}"),
+            })
+            .collect()
+    }
+
+    // `send_page_frame` is generic over the sink precisely so the chokepoint can
+    // be exercised without a socket: a `Vec<Message>` is a sink that never fails.
+    #[tokio::test]
+    async fn send_page_frame_records_the_bytes_it_sent() {
+        let metrics = crate::observability::metrics();
+        let before = metrics.realtime_message_count("page", "lease-granted");
+        let mut sink: Vec<Message> = Vec::new();
+
+        let bytes = send_page_frame(&mut sink, PageServerMessage::LeaseGranted)
+            .await
+            .expect("a Vec sink never fails");
+
+        let frames = text_frames(&sink);
+        assert_eq!(frames, [r#"{"type":"lease-granted"}"#]);
+        assert_eq!(bytes, frames[0].len());
+        // No other test in this binary sends `lease-granted`, so the delta on the
+        // process-wide histogram is exact.
+        assert_eq!(
+            metrics.realtime_message_count("page", "lease-granted"),
+            before + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_frames_apply_delete_wins_and_count_every_frame() {
+        let batches = vec![
+            StrokeBatch {
+                seq: 1,
+                client_batch_id: "batch_1".to_string(),
+                strokes: vec![fixture_stroke("kept"), fixture_stroke("erased")],
+            },
+            StrokeBatch {
+                seq: 2,
+                client_batch_id: "batch_2".to_string(),
+                strokes: vec![fixture_stroke("later")],
+            },
+        ];
+        let tombstones = vec![TombstoneBatch {
+            revision: 3,
+            client_mutation_id: "erase_1".to_string(),
+            stroke_ids: vec!["erased".to_string()],
+        }];
+        let mut sink: Vec<Message> = Vec::new();
+        let mut cost = ReplayCost::default();
+
+        assert!(send_replay_frames(&mut sink, batches, tombstones, &mut cost).await);
+
+        let frames = text_frames(&sink);
+        let types: Vec<String> = frames
+            .iter()
+            .map(|frame| {
+                serde_json::from_str::<serde_json::Value>(frame).expect("frame should be JSON")
+                    ["type"]
+                    .as_str()
+                    .expect("frame should carry a type")
+                    .to_string()
+            })
+            .collect();
+        // One frame per stored batch plus one per tombstone batch — the shape
+        // #323 collapses into a single frame.
+        assert_eq!(types, ["stroke-batch", "stroke-batch", "tombstone-batch"]);
+        assert!(frames[0].contains(r#""id":"kept""#));
+        assert!(
+            !frames[0].contains(r#""id":"erased""#),
+            "delete-wins filtering must still drop tombstoned strokes"
+        );
+        assert_eq!(
+            cost,
+            ReplayCost {
+                frames: 3,
+                bytes: frames.iter().map(|frame| frame.len() as u64).sum(),
+            }
+        );
     }
 }
