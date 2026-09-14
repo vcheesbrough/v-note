@@ -1,7 +1,7 @@
 # Deploy workflow.
 #   Push:       after checks, web and android all pass → verify-release-images →
 #               apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
-#               ∥ publish-grafana-dashboard (master only)
+#               ∥ publish-grafana-dashboard
 #   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint →
 #               deploy-dev | deploy-prod → tag-release-*
 # See checks.yml for why the push pipeline is split into workflows.
@@ -192,11 +192,12 @@ steps:
 
   # Publishes deploy/grafana/v-note-overview.json to Grafana (Applications / v-note)
   # over the HTTP API — the dashboard counterpart of apply-authentik-blueprint.
-  # Master pushes only: every push on any branch runs auto-deploy-dev, so
-  # publishing there would let a feature branch overwrite the shared dashboard,
-  # and publishing from deploy-prod would let an older release roll it back. After
-  # auto-deploy-dev, so panels go live with the metrics they chart; it does not
-  # gate tag-release-auto-dev. grafana_api_token is the shared woodpecker-ci
+  # Every push, on any branch, right after auto-deploy-dev: the dashboard tracks
+  # whatever is deployed to dev, so a branch's panels go live with the metrics they
+  # chart and can be checked before merge. The last push wins, as it does for dev
+  # itself, and the version message names the branch. Never from deploy-prod, which
+  # could roll the dashboard back to an older release. It does not gate
+  # tag-release-auto-dev. grafana_api_token is the shared woodpecker-ci
   # service-account token (/woodpecker/shared, Edit on the Applications folder).
   # curl/jq are deliberately unpinned: the base image is digest-pinned, and Alpine
   # removes superseded versions from a stable branch's repo, so `pkg=<ver>` would
@@ -204,7 +205,6 @@ steps:
   publish-grafana-dashboard:
     when:
       - event: push
-        branch: master
     depends_on:
       - auto-deploy-dev
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
@@ -215,7 +215,7 @@ steps:
         from_secret: grafana_api_token
     commands:
       - apk add --no-cache curl jq
-      - RELEASE_TAG="$$(cat .release-tag)" COMMIT_SHA="$$CI_COMMIT_SHA" ./scripts/publish-grafana-dashboard.sh deploy/grafana/v-note-overview.json
+      - GRAFANA_MESSAGE_PREFIX="v-note $$CI_COMMIT_BRANCH" RELEASE_TAG="$$(cat .release-tag)" COMMIT_SHA="$$CI_COMMIT_SHA" ./scripts/publish-grafana-dashboard.sh deploy/grafana/v-note-overview.json
 
   deploy-prod:
     when:

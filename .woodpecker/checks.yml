@@ -59,8 +59,8 @@ steps:
     commands:
       - ./scripts/test-deploy-v-note.sh
 
-  # The Grafana dashboard is published from master only (deploy.yml), so a broken
-  # one would otherwise first surface after merge, on the shared dashboard. This
+  # deploy.yml publishes the Grafana dashboard on every push once dev is deployed,
+  # so a broken one would otherwise land straight on the shared dashboard. This
   # validates deploy/grafana/v-note-overview.json and the publish script's payload
   # without Grafana or a token. Its own step: the docker CLI image has no jq.
   # jq is unpinned for the reason given on publish-grafana-dashboard in deploy.yml.
