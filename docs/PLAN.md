@@ -216,13 +216,23 @@ Locked engineering/ops conventions — product behaviour stays in **Decisions ma
 
 **Operator norm:** deploy server image **and** install the **APK from the same CI build / git tag** — lockstep is the default even when MVP+ runtime allows patch slack.
 
-### CI — push pipeline (lands **#145**)
+### CI — push pipeline
+
+The authoritative definition is **[`.woodpecker/build.yml`](../.woodpecker/build.yml)** — this table tracks it.
 
 | Step | What runs |
 | --- | --- |
-| **build** | Docker image with **rustfmt**, **clippy**, **`cargo test`**; **Trunk** SPA build; **Gradle** `assembleDevDebug`; tag `registry.desync.link/v-note:$CI_COMMIT_SHA` |
-| **contract-validation** | Golden fixtures vs **`schemas/`** on server, SPA, Android |
-| **e2e** | `e2e/docker-compose.test.yml` — Playwright (+ Android emulator job when instrumented tests exist) |
+| **compute-version** | Release-versions plugin, `major_minor_source: cargo` → **`.release-tag`** |
+| **lint** | **`cargo fmt --all --check`** and **`cargo clippy --workspace --all-targets -- -D warnings`** |
+| **contract-validation** | **`cargo test`** on `protocol`, `frontend`, `server`; Android build-box image pin check |
+| **deploy-script-validation** | `scripts/test-deploy-v-note.sh` — the deploy script's parameter guards |
+| **build-android** | `Dockerfile.android` — **Gradle** APK; image metadata check; push `registry.desync.link/v-note-android:{release}` |
+| **android-instrumented-api-29 / -36** | `Dockerfile.android-instrumented` — emulator instrumented tests on API 29 and 36 |
+| **build-web** | `Dockerfile.web` — **Trunk** SPA build + server; image metadata and container-health checks; push `registry.desync.link/v-note:{release}` |
+| **e2e-web** | `e2e/docker-compose.test.yml` (+ the android-apk overlay) — Playwright against the pushed image |
+| **apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev** | After every gate above is green: Authentik blueprint, dev deploy, push the release tag |
+
+**`{release}`** is the plain semver `MAJOR.MINOR.PATCH` that **compute-version** writes to **`.release-tag`**.
 
 ### Local development
 
