@@ -1,21 +1,38 @@
 # syntax=docker/dockerfile:1.7
 
-# CI-only: Android devDebug APK + unit tests (Woodpecker build-android).
-# Stage 1 builds the APK; stage 2 (nginx:alpine) delivers it over HTTP for sideloading.
-# Base image pin: scripts/android-build-box-image.ref (override via --build-arg in CI).
-ARG ANDROID_BUILD_BOX_IMAGE=mingc/android-build-box:master@sha256:47a26138302605eb8a37b024e8a263af0812c14800813458bc674df47cc26331
+# CI-only Android images, all built from one Gradle `builder` stage:
+#
+#   --target apk (default)   Woodpecker build-android: nginx serving the devDebug APK
+#   --target instrumented    Woodpecker android-instrumented-api-29 / -36: emulator +
+#                            prebuilt app/test APKs (needs --privileged and /dev/kvm)
+#
+# The three CI steps run concurrently. They used to be three separate Gradle builds
+# of the same app, serialised on the `sharing=locked` Gradle cache mounts (~29s of
+# lock wait per lane). The `builder` stage is now byte-identical in all three solves,
+# so BuildKit runs it once and every target reuses the result. Keep it that way:
+# nothing `builder` references may differ between the three builds — an API level
+# or an OCI label arg used there would fork it back into three builds.
 
-# Delivery-stage base, declared once: the `FROM` below and the OCI `base.*`
-# labels at the end are both derived from these args.
+# android-build-box pin, declared as name + digest so both FROMs and the
+# instrumented image's OCI `base.*` labels are built from the same values. The pin's
+# home is scripts/android-build-box-image.ref: CI and `just` split it on `@` and pass
+# both halves, and scripts/check-android-build-box-image.sh holds these defaults to it.
+ARG BUILD_BOX_IMAGE_NAME=mingc/android-build-box:master
+ARG BUILD_BOX_IMAGE_DIGEST=sha256:47a26138302605eb8a37b024e8a263af0812c14800813458bc674df47cc26331
+
+# APK delivery-stage base, declared once: the `FROM` below and the OCI `base.*`
+# labels of the apk image are both derived from these args.
 ARG BASE_IMAGE_NAME=nginx:alpine
 ARG BASE_IMAGE_DIGEST=sha256:8b1e78743a03dbb2c95171cc58639fef29abc8816598e27fb910ed2e621e589a
 
-FROM ${ANDROID_BUILD_BOX_IMAGE} AS builder
+FROM ${BUILD_BOX_IMAGE_NAME}@${BUILD_BOX_IMAGE_DIGEST} AS builder
 # CI passes the computed release tag so versionName matches the deployed image.
 ARG V_NOTE_RELEASE=
 ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 WORKDIR /workspace
 COPY . .
+# The Gradle wrapper distribution unpacks into /root/.gradle/wrapper, which is the
+# cache mount — so it is downloaded once, not on every commit.
 RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked \
     --mount=type=cache,id=v-note-gradle-project,target=/workspace/android/.gradle,sharing=locked \
     ./scripts/sync-version.sh \
@@ -23,9 +40,55 @@ RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked
     && chmod +x ./gradlew \
     && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \
         :app:assembleDevDebug \
+        :app:assembleDevDebugAndroidTest \
         :app:testDevDebugUnitTest :app:testDevLocalDebugUnitTest :app:testProdDebugUnitTest
 
-FROM ${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST}
+FROM ${BUILD_BOX_IMAGE_NAME}@${BUILD_BOX_IMAGE_DIGEST} AS instrumented
+ARG ANDROID_API_LEVEL=36
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+ENV PATH=/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:${PATH}
+ENV ANDROID_API_LEVEL=${ANDROID_API_LEVEL}
+ENV AVD_NAME=vnote-ci-api-${ANDROID_API_LEVEL}
+ENV SYSTEM_IMAGE=system-images;android-${ANDROID_API_LEVEL};google_apis;x86_64
+
+# Emulator + system image are baked here, before any source, so runtime does not
+# re-download SDK packages and this layer survives every commit.
+RUN yes | sdkmanager --licenses >/dev/null 2>&1 || true \
+    && sdkmanager "platform-tools" "emulator" "${SYSTEM_IMAGE}" \
+    && echo no | avdmanager create avd -n "${AVD_NAME}" -k "${SYSTEM_IMAGE}" -d pixel_6 --force
+
+ARG V_NOTE_RELEASE=
+ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
+WORKDIR /workspace
+# The whole builder workspace, not just the two APKs: the run script re-syncs the
+# version and keeps a Gradle `connectedDevDebugAndroidTest` fallback for when the
+# prebuilt APKs are missing.
+COPY --from=builder /workspace /workspace
+CMD ["bash", "scripts/run-android-instrumented-ci.sh"]
+
+# OCI image metadata — see Dockerfile.web for the rationale.
+ARG BUILD_BOX_IMAGE_NAME
+ARG BUILD_BOX_IMAGE_DIGEST
+ARG OCI_IMAGE_VERSION=
+ARG OCI_IMAGE_REVISION=
+ARG OCI_IMAGE_CREATED=
+LABEL org.opencontainers.image.title="v-note-android-instrumented" \
+      org.opencontainers.image.description="v-note Android API ${ANDROID_API_LEVEL} CI image (devDebug instrumented tests + emulator)" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.url="https://github.com/vcheesbrough/v-note" \
+      org.opencontainers.image.source="https://github.com/vcheesbrough/v-note" \
+      org.opencontainers.image.authors="Vincent Cheesbrough" \
+      org.opencontainers.image.vendor="Vincent Cheesbrough" \
+      org.opencontainers.image.documentation="https://github.com/vcheesbrough/v-note/blob/master/docs/DEPLOY.md" \
+      org.opencontainers.image.base.name="${BUILD_BOX_IMAGE_NAME}" \
+      org.opencontainers.image.base.digest="${BUILD_BOX_IMAGE_DIGEST}" \
+      org.opencontainers.image.version="${OCI_IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${OCI_IMAGE_REVISION}" \
+      org.opencontainers.image.created="${OCI_IMAGE_CREATED}"
+
+# Last stage, so a bare `docker build -f Dockerfile.android` still yields the APK image.
+FROM ${BASE_IMAGE_NAME}@${BASE_IMAGE_DIGEST} AS apk
 ARG V_NOTE_RELEASE
 # Serve the APK at /dl/apk. The path has no extension, so set the MIME type
 # explicitly and a download filename via Content-Disposition.

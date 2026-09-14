@@ -7,8 +7,7 @@ ARG BASE_IMAGE_NAME=debian:trixie-slim
 ARG BASE_IMAGE_DIGEST=sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
 
 # Rust toolchain pin. Three places hold this version and must move together:
-# here, `.woodpecker/build.yml` (contract-validation image), and `rust-toolchain.toml`
-# (host dev). rust-toolchain.toml is dockerignored so rustup does not re-resolve
+# here, `Dockerfile.rust-ci` (CI lint and tests), and `rust-toolchain.toml` (host dev). rust-toolchain.toml is dockerignored so rustup does not re-resolve
 # inside the build — this image already *is* the pinned toolchain.
 FROM rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS builder
 # `--locked` is load-bearing: an unlocked resolution of trunk 0.21.14 no longer
@@ -29,19 +28,25 @@ ENV V_NOTE_RELEASE=${V_NOTE_RELEASE}
 # from the build secret (env-only — the token is never written to a layer).
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 COPY . .
-RUN --mount=type=cache,id=v-note-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=v-note-cargo-git,target=/usr/local/cargo/git \
+# The crate cache is the whole CARGO_HOME (`v-note-cargo-home`), shared with the CI
+# lint and test builds in Dockerfile.rust-ci, which run at the same time. It must be
+# the CARGO_HOME root, not just registry/ and git/: cargo's download lock lives at
+# the root, so sharing only the subdirs let concurrent builds collide on the same
+# git checkout. Exported per RUN rather than set with ENV so the trunk binary
+# installed above stays in the image's /usr/local/cargo/bin.
+RUN --mount=type=cache,id=v-note-cargo-home,target=/cargo-home \
     --mount=type=cache,id=v-note-cargo-target,target=/app/target \
     --mount=type=cache,id=v-note-trunk-cache,target=/root/.cache/trunk \
     --mount=type=secret,id=github_token \
     set -eu; \
+    export CARGO_HOME=/cargo-home; \
     . /app/scripts/docker-git-credential.sh; \
     cd frontend && trunk build --release
-RUN --mount=type=cache,id=v-note-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=v-note-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=v-note-cargo-home,target=/cargo-home \
     --mount=type=cache,id=v-note-cargo-target,target=/app/target \
     --mount=type=secret,id=github_token \
     set -eu; \
+    export CARGO_HOME=/cargo-home; \
     . /app/scripts/docker-git-credential.sh; \
     cargo build --release -p server \
     && cp /app/target/release/server /tmp/server

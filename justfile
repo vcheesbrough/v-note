@@ -40,9 +40,9 @@ build-android-docker:
 android-instrumented-docker api="36":
     ./scripts/sync-version.sh
     REF='{{android_build_box_image}}' && \
-    docker build -f Dockerfile.android-instrumented \
-      --build-arg BASE_IMAGE_NAME="${REF%@*}" \
-      --build-arg BASE_IMAGE_DIGEST="${REF#*@}" \
+    docker build -f Dockerfile.android --target instrumented \
+      --build-arg BUILD_BOX_IMAGE_NAME="${REF%@*}" \
+      --build-arg BUILD_BOX_IMAGE_DIGEST="${REF#*@}" \
       --build-arg ANDROID_API_LEVEL={{api}} \
       --build-arg OCI_IMAGE_VERSION="$(git describe --tags --always --dirty)" \
       --build-arg OCI_IMAGE_REVISION="$(git rev-parse HEAD)" \
@@ -74,3 +74,9 @@ e2e:
 
 contract-validation:
     cargo test -p protocol
+
+# CI-parity Rust gates, exactly as the `lint` / `rust-test` steps run them (needs GITHUB_TOKEN
+# for the private sovereign-config dep). `just rust-ci lint` or `just rust-ci test`.
+rust-ci target="test":
+    docker build -f Dockerfile.rust-ci --target {{target}} --output type=cacheonly \
+      --secret id=github_token,env=GITHUB_TOKEN .

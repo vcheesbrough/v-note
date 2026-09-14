@@ -3,7 +3,7 @@
 #
 # KV path: secret/woodpecker/repos/vcheesbrough/v-note
 # Keys:    v_note_dev_sovereign_access_url / v_note_prod_sovereign_access_url
-#          (match the from_secret names in .woodpecker/build.yml)
+#          (match the from_secret names in .woodpecker/deploy.yml)
 #
 # The access URL is a long-lived credential granting read access to the whole
 # /v-note/<env>/server subtree — including database/password and
