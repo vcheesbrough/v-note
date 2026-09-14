@@ -1,14 +1,12 @@
 # Host-dev toolchain pin. Keep the channel byte-identical with the `rust:<ver>`
-# images in `Dockerfile.web` (builder `FROM`) and `.woodpecker/build.yml`
-# (contract-validation) — all three move together on a toolchain bump.
+# images in `Dockerfile.web` (builder `FROM`) and `Dockerfile.rust-ci` (CI lint and
+# tests) — all three move together on a toolchain bump.
 #
-# Kept out of CI two different ways, because the images there already *are* this
-# toolchain and re-resolving it would only download the components below:
-#   - `docker build` contexts — via the three `Dockerfile.*.dockerignore` files;
-#   - the `lint` and `contract-validation` steps — via `RUSTUP_TOOLCHAIN` in
-#     `.woodpecker/build.yml`, since Woodpecker clones the repo directly and
-#     `.dockerignore` has no effect there. `lint` then adds clippy and rustfmt
-#     explicitly: the `rust:` images ship a minimal profile without them.
+# Kept out of CI because the images there already *are* this toolchain and
+# re-resolving it would only download the components below. Every Rust build in CI
+# is a `docker build`, and each Dockerfile's paired `.dockerignore` excludes this
+# file. `Dockerfile.rust-ci` then adds clippy and rustfmt explicitly for `lint`:
+# the `rust:` images ship a minimal profile without them.
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]

@@ -3,7 +3,7 @@ set -eu
 
 # Deploy one v-note environment. Takes no arguments and ignores any: every
 # environment-specific value is a parameter supplied by the calling pipeline step
-# (.woodpecker/build.yml), so this script has no idea dev and prod exist and no
+# (.woodpecker/deploy.yml), so this script has no idea dev and prod exist and no
 # branch to keep in sync with them.
 #
 # What stays here is the shell that is awkward to inline: the metrics-label

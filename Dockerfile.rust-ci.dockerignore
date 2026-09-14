@@ -1,0 +1,47 @@
+# Paired with Dockerfile.rust-ci (auto-selected by BuildKit).
+#
+# Not a copy of Dockerfile.web.dockerignore: the tests need `contracts/fixtures/`
+# (crates/protocol/tests/contracts.rs) and `crates/server/tests/`, both of which
+# the release image excludes.
+
+# Build artifacts
+target/
+frontend/dist/
+frontend/pkg/
+frontend/target/
+
+# Not part of the Cargo workspace
+android/
+docs/
+deploy/
+e2e/
+.woodpecker/
+authentik/
+schemas/
+
+# Dockerfiles (avoid COPY . . cache bust on Dockerfile-only edits)
+Dockerfile
+Dockerfile.*
+
+# Host-dev toolchain pin — the build image already is the pinned toolchain;
+# shipping this in would make rustup re-resolve components and targets.
+rust-toolchain.toml
+
+# Scripts — only the git-credential helper is sourced by the cargo layers.
+scripts/*
+!scripts/docker-git-credential.sh
+
+# Meta
+README.md
+AGENTS.md
+LICENSE
+LICENSE-TIER.md
+justfile
+.gitignore
+version.txt
+
+# Git / IDE
+.git/
+.idea/
+.vscode/
+.cursor/

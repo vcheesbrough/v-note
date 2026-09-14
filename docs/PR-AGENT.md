@@ -9,7 +9,7 @@ Automated pull-request reviews via [claude-pr-agent](https://github.com/vcheesbr
 | [`.woodpecker/pr-review.yml`](../.woodpecker/pr-review.yml) | Woodpecker pipeline — runs on `pull_request` events |
 | [`.woodpecker/pr-review-prompt.md`](../.woodpecker/pr-review-prompt.md) | Repo-local review rules (stack, MVP constraints, output JSON schema) |
 
-This pipeline is **standalone**. It does not depend on `.woodpecker/build.yml` or any docker build/e2e CI (those remain deferred for v-note).
+This pipeline is **standalone**. It does not depend on the push workflows (`.woodpecker/checks.yml`, `web.yml`, `android.yml`, `deploy.yml`) or any docker build/e2e CI.
 
 ## Trigger
 

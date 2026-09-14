@@ -1,0 +1,83 @@
+# Web workflow: build the release image, then run Playwright e2e against it.
+# See checks.yml for why the push pipeline is split into workflows.
+
+when:
+  - event: [push, manual]
+
+steps:
+  # Workflows share nothing, so each computes its own release tag. compute-version
+  # reuses the tag already on this commit, or allocates highest remote patch + 1,
+  # so every workflow of one commit agrees; deploy.yml still verifies the images'
+  # revision label before it rolls anything out.
+  compute-version:
+    depends_on: []
+    pull: true
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
+    settings:
+      mode: compute
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
+  build-web:
+    depends_on:
+      - compute-version
+    image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+    volumes: &docker-socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      # Needed by the cargo layers to fetch the private sovereign-config git dep.
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
+        START=$$(date +%s)
+        docker build -f Dockerfile.web \
+          --secret id=github_token,env=GITHUB_TOKEN \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_VERSION="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_REVISION="$$CI_COMMIT_SHA" \
+          --build-arg OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)" \
+          -t "$$IMAGE" .
+        echo "timing: docker build Dockerfile.web took $$(( $$(date +%s) - $$START ))s"
+        # The image that actually ships, gated on the same label contract the e2e
+        # support image is held to — this is the check that caught the missing
+        # authors/vendor labels the old --label flags never set.
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        # Both gated before the push: the deploy step and the e2e stack below now
+        # wait on this image's own healthcheck, so an image whose probe is broken
+        # would not fail loudly — it would hang until a timeout.
+        ./scripts/test-container-health.sh "$$IMAGE"
+        START=$$(date +%s)
+        docker push "$$IMAGE"
+        echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
+
+  e2e-web:
+    depends_on:
+      - build-web
+    image: *docker-image
+    volumes: *docker-socket
+    commands:
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        export OCI_IMAGE_VERSION="$$RELEASE_TAG"
+        export OCI_IMAGE_REVISION="$$CI_COMMIT_SHA"
+        export OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)"
+        REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
+        START=$$(date +%s)
+        TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml build playwright v-note-android-apk legacy-migration-fixture
+        echo "timing: e2e support image build took $$(( $$(date +%s) - $$START ))s"
+        ./scripts/check-image-metadata.sh "v-note-e2e-playwright:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        START=$$(date +%s)
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        echo "timing: e2e compose up took $$(( $$(date +%s) - $$START ))s"
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml down --volumes
+        echo "Test report: $$REPORT/index.html"
+        exit $$RC
