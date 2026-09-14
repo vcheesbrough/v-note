@@ -315,13 +315,23 @@ docker buildx du --filter type=exec.cachemount     # size of every cache mount
 docker buildx prune --filter type=exec.cachemount  # drop them; the next build is cold
 ```
 
-Because they are cache, BuildKit's garbage collector may evict them under disk
-pressure — a run after an eviction is slower, never wrong.
+Because they are cache, BuildKit's garbage collector may evict them. A run after an
+eviction is slower, never wrong. The CI agent (mini, Docker 28) sets no `builder.gc`
+in `daemon.json`, so it runs the disk-derived defaults (`docker buildx inspect
+default`). Checked 2026-09-14:
 
-Iteration 31 retired the `v-note-cargo-registry` and `v-note-cargo-git` cache ids
-(sharing only those subdirs raced — see `Dockerfile.rust-ci`). Nothing references
-them any more, so on the CI agent they are dead weight until GC reclaims them; they
-are safe to drop by hand.
+- Cache mounts left unused for **48h** become evictable once all cache mounts on the
+  host together exceed **~23.7 GiB**. They were ~15 GiB across v-note, bored and
+  sovereign-config. v-note's are used on every push, so the practical effect is at
+  most one cold pipeline after a couple of idle days.
+- All build cache is capped at **~171 GiB**, and GC keeps at least **~85.7 GiB** of
+  disk free, so the cache cannot fill the disk.
+
+The `v-note-cargo-registry` / `v-note-cargo-git` ids that iteration 31 retired
+(sharing only those subdirs raced — see `Dockerfile.rust-ci`) were pruned from mini
+by id. If a cargo target cache ever grows large enough to crowd the host, prune that
+one record: `docker buildx prune --filter id=<ID>`, with the ID from `docker buildx du
+--verbose`.
 
 **Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `deploy`
 (after all three). A commit is green only when every one of them is; the combined
