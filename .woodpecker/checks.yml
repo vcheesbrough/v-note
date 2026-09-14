@@ -63,6 +63,7 @@ steps:
   # one would otherwise first surface after merge, on the shared dashboard. This
   # validates deploy/grafana/v-note-overview.json and the publish script's payload
   # without Grafana or a token. Its own step: the docker CLI image has no jq.
+  # jq is unpinned for the reason given on publish-grafana-dashboard in deploy.yml.
   grafana-dashboard-validation:
     depends_on: []
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
