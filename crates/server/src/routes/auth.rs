@@ -6,7 +6,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 use tracing::Instrument as _;
 
@@ -21,7 +21,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     let auth = &state.auth;
 
     let mut nonce_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes);
 
     let authorize = match url::Url::parse_with_params(

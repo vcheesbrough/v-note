@@ -221,9 +221,14 @@ Secret leaves (`database/password`, `oidc/client-secret`) are stored with
 OpenBao because the `postgres` service consumes it directly — the same value lives
 in two stores.
 
-The provider is pinned to the running sovereign-config server's tag (**2.12.1**)
-and **fails closed on protocol mismatch**; if that server is upgraded, bump
-`sovereign-config-provider` in `crates/server/Cargo.toml` and rebuild.
+The provider is pinned to the running sovereign-config server's tag (**2.19.4**).
+Only the **protocol** is enforced: the provider **fails closed on protocol
+mismatch** (both sides speak `v3`), but nothing checks the tag itself — the server
+once ran 2.19.4 against a 2.12.1 client without anything failing. So the pin is a
+convention to keep, not a guarantee: before relocking, compare it with the live
+version (sovereign-config MCP `status`, or the unauthenticated gRPC
+`System.GetVersion`), and if the server has moved, bump `sovereign-config-provider`
+in `crates/server/Cargo.toml` and rebuild.
 
 ### Compose env vars that remain (per deployment)
 
