@@ -27,7 +27,10 @@ rustls = { version = "0.23", features = ["ring"] }
 serde.workspace = true
 serde_json.workspace = true
 sovereign-config-provider = { git = "https://github.com/vcheesbrough/sovereign-config", tag = "2.12.1", features = ["config"] }
-sqlx = { version = "0.8", default-features = false, features = ["chrono", "derive", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
+# 0.9 deleted the combined runtime+TLS features; `runtime-tokio` + `tls-rustls-ring`
+# is the exact expansion of the 0.8 `runtime-tokio-rustls` this replaced (ring +
+# webpki roots), so the TLS stack is unchanged.
+sqlx = { version = "0.9", default-features = false, features = ["chrono", "derive", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 time = "0.3"
 tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }
