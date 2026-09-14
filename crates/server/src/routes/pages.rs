@@ -56,11 +56,46 @@ impl From<PageRow> for PageSummary {
     }
 }
 
-fn db(state: &AppState) -> Result<&sqlx::PgPool, Response> {
-    state
-        .db
-        .as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "database not configured").into_response())
+/// A page-route failure, as the small half of every `Result` in this module.
+///
+/// The handlers used to carry an already-built `Response` in the `Err` variant.
+/// A `Response` is 128 bytes, so every `Result` here — success path included —
+/// was sized by its error (`clippy::result_large_err`). A status plus a static
+/// message is 24, and axum renders the identical response through
+/// `IntoResponse`: same code, same `text/plain` body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiError {
+    status: StatusCode,
+    message: &'static str,
+}
+
+impl ApiError {
+    const DB_UNAVAILABLE: Self = Self {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "database not configured",
+    };
+    const PAGE_NOT_FOUND: Self = Self {
+        status: StatusCode::FORBIDDEN,
+        message: "page not found",
+    };
+    const THUMBNAIL_GONE: Self = Self {
+        status: StatusCode::GONE,
+        message: "thumbnail revision no longer available",
+    };
+    const DB_OPERATION_FAILED: Self = Self {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: "database operation failed",
+    };
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, self.message).into_response()
+    }
+}
+
+fn db(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
+    state.db.as_ref().ok_or(ApiError::DB_UNAVAILABLE)
 }
 
 fn db_query_span(operation: &'static str, query_name: &'static str) -> tracing::Span {
@@ -76,7 +111,7 @@ fn db_query_span(operation: &'static str, query_name: &'static str) -> tracing::
 pub async fn list_pages(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
-) -> Result<Json<ListPagesResponse>, Response> {
+) -> Result<Json<ListPagesResponse>, ApiError> {
     let rows = sqlx::query_as::<_, PageRow>(
         r#"
         SELECT p.id, p.title, p.created_at, p.updated_at, p.paper,
@@ -106,7 +141,7 @@ pub async fn create_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreatePageRequest>,
-) -> Result<(StatusCode, Json<PageResponse>), Response> {
+) -> Result<(StatusCode, Json<PageResponse>), ApiError> {
     let title = payload
         .title
         .as_deref()
@@ -151,7 +186,7 @@ pub async fn get_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Path(page_id): Path<String>,
-) -> Result<Json<PageResponse>, Response> {
+) -> Result<Json<PageResponse>, ApiError> {
     let row = sqlx::query_as::<_, PageRow>(
         r#"
         SELECT p.id, p.title, p.created_at, p.updated_at, p.paper,
@@ -175,7 +210,7 @@ pub async fn get_page(
         Some(row) => Ok(Json(PageResponse {
             page: PageSummary::from(row),
         })),
-        None => Err((StatusCode::FORBIDDEN, "page not found").into_response()),
+        None => Err(ApiError::PAGE_NOT_FOUND),
     }
 }
 
@@ -184,7 +219,7 @@ pub async fn get_thumbnail(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Path((page_id, source_seq)): Path<(String, u64)>,
-) -> Result<Response, Response> {
+) -> Result<Response, ApiError> {
     let owned: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND owner_id = $2)")
             .bind(&page_id)
@@ -193,7 +228,7 @@ pub async fn get_thumbnail(
             .await
             .map_err(server_error)?;
     if !owned {
-        return Err((StatusCode::FORBIDDEN, "page not found").into_response());
+        return Err(ApiError::PAGE_NOT_FOUND);
     }
     let png = sqlx::query_scalar::<_, Vec<u8>>(
         "SELECT png FROM page_thumbnails WHERE page_id = $1 AND source_seq = $2 AND status = 'available'",
@@ -215,7 +250,7 @@ pub async fn get_thumbnail(
             bytes,
         )
             .into_response()),
-        None => Err((StatusCode::GONE, "thumbnail revision no longer available").into_response()),
+        None => Err(ApiError::THUMBNAIL_GONE),
     }
 }
 
@@ -224,7 +259,7 @@ pub async fn delete_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Path(page_id): Path<String>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let result = sqlx::query(
         r#"
         DELETE FROM pages
@@ -243,7 +278,7 @@ pub async fn delete_page(
 
     if result.rows_affected() == 0 {
         crate::observability::metrics().record_page_mutation("delete_page", "not_found");
-        return Err((StatusCode::FORBIDDEN, "page not found").into_response());
+        return Err(ApiError::PAGE_NOT_FOUND);
     }
 
     state
@@ -253,11 +288,87 @@ pub async fn delete_page(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn server_error(error: sqlx::Error) -> Response {
+fn server_error(error: sqlx::Error) -> ApiError {
     tracing::error!(error = %error, "page database operation failed");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "database operation failed",
-    )
-        .into_response()
+    ApiError::DB_OPERATION_FAILED
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn rendered(error: ApiError) -> (StatusCode, String, String) {
+        let response = error.into_response();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should be readable");
+        (
+            status,
+            content_type,
+            String::from_utf8(body.to_vec()).expect("error body should be UTF-8"),
+        )
+    }
+
+    // The Err variant moved from a built `Response` to `ApiError`, so every
+    // status/body pair the handlers can return is pinned here — the shrink must
+    // not have changed a single byte a client sees.
+    #[tokio::test]
+    async fn api_errors_render_the_same_responses_as_before() {
+        for (error, expected_status, expected_body) in [
+            (
+                ApiError::DB_UNAVAILABLE,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "database not configured",
+            ),
+            (
+                ApiError::PAGE_NOT_FOUND,
+                StatusCode::FORBIDDEN,
+                "page not found",
+            ),
+            (
+                ApiError::THUMBNAIL_GONE,
+                StatusCode::GONE,
+                "thumbnail revision no longer available",
+            ),
+            (
+                ApiError::DB_OPERATION_FAILED,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database operation failed",
+            ),
+        ] {
+            let (status, content_type, body) = rendered(error).await;
+            assert_eq!(status, expected_status);
+            assert_eq!(content_type, "text/plain; charset=utf-8");
+            assert_eq!(body, expected_body);
+        }
+    }
+
+    // A sqlx failure must stay a 500 with the generic body — the log line carries
+    // the detail, the client never does.
+    #[tokio::test]
+    async fn server_error_maps_sqlx_failures_to_a_generic_500() {
+        let (status, _, body) = rendered(server_error(sqlx::Error::RowNotFound)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, "database operation failed");
+    }
+
+    // The whole point of the change: the success path no longer pays for the
+    // error path. 128 bytes is clippy's `result_large_err` threshold, which a
+    // bare `Response` hits exactly.
+    #[test]
+    fn the_error_variant_stays_small() {
+        assert!(
+            size_of::<ApiError>() < 128,
+            "ApiError is {} bytes; result_large_err fires at 128",
+            size_of::<ApiError>()
+        );
+    }
 }
