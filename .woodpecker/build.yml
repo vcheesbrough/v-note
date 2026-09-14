@@ -44,8 +44,13 @@ steps:
       - export GIT_CONFIG_COUNT=1
       - export GIT_CONFIG_KEY_0="url.https://x-access-token:$${GITHUB_TOKEN}@github.com/.insteadOf"
       - export GIT_CONFIG_VALUE_0="https://github.com/"
-      - cargo fmt --all --check
+      # Clippy first, deliberately. Both gates are hard failures and the step
+      # stops at the first, so whichever runs second is the one a contributor
+      # only learns about on the next push. Clippy is the gate that catches
+      # bugs; rustfmt is the one a keystroke fixes — better to mask the cheap
+      # signal than the expensive one.
       - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo fmt --all --check
 
   contract-validation:
     when:
