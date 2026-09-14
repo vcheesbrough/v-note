@@ -1,30 +1,26 @@
+mod common;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use protocol::HealthResponse;
-use server::auth::{AuthConfig, JwksCache};
+use server::auth::JwksCache;
 use server::build_router;
 use server::observability::{CORRELATION_ID_HEADER, REQUEST_ID_HEADER, metrics, metrics_handler};
 use tower::util::ServiceExt;
 
+use common::test_auth_config;
+
 fn test_router() -> axum::Router {
-    let auth = Arc::new(AuthConfig {
-        issuer_url: "http://mock-oidc:8080/default".to_string(),
-        client_id: "v-note-test".to_string(),
-        client_secret: "test-secret".to_string(),
-        redirect_uri: "https://app:443/auth/callback".to_string(),
-        required_scope: "v-note:test:access".to_string(),
-        end_session_url: None,
-        authorize_endpoint: "http://mock-oidc:8080/default/authorize".to_string(),
-        token_endpoint: "http://mock-oidc:8080/default/token".to_string(),
-        jwks_uri: "http://mock-oidc:8080/default/jwks".to_string(),
-        android_issuer_url: None,
-        android_client_id: None,
-    });
+    // An empty JWKS cache, not the fixture one: nothing here presents a token.
     let jwks = Arc::new(JwksCache::with_keys(HashMap::new()));
-    build_router("test-version".to_string(), auth, jwks)
+    build_router(
+        "test-version".to_string(),
+        Arc::new(test_auth_config()),
+        jwks,
+    )
 }
 
 #[tokio::test]
