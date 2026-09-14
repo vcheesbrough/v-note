@@ -1,0 +1,69 @@
+# syntax=docker/dockerfile:1.7
+
+# CI-only: the workspace's Rust gates (Woodpecker `lint` and `rust-test`). No image
+# is exported — each target either passes or fails the build:
+#
+#   docker build -f Dockerfile.rust-ci --target lint --output type=cacheonly \
+#     --secret id=github_token,env=GITHUB_TOKEN .
+#   docker build -f Dockerfile.rust-ci --target test --output type=cacheonly \
+#     --secret id=github_token,env=GITHUB_TOKEN .
+#
+# Why BuildKit rather than a plain `rust:` step image: a Woodpecker step starts with
+# an empty CARGO_HOME and target dir, so every pipeline re-downloaded every crate
+# twice (once per step) and compiled the workspace from scratch. Here both targets
+# share the crate cache `Dockerfile.web` also uses, and each keeps its own compiled
+# target dir across pipelines. The target dirs are deliberately separate — from each
+# other and from the release one — because lint, test and build-web run
+# concurrently, and a shared target dir would serialise them on cargo's
+# build-directory lock.
+#
+# The crate cache is the whole CARGO_HOME (`v-note-cargo-home`), not just its
+# registry/ and git/ subdirs. Cargo's download lock lives at the CARGO_HOME root; with
+# only the subdirs shared, each build held a private lock over shared files, and two
+# builds checking out the same git dep collided ("… exists and is not an empty
+# directory"). With the root shared, concurrent builds wait on one real lock.
+
+# Rust toolchain pin. Three places hold this version and must move together: here,
+# the builder `FROM` in `Dockerfile.web`, and `rust-toolchain.toml` (host dev).
+# rust-toolchain.toml is dockerignored so rustup does not re-resolve inside the
+# build — this image already *is* the pinned toolchain.
+FROM rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS toolchain
+WORKDIR /app
+# sovereign-config-provider is a git+tag dep on a PRIVATE repo; cargo must resolve
+# it even for workspace members that do not depend on it. The git CLI honours the
+# GIT_CONFIG_* rewrite sourced from the build secret (never written to a layer).
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+FROM toolchain AS lint
+# The `rust:` images ship a minimal profile, so clippy and rustfmt genuinely are
+# absent. Added before `COPY . .` so this layer survives source changes.
+RUN rustup component add clippy rustfmt
+COPY . .
+# Clippy first, deliberately. Both gates are hard failures and the build stops at
+# the first, so whichever runs second is the one a contributor only learns about on
+# the next push. Clippy is the gate that catches bugs; rustfmt is the one a
+# keystroke fixes — better to mask the cheap signal than the expensive one.
+# CARGO_HOME is exported per RUN, not set with ENV, so the image's own
+# /usr/local/cargo (the rustup proxies on PATH) is left alone.
+RUN --mount=type=cache,id=v-note-cargo-home,target=/cargo-home \
+    --mount=type=cache,id=v-note-cargo-target-lint,target=/app/target \
+    --mount=type=secret,id=github_token \
+    set -eu; \
+    export CARGO_HOME=/cargo-home; \
+    . /app/scripts/docker-git-credential.sh; \
+    cargo clippy --workspace --all-targets -- -D warnings; \
+    cargo fmt --all --check
+
+FROM toolchain AS test
+COPY . .
+# One invocation for all three members, not one per package: separate `-p` runs
+# each resolve features on their own, so every crate they share was compiled once
+# per run. Selecting all three unifies features exactly as the clippy run above
+# does, and the shared dependencies build once.
+RUN --mount=type=cache,id=v-note-cargo-home,target=/cargo-home \
+    --mount=type=cache,id=v-note-cargo-target-test,target=/app/target \
+    --mount=type=secret,id=github_token \
+    set -eu; \
+    export CARGO_HOME=/cargo-home; \
+    . /app/scripts/docker-git-credential.sh; \
+    cargo test -p protocol -p frontend -p server

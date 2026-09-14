@@ -1,0 +1,247 @@
+# Deploy workflow.
+#   Push:       after checks, web and android all pass → verify-release-images →
+#               apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
+#   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint →
+#               deploy-dev | deploy-prod → tag-release-*
+# See checks.yml for why the push pipeline is split into workflows.
+
+when:
+  - event: [push, deployment]
+
+# `optional` because a deployment event builds nothing: checks, web and android
+# only run on push/manual, and a non-optional dependency on a workflow that is not
+# part of the pipeline would stop manual deploys. On push all three are present,
+# so they are enforced — this workflow runs only if every one of them succeeded.
+depends_on:
+  - name: checks
+    optional: true
+  - name: web
+    optional: true
+  - name: android
+    optional: true
+
+steps:
+  compute-version:
+    depends_on: []
+    pull: true
+    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
+    settings:
+      mode: compute
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
+  validate-deployment:
+    when:
+      - event: deployment
+    depends_on: []
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    commands:
+      - |
+        if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
+          echo "ERROR: deploy target must be 'dev' or 'prod' (got: '$$CI_PIPELINE_DEPLOY_TARGET')"
+          exit 1
+        fi
+      - |
+        if [ "$$CI_PIPELINE_DEPLOY_TARGET" = "prod" ] && [ "$$CI_COMMIT_BRANCH" != "master" ]; then
+          echo "ERROR: prod can only be deployed from master (current branch: '$$CI_COMMIT_BRANCH')"
+          exit 1
+        fi
+
+  # This workflow computed its release tag itself — workflows share nothing. It
+  # matches the tag web and android built with unless another pipeline pushed a tag
+  # on this line in between, and then it would name *another commit's* images.
+  # Refuse to roll out anything whose revision label is not this commit.
+  verify-release-images:
+    when:
+      - event: push
+    depends_on:
+      - compute-version
+    image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+    volumes: &docker-socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+    commands:
+      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        for REPO in registry.desync.link/v-note registry.desync.link/v-note-android; do
+          docker pull --quiet "$$REPO:$$RELEASE_TAG"
+          ./scripts/check-image-metadata.sh "$$REPO:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        done
+
+  apply-authentik-blueprint:
+    when:
+      - event: deployment
+    depends_on:
+      - validate-deployment
+    pull: true
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
+    settings:
+      api_url: https://auth.desync.link
+      api_token:
+        from_secret: authentik_api_token
+      file: authentik/blueprint.yaml
+      instance_name: v-note
+      timeout_seconds: 900
+      vars:
+        AUTHENTIK_V_NOTE_DEV_CLIENT_SECRET:
+          from_secret: v_note_dev_oidc_client_secret
+        AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
+          from_secret: v_note_prod_oidc_client_secret
+
+  # The push gates (checks, web, android) are enforced by the workflow-level
+  # depends_on above, not by step dependencies.
+  apply-authentik-blueprint-auto-dev:
+    when:
+      - event: push
+    depends_on:
+      - verify-release-images
+    pull: true
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
+    settings:
+      api_url: https://auth.desync.link
+      api_token:
+        from_secret: authentik_api_token
+      file: authentik/blueprint.yaml
+      instance_name: v-note
+      timeout_seconds: 900
+      vars:
+        AUTHENTIK_V_NOTE_DEV_CLIENT_SECRET:
+          from_secret: v_note_dev_oidc_client_secret
+        AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
+          from_secret: v_note_prod_oidc_client_secret
+
+  deploy-dev:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - validate-deployment
+      - compute-version
+      - apply-authentik-blueprint
+    image: *docker-image
+    volumes: *docker-socket
+    # The whole dev environment, defined once and reused by auto-deploy-dev.
+    # deploy-v-note.sh takes no arguments and knows nothing about dev vs prod —
+    # every environment-specific value is right here.
+    environment: &deploy-dev-environment
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      POSTGRES_PASSWORD:
+        from_secret: v_note_dev_postgres_password
+      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
+      # itself selects the environment.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+        from_secret: v_note_dev_sovereign_access_url
+      # Alias of /v-note/dev/server/observability/metrics-addr — the same stored
+      # value the app reads, exposed to the broker so the deploy can derive the
+      # Alloy scrape labels docker writes at container-create time. A plain
+      # value, not a secret; `from_secret` is Woodpecker's only broker channel.
+      V_NOTE_METRICS_ADDR:
+        from_secret: v_note_dev_metrics_addr
+      # Read by `docker compose` itself, so the script needs no -p/-f flags.
+      COMPOSE_PROJECT_NAME: v-note-dev
+      COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.android-apk.yml
+      V_NOTE_IMAGE_REPOS: registry.desync.link/v-note registry.desync.link/v-note-android
+      V_NOTE_HOST: v-notes-dev.desync.link
+      V_NOTE_CONTAINER_NAME: v-note-dev
+      DB_VOLUME: v-note-dev-db
+      # Canonical environment name, matching the sovereign-config
+      # `observability/environment` leaf the server uses for the OTEL
+      # `deployment.environment` trace attribute. Deliberately not the branch
+      # name: that split one deployment across two values, so traces said `dev`
+      # while the metrics/log discovery labels said e.g. `feat/foo` and no single
+      # environment filter matched all three signals. The build is already
+      # identified by `observability.release` and the image's
+      # `org.opencontainers.image.revision`.
+      APP_ENV: dev
+    commands: &deploy-commands
+      - ./scripts/deploy-v-note.sh
+
+  auto-deploy-dev:
+    when:
+      - event: push
+    depends_on:
+      - compute-version
+      - apply-authentik-blueprint-auto-dev
+    image: *docker-image
+    volumes: *docker-socket
+    environment: *deploy-dev-environment
+    commands: *deploy-commands
+
+  tag-release-auto-dev:
+    when:
+      - event: push
+    depends_on:
+      - auto-deploy-dev
+    pull: true
+    image: *version-plugin
+    settings:
+      mode: push-tag
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
+  deploy-prod:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - validate-deployment
+      - compute-version
+      - apply-authentik-blueprint
+    image: *docker-image
+    volumes: *docker-socket
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      POSTGRES_PASSWORD:
+        from_secret: v_note_prod_postgres_password
+      # Unlocks the /v-note/prod/server sovereign-config subtree.
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+        from_secret: v_note_prod_sovereign_access_url
+      # Alias of /v-note/prod/server/observability/metrics-addr — see deploy-dev.
+      V_NOTE_METRICS_ADDR:
+        from_secret: v_note_prod_metrics_addr
+      # No android-apk overlay on prod: the APK delivery image is dev-only.
+      COMPOSE_PROJECT_NAME: v-note
+      COMPOSE_FILE: deploy/docker-compose.yml
+      V_NOTE_IMAGE_REPOS: registry.desync.link/v-note
+      V_NOTE_HOST: v-notes.desync.link
+      V_NOTE_CONTAINER_NAME: v-note
+      DB_VOLUME: v-note-prod-db
+      APP_ENV: production
+    commands: *deploy-commands
+
+  tag-release-dev:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - deploy-dev
+    pull: true
+    image: *version-plugin
+    settings: &push-tag-settings
+      mode: push-tag
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
+  tag-release-prod:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - deploy-prod
+    pull: true
+    image: *version-plugin
+    settings: *push-tag-settings

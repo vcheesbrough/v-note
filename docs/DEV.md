@@ -290,13 +290,37 @@ credentials directly.)
 ```bash
 export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>
 
+just rust-ci lint                                 # CI `lint`: clippy -D warnings, then fmt --check
+just rust-ci test                                 # CI `rust-test`: cargo test -p protocol -p frontend -p server
 docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --build-arg OCI_IMAGE_* for a labelled image (see DEPLOY.md)
-cargo test -p protocol -p server
 ./scripts/test-container-health.sh v-note:local   # HEALTHCHECK config + a real unhealthy transition
 ./scripts/test-deploy-v-note.sh                   # deploy parameter guards + health gate (no docker socket needed)
+./scripts/check-android-build-box-image.sh        # CI `android-build-box-pin`
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright
 ```
+
+**Rust CI runs inside BuildKit.** `lint` and `rust-test` are `docker build`s of
+`Dockerfile.rust-ci` (`--output type=cacheonly`, so no image is left behind). They
+share one crate cache with `Dockerfile.web` — the whole `CARGO_HOME`, cache id
+`v-note-cargo-home` — and each keep a compiled target dir (`v-note-cargo-target-lint`,
+`v-note-cargo-target-test`, next to the release `v-note-cargo-target`), so a warm run
+recompiles only the workspace crates. The shared cache is the `CARGO_HOME` *root* on
+purpose: cargo's download lock lives there, so the three concurrent builds take turns
+on it instead of colliding on the same git checkout. They are BuildKit cache mounts,
+not volumes:
+
+```bash
+docker buildx du --filter type=exec.cachemount     # size of every cache mount
+docker buildx prune --filter type=exec.cachemount  # drop them; the next build is cold
+```
+
+Because they are cache, BuildKit's garbage collector may evict them under disk
+pressure — a run after an eviction is slower, never wrong.
+
+**Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `deploy`
+(after all three). A commit is green only when every one of them is; the combined
+GitHub status below reflects all of them.
 
 The e2e stack waits on the app's healthcheck (`service_healthy`), so a container
 that never becomes healthy fails the run with `dependency failed to start`

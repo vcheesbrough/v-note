@@ -156,7 +156,7 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
 | **`e2e/docker-compose.test.yml`** | Mock OIDC + Postgres + server + SPA (+ worker/PaddleOCR when needed); `TEST_IMAGE` from fresh CI build |
 | **`e2e/` Playwright** | SPA flows, REST probes, multi-context realtime (two browsers on same page), failure injection (stop service, 5xx) |
 | **`e2e/global-setup.ts`** | Wait for `/health`, seed auth cookie/bearer (bored pattern) |
-| **`.woodpecker/build.yml` `e2e` step** | `docker compose … up --exit-code-from playwright` (+ Android job when instrumented tests exist) |
+| **`.woodpecker/web.yml` `e2e-web` step** | `docker compose … up --exit-code-from playwright` (+ Android job when instrumented tests exist) |
 | **`android/…/androidTest`** | **Compose UI / instrumented e2e** for native flows Playwright cannot drive (ink capture, lease banner, disconnect UX, search jump) — runs in CI on Android 10/API 29 (Note9 generation) and Android 16/API 36 (Tab S8 Ultra generation) |
 
 Reference implementation: **[bored `e2e/`](https://github.com/vcheesbrough/bored/tree/main/e2e)** (mock-oauth2-server, Playwright, `sse.spec.ts` two-context pattern).
@@ -201,7 +201,7 @@ Locked engineering/ops conventions — product behaviour stays in **Decisions ma
 
 **Protocol history:** `4 → 5` in **iteration 20** (card **#202**, page paper) — `PageSummary.paper`, `CreatePageRequest.paper` and `Welcome.paper` (all `#[serde(default)]`, so pre-v5 payloads still parse) plus the new `set-paper` / `paper-changed` page-channel messages. `PROTOCOL_VERSION` is duplicated in **five** places, one of them a bare `&str` with no compile-time link to the canonical constant; both of those are now covered by tests that derive from `protocol::PROTOCOL_VERSION`, so a bump cannot leave a stale label behind.
 
-**Single source of truth:** root **`Cargo.toml`** workspace **`version`** → propagated at **CI build** to server, SPA, and Android **`versionName`**. Same Woodpecker **`build`** step that tags **`registry.desync.link/v-note:{release}`** must produce the **matching Android APK** for that **`release`**.
+**Single source of truth:** root **`Cargo.toml`** workspace **`version`** → propagated at **CI build** to server, SPA, and Android **`versionName`**. The same Woodpecker push pipeline that tags **`registry.desync.link/v-note:{release}`** must produce the **matching Android APK** for that **`release`**.
 
 **Server surface:** **`GET /api/meta`** returns `{ "release": "0.N.P", "protocol": 1 }`.
 
@@ -218,19 +218,22 @@ Locked engineering/ops conventions — product behaviour stays in **Decisions ma
 
 ### CI — push pipeline
 
-The authoritative definition is **[`.woodpecker/build.yml`](../.woodpecker/build.yml)** — this table tracks it.
+The authoritative definition is the four workflow files in **[`.woodpecker/`](../.woodpecker/)** — this table tracks them. **checks**, **web** and **android** run in parallel; **deploy** runs only when all three succeed. The pipeline is split into workflows, not one file of step `depends_on`, because Woodpecker runs step dependencies as whole stages: a step waits for *every* step of the previous dependency level, which held `build-web` behind the Rust tests and `e2e-web` behind the API 36 emulator lane (iteration 31, card **#320**).
 
-| Step | What runs |
-| --- | --- |
-| **compute-version** | Release-versions plugin, `major_minor_source: cargo` → **`.release-tag`** |
-| **lint** | **`cargo fmt --all --check`** and **`cargo clippy --workspace --all-targets -- -D warnings`** |
-| **contract-validation** | **`cargo test`** on `protocol`, `frontend`, `server`; Android build-box image pin check |
-| **deploy-script-validation** | `scripts/test-deploy-v-note.sh` — the deploy script's parameter guards |
-| **build-android** | `Dockerfile.android` — **Gradle** APK; image metadata check; push `registry.desync.link/v-note-android:{release}` |
-| **android-instrumented-api-29 / -36** | `Dockerfile.android-instrumented` — emulator instrumented tests on API 29 and 36 |
-| **build-web** | `Dockerfile.web` — **Trunk** SPA build + server; image metadata and container-health checks; push `registry.desync.link/v-note:{release}` |
-| **e2e-web** | `e2e/docker-compose.test.yml` (+ the android-apk overlay) — Playwright against the pushed image |
-| **apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev** | After every gate above is green: Authentik blueprint, dev deploy, push the release tag |
+| Workflow | Step | What runs |
+| --- | --- | --- |
+| **checks** | **lint** | `Dockerfile.rust-ci --target lint` — **`cargo clippy --workspace --all-targets -- -D warnings`**, then **`cargo fmt --all --check`** |
+| **checks** | **rust-test** | `Dockerfile.rust-ci --target test` — **`cargo test -p protocol -p frontend -p server`**, one invocation |
+| **checks** | **deploy-script-validation** | `scripts/test-deploy-v-note.sh` — the deploy script's parameter guards |
+| **checks** | **android-build-box-pin** | `scripts/check-android-build-box-image.sh` — every file naming the build-box image agrees with the `.ref` |
+| **web**, **android**, **deploy** | **compute-version** | Release-versions plugin, `major_minor_source: cargo` → **`.release-tag`**. Each workflow computes its own (workflows share nothing); a commit's tag is reused, so they agree |
+| **web** | **build-web** | `Dockerfile.web` — **Trunk** SPA build + server; image metadata and container-health checks; push `registry.desync.link/v-note:{release}` |
+| **web** | **e2e-web** | `e2e/docker-compose.test.yml` (+ the android-apk overlay) — Playwright against the pushed image |
+| **android** | **build-android** | `Dockerfile.android --target apk` — **Gradle** APK + unit tests; image metadata check; push `registry.desync.link/v-note-android:{release}` |
+| **android** | **android-instrumented-api-29 / -36** | `Dockerfile.android --target instrumented` — emulator instrumented tests on API 29 and 36. The Gradle `builder` stage is shared with **build-android**, so the app is built once |
+| **deploy** | **verify-release-images → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev** | After every workflow above is green: check both pushed images carry this commit's revision label, Authentik blueprint, dev deploy, push the release tag |
+
+The Rust gates run inside BuildKit so they share **build-web**'s crate cache (the whole `CARGO_HOME`, cache id `v-note-cargo-home`, so cargo's download lock is shared too) and keep their own compiled target dirs (`v-note-cargo-target-lint` / `-test`) across pipelines.
 
 **`{release}`** is the plain semver `MAJOR.MINOR.PATCH` that **compute-version** writes to **`.release-tag`**.
 

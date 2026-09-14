@@ -1,0 +1,102 @@
+# Android workflow: APK delivery image + emulator instrumented tests on API 29 and 36.
+# See checks.yml for why the push pipeline is split into workflows.
+#
+# All three build steps build targets of one Dockerfile.android and run
+# concurrently. Its `builder` stage is identical in all three, so BuildKit runs the
+# Gradle build once and the lanes share it instead of queueing on the Gradle cache
+# lock. That only holds while every build arg the builder reads is passed
+# identically below — V_NOTE_RELEASE and the build-box name/digest.
+
+when:
+  - event: [push, manual]
+
+steps:
+  # Workflows share nothing, so each computes its own release tag — see web.yml.
+  compute-version:
+    depends_on: []
+    pull: true
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
+    settings:
+      mode: compute
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
+  build-android:
+    depends_on:
+      - compute-version
+    # mingc/android-build-box as a Woodpecker step image does not attach stdout to logs.
+    # docker run -v $CI_WORKSPACE fails when the agent workspace is a named volume, not a
+    # host path — use docker build (context over API) like build-web.
+    image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+    volumes: &docker-socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+    commands:
+      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        IMAGE=registry.desync.link/v-note-android:$$RELEASE_TAG
+        # The pin lives in scripts/android-build-box-image.ref; split it on `@` so
+        # the FROMs and the OCI base.* labels are fed from that one value.
+        BUILD_BOX_REF=$$(cat scripts/android-build-box-image.ref)
+        START=$$(date +%s)
+        docker build -f Dockerfile.android --target apk \
+          --build-arg BUILD_BOX_IMAGE_NAME="$${BUILD_BOX_REF%@*}" \
+          --build-arg BUILD_BOX_IMAGE_DIGEST="$${BUILD_BOX_REF#*@}" \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_VERSION="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_REVISION="$$CI_COMMIT_SHA" \
+          --build-arg OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)" \
+          -t "$$IMAGE" .
+        echo "timing: docker build Dockerfile.android (apk) took $$(( $$(date +%s) - $$START ))s"
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        START=$$(date +%s)
+        docker push "$$IMAGE"
+        echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
+
+  android-instrumented-api-29:
+    depends_on:
+      - compute-version
+    image: *docker-image
+    volumes: *docker-socket
+    environment:
+      ANDROID_API_LEVEL: "29"
+    commands: &android-instrumented-commands
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        IMAGE=v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
+        BUILD_BOX_REF=$$(cat scripts/android-build-box-image.ref)
+        START=$$(date +%s)
+        docker build -f Dockerfile.android --target instrumented \
+          --build-arg BUILD_BOX_IMAGE_NAME="$${BUILD_BOX_REF%@*}" \
+          --build-arg BUILD_BOX_IMAGE_DIGEST="$${BUILD_BOX_REF#*@}" \
+          --build-arg ANDROID_API_LEVEL="$$ANDROID_API_LEVEL" \
+          --build-arg V_NOTE_RELEASE="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_VERSION="$$RELEASE_TAG" \
+          --build-arg OCI_IMAGE_REVISION="$$CI_COMMIT_SHA" \
+          --build-arg OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)" \
+          -t "$$IMAGE" .
+        echo "timing: docker build Dockerfile.android (instrumented api$$ANDROID_API_LEVEL) took $$(( $$(date +%s) - $$START ))s"
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+      - |
+        START=$$(date +%s)
+        if [ -c /dev/kvm ]; then
+          docker run --rm --privileged --device=/dev/kvm v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
+        else
+          docker run --rm --privileged v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
+        fi
+        echo "timing: Android API $$ANDROID_API_LEVEL instrumented docker run took $$(( $$(date +%s) - $$START ))s"
+
+  android-instrumented-api-36:
+    depends_on:
+      - compute-version
+    image: *docker-image
+    volumes: *docker-socket
+    environment:
+      ANDROID_API_LEVEL: "36"
+    commands: *android-instrumented-commands

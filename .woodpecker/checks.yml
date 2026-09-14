@@ -1,0 +1,68 @@
+# Checks workflow: the static gates. No step depends on another, so all of them
+# start together and none holds up the build workflows.
+#
+# Push pipeline = four workflows: checks ∥ web ∥ android → deploy.
+# Why workflows and not one file of `depends_on` steps: Woodpecker runs step
+# dependencies as whole stages — a step starts only when *every* step of the
+# previous dependency level has finished, not just the ones it names. In the old
+# single build.yml that made build-web wait ~100s on the Rust tests and e2e-web
+# ~138s on the API 36 emulator lane. Workflows run in parallel and share nothing;
+# deploy.yml depends on all three.
+
+when:
+  - event: [push, manual]
+
+steps:
+  # Rust gates run inside BuildKit (Dockerfile.rust-ci) so they share build-web's
+  # warm crate cache and keep their own compiled target dirs across pipelines —
+  # a plain `rust:` step image started from nothing every time. Separate steps so
+  # a lint failure reads as a lint failure.
+  lint:
+    depends_on: []
+    image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+    volumes: &docker-socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment: &github-token
+      # sovereign-config-provider is a git+tag dep on a private repo; the cargo
+      # layers fetch it through this BuildKit secret.
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - |
+        START=$$(date +%s)
+        docker build -f Dockerfile.rust-ci --target lint --output type=cacheonly \
+          --secret id=github_token,env=GITHUB_TOKEN .
+        echo "timing: rust-ci lint took $$(( $$(date +%s) - $$START ))s"
+
+  rust-test:
+    depends_on: []
+    image: *docker-image
+    volumes: *docker-socket
+    environment: *github-token
+    commands:
+      - |
+        START=$$(date +%s)
+        docker build -f Dockerfile.rust-ci --target test --output type=cacheonly \
+          --secret id=github_token,env=GITHUB_TOKEN .
+        echo "timing: rust-ci test took $$(( $$(date +%s) - $$START ))s"
+
+  # deploy-v-note.sh takes no arguments: every environment-specific value is a
+  # parameter set by the deploy steps in deploy.yml, so a missing one is not a
+  # crash but a silently wrong deploy (prod labelled env=dev, a parallel compose
+  # project, an app with no runtime config). The deploy steps only ever exercise
+  # the happy path, so the guards get their own test. Runs on the docker CLI image
+  # for the compose plugin — `compose config` resolves the model client-side, so
+  # this needs no docker socket.
+  deploy-script-validation:
+    depends_on: []
+    image: *docker-image
+    commands:
+      - ./scripts/test-deploy-v-note.sh
+
+  # Every file that names the android-build-box image must agree with
+  # scripts/android-build-box-image.ref.
+  android-build-box-pin:
+    depends_on: []
+    image: *docker-image
+    commands:
+      - ./scripts/check-android-build-box-image.sh

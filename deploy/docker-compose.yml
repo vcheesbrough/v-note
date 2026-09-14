@@ -21,7 +21,7 @@ services:
 
   v-note:
     # No `build:` here on purpose: this file defines production and the web image
-    # has a canonical CI build (.woodpecker/build.yml `build-web`). Compose may
+    # has a canonical CI build (.woodpecker/web.yml `build-web`). Compose may
     # build images that exist only for one stack (the e2e Playwright and
     # legacy-migration fixtures) — never the deployed application image. Local
     # dev builds the same image with the same Dockerfile via `just run-compose`.

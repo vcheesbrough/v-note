@@ -19,7 +19,7 @@
 
 ## Woodpecker deploy pipeline
 
-Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** remains available (bored-aligned steps in `.woodpecker/build.yml`):
+Normal push builds automatically deploy **dev** once every push workflow passes. Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
 
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
@@ -27,13 +27,15 @@ Normal push builds automatically deploy **dev** after `e2e-web` passes. Manual d
 4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 
-Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path: `contract-validation`, `build-android`, both Android instrumented lanes (`android-instrumented-api-29` and `android-instrumented-api-36`), `build-web`, and `e2e-web` must pass before `apply-authentik-blueprint-auto-dev`, `auto-deploy-dev`, and `tag-release-auto-dev` run. Prod remains manual-only and is never deployed from a push event.
+Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced. Prod remains manual-only and is never deployed from a push event.
+
+Because workflows share nothing, `deploy.yml` computes the release tag again. The first push step, **verify-release-images**, pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — so a tag pushed by another pipeline in between can never roll out someone else's images.
 
 ### The deploy script takes no arguments
 
 `scripts/deploy-v-note.sh` has **one entry point and no modes**. It does not know
 that dev and prod exist: every environment-specific value is a parameter set by
-the calling step in [`.woodpecker/build.yml`](../.woodpecker/build.yml), where
+the calling step in [`.woodpecker/deploy.yml`](../.woodpecker/deploy.yml), where
 the dev block is defined once and reused by `auto-deploy-dev` via a YAML anchor.
 Adding an environment means adding a step, not editing the script.
 
@@ -124,7 +126,7 @@ Woodpecker broker; local compose secrets still come from OpenBao.
 Mini points `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at the
 `sovereign-config-woodpecker-broker`, whose layers are
 `/woodpecker/shared,/woodpecker/repos/{repo.owner}/{repo.name}` — so a
-`from_secret: <name>` in [`.woodpecker/build.yml`](../.woodpecker/build.yml)
+`from_secret: <name>` in any [`.woodpecker/`](../.woodpecker/) workflow
 resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
 
 | Woodpecker secret key | Used for |
@@ -316,8 +318,8 @@ All four repo-built images set [OCI Image Spec](https://github.com/opencontainer
 | Image | Dockerfile / compose | CI tag (examples) |
 | --- | --- | --- |
 | **`v-note`** | `Dockerfile.web` | `registry.desync.link/v-note:{release}` |
-| **`v-note-android`** | `Dockerfile.android` | `registry.desync.link/v-note-android:{release}` |
-| **`v-note-android-instrumented`** | `Dockerfile.android-instrumented` | `v-note-android-instrumented:{sha}-api{29\|36}` |
+| **`v-note-android`** | `Dockerfile.android` (`--target apk`) | `registry.desync.link/v-note-android:{release}` |
+| **`v-note-android-instrumented`** | `Dockerfile.android` (`--target instrumented`) | `v-note-android-instrumented:{sha}-api{29\|36}` |
 | **`v-note-e2e-playwright`** | `e2e/docker-compose.test.yml` | `v-note-e2e-playwright:{release}` |
 
 **Each Dockerfile owns its own labels.** Static values are `LABEL` instructions in
@@ -328,7 +330,7 @@ set:
 | Label | Source |
 | --- | --- |
 | Static (title, description, licenses, url, source, authors, vendor, documentation) | `LABEL` in the Dockerfile |
-| `org.opencontainers.image.base.name` / `.base.digest` | `LABEL` in the Dockerfile, fed from the same `BASE_IMAGE_NAME` / `BASE_IMAGE_DIGEST` args as its `FROM`, so the labels cannot describe a different base than the one built on. For the android-build-box images those two args are also held against `scripts/android-build-box-image.ref` by `scripts/check-android-build-box-image.sh` — a file that spells the pin out must spell out the *current* one, whether as a whole `name@sha256:…` or as the two halves |
+| `org.opencontainers.image.base.name` / `.base.digest` | `LABEL` in the Dockerfile, fed from the same `BASE_IMAGE_NAME` / `BASE_IMAGE_DIGEST` args as its `FROM` (`BUILD_BOX_IMAGE_NAME` / `BUILD_BOX_IMAGE_DIGEST` for the instrumented image), so the labels cannot describe a different base than the one built on. For the android-build-box image the build-box args are also held against `scripts/android-build-box-image.ref` by `scripts/check-android-build-box-image.sh` — a file that spells the pin out must spell out the *current* one, whether as a whole `name@sha256:…` or as the two halves |
 | `org.opencontainers.image.version` | `--build-arg OCI_IMAGE_VERSION` (`.release-tag` in CI, `git describe` locally) |
 | `org.opencontainers.image.revision` | `--build-arg OCI_IMAGE_REVISION` (`CI_COMMIT_SHA` / `git rev-parse HEAD`) |
 | `org.opencontainers.image.created` | `--build-arg OCI_IMAGE_CREATED` — **`git log -1 --format=%cI`, not the wall clock**, so rebuilding a commit reproduces the same label (and the same image config blob) |
@@ -356,8 +358,8 @@ deploy host source instead of the tested image.
 | Image | Ignore file |
 | --- | --- |
 | Web | `Dockerfile.web.dockerignore` |
-| Android | `Dockerfile.android.dockerignore` |
-| Android instrumented | `Dockerfile.android-instrumented.dockerignore` |
+| Android (apk + instrumented) | `Dockerfile.android.dockerignore` |
+| Rust CI gates (no image) | `Dockerfile.rust-ci.dockerignore` — keeps `contracts/` and `crates/server/tests/`, which the web image excludes |
 | Playwright e2e | `e2e/.dockerignore` (compose `context: e2e/`) |
 
 Local check after build — the same three build args CI passes. Example (web):

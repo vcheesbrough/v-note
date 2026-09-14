@@ -36,7 +36,7 @@ just android-run   # terminal 2: adb reverse + install + launch dev APK
 # Contract fixtures
 just contract-validation
 
-# E2e (build web image first; see .woodpecker/build.yml build-web for OCI --label flags)
+# E2e (build web image first; see .woodpecker/web.yml build-web for the build args)
 just e2e
 ```
 
@@ -51,7 +51,7 @@ just e2e
 | `schemas/`, `contracts/fixtures/` | JSON Schema + golden fixtures |
 | `deploy/` | Compose (local + prod Traefik overlay) |
 | `e2e/` | Playwright harness |
-| `.woodpecker/build.yml` | Push CI + deploy skeleton |
+| `.woodpecker/` | Push CI workflows (`checks` ∥ `web` ∥ `android` → `deploy`) + PR review |
 
 ## Documentation
 
