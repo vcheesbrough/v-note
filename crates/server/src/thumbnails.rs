@@ -11,7 +11,7 @@ use tiny_skia::{
 use tracing::Instrument as _;
 
 use crate::AppState;
-use crate::observability::db_query_span;
+use crate::observability::{db_query_span, metered};
 
 const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
@@ -38,7 +38,7 @@ pub fn recover_pending(state: AppState) {
                JOIN pages p ON p.id = t.page_id
                WHERE t.status = 'generating'"#,
             )
-            .fetch_all(&pool)
+            .fetch_all(metered(&pool))
             .instrument(db_query_span("SELECT", "recover_pending_thumbnails"))
             .await;
             let pending = match pending {
@@ -105,7 +105,7 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
                 )
                 .bind(&page_id)
                 .bind(source_seq as i64)
-                .execute(pool)
+                .execute(metered(pool))
                 .instrument(db_query_span("UPDATE", "thumbnail_mark_failed"))
                 .await;
                 ThumbnailMetadata::Failed { source_seq }
@@ -135,7 +135,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     )
     .bind(page_id)
     .bind(source_seq as i64)
-    .fetch_optional(pool)
+    .fetch_optional(metered(pool))
     .instrument(db_query_span("SELECT", "thumbnail_job_paper"))
     .await
     .map_err(|error| error.to_string())?
@@ -148,7 +148,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     )
     .bind(page_id)
     .bind(source_seq as i64)
-    .fetch_all(pool)
+    .fetch_all(metered(pool))
     .instrument(db_query_span("SELECT", "thumbnail_strokes"))
     .await
     .map_err(|error| error.to_string())?;
@@ -157,7 +157,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     )
     .bind(page_id)
     .bind(source_seq as i64)
-    .fetch_all(pool)
+    .fetch_all(metered(pool))
     .instrument(db_query_span("SELECT", "thumbnail_tombstones"))
     .await
     .map_err(|error| error.to_string())?
@@ -177,7 +177,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(page_id)
     .bind(source_seq as i64)
     .bind(png)
-    .execute(pool)
+    .execute(metered(pool))
     .instrument(db_query_span("UPDATE", "thumbnail_store_png"))
     .await
     .map_err(|error| error.to_string())?;
@@ -523,7 +523,7 @@ async fn cleanup(pool: &PgPool, page_id: &str) -> Result<(), sqlx::Error> {
            )"#,
     )
     .bind(page_id)
-    .execute(pool)
+    .execute(metered(pool))
     .instrument(db_query_span("DELETE", "thumbnail_cleanup"))
     .await?;
     Ok(())

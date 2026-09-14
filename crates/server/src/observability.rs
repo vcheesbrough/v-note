@@ -446,14 +446,173 @@ fn request_span(
 /// A span for one Postgres round trip: a query, or a transaction's `BEGIN` or
 /// `COMMIT`. `query_name` names the call site (e.g. `persist_batch_insert`), so a
 /// slow query is identifiable in Tempo without recording SQL text or bound
-/// values, which can carry user content.
+/// values, which can carry user content. The `db.response.*` fields are filled
+/// in by [`metered`] when the query finishes.
 pub fn db_query_span(operation: &'static str, query_name: &'static str) -> tracing::Span {
     tracing::info_span!(
         "db.query",
         db.system = "postgresql",
         db.operation = operation,
         db.query_name = query_name,
+        db.response.returned_rows = tracing::field::Empty,
+        db.response.bytes = tracing::field::Empty,
+        db.response.max_row_bytes = tracing::field::Empty,
+        db.response.affected_rows = tracing::field::Empty,
     )
+}
+
+/// Wraps a query's executor — `metered(pool)`, `metered(&mut *tx)` — so the
+/// enclosing `db.query` span records the size of what came back:
+///
+/// - `db.response.returned_rows`: rows returned;
+/// - `db.response.bytes` / `db.response.max_row_bytes`: Postgres wire bytes of
+///   the returned column values, in total and for the widest row — the width of
+///   the result (a `NULL` carries none);
+/// - `db.response.affected_rows`: the command tag's row count, so an `INSERT`,
+///   `UPDATE` or `DELETE` reports the rows it wrote. Absent for `fetch_optional`,
+///   which does not surface it.
+///
+/// Only `fetch_many` and `fetch_optional` need wrapping: every other method sqlx
+/// calls (`fetch_one`, `fetch_all`, `execute`, …) defaults to one of them. Totals
+/// go on the span that is current when the query finishes, which is the
+/// `db.query` span the call site instruments the query with.
+#[derive(Debug)]
+pub struct Metered<E>(E);
+
+pub fn metered<E>(executor: E) -> Metered<E> {
+    Metered(executor)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ResultSize {
+    rows: u64,
+    bytes: u64,
+    max_row_bytes: u64,
+    affected_rows: Option<u64>,
+}
+
+impl ResultSize {
+    fn add_row(&mut self, row_bytes: u64) {
+        self.rows += 1;
+        self.bytes += row_bytes;
+        self.max_row_bytes = self.max_row_bytes.max(row_bytes);
+    }
+
+    fn add_affected(&mut self, rows: u64) {
+        *self.affected_rows.get_or_insert(0) += rows;
+    }
+
+    fn record_on_current_span(&self) {
+        let span = tracing::Span::current();
+        span.record("db.response.returned_rows", self.rows);
+        span.record("db.response.bytes", self.bytes);
+        span.record("db.response.max_row_bytes", self.max_row_bytes);
+        if let Some(affected) = self.affected_rows {
+            span.record("db.response.affected_rows", affected);
+        }
+    }
+}
+
+/// Wire bytes of one row's column values; a `NULL` carries none.
+fn row_bytes(row: &sqlx::postgres::PgRow) -> u64 {
+    use sqlx::Row as _;
+    (0..row.len())
+        .filter_map(|index| row.try_get_raw(index).ok())
+        .filter_map(|value| value.as_bytes().ok().map(|bytes| bytes.len() as u64))
+        .sum()
+}
+
+/// Accumulates over a result stream and records when the stream is dropped:
+/// after its last item, or early if the caller stops reading.
+struct StreamSize(ResultSize);
+
+impl Drop for StreamSize {
+    fn drop(&mut self) {
+        self.0.record_on_current_span();
+    }
+}
+
+impl<'c, E> sqlx::Executor<'c> for Metered<E>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
+    type Database = sqlx::Postgres;
+
+    fn fetch_many<'e, 'q: 'e, Q>(
+        self,
+        query: Q,
+    ) -> futures_util::stream::BoxStream<
+        'e,
+        Result<
+            sqlx::Either<
+                <Self::Database as sqlx::Database>::QueryResult,
+                <Self::Database as sqlx::Database>::Row,
+            >,
+            sqlx::Error,
+        >,
+    >
+    where
+        'c: 'e,
+        Q: 'q + sqlx::Execute<'q, Self::Database>,
+    {
+        use futures_util::StreamExt as _;
+        let mut size = StreamSize(ResultSize::default());
+        self.0
+            .fetch_many(query)
+            .inspect(move |step| match step {
+                Ok(sqlx::Either::Left(result)) => size.0.add_affected(result.rows_affected()),
+                Ok(sqlx::Either::Right(row)) => size.0.add_row(row_bytes(row)),
+                Err(_) => {}
+            })
+            .boxed()
+    }
+
+    fn fetch_optional<'e, 'q: 'e, Q>(
+        self,
+        query: Q,
+    ) -> futures_util::future::BoxFuture<
+        'e,
+        Result<Option<<Self::Database as sqlx::Database>::Row>, sqlx::Error>,
+    >
+    where
+        'c: 'e,
+        Q: 'q + sqlx::Execute<'q, Self::Database>,
+    {
+        let fetch = self.0.fetch_optional(query);
+        Box::pin(async move {
+            let row = fetch.await?;
+            let mut size = ResultSize::default();
+            if let Some(row) = &row {
+                size.add_row(row_bytes(row));
+            }
+            size.record_on_current_span();
+            Ok(row)
+        })
+    }
+
+    fn prepare_with<'e>(
+        self,
+        sql: sqlx::SqlStr,
+        parameters: &'e [<Self::Database as sqlx::Database>::TypeInfo],
+    ) -> futures_util::future::BoxFuture<
+        'e,
+        Result<<Self::Database as sqlx::Database>::Statement, sqlx::Error>,
+    >
+    where
+        'c: 'e,
+    {
+        self.0.prepare_with(sql, parameters)
+    }
+
+    fn describe<'e>(
+        self,
+        sql: sqlx::SqlStr,
+    ) -> futures_util::future::BoxFuture<'e, Result<sqlx::Describe<Self::Database>, sqlx::Error>>
+    where
+        'c: 'e,
+    {
+        self.0.describe(sql)
+    }
 }
 
 struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
@@ -717,6 +876,29 @@ mod tests {
         });
     }
 
+    #[test]
+    fn result_size_counts_rows_total_and_widest_row() {
+        let mut size = super::ResultSize::default();
+        for row_bytes in [120, 4_096, 0, 512] {
+            size.add_row(row_bytes);
+        }
+        assert_eq!(
+            size,
+            super::ResultSize {
+                rows: 4,
+                bytes: 4_728,
+                max_row_bytes: 4_096,
+                affected_rows: None,
+            }
+        );
+
+        let mut write = super::ResultSize::default();
+        write.add_affected(3);
+        write.add_affected(0);
+        assert_eq!(write.rows, 0);
+        assert_eq!(write.affected_rows, Some(3));
+    }
+
     /// Every Postgres call site gets a `db.query` span, or its time is invisible
     /// in Tempo — which is how `get_thumbnail` and the whole realtime/thumbnail
     /// write path went untraced. Counts call sites in the non-test source.
@@ -735,6 +917,11 @@ mod tests {
             assert_eq!(
                 queries, query_spans,
                 "{file}: {queries} queries, {query_spans} db spans"
+            );
+            let metered = code.matches("(metered(").count();
+            assert_eq!(
+                queries, metered,
+                "{file}: {queries} queries, {metered} metered executors"
             );
             let transactions = code.matches(".begin()").count() + code.matches(".commit()").count();
             assert_eq!(

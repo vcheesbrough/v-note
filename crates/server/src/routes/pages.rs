@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::Claims;
-use crate::observability::db_query_span;
+use crate::observability::{db_query_span, metered};
 
 #[derive(sqlx::FromRow)]
 struct PageRow {
@@ -118,7 +118,7 @@ pub async fn list_pages(
         "#,
     )
     .bind(claims.sub.clone())
-    .fetch_all(db(&state)?)
+    .fetch_all(metered(db(&state)?))
     .instrument(db_query_span("SELECT", "list_pages"))
     .await
     .map_err(server_error)?;
@@ -156,7 +156,7 @@ pub async fn create_page(
     .bind(claims.sub.clone())
     .bind(title)
     .bind(payload.paper.wire_value())
-    .fetch_one(db(&state)?)
+    .fetch_one(metered(db(&state)?))
     .instrument(db_query_span("INSERT", "create_page"))
     .await
     .map_err(|error| {
@@ -193,7 +193,7 @@ pub async fn get_page(
     )
     .bind(page_id)
     .bind(claims.sub)
-    .fetch_optional(db(&state)?)
+    .fetch_optional(metered(db(&state)?))
     .instrument(db_query_span("SELECT", "get_page"))
     .await
     .map_err(server_error)?;
@@ -216,7 +216,7 @@ pub async fn get_thumbnail(
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND owner_id = $2)")
             .bind(&page_id)
             .bind(&claims.sub)
-            .fetch_one(db(&state)?)
+            .fetch_one(metered(db(&state)?))
             .instrument(db_query_span("SELECT", "get_thumbnail_owner"))
             .await
             .map_err(server_error)?;
@@ -228,7 +228,7 @@ pub async fn get_thumbnail(
     )
     .bind(&page_id)
     .bind(source_seq as i64)
-    .fetch_optional(db(&state)?)
+    .fetch_optional(metered(db(&state)?))
     .instrument(db_query_span("SELECT", "get_thumbnail_png"))
     .await
     .map_err(server_error)?;
@@ -262,7 +262,7 @@ pub async fn delete_page(
     )
     .bind(page_id.clone())
     .bind(claims.sub.clone())
-    .execute(db(&state)?)
+    .execute(metered(db(&state)?))
     .instrument(db_query_span("DELETE", "delete_page"))
     .await
     .map_err(|error| {
