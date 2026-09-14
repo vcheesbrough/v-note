@@ -1,7 +1,7 @@
 {
   "uid": "v-note-overview",
   "title": "v-note — overview",
-  "description": "v-note realtime WebSocket, HTTP and thumbnail metrics, filtered by env. Source of truth: deploy/grafana/v-note-overview.json in the v-note repo, published by the publish-grafana-dashboard step on every master push. Edits made in the Grafana UI are overwritten by the next publish unless exported back into the repo.",
+  "description": "v-note realtime WebSocket, HTTP and thumbnail metrics, filtered by env. Source of truth: deploy/grafana/v-note-overview.json in the v-note repo, published by the publish-grafana-dashboard step on every push that deploys dev, from any branch (the last push wins; the version message names the branch). Edits made in the Grafana UI are overwritten by the next publish unless exported back into the repo.",
   "tags": [
     "v-note",
     "realtime"

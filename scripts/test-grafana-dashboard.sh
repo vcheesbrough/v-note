@@ -1,8 +1,8 @@
 #!/bin/sh
 # Offline checks for the v-note Grafana dashboard and the script that publishes it.
 #
-# Publishing is master-only (deploy.yml `publish-grafana-dashboard`), so a broken
-# dashboard would otherwise first show up *after* merge, on the shared dashboard.
+# Every push that deploys dev publishes (deploy.yml `publish-grafana-dashboard`),
+# so a broken dashboard would otherwise land straight on the shared dashboard.
 # Everything here runs with no network and no token:
 #
 #   1. deploy/grafana/v-note-overview.json — parses, keeps its stable uid, commits
