@@ -17,7 +17,7 @@ use protocol::{
     LibraryEvent, PageClientMessage, PageServerMessage, Paper, RealtimeTicketResponse, Stroke,
     StrokeBatch, TombstoneBatch,
 };
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
@@ -297,7 +297,7 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 
 fn random_hex(bytes: usize) -> String {
     let mut buffer = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buffer);
+    rand::rng().fill_bytes(&mut buffer);
     buffer.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

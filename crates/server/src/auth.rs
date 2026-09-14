@@ -270,6 +270,9 @@ pub async fn validate_jwt(
         issuers.push(android_iss);
     }
     validation.set_issuer(&issuers);
+    // jsonwebtoken checks `aud`/`iss` only when the claim is present: a token with
+    // no `aud` passes `set_audience` untouched. Requiring them closes that gap.
+    validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
     let data = decode::<Claims>(token, &key, &validation).map_err(|error| {
         tracing::debug!(error = %error, "JWT validation failed");
