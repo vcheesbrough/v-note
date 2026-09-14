@@ -443,6 +443,19 @@ fn request_span(
     span
 }
 
+/// A span for one Postgres round trip: a query, or a transaction's `BEGIN` or
+/// `COMMIT`. `query_name` names the call site (e.g. `persist_batch_insert`), so a
+/// slow query is identifiable in Tempo without recording SQL text or bound
+/// values, which can carry user content.
+pub fn db_query_span(operation: &'static str, query_name: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        "db.query",
+        db.system = "postgresql",
+        db.operation = operation,
+        db.query_name = query_name,
+    )
+}
+
 struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
 
 impl Extractor for HeaderExtractor<'_> {
@@ -690,6 +703,45 @@ mod tests {
             assert_eq!(context.trace_id, TRACEPARENT_TRACE_ID);
             assert_ne!(context.span_id, TRACEPARENT_SPAN_ID);
         });
+    }
+
+    #[test]
+    fn db_query_span_names_the_operation_and_call_site() {
+        with_otel_layer(|| {
+            let span = super::db_query_span("COMMIT", "persist_batch");
+            let metadata = span.metadata().expect("span should be enabled");
+            assert_eq!(metadata.name(), "db.query");
+            for field in ["db.system", "db.operation", "db.query_name"] {
+                assert!(metadata.fields().field(field).is_some(), "missing {field}");
+            }
+        });
+    }
+
+    /// Every Postgres call site gets a `db.query` span, or its time is invisible
+    /// in Tempo — which is how `get_thumbnail` and the whole realtime/thumbnail
+    /// write path went untraced. Counts call sites in the non-test source.
+    #[test]
+    fn every_postgres_call_site_has_a_db_span() {
+        for (file, source) in [
+            ("routes/pages.rs", include_str!("routes/pages.rs")),
+            ("routes/realtime.rs", include_str!("routes/realtime.rs")),
+            ("thumbnails.rs", include_str!("thumbnails.rs")),
+        ] {
+            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+            let tx_spans = code.matches("db_query_span(\"BEGIN\"").count()
+                + code.matches("db_query_span(\"COMMIT\"").count();
+            let query_spans = code.matches(".instrument(db_query_span(").count() - tx_spans;
+            let queries = code.matches("sqlx::query").count();
+            assert_eq!(
+                queries, query_spans,
+                "{file}: {queries} queries, {query_spans} db spans"
+            );
+            let transactions = code.matches(".begin()").count() + code.matches(".commit()").count();
+            assert_eq!(
+                transactions, tx_spans,
+                "{file}: {transactions} BEGIN/COMMIT, {tx_spans} db spans"
+            );
+        }
     }
 
     #[test]
