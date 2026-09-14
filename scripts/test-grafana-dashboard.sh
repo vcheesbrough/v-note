@@ -111,7 +111,9 @@ for metric in \
   v_note_realtime_replay_duration_seconds_bucket v_note_realtime_message_handling_seconds_bucket \
   v_note_realtime_active_connections v_note_realtime_events_total \
   v_note_http_requests_total v_note_http_request_duration_seconds_bucket \
-  v_note_thumbnail_artifact_bytes_bucket; do
+  v_note_thumbnail_artifact_bytes_bucket v_note_thumbnail_generation_duration_seconds_bucket \
+  v_note_thumbnail_generation_duration_seconds_count v_note_thumbnail_queue_depth \
+  v_note_thumbnail_recoveries_total; do
   dash_check "charts $metric" "prom_exprs | any(test(\"$metric\\\\b\"))"
 done
 dash_check "lagged and *_error results are called out" \
