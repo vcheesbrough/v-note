@@ -214,7 +214,7 @@ pub async fn get_page(
     }
 }
 
-#[tracing::instrument(skip_all, fields(page_id = %page_id, source_seq))]
+#[tracing::instrument(skip_all, fields(page_id = %page_id, source_seq = source_seq))]
 pub async fn get_thumbnail(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -225,6 +225,7 @@ pub async fn get_thumbnail(
             .bind(&page_id)
             .bind(&claims.sub)
             .fetch_one(db(&state)?)
+            .instrument(db_query_span("SELECT", "get_thumbnail_owner"))
             .await
             .map_err(server_error)?;
     if !owned {
@@ -236,6 +237,7 @@ pub async fn get_thumbnail(
     .bind(&page_id)
     .bind(source_seq as i64)
     .fetch_optional(db(&state)?)
+    .instrument(db_query_span("SELECT", "get_thumbnail_png"))
     .await
     .map_err(server_error)?;
     match png {
