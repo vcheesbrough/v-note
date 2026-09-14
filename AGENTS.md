@@ -102,7 +102,8 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   Repo prompt: [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md).
   Secrets/setup: [`docs/PR-AGENT.md`](docs/PR-AGENT.md).
 - **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
-  `checks` (lint, rust-test, deploy-script-validation, android-build-box-pin),
+  `checks` (lint, rust-test, deploy-script-validation, grafana-dashboard-validation,
+  android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android, API 29/36
   instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
   auto-deploy-dev → tag) runs only when all three succeed. **`ci-watch` must follow

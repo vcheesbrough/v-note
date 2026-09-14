@@ -33,6 +33,23 @@ pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
 /// below is that link.
 const PROTOCOL_VERSION: &str = "5";
 
+/// Realtime frame and replay sizes: from a ~50 B `synced` up to a multi-MB
+/// replay (the `DensePageSeeder` reference page replays ~2.7 MB today).
+const REALTIME_BYTES_BUCKETS: [f64; 9] = [
+    128.0, 512.0, 2048.0, 8192.0, 32768.0, 131072.0, 524288.0, 2097152.0, 8388608.0,
+];
+/// Frames per replay: one per stored stroke batch and tombstone batch, plus the
+/// closing `synced`. The dense reference page sends ~1200; #323 drives it to 1.
+const REALTIME_REPLAY_FRAMES_BUCKETS: [f64; 12] = [
+    1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+];
+const REALTIME_REPLAY_DURATION_BUCKETS: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+];
+const REALTIME_HANDLING_BUCKETS: [f64; 12] = [
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+];
+
 static METRICS: Lazy<Metrics> = Lazy::new(Metrics::new);
 
 pub fn metrics() -> &'static Metrics {
@@ -51,6 +68,11 @@ pub struct Metrics {
     thumbnail_artifact_bytes: Histogram,
     realtime_events_total: IntCounterVec,
     realtime_active_connections: IntGauge,
+    realtime_message_bytes: HistogramVec,
+    realtime_replay_bytes: Histogram,
+    realtime_replay_frames: Histogram,
+    realtime_replay_duration_seconds: Histogram,
+    realtime_message_handling_seconds: HistogramVec,
     _build_info: IntGauge,
 }
 
@@ -133,6 +155,52 @@ impl Metrics {
             "Currently open realtime WebSocket connections",
         )
         .expect("active realtime gauge should build");
+        // Cardinality budget: `channel` × `message_type`, both bounded enums.
+        // Never add `page_id`, `session_id`, `owner_id` or `client_batch_id` —
+        // those belong in span fields, not labels.
+        let realtime_message_bytes = HistogramVec::new(
+            HistogramOpts::new(
+                "v_note_realtime_message_bytes",
+                "Serialized size of realtime frames sent, by channel and message type",
+            )
+            .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
+            &["channel", "message_type"],
+        )
+        .expect("realtime message size histogram should build");
+        let realtime_replay_bytes = Histogram::with_opts(
+            HistogramOpts::new(
+                "v_note_realtime_replay_bytes",
+                "Total bytes sent for one page-channel subscribe replay",
+            )
+            .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
+        )
+        .expect("realtime replay bytes histogram should build");
+        let realtime_replay_frames = Histogram::with_opts(
+            HistogramOpts::new(
+                "v_note_realtime_replay_frames",
+                "Frames sent for one page-channel subscribe replay, including the closing synced",
+            )
+            .buckets(REALTIME_REPLAY_FRAMES_BUCKETS.to_vec()),
+        )
+        .expect("realtime replay frames histogram should build");
+        let realtime_replay_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "v_note_realtime_replay_duration_seconds",
+                "Wall time from a subscribe being received to its synced being sent",
+            )
+            .buckets(REALTIME_REPLAY_DURATION_BUCKETS.to_vec()),
+        )
+        .expect("realtime replay duration histogram should build");
+        let realtime_message_handling_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "v_note_realtime_message_handling_seconds",
+                "Server-side handling time of inbound page-channel messages, by message type \
+                 (not end-to-end latency)",
+            )
+            .buckets(REALTIME_HANDLING_BUCKETS.to_vec()),
+            &["message_type"],
+        )
+        .expect("realtime message handling histogram should build");
         let build_info = IntGauge::with_opts(
             Opts::new("v_note_build_info", "v-note build and protocol metadata")
                 .const_label("protocol", PROTOCOL_VERSION)
@@ -152,6 +220,11 @@ impl Metrics {
             Box::new(thumbnail_artifact_bytes.clone()),
             Box::new(realtime_events_total.clone()),
             Box::new(realtime_active_connections.clone()),
+            Box::new(realtime_message_bytes.clone()),
+            Box::new(realtime_replay_bytes.clone()),
+            Box::new(realtime_replay_frames.clone()),
+            Box::new(realtime_replay_duration_seconds.clone()),
+            Box::new(realtime_message_handling_seconds.clone()),
             Box::new(build_info.clone()),
         ] {
             registry
@@ -171,6 +244,11 @@ impl Metrics {
             thumbnail_artifact_bytes,
             realtime_events_total,
             realtime_active_connections,
+            realtime_message_bytes,
+            realtime_replay_bytes,
+            realtime_replay_frames,
+            realtime_replay_duration_seconds,
+            realtime_message_handling_seconds,
             _build_info: build_info,
         }
     }
@@ -213,6 +291,47 @@ impl Metrics {
         self.realtime_events_total
             .with_label_values(&[channel, result])
             .inc();
+    }
+
+    /// One realtime frame put on the wire. Both labels are `'static` so an id
+    /// (always an owned `String`) cannot be passed as one by accident.
+    pub fn observe_realtime_message_bytes(
+        &self,
+        channel: &'static str,
+        message_type: &'static str,
+        bytes: usize,
+    ) {
+        self.realtime_message_bytes
+            .with_label_values(&[channel, message_type])
+            .observe(bytes as f64);
+    }
+
+    /// One completed page-channel replay: every frame from the first
+    /// `stroke-batch` to the closing `synced`.
+    pub fn observe_realtime_replay(&self, frames: u64, bytes: u64, elapsed_seconds: f64) {
+        self.realtime_replay_frames.observe(frames as f64);
+        self.realtime_replay_bytes.observe(bytes as f64);
+        self.realtime_replay_duration_seconds
+            .observe(elapsed_seconds);
+    }
+
+    /// Server-side handling of one inbound page-channel message. Deliberately
+    /// not end-to-end latency: that needs client timestamps (#154).
+    pub fn observe_realtime_message_handling(
+        &self,
+        message_type: &'static str,
+        elapsed_seconds: f64,
+    ) {
+        self.realtime_message_handling_seconds
+            .with_label_values(&[message_type])
+            .observe(elapsed_seconds);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn realtime_message_count(&self, channel: &str, message_type: &str) -> u64 {
+        self.realtime_message_bytes
+            .with_label_values(&[channel, message_type])
+            .get_sample_count()
     }
 
     pub fn realtime_connection_guard(&self) -> RealtimeConnectionGuard {
@@ -489,7 +608,7 @@ fn normalized_route(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::PROTOCOL_VERSION;
+    use super::{Metrics, PROTOCOL_VERSION};
 
     /// `PROTOCOL_VERSION` is duplicated across five places, and this one is a
     /// bare `&str` with no compile-time link to the canonical constant. Without
@@ -498,5 +617,102 @@ mod tests {
     #[test]
     fn protocol_version_label_matches_protocol() {
         assert_eq!(PROTOCOL_VERSION, protocol::PROTOCOL_VERSION.to_string());
+    }
+
+    // The tests below build their own `Metrics` (its own registry) rather than
+    // reading the process-wide one, so exact counts hold under parallel tests.
+
+    #[test]
+    fn realtime_message_bytes_are_bucketed_by_channel_and_message_type() {
+        let metrics = Metrics::new();
+        metrics.observe_realtime_message_bytes("page", "synced", 50);
+        metrics.observe_realtime_message_bytes("page", "stroke-batch", 2_300);
+        metrics.observe_realtime_message_bytes("library", "page-updated", 120);
+
+        let synced = metrics
+            .realtime_message_bytes
+            .with_label_values(&["page", "synced"]);
+        assert_eq!(synced.get_sample_count(), 1);
+        assert_eq!(synced.get_sample_sum(), 50.0);
+        assert_eq!(
+            metrics
+                .realtime_message_bytes
+                .with_label_values(&["library", "page-updated"])
+                .get_sample_count(),
+            1
+        );
+
+        let text = metrics.render().expect("metrics should render");
+        assert!(text.contains(
+            r#"v_note_realtime_message_bytes_bucket{channel="page",message_type="synced",le="128"} 1"#
+        ));
+        assert!(text.contains(
+            r#"v_note_realtime_message_bytes_bucket{channel="page",message_type="stroke-batch",le="2048"} 0"#
+        ));
+        assert!(text.contains(
+            r#"v_note_realtime_message_bytes_bucket{channel="page",message_type="stroke-batch",le="8192"} 1"#
+        ));
+    }
+
+    #[test]
+    fn replay_cost_is_one_observation_per_replay() {
+        let metrics = Metrics::new();
+        // The DensePageSeeder reference page as #323 measured it: 1200 batch
+        // frames plus `synced`, 2.74 MB.
+        metrics.observe_realtime_replay(1201, 2_740_000, 0.8);
+
+        assert_eq!(metrics.realtime_replay_frames.get_sample_count(), 1);
+        assert_eq!(metrics.realtime_replay_frames.get_sample_sum(), 1201.0);
+        assert_eq!(metrics.realtime_replay_bytes.get_sample_sum(), 2_740_000.0);
+        assert_eq!(
+            metrics.realtime_replay_duration_seconds.get_sample_count(),
+            1
+        );
+
+        // Today's dense replay lands below the top bucket, so its p95 is a real
+        // number rather than +Inf — the before-number #323 needs.
+        let text = metrics.render().expect("metrics should render");
+        assert!(text.contains(r#"v_note_realtime_replay_bytes_bucket{le="2097152"} 0"#));
+        assert!(text.contains(r#"v_note_realtime_replay_bytes_bucket{le="8388608"} 1"#));
+        assert!(text.contains(r#"v_note_realtime_replay_frames_bucket{le="1000"} 0"#));
+        assert!(text.contains(r#"v_note_realtime_replay_frames_bucket{le="2500"} 1"#));
+    }
+
+    #[test]
+    fn message_handling_is_labelled_by_inbound_type_only() {
+        let metrics = Metrics::new();
+        metrics.observe_realtime_message_handling("commit-batch", 0.012);
+        metrics.observe_realtime_message_handling("commit-batch", 0.003);
+        metrics.observe_realtime_message_handling("subscribe", 0.2);
+
+        let commit_batch = metrics
+            .realtime_message_handling_seconds
+            .with_label_values(&["commit-batch"]);
+        assert_eq!(commit_batch.get_sample_count(), 2);
+        assert!((commit_batch.get_sample_sum() - 0.015).abs() < 1e-9);
+
+        let text = metrics.render().expect("metrics should render");
+        assert!(text.contains(
+            r#"v_note_realtime_message_handling_seconds_count{message_type="subscribe"} 1"#
+        ));
+    }
+
+    #[test]
+    fn lagged_is_a_recorded_realtime_result() {
+        let metrics = Metrics::new();
+        metrics.record_realtime_event("page", "lagged");
+        metrics.record_realtime_event("library", "lagged");
+
+        assert_eq!(
+            metrics
+                .realtime_events_total
+                .with_label_values(&["page", "lagged"])
+                .get(),
+            1
+        );
+        let text = metrics.render().expect("metrics should render");
+        assert!(
+            text.contains(r#"v_note_realtime_events_total{channel="library",result="lagged"} 1"#)
+        );
     }
 }
