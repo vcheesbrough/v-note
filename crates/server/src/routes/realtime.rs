@@ -22,6 +22,7 @@ use rand::Rng;
 use serde::Deserialize;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
+use tracing::Instrument as _;
 
 use crate::AppState;
 use crate::auth::{Claims, validate_jwt};
@@ -225,8 +226,15 @@ pub async fn realtime_socket(
         }
     };
 
-    ws.on_upgrade(move |socket| async move {
-        handle_library_socket(state, owner_id, socket).await;
+    // `on_upgrade` runs the socket in a spawned task, which has no current span.
+    // Calling the handler inside the upgrade request's span keeps the connection
+    // in the same trace as the request (and so under Traefik's edge span).
+    let upgrade_span = tracing::Span::current();
+    ws.on_upgrade(move |socket| {
+        async move {
+            handle_library_socket(state, owner_id, socket).await;
+        }
+        .instrument(upgrade_span)
     })
 }
 
@@ -353,8 +361,13 @@ pub async fn page_socket(
         }
     }
 
-    ws.on_upgrade(move |socket| async move {
-        handle_page_socket(state, pool, page_id, socket).await;
+    // See `realtime_socket`: keep the connection in the upgrade request's trace.
+    let upgrade_span = tracing::Span::current();
+    ws.on_upgrade(move |socket| {
+        async move {
+            handle_page_socket(state, pool, page_id, socket).await;
+        }
+        .instrument(upgrade_span)
     })
 }
 

@@ -9,8 +9,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use once_cell::sync::Lazy;
 use opentelemetry::KeyValue;
+use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use prometheus::{
     Encoder, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
@@ -378,12 +380,7 @@ pub async fn request_observability_middleware(mut req: Request, next: Next) -> R
     let request_id = request_id_from_headers(req.headers()).unwrap_or_else(generate_request_id);
     req.extensions_mut().insert(RequestId(request_id.clone()));
 
-    let span = tracing::info_span!(
-        "http.request",
-        method = %method,
-        route = %route,
-        request_id = %request_id,
-    );
+    let span = request_span(&method, &route, &request_id, req.headers());
     let started = Instant::now();
     let mut response = next.run(req).instrument(span.clone()).await;
     let elapsed = started.elapsed().as_secs_f64();
@@ -418,6 +415,44 @@ pub async fn request_observability_middleware(mut req: Request, next: Next) -> R
     );
 
     response
+}
+
+/// The `http.request` span, parented to the W3C trace context in the request's
+/// `traceparent` header. Traefik starts every trace at the edge and forwards that
+/// header, so adopting it nests v-note's spans under Traefik's rather than
+/// starting a disconnected trace. Without a valid `traceparent` (a request that
+/// did not come through Traefik) the span is a new root.
+fn request_span(
+    method: &axum::http::Method,
+    route: &str,
+    request_id: &str,
+    headers: &axum::http::HeaderMap,
+) -> tracing::Span {
+    let span = tracing::info_span!(
+        "http.request",
+        method = %method,
+        route = %route,
+        request_id = %request_id,
+    );
+    let parent = TraceContextPropagator::new().extract(&HeaderExtractor(headers));
+    if parent.span().span_context().is_valid() {
+        // Fails only when no OpenTelemetry layer is installed (export is off),
+        // and then there is no trace to join.
+        let _ = span.set_parent(parent);
+    }
+    span
+}
+
+struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|name| name.as_str()).collect()
+    }
 }
 
 struct TraceLogContext {
@@ -608,7 +643,7 @@ fn normalized_route(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metrics, PROTOCOL_VERSION};
+    use super::{Metrics, PROTOCOL_VERSION, request_span, trace_context_from_span};
 
     /// `PROTOCOL_VERSION` is duplicated across five places, and this one is a
     /// bare `&str` with no compile-time link to the canonical constant. Without
@@ -621,6 +656,57 @@ mod tests {
 
     // The tests below build their own `Metrics` (its own registry) rather than
     // reading the process-wide one, so exact counts hold under parallel tests.
+
+    /// Runs `check` with an OpenTelemetry layer installed, as in production, so
+    /// spans carry real trace context. The provider has no exporter.
+    fn with_otel_layer(check: impl FnOnce()) {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::with_default(subscriber, check);
+    }
+
+    const TRACEPARENT_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const TRACEPARENT_SPAN_ID: &str = "00f067aa0ba902b7";
+
+    fn headers_with_traceparent(value: &'static str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("traceparent", axum::http::HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn request_span_joins_the_trace_in_traceparent() {
+        with_otel_layer(|| {
+            let headers =
+                headers_with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+            let span = request_span(&axum::http::Method::GET, "/api/pages", "req_1", &headers);
+
+            let context = trace_context_from_span(&span).expect("span should carry a trace");
+            // Same trace as the edge (Traefik) span, but its own span id: a child.
+            assert_eq!(context.trace_id, TRACEPARENT_TRACE_ID);
+            assert_ne!(context.span_id, TRACEPARENT_SPAN_ID);
+        });
+    }
+
+    #[test]
+    fn request_span_without_a_valid_traceparent_starts_a_new_trace() {
+        with_otel_layer(|| {
+            for headers in [
+                axum::http::HeaderMap::new(),
+                headers_with_traceparent("not-a-traceparent"),
+                headers_with_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01"),
+            ] {
+                let span = request_span(&axum::http::Method::GET, "/health", "req_2", &headers);
+                let context = trace_context_from_span(&span).expect("span should carry a trace");
+                assert_ne!(context.trace_id, TRACEPARENT_TRACE_ID);
+                assert_ne!(context.trace_id, "00000000000000000000000000000000");
+            }
+        });
+    }
 
     #[test]
     fn realtime_message_bytes_are_bucketed_by_channel_and_message_type() {
