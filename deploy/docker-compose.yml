@@ -54,7 +54,7 @@ services:
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.rule=Host(`${V_NOTE_HOST:?V_NOTE_HOST is required}`)
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls=true
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls.certresolver=myresolver
-      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,crowdsec@docker,security-headers@docker
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,security-headers@docker
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.scheme=https
       # Derived by deploy-v-note.sh from the one `observability/metrics-addr`

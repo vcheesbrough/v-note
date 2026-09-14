@@ -103,6 +103,23 @@ pub enum LibraryEvent {
     },
 }
 
+impl LibraryEvent {
+    /// The serde `type` tag, as a `'static` metric label.
+    ///
+    /// An exhaustive `match`, deliberately with no wildcard: a new variant does
+    /// not compile until it names its label, so it can never land in an `other`
+    /// bucket. `tests/message_types.rs` holds every label to the tag serde
+    /// actually writes.
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::PageCreated { .. } => "page-created",
+            Self::PageDeleted { .. } => "page-deleted",
+            Self::PageThumbnailUpdated { .. } => "page-thumbnail-updated",
+            Self::PageUpdated { .. } => "page-updated",
+        }
+    }
+}
+
 // ---- Canonical ink (stroke geometry) -------------------------------------
 //
 // Strokes are authored in **world/document coordinates** on the infinite
@@ -364,6 +381,22 @@ pub enum PageClientMessage {
     },
 }
 
+impl PageClientMessage {
+    /// The serde `type` tag, as a `'static` metric label — see
+    /// [`LibraryEvent::message_type`] for why the match has no wildcard.
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::Subscribe { .. } => "subscribe",
+            Self::AcquireLease => "acquire-lease",
+            Self::RenewLease => "renew-lease",
+            Self::ReleaseLease => "release-lease",
+            Self::CommitBatch { .. } => "commit-batch",
+            Self::CommitTombstones { .. } => "commit-tombstones",
+            Self::SetPaper { .. } => "set-paper",
+        }
+    }
+}
+
 /// Server → client messages on the page channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -413,4 +446,22 @@ pub enum PageServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_mutation_id: Option<String>,
     },
+}
+
+impl PageServerMessage {
+    /// The serde `type` tag, as a `'static` metric label — see
+    /// [`LibraryEvent::message_type`] for why the match has no wildcard.
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::Welcome { .. } => "welcome",
+            Self::StrokeBatch(_) => "stroke-batch",
+            Self::TombstoneBatch(_) => "tombstone-batch",
+            Self::Synced { .. } => "synced",
+            Self::LeaseGranted => "lease-granted",
+            Self::LeaseDenied { .. } => "lease-denied",
+            Self::PaperChanged { .. } => "paper-changed",
+            Self::LeaseChanged { .. } => "lease-changed",
+            Self::Error { .. } => "error",
+        }
+    }
 }
