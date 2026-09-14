@@ -7,81 +7,27 @@
 //! The database-backed paths (403 page-not-found, 410 thumbnail-gone) are
 //! covered by the Playwright suite in `e2e/tests/`.
 
-use std::collections::HashMap;
+mod common;
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
 use protocol::{CreatePageRequest, Paper};
-use serde::Serialize;
-use server::auth::{AuthConfig, JwksCache};
 use server::build_router;
 use tower::util::ServiceExt;
 
-const TEST_JWT_KID: &str = "test-kid";
-const TEST_RSA_PRIVATE_PEM: &str = include_str!("fixtures/test_rsa_private.pem");
-const TEST_RSA_N: &str = "n2LSwWaKa37_PfC0fQehlQkhj4KFZc5htmDM5PDWOvnwuxmQ9AC48APxN-p1gjxR6O7MRsui-73c2pbk2Fp7nLQPmhupMEMw2bXDKV3iUaqppBGgMnbG43RnK6ho814E1aeaDdoicAlOUZQhp2PkRRd-2xemtazForez00ig-HN7W_JAh00ZaXP6JifiPqseSLKB1DnaNj1rIxfyPBdxrKyvDtKTudT3pn1yI8Wkl3mI57upEG7CCssZcLmKhWB3dMdHOaT2dnFqeOka4e3dt7i6jJj6h7LuAb4mfuYYAfJDhq5Ls8x9kb_I4U2NoCLYUtC3UlnwUIacvLzp4_iVkQ";
-const TEST_RSA_E: &str = "AQAB";
+use common::{SignedTokenClaims, sign_test_token, test_auth_config, test_jwks_cache};
 
-#[derive(Serialize)]
-struct SignedTokenClaims {
-    sub: String,
-    iss: String,
-    exp: u64,
-    scope: String,
-    aud: String,
-}
-
-fn test_auth_config() -> AuthConfig {
-    AuthConfig {
-        issuer_url: "http://mock-oidc:8080/default".to_string(),
-        client_id: "v-note-test".to_string(),
-        client_secret: "test-secret".to_string(),
-        redirect_uri: "https://app:443/auth/callback".to_string(),
-        required_scope: "v-note:test:access".to_string(),
-        end_session_url: None,
-        authorize_endpoint: "http://mock-oidc:8080/default/authorize".to_string(),
-        token_endpoint: "http://mock-oidc:8080/default/token".to_string(),
-        jwks_uri: "http://mock-oidc:8080/default/jwks".to_string(),
-        android_issuer_url: None,
-        android_client_id: None,
-    }
-}
-
-/// A router with `db: None` — exactly the state `db()` rejects.
+/// A router with `db: None` — exactly the state `db()` rejects — plus a token
+/// that clears the auth middleware, so the request reaches the handler.
 fn router_without_db() -> (axum::Router, String) {
     let config = test_auth_config();
-    let decoding_key =
-        DecodingKey::from_rsa_components(TEST_RSA_N, TEST_RSA_E).expect("test RSA components");
-    let mut keys = HashMap::new();
-    keys.insert(TEST_JWT_KID.to_string(), decoding_key);
-
-    let exp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_secs()
-        + 3600;
-    let mut jwt_header = Header::new(Algorithm::RS256);
-    jwt_header.kid = Some(TEST_JWT_KID.to_string());
-    let token = encode(
-        &jwt_header,
-        &SignedTokenClaims {
-            sub: "page-user".to_string(),
-            iss: config.issuer_url.clone(),
-            exp,
-            scope: config.required_scope.clone(),
-            aud: config.client_id.clone(),
-        },
-        &EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_PEM.as_bytes()).expect("test RSA private key"),
-    )
-    .expect("token should encode");
-
+    let token = sign_test_token(SignedTokenClaims::valid_for(&config, "page-user"));
     let app = build_router(
         "test-version".to_string(),
         Arc::new(config),
-        Arc::new(JwksCache::with_keys(keys)),
+        Arc::new(test_jwks_cache()),
     );
     (app, token)
 }
