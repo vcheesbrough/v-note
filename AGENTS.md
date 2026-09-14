@@ -101,14 +101,20 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   on every PR — Claude PR agent via [claude-pr-agent](https://github.com/vcheesbrough/claude-pr-agent).
   Repo prompt: [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md).
   Secrets/setup: [`docs/PR-AGENT.md`](docs/PR-AGENT.md).
-- **Full push/deploy CI lands with #145** — [`.woodpecker/build.yml`](.woodpecker/build.yml),
-  deploy compose, contract-validation, e2e. **Until that scaffold exists, do not
-  add pipeline files unless the user requests that slice**, and there is no
-  push pipeline for `ci-watch` to monitor yet. Reproduce commands (once it
-  exists) per [`docs/DEV.md`](docs/DEV.md):
-  - `docker build -f Dockerfile.web -t v-note:ci-local .` (with `--label` flags from `build-web`)
+- **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
+  `checks` (lint, rust-test, deploy-script-validation, android-build-box-pin),
+  `web` (build-web → e2e-web) and `android` (build-android, API 29/36
+  instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
+  auto-deploy-dev → tag) runs only when all three succeed. **`ci-watch` must follow
+  every workflow of the pushed commit's pipeline to completion** — one green
+  workflow while another is still running is not a result. Do not fold them back
+  into one file: Woodpecker runs step `depends_on` as whole stages, so steps in one
+  workflow wait on unrelated slow steps (#320). Reproduce commands per
+  [`docs/DEV.md`](docs/DEV.md):
+  - `just rust-ci lint` / `just rust-ci test` (`Dockerfile.rust-ci`, as the `lint` / `rust-test` steps)
+  - `docker build -f Dockerfile.web -t v-note:ci-local --secret id=github_token,env=GITHUB_TOKEN .`
   - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
-  - **All push steps including `e2e` must be green** before an iteration is done.
+  - **All push workflows, including `e2e-web` and both Android lanes, must be green** before an iteration is done.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see
   [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**). Contract/unit tests
