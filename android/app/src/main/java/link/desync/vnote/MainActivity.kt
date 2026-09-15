@@ -25,10 +25,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import link.desync.vnote.api.ApiClient
-import link.desync.vnote.api.LibraryEventListener
 import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
@@ -37,11 +35,8 @@ import link.desync.vnote.ink.PageCanvasScreen
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.ink.PaperPreferences
 import link.desync.vnote.ink.normalizedSamsungSpenAction
-import link.desync.vnote.model.LibraryEvent
-import link.desync.vnote.model.PageSummary
-import link.desync.vnote.model.ThumbnailMetadata
+import link.desync.vnote.library.LibraryStateHolder
 import link.desync.vnote.ui.theme.VNoteTheme
-import okhttp3.WebSocket
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -57,14 +52,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var tokenStore: TokenStore
     private lateinit var authRepository: AuthRepository
     private lateinit var apiClient: ApiClient
-    private var librarySocket: WebSocket? = null
-    private var libraryConnectionGeneration = 0
+    private lateinit var library: LibraryStateHolder
 
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
-    private val pagesState = androidx.compose.runtime.mutableStateOf<List<PageSummary>>(emptyList())
-    private val selectedPageState = androidx.compose.runtime.mutableStateOf<PageSummary?>(null)
-    private val libraryErrorState = androidx.compose.runtime.mutableStateOf<String?>(null)
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         val normalizedAction = normalizedSamsungSpenAction(event.actionMasked)
@@ -90,6 +81,13 @@ class MainActivity : ComponentActivity() {
         apiClient =
             apiClientFactory?.invoke(tokenStore, authRepository)
                 ?: OkHttpApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+        library =
+            LibraryStateHolder(
+                apiClient = apiClient,
+                reconnectScope = lifecycleScope,
+                isSignedIn = { sessionState.value is SessionState.SignedIn },
+                runOnUiThread = { block -> runOnUiThread { block() } },
+            )
 
         setContent {
             VNoteTheme {
@@ -99,14 +97,14 @@ class MainActivity : ComponentActivity() {
                 ) {
                     AppRoot {
                         val session = sessionState.value
-                        val selectedPage = selectedPageState.value
+                        val selectedPage = library.selectedPage
                         if (session is SessionState.SignedIn && selectedPage != null) {
                             // An open page takes over the whole surface — the infinite ink canvas.
                             PageCanvasScreen(
                                 apiClient = apiClient,
                                 page = selectedPage,
                                 userId = session.profile.sub,
-                                onBack = { closePage() },
+                                onBack = { library.closePage() },
                             )
                         } else {
                             AppScreen(
@@ -115,11 +113,11 @@ class MainActivity : ComponentActivity() {
                                 onSignIn = { signIn() },
                                 onSignOut = { signOut() },
                                 onReload = { reloadSession() },
-                                pages = pagesState.value,
-                                libraryError = libraryErrorState.value,
+                                pages = library.pages,
+                                libraryError = library.error,
                                 onCreatePage = { createPage() },
-                                onOpenPage = { selectedPageState.value = it },
-                                onDeletePage = { deletePage(it) },
+                                onOpenPage = { library.openPage(it) },
+                                onDeletePage = { library.deletePage(it) },
                             )
                         }
                     }
@@ -139,7 +137,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        librarySocket?.close(1000, "activity destroyed")
+        library.close()
         authRepository.shutdown()
         super.onDestroy()
     }
@@ -209,11 +207,7 @@ class MainActivity : ComponentActivity() {
 
     private fun signOut() {
         val endSessionIntent = authRepository.createEndSessionIntent()
-        librarySocket?.close(1000, "signed out")
-        librarySocket = null
-        libraryConnectionGeneration += 1
-        pagesState.value = emptyList()
-        selectedPageState.value = null
+        library.clear()
         authRepository.signOutLocal()
         sessionState.value = SessionState.SignedOut
         endSessionIntent?.data?.let { uri ->
@@ -232,27 +226,12 @@ class MainActivity : ComponentActivity() {
             apiClient.fetchMe().fold(
                 onSuccess = { profile ->
                     sessionState.value = SessionState.SignedIn(profile)
-                    loadPages()
-                    connectLibrarySocket()
+                    library.start()
                 },
                 onFailure = { error ->
                     authRepository.signOutLocal()
                     sessionState.value =
                         SessionState.Error(error.message ?: "Session check failed")
-                },
-            )
-        }
-    }
-
-    private fun loadPages() {
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            apiClient.listPages().fold(
-                onSuccess = { pages ->
-                    pagesState.value = pages
-                    libraryErrorState.value = null
-                },
-                onFailure = { error ->
-                    libraryErrorState.value = error.message ?: "Loading pages failed"
                 },
             )
         }
@@ -268,119 +247,9 @@ class MainActivity : ComponentActivity() {
             } else {
                 Paper.None
             }
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            apiClient.createPage(paper = paper).fold(
-                onSuccess = { page ->
-                    upsertPage(page)
-                    selectedPageState.value = page
-                    libraryErrorState.value = null
-                },
-                onFailure = { error ->
-                    libraryErrorState.value = error.message ?: "Creating page failed"
-                },
-            )
-        }
-    }
-
-    private fun deletePage(page: PageSummary) {
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            apiClient.deletePage(page.id).fold(
-                onSuccess = {
-                    removePage(page.id)
-                    libraryErrorState.value = null
-                },
-                onFailure = { error ->
-                    libraryErrorState.value = error.message ?: "Deleting page failed"
-                },
-            )
-        }
-    }
-
-    private fun closePage() {
-        selectedPageState.value = null
-        loadPages()
-    }
-
-    private fun connectLibrarySocket() {
-        val generation = ++libraryConnectionGeneration
-        librarySocket?.close(1000, "reconnecting")
-        librarySocket =
-            apiClient.openLibrarySocket(
-                object : LibraryEventListener {
-                    override fun onEvent(event: LibraryEvent) {
-                        runOnUiThread {
-                            when (event) {
-                                is LibraryEvent.PageCreated -> upsertPage(event.page)
-                                is LibraryEvent.PageDeleted -> removePage(event.pageId)
-                                is LibraryEvent.PageThumbnailUpdated -> {
-                                    pagesState.value =
-                                        pagesState.value.map { page ->
-                                            if (page.id == event.pageId && event.thumbnail.sourceSeq() >= page.thumbnail.sourceSeq()) {
-                                                page.copy(thumbnail = event.thumbnail)
-                                            } else {
-                                                page
-                                            }
-                                        }
-                                }
-                                is LibraryEvent.PageUpdated -> {
-                                    val current = pagesState.value.firstOrNull { it.id == event.pageId }
-                                    // Ignore a stale/duplicate timestamp so re-sort stays idempotent.
-                                    if (current != null && event.updatedAt > current.updatedAt) {
-                                        pagesState.value =
-                                            pagesState.value
-                                                .map { page ->
-                                                    if (page.id == event.pageId) {
-                                                        page.copy(updatedAt = event.updatedAt)
-                                                    } else {
-                                                        page
-                                                    }
-                                                }.sortedByDescending { it.updatedAt }
-                                    }
-                                }
-                            }
-                            libraryErrorState.value = null
-                        }
-                    }
-
-                    override fun onError(message: String) {
-                        runOnUiThread { libraryErrorState.value = message }
-                    }
-
-                    override fun onClosed() {
-                        if (generation != libraryConnectionGeneration || sessionState.value !is SessionState.SignedIn) return
-                        runOnUiThread { libraryErrorState.value = "Realtime disconnected" }
-                        lifecycleScope.launch {
-                            delay(1_000)
-                            if (generation != libraryConnectionGeneration || sessionState.value !is SessionState.SignedIn) return@launch
-                            loadPages()
-                            connectLibrarySocket()
-                        }
-                    }
-                },
-            )
-    }
-
-    private fun upsertPage(page: PageSummary) {
-        pagesState.value =
-            (pagesState.value.filterNot { it.id == page.id } + page)
-                .sortedByDescending { it.updatedAt }
-    }
-
-    private fun removePage(pageId: String) {
-        pagesState.value = pagesState.value.filterNot { it.id == pageId }
-        if (selectedPageState.value?.id == pageId) {
-            selectedPageState.value = null
-        }
+        library.createPage(paper)
     }
 }
-
-private fun ThumbnailMetadata.sourceSeq(): Long =
-    when (this) {
-        ThumbnailMetadata.Empty -> 0
-        is ThumbnailMetadata.Generating -> sourceSeq
-        is ThumbnailMetadata.Available -> sourceSeq
-        is ThumbnailMetadata.Failed -> sourceSeq
-    }
 
 @Composable
 private fun AppRoot(content: @Composable () -> Unit) {
