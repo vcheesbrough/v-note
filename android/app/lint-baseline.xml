@@ -40,8 +40,8 @@
         errorLine1="    var stylusStartTime by remember { mutableStateOf(0L) }"
         errorLine2="                                      ~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/link/desync/vnote/ink/PageCanvas.kt"
-            line="491"
+            file="src/main/java/link/desync/vnote/ink/InkCanvas.kt"
+            line="71"
             column="39"/>
     </issue>
 
@@ -116,17 +116,6 @@
 
     <issue
         id="UseKtx"
-        message="Use the KTX extension function `String.toColorInt` instead?"
-        errorLine1="internal fun parseColor(value: String): Color = Color(android.graphics.Color.parseColor(value))"
-        errorLine2="                                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/link/desync/vnote/ink/PageCanvas.kt"
-            line="1037"
-            column="55"/>
-    </issue>
-
-    <issue
-        id="UseKtx"
         message="Use the KTX extension function `SharedPreferences.edit` instead?"
         errorLine1="        preferences.edit().putString(key(), paper.wireValue).apply()"
         errorLine2="        ~~~~~~~~~~~~~~~~~~">
@@ -167,6 +156,17 @@
             file="src/main/java/link/desync/vnote/auth/TokenStore.kt"
             line="44"
             column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toColorInt` instead?"
+        errorLine1="internal fun parseColor(value: String): Color = Color(android.graphics.Color.parseColor(value))"
+        errorLine2="                                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/link/desync/vnote/ink/ToolPalette.kt"
+            line="198"
+            column="55"/>
     </issue>
 
 </issues>
