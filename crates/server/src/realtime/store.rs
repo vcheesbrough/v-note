@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use protocol::{Paper, Stroke, StrokeBatch, TombstoneBatch};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use tracing::Instrument as _;
 
 use crate::observability::{db_query_span, metered};
@@ -226,6 +226,47 @@ async fn persist_batch(
         });
     }
 
+    let inserted = insert_visible_batch(
+        &mut tx,
+        page_id,
+        client_batch_id,
+        &visible_strokes,
+        current_revision,
+        &paper,
+    )
+    .await?;
+    tx.commit()
+        .instrument(db_query_span("COMMIT", "persist_batch"))
+        .await?;
+    Ok(PersistedBatch {
+        seq: inserted.seq as u64,
+        revision: inserted.revision as u64,
+        owner_id,
+        visible_strokes,
+        thumbnail_job_created: inserted.thumbnail_job_created,
+        updated_at: Some(inserted.updated_at),
+    })
+}
+
+/// A stroke batch written by [`insert_visible_batch`].
+struct InsertedBatch {
+    seq: i64,
+    revision: i64,
+    updated_at: String,
+    thumbnail_job_created: bool,
+}
+
+/// The write half of [`persist_batch`], inside its transaction and page lock:
+/// allocate the next seq and revision, store the batch, bump the page, and
+/// create the thumbnail job for the new revision on the paper in force.
+async fn insert_visible_batch(
+    tx: &mut PgConnection,
+    page_id: &str,
+    client_batch_id: &str,
+    visible_strokes: &[Stroke],
+    current_revision: i64,
+    paper: &str,
+) -> Result<InsertedBatch, sqlx::Error> {
     let next: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM stroke_batches WHERE page_id = $1",
     )
@@ -242,7 +283,7 @@ async fn persist_batch(
     .bind(next)
     .bind(revision)
     .bind(client_batch_id)
-    .bind(sqlx::types::Json(&visible_strokes))
+    .bind(sqlx::types::Json(visible_strokes))
     .execute(metered(&mut *tx))
     .instrument(db_query_span("INSERT", "persist_batch_insert"))
     .await?;
@@ -261,23 +302,18 @@ async fn persist_batch(
     )
     .bind(page_id)
     .bind(revision)
-    .bind(&paper)
+    .bind(paper)
     .execute(metered(&mut *tx))
     .instrument(db_query_span("INSERT", "persist_batch_thumbnail_job"))
     .await?
     .rows_affected()
         == 1;
 
-    tx.commit()
-        .instrument(db_query_span("COMMIT", "persist_batch"))
-        .await?;
-    Ok(PersistedBatch {
-        seq: next as u64,
-        revision: revision as u64,
-        owner_id,
-        visible_strokes,
+    Ok(InsertedBatch {
+        seq: next,
+        revision,
+        updated_at,
         thumbnail_job_created,
-        updated_at: Some(updated_at),
     })
 }
 

@@ -138,13 +138,15 @@ fn realtime_message_bytes_are_bucketed_by_channel_and_message_type() {
     metrics.observe_realtime_message_bytes("library", "page-updated", 120);
 
     let synced = metrics
-        .realtime_message_bytes
+        .realtime
+        .message_bytes
         .with_label_values(&["page", "synced"]);
     assert_eq!(synced.get_sample_count(), 1);
     assert_eq!(synced.get_sample_sum(), 50.0);
     assert_eq!(
         metrics
-            .realtime_message_bytes
+            .realtime
+            .message_bytes
             .with_label_values(&["library", "page-updated"])
             .get_sample_count(),
         1
@@ -169,11 +171,11 @@ fn replay_cost_is_one_observation_per_replay() {
     // frames plus `synced`, 2.74 MB.
     metrics.observe_realtime_replay(1201, 2_740_000, 0.8);
 
-    assert_eq!(metrics.realtime_replay_frames.get_sample_count(), 1);
-    assert_eq!(metrics.realtime_replay_frames.get_sample_sum(), 1201.0);
-    assert_eq!(metrics.realtime_replay_bytes.get_sample_sum(), 2_740_000.0);
+    assert_eq!(metrics.realtime.replay_frames.get_sample_count(), 1);
+    assert_eq!(metrics.realtime.replay_frames.get_sample_sum(), 1201.0);
+    assert_eq!(metrics.realtime.replay_bytes.get_sample_sum(), 2_740_000.0);
     assert_eq!(
-        metrics.realtime_replay_duration_seconds.get_sample_count(),
+        metrics.realtime.replay_duration_seconds.get_sample_count(),
         1
     );
 
@@ -194,7 +196,8 @@ fn message_handling_is_labelled_by_inbound_type_only() {
     metrics.observe_realtime_message_handling("subscribe", 0.2);
 
     let commit_batch = metrics
-        .realtime_message_handling_seconds
+        .realtime
+        .message_handling_seconds
         .with_label_values(&["commit-batch"]);
     assert_eq!(commit_batch.get_sample_count(), 2);
     assert!((commit_batch.get_sample_sum() - 0.015).abs() < 1e-9);
@@ -215,7 +218,8 @@ fn lagged_is_a_recorded_realtime_result() {
 
     assert_eq!(
         metrics
-            .realtime_events_total
+            .realtime
+            .events_total
             .with_label_values(&["page", "lagged"])
             .get(),
         1

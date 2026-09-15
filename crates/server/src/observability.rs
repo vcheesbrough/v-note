@@ -60,149 +60,242 @@ pub fn metrics() -> &'static Metrics {
 
 pub struct Metrics {
     registry: Registry,
-    http_requests_total: IntCounterVec,
-    http_request_duration_seconds: HistogramVec,
+    http: HttpMetrics,
     auth_failures_total: IntCounterVec,
     page_mutations_total: IntCounterVec,
-    thumbnail_generation_duration_seconds: HistogramVec,
-    thumbnail_queue_depth: IntGauge,
-    thumbnail_recoveries_total: IntCounterVec,
-    thumbnail_artifact_bytes: Histogram,
-    realtime_events_total: IntCounterVec,
-    realtime_active_connections: IntGauge,
-    realtime_message_bytes: HistogramVec,
-    realtime_replay_bytes: Histogram,
-    realtime_replay_frames: Histogram,
-    realtime_replay_duration_seconds: Histogram,
-    realtime_message_handling_seconds: HistogramVec,
+    thumbnails: ThumbnailMetrics,
+    realtime: RealtimeMetrics,
     _build_info: IntGauge,
+}
+
+struct HttpMetrics {
+    requests_total: IntCounterVec,
+    request_duration_seconds: HistogramVec,
+}
+
+struct ThumbnailMetrics {
+    generation_duration_seconds: HistogramVec,
+    queue_depth: IntGauge,
+    recoveries_total: IntCounterVec,
+    artifact_bytes: Histogram,
+}
+
+struct RealtimeMetrics {
+    events_total: IntCounterVec,
+    active_connections: IntGauge,
+    message_bytes: HistogramVec,
+    replay_bytes: Histogram,
+    replay_frames: Histogram,
+    replay_duration_seconds: Histogram,
+    message_handling_seconds: HistogramVec,
+}
+
+/// Registers `collector` and hands it back for recording. A duplicate name is a
+/// programming error, so it panics at startup rather than failing quietly.
+fn register<C>(registry: &Registry, collector: C) -> C
+where
+    C: prometheus::core::Collector + Clone + 'static,
+{
+    registry
+        .register(Box::new(collector.clone()))
+        .expect("metric should register once");
+    collector
+}
+
+impl HttpMetrics {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            requests_total: register(
+                registry,
+                IntCounterVec::new(
+                    Opts::new(
+                        "v_note_http_requests_total",
+                        "HTTP requests by route and status",
+                    ),
+                    &["method", "route", "status"],
+                )
+                .expect("http request counter should build"),
+            ),
+            request_duration_seconds: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_http_request_duration_seconds",
+                        "HTTP request latency by route and status",
+                    ),
+                    &["method", "route", "status"],
+                )
+                .expect("http request histogram should build"),
+            ),
+        }
+    }
+}
+
+impl ThumbnailMetrics {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            generation_duration_seconds: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_thumbnail_generation_duration_seconds",
+                        "Thumbnail generation duration by result",
+                    ),
+                    &["result"],
+                )
+                .expect("thumbnail generation histogram should build"),
+            ),
+            queue_depth: register(
+                registry,
+                IntGauge::new(
+                    "v_note_thumbnail_queue_depth",
+                    "Thumbnail generations awaiting completion",
+                )
+                .expect("thumbnail queue gauge should build"),
+            ),
+            recoveries_total: register(
+                registry,
+                IntCounterVec::new(
+                    Opts::new(
+                        "v_note_thumbnail_recoveries_total",
+                        "Thumbnail generation recovery attempts by result",
+                    ),
+                    &["result"],
+                )
+                .expect("thumbnail recovery counter should build"),
+            ),
+            artifact_bytes: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_thumbnail_artifact_bytes",
+                        "Stored thumbnail PNG size in bytes",
+                    )
+                    .buckets(vec![
+                        256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
+                    ]),
+                )
+                .expect("thumbnail artifact histogram should build"),
+            ),
+        }
+    }
+}
+
+impl RealtimeMetrics {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            events_total: register(
+                registry,
+                IntCounterVec::new(
+                    Opts::new(
+                        "v_note_realtime_events_total",
+                        "Realtime WebSocket events by channel and result",
+                    ),
+                    &["channel", "result"],
+                )
+                .expect("realtime event counter should build"),
+            ),
+            active_connections: register(
+                registry,
+                IntGauge::new(
+                    "v_note_realtime_active_connections",
+                    "Currently open realtime WebSocket connections",
+                )
+                .expect("active realtime gauge should build"),
+            ),
+            // Cardinality budget: `channel` × `message_type`, both bounded enums.
+            // Never add `page_id`, `session_id`, `owner_id` or `client_batch_id` —
+            // those belong in span fields, not labels.
+            message_bytes: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_realtime_message_bytes",
+                        "Serialized size of realtime frames sent, by channel and message type",
+                    )
+                    .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
+                    &["channel", "message_type"],
+                )
+                .expect("realtime message size histogram should build"),
+            ),
+            replay_bytes: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_realtime_replay_bytes",
+                        "Total bytes sent for one page-channel subscribe replay",
+                    )
+                    .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
+                )
+                .expect("realtime replay bytes histogram should build"),
+            ),
+            replay_frames: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_realtime_replay_frames",
+                        "Frames sent for one page-channel subscribe replay, including the closing synced",
+                    )
+                    .buckets(REALTIME_REPLAY_FRAMES_BUCKETS.to_vec()),
+                )
+                .expect("realtime replay frames histogram should build"),
+            ),
+            replay_duration_seconds: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_realtime_replay_duration_seconds",
+                        "Wall time from a subscribe being received to its synced being sent",
+                    )
+                    .buckets(REALTIME_REPLAY_DURATION_BUCKETS.to_vec()),
+                )
+                .expect("realtime replay duration histogram should build"),
+            ),
+            message_handling_seconds: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_realtime_message_handling_seconds",
+                        "Server-side handling time of inbound page-channel messages, by message type \
+                         (not end-to-end latency)",
+                    )
+                    .buckets(REALTIME_HANDLING_BUCKETS.to_vec()),
+                    &["message_type"],
+                )
+                .expect("realtime message handling histogram should build"),
+            ),
+        }
+    }
 }
 
 impl Metrics {
     fn new() -> Self {
         let registry = Registry::new();
-        let http_requests_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_http_requests_total",
-                "HTTP requests by route and status",
-            ),
-            &["method", "route", "status"],
-        )
-        .expect("http request counter should build");
-        let http_request_duration_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_http_request_duration_seconds",
-                "HTTP request latency by route and status",
-            ),
-            &["method", "route", "status"],
-        )
-        .expect("http request histogram should build");
-        let auth_failures_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_auth_failures_total",
-                "Authentication failures by reason",
-            ),
-            &["reason"],
-        )
-        .expect("auth failure counter should build");
-        let page_mutations_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_page_mutations_total",
-                "Page and ink mutations by operation/result",
-            ),
-            &["operation", "result"],
-        )
-        .expect("page mutation counter should build");
-        let thumbnail_generation_duration_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_thumbnail_generation_duration_seconds",
-                "Thumbnail generation duration by result",
-            ),
-            &["result"],
-        )
-        .expect("thumbnail generation histogram should build");
-        let thumbnail_queue_depth = IntGauge::new(
-            "v_note_thumbnail_queue_depth",
-            "Thumbnail generations awaiting completion",
-        )
-        .expect("thumbnail queue gauge should build");
-        let thumbnail_recoveries_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_thumbnail_recoveries_total",
-                "Thumbnail generation recovery attempts by result",
-            ),
-            &["result"],
-        )
-        .expect("thumbnail recovery counter should build");
-        let thumbnail_artifact_bytes = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_thumbnail_artifact_bytes",
-                "Stored thumbnail PNG size in bytes",
+        let http = HttpMetrics::new(&registry);
+        let auth_failures_total = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    "v_note_auth_failures_total",
+                    "Authentication failures by reason",
+                ),
+                &["reason"],
             )
-            .buckets(vec![
-                256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
-            ]),
-        )
-        .expect("thumbnail artifact histogram should build");
-        let realtime_events_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_realtime_events_total",
-                "Realtime WebSocket events by channel and result",
-            ),
-            &["channel", "result"],
-        )
-        .expect("realtime event counter should build");
-        let realtime_active_connections = IntGauge::new(
-            "v_note_realtime_active_connections",
-            "Currently open realtime WebSocket connections",
-        )
-        .expect("active realtime gauge should build");
-        // Cardinality budget: `channel` × `message_type`, both bounded enums.
-        // Never add `page_id`, `session_id`, `owner_id` or `client_batch_id` —
-        // those belong in span fields, not labels.
-        let realtime_message_bytes = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_realtime_message_bytes",
-                "Serialized size of realtime frames sent, by channel and message type",
+            .expect("auth failure counter should build"),
+        );
+        let page_mutations_total = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    "v_note_page_mutations_total",
+                    "Page and ink mutations by operation/result",
+                ),
+                &["operation", "result"],
             )
-            .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
-            &["channel", "message_type"],
-        )
-        .expect("realtime message size histogram should build");
-        let realtime_replay_bytes = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_realtime_replay_bytes",
-                "Total bytes sent for one page-channel subscribe replay",
-            )
-            .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
-        )
-        .expect("realtime replay bytes histogram should build");
-        let realtime_replay_frames = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_realtime_replay_frames",
-                "Frames sent for one page-channel subscribe replay, including the closing synced",
-            )
-            .buckets(REALTIME_REPLAY_FRAMES_BUCKETS.to_vec()),
-        )
-        .expect("realtime replay frames histogram should build");
-        let realtime_replay_duration_seconds = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_realtime_replay_duration_seconds",
-                "Wall time from a subscribe being received to its synced being sent",
-            )
-            .buckets(REALTIME_REPLAY_DURATION_BUCKETS.to_vec()),
-        )
-        .expect("realtime replay duration histogram should build");
-        let realtime_message_handling_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_realtime_message_handling_seconds",
-                "Server-side handling time of inbound page-channel messages, by message type \
-                 (not end-to-end latency)",
-            )
-            .buckets(REALTIME_HANDLING_BUCKETS.to_vec()),
-            &["message_type"],
-        )
-        .expect("realtime message handling histogram should build");
+            .expect("page mutation counter should build"),
+        );
+        let thumbnails = ThumbnailMetrics::new(&registry);
+        let realtime = RealtimeMetrics::new(&registry);
         let build_info = IntGauge::with_opts(
             Opts::new("v_note_build_info", "v-note build and protocol metadata")
                 .const_label("protocol", PROTOCOL_VERSION)
@@ -210,47 +303,15 @@ impl Metrics {
         )
         .expect("build info gauge should build");
         build_info.set(1);
-
-        for collector in [
-            Box::new(http_requests_total.clone()) as Box<dyn prometheus::core::Collector>,
-            Box::new(http_request_duration_seconds.clone()),
-            Box::new(auth_failures_total.clone()),
-            Box::new(page_mutations_total.clone()),
-            Box::new(thumbnail_generation_duration_seconds.clone()),
-            Box::new(thumbnail_queue_depth.clone()),
-            Box::new(thumbnail_recoveries_total.clone()),
-            Box::new(thumbnail_artifact_bytes.clone()),
-            Box::new(realtime_events_total.clone()),
-            Box::new(realtime_active_connections.clone()),
-            Box::new(realtime_message_bytes.clone()),
-            Box::new(realtime_replay_bytes.clone()),
-            Box::new(realtime_replay_frames.clone()),
-            Box::new(realtime_replay_duration_seconds.clone()),
-            Box::new(realtime_message_handling_seconds.clone()),
-            Box::new(build_info.clone()),
-        ] {
-            registry
-                .register(collector)
-                .expect("metric should register once");
-        }
+        let build_info = register(&registry, build_info);
 
         Self {
             registry,
-            http_requests_total,
-            http_request_duration_seconds,
+            http,
             auth_failures_total,
             page_mutations_total,
-            thumbnail_generation_duration_seconds,
-            thumbnail_queue_depth,
-            thumbnail_recoveries_total,
-            thumbnail_artifact_bytes,
-            realtime_events_total,
-            realtime_active_connections,
-            realtime_message_bytes,
-            realtime_replay_bytes,
-            realtime_replay_frames,
-            realtime_replay_duration_seconds,
-            realtime_message_handling_seconds,
+            thumbnails,
+            realtime,
             _build_info: build_info,
         }
     }
@@ -266,31 +327,34 @@ impl Metrics {
     }
 
     pub fn record_thumbnail_generation(&self, result: &'static str, elapsed_seconds: f64) {
-        self.thumbnail_generation_duration_seconds
+        self.thumbnails
+            .generation_duration_seconds
             .with_label_values(&[result])
             .observe(elapsed_seconds);
     }
 
     pub fn thumbnail_generation_queued(&self) {
-        self.thumbnail_queue_depth.inc();
+        self.thumbnails.queue_depth.inc();
     }
 
     pub fn thumbnail_generation_finished(&self) {
-        self.thumbnail_queue_depth.dec();
+        self.thumbnails.queue_depth.dec();
     }
 
     pub fn record_thumbnail_recovery(&self, result: &'static str) {
-        self.thumbnail_recoveries_total
+        self.thumbnails
+            .recoveries_total
             .with_label_values(&[result])
             .inc();
     }
 
     pub fn observe_thumbnail_artifact_bytes(&self, bytes: usize) {
-        self.thumbnail_artifact_bytes.observe(bytes as f64);
+        self.thumbnails.artifact_bytes.observe(bytes as f64);
     }
 
     pub fn record_realtime_event(&self, channel: &'static str, result: &'static str) {
-        self.realtime_events_total
+        self.realtime
+            .events_total
             .with_label_values(&[channel, result])
             .inc();
     }
@@ -303,7 +367,8 @@ impl Metrics {
         message_type: &'static str,
         bytes: usize,
     ) {
-        self.realtime_message_bytes
+        self.realtime
+            .message_bytes
             .with_label_values(&[channel, message_type])
             .observe(bytes as f64);
     }
@@ -311,9 +376,10 @@ impl Metrics {
     /// One completed page-channel replay: every frame from the first
     /// `stroke-batch` to the closing `synced`.
     pub fn observe_realtime_replay(&self, frames: u64, bytes: u64, elapsed_seconds: f64) {
-        self.realtime_replay_frames.observe(frames as f64);
-        self.realtime_replay_bytes.observe(bytes as f64);
-        self.realtime_replay_duration_seconds
+        self.realtime.replay_frames.observe(frames as f64);
+        self.realtime.replay_bytes.observe(bytes as f64);
+        self.realtime
+            .replay_duration_seconds
             .observe(elapsed_seconds);
     }
 
@@ -324,29 +390,33 @@ impl Metrics {
         message_type: &'static str,
         elapsed_seconds: f64,
     ) {
-        self.realtime_message_handling_seconds
+        self.realtime
+            .message_handling_seconds
             .with_label_values(&[message_type])
             .observe(elapsed_seconds);
     }
 
     #[cfg(test)]
     pub(crate) fn realtime_message_count(&self, channel: &str, message_type: &str) -> u64 {
-        self.realtime_message_bytes
+        self.realtime
+            .message_bytes
             .with_label_values(&[channel, message_type])
             .get_sample_count()
     }
 
     pub fn realtime_connection_guard(&self) -> RealtimeConnectionGuard {
-        self.realtime_active_connections.inc();
+        self.realtime.active_connections.inc();
         RealtimeConnectionGuard
     }
 
     fn record_http(&self, method: &str, route: &str, status: StatusCode, elapsed: f64) {
         let status = status.as_u16().to_string();
-        self.http_requests_total
+        self.http
+            .requests_total
             .with_label_values(&[method, route, &status])
             .inc();
-        self.http_request_duration_seconds
+        self.http
+            .request_duration_seconds
             .with_label_values(&[method, route, &status])
             .observe(elapsed);
     }
@@ -367,7 +437,7 @@ pub struct RealtimeConnectionGuard;
 
 impl Drop for RealtimeConnectionGuard {
     fn drop(&mut self) {
-        metrics().realtime_active_connections.dec();
+        metrics().realtime.active_connections.dec();
     }
 }
 

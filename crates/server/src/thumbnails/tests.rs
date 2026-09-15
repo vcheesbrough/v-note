@@ -165,7 +165,7 @@ fn drawn_bounds(pixmap: &Pixmap) -> (u32, u32, u32, u32) {
 
 /// A short **diagonal** v2 stroke (Δx and Δy each individually under the
 /// nib width) must collapse to a dot, matching Android's live-canvas
-/// `maxOf(Δx, Δy) < maxWidth` classifier exactly (`PageCanvas.kt`) — even
+/// `maxOf(Δx, Δy) < maxWidth` classifier exactly (`InkRenderer.kt`) — even
 /// though the true diagonal distance is technically larger. Using the
 /// bounding-box diagonal instead would make the library preview disagree
 /// with what the page itself renders for the same stroke.
