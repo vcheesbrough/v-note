@@ -13,11 +13,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
 use serde::Serialize;
 use server::auth::{AuthConfig, JwksCache};
+use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 pub const TEST_JWT_KID: &str = "test-kid";
 pub const TEST_RSA_PRIVATE_PEM: &str = include_str!("../fixtures/test_rsa_private.pem");
@@ -49,6 +51,17 @@ pub fn android_auth_config() -> AuthConfig {
         android_client_id: Some("v-note-android-test".to_string()),
         ..test_auth_config()
     }
+}
+
+/// A Postgres pool that never connects. The router requires a pool; tests that
+/// do not exercise the database hand it this one. Port 1 on loopback refuses at
+/// once and the short acquire timeout bounds the wait, so a test that does reach
+/// a query gets a prompt 500 rather than a hang. Lazy: needs a Tokio runtime,
+/// not Postgres.
+pub fn unreachable_pool() -> PgPool {
+    PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(500))
+        .connect_lazy_with(PgConnectOptions::new().host("127.0.0.1").port(1))
 }
 
 /// A JWKS cache pre-seeded with the fixture key, so no HTTP fetch is attempted.
