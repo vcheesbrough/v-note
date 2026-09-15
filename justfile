@@ -83,7 +83,12 @@ contract-validation:
     cargo test -p protocol
 
 # CI-parity Rust gates, exactly as the `lint` / `rust-test` steps run them (needs GITHUB_TOKEN
-# for the private sovereign-config dep). `just rust-ci lint` or `just rust-ci test`.
+# for the private sovereign-config dep). `just rust-ci lint` or `just rust-ci test`; `test`
+# also starts the throwaway Postgres the `postgres-tests` feature needs.
 rust-ci target="test":
-    docker build -f Dockerfile.rust-ci --target {{target}} --output type=cacheonly \
-      --secret id=github_token,env=GITHUB_TOKEN .
+    if [ "{{target}}" = "test" ]; then \
+      ./scripts/rust-ci-test.sh; \
+    else \
+      docker build -f Dockerfile.rust-ci --target {{target}} --output type=cacheonly \
+        --secret id=github_token,env=GITHUB_TOKEN .; \
+    fi

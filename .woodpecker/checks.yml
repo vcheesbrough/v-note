@@ -16,7 +16,8 @@ steps:
   # Rust gates run inside BuildKit (Dockerfile.rust-ci) so they share build-web's
   # warm crate cache and keep their own compiled target dirs across pipelines —
   # a plain `rust:` step image started from nothing every time. Separate steps so
-  # a lint failure reads as a lint failure.
+  # a lint failure reads as a lint failure. rust-test also needs a Postgres for the
+  # `postgres-tests` feature; scripts/rust-ci-test.sh starts one beside the build.
   lint:
     depends_on: []
     image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
@@ -42,8 +43,7 @@ steps:
     commands:
       - |
         START=$$(date +%s)
-        docker build -f Dockerfile.rust-ci --target test --output type=cacheonly \
-          --secret id=github_token,env=GITHUB_TOKEN .
+        ./scripts/rust-ci-test.sh
         echo "timing: rust-ci test took $$(( $$(date +%s) - $$START ))s"
 
   # deploy-v-note.sh takes no arguments: every environment-specific value is a

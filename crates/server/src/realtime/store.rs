@@ -608,3 +608,6 @@ impl PageStore for PgPageStore {
         persist_paper(&self.pool, page_id, paper).await
     }
 }
+
+#[cfg(all(test, feature = "postgres-tests"))]
+mod postgres_tests;

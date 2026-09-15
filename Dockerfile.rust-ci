@@ -51,11 +51,16 @@ RUN --mount=type=cache,id=v-note-cargo-home,target=/cargo-home \
     set -eu; \
     export CARGO_HOME=/cargo-home; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo clippy --workspace --all-targets -- -D warnings; \
+    cargo clippy --workspace --all-targets --features server/postgres-tests -- -D warnings; \
     cargo fmt --all --check
 
 FROM toolchain AS test
 COPY . .
+# Postgres for the `postgres-tests` feature: `#[sqlx::test]` creates one migrated
+# database per test on the server this URL names. It is a sibling container that
+# scripts/rust-ci-test.sh starts and passes in, the only supported way to run this
+# stage — an empty URL fails fast rather than quietly skipping those tests.
+ARG DATABASE_URL=
 # One invocation for all three members, not one per package: separate `-p` runs
 # each resolve features on their own, so every crate they share was compiled once
 # per run. Selecting all three unifies features exactly as the clippy run above
@@ -64,6 +69,10 @@ RUN --mount=type=cache,id=v-note-cargo-home,target=/cargo-home \
     --mount=type=cache,id=v-note-cargo-target-test,target=/app/target \
     --mount=type=secret,id=github_token \
     set -eu; \
+    if [ -z "$DATABASE_URL" ]; then \
+      echo "DATABASE_URL is empty: run this stage via scripts/rust-ci-test.sh" >&2; exit 1; \
+    fi; \
+    export DATABASE_URL; \
     export CARGO_HOME=/cargo-home; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo test -p protocol -p frontend -p server
+    cargo test -p protocol -p frontend -p server --features server/postgres-tests
