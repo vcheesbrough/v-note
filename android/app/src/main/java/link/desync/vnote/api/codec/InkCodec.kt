@@ -20,7 +20,7 @@ internal fun decodeStrokeBatch(json: JSONObject): PageEvent.StrokeBatch =
         strokes = decodeStrokes(json.getJSONArray("strokes")),
     )
 
-internal fun decodeStrokes(array: JSONArray): List<Stroke> =
+private fun decodeStrokes(array: JSONArray): List<Stroke> =
     buildList {
         for (index in 0 until array.length()) {
             add(decodeStroke(array.getJSONObject(index)))

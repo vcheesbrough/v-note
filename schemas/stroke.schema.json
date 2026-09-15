@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://v-note/schemas/stroke.schema.json",
   "title": "Stroke",
-  "description": "One ink stroke. `crates/protocol::Stroke` is the source of truth; this schema is asserted against every stroke-bearing fixture by `crates/protocol/tests/contracts.rs`.",
+  "description": "One ink stroke. `crates/protocol::Stroke` is the source of truth; this schema is asserted against every stroke-bearing fixture by `crates/protocol/tests/schemas.rs`.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "style", "points"],

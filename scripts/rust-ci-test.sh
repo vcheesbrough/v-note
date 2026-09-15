@@ -25,13 +25,30 @@ if [ -z "${GITHUB_TOKEN:-}" ]; then
 fi
 
 name="v-note-rust-ci-pg-${CI_PIPELINE_NUMBER:-local}-$$"
+started=$(date +%s)
+
+# The traps below cannot run if the step is SIGKILLed (a Woodpecker cancel or
+# timeout), which would leave this container running on the CI host. Reap any
+# labelled sidecar more than an hour old first; a live run is never that old,
+# so concurrent pipelines are safe.
+docker ps --filter label=v-note.rust-ci-test=true \
+  --format '{{.ID}} {{.Label "v-note.rust-ci-test.started"}}' |
+  while read -r id since; do
+    # No start stamp: not a sidecar this reaper can age, so leave it alone.
+    case "$since" in '' | *[!0-9]*) continue ;; esac
+    if [ $((started - since)) -gt 3600 ]; then
+      docker rm -f "$id" >/dev/null 2>&1 || true
+    fi
+  done
+
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-docker run -d --rm --name "$name" --label v-note.rust-ci-test=true \
+docker run -d --rm --name "$name" \
+  --label v-note.rust-ci-test=true --label v-note.rust-ci-test.started="$started" \
   -e POSTGRES_USER=v_note -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" -e POSTGRES_DB=v_note \
   "$POSTGRES_IMAGE" >/dev/null
 
