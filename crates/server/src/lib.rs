@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod observability;
+mod realtime;
 mod routes;
 mod thumbnails;
 
@@ -18,9 +19,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::auth::{AuthConfig, JwksCache, auth_middleware};
 use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig, ServerConfig};
 use crate::observability::request_observability_middleware;
+use crate::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
-use crate::routes::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 
 #[derive(Clone)]
 pub struct AppState {

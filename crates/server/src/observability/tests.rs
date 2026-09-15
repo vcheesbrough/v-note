@@ -89,7 +89,7 @@ fn result_size_counts_rows_total_and_widest_row() {
 fn every_postgres_call_site_has_a_db_span() {
     for (file, source) in [
         ("routes/pages.rs", include_str!("../routes/pages.rs")),
-        ("routes/realtime.rs", include_str!("../routes/realtime.rs")),
+        ("realtime/store.rs", include_str!("../realtime/store.rs")),
         ("thumbnails.rs", include_str!("../thumbnails.rs")),
     ] {
         let code = source.split("#[cfg(test)]").next().unwrap_or(source);
