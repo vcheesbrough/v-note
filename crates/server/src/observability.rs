@@ -27,7 +27,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::ObservabilityConfig;
 
-pub const REQUEST_ID_HEADER: &str = "x-request-id";
+pub use protocol::REQUEST_ID_HEADER;
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
 /// Metric/trace label form of [`protocol::PROTOCOL_VERSION`]. A bare `&str`
 /// because both consumers want a `'static` label, so there is no compile-time
