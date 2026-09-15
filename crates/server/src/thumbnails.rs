@@ -539,3 +539,6 @@ async fn cleanup_best_effort(pool: &PgPool, page_id: &str) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "postgres-tests"))]
+mod postgres_tests;

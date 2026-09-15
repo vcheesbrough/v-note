@@ -305,7 +305,9 @@ credentials directly.)
 export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>
 
 just rust-ci lint                                 # CI `lint`: clippy -D warnings, then fmt --check
-just rust-ci test                                 # CI `rust-test`: cargo test -p protocol -p frontend -p server
+just rust-ci test                                 # CI `rust-test`: every crate + `postgres-tests`, on a throwaway Postgres
+DATABASE_URL=postgres://v_note:<password>@127.0.0.1:5432/v_note \
+  cargo test -p server --features postgres-tests  # host run of the database tests against your own Postgres
 docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --build-arg OCI_IMAGE_* for a labelled image (see DEPLOY.md)
 ./scripts/test-container-health.sh v-note:local   # HEALTHCHECK config + a real unhealthy transition
 ./scripts/test-deploy-v-note.sh                   # deploy parameter guards + health gate (no docker socket needed)
