@@ -18,7 +18,7 @@ import okhttp3.WebSocket
 // banner, and the library channel that keeps them live. Extracted from
 // MainActivity (#337), which keeps the sign-in flow and delegates here. The list
 // rules themselves are the pure functions in LibraryPages.kt.
-class LibraryStateHolder(
+internal class LibraryStateHolder(
     private val apiClient: ApiClient,
     // Runs the reconnect delay; the activity's lifecycle scope.
     private val reconnectScope: CoroutineScope,
@@ -37,7 +37,11 @@ class LibraryStateHolder(
         private set
 
     private var librarySocket: WebSocket? = null
-    private var connectionGeneration = 0
+
+    // Bumped for every new channel and on sign-out; a channel remembers the value
+    // it was opened with. Readable so tests can observe sign-out superseding it.
+    internal var connectionGeneration = 0
+        private set
 
     // Loads the list and opens the library channel, once a session is signed in.
     fun start() {
@@ -52,22 +56,6 @@ class LibraryStateHolder(
     fun closePage() {
         selectedPage = null
         loadPages()
-    }
-
-    // The REST calls below run in a fresh Main-dispatcher scope per call, not a
-    // lifecycle scope, exactly as they did inside MainActivity.
-    fun loadPages() {
-        CoroutineScope(Dispatchers.Main).launch {
-            apiClient.listPages().fold(
-                onSuccess = { loaded ->
-                    pages = loaded
-                    error = null
-                },
-                onFailure = { failure ->
-                    error = failure.message ?: "Loading pages failed"
-                },
-            )
-        }
     }
 
     fun createPage(paper: Paper) {
@@ -88,10 +76,9 @@ class LibraryStateHolder(
     fun deletePage(page: PageSummary) {
         CoroutineScope(Dispatchers.Main).launch {
             apiClient.deletePage(page.id).fold(
-                onSuccess = {
-                    removePage(page.id)
-                    error = null
-                },
+                // Exactly what the channel's own page-deleted event does: drop
+                // it, close it if open, clear the error.
+                onSuccess = { applyLibraryEvent(LibraryEvent.PageDeleted(page.id)) },
                 onFailure = { failure ->
                     error = failure.message ?: "Deleting page failed"
                 },
@@ -113,6 +100,32 @@ class LibraryStateHolder(
         librarySocket?.close(1000, "activity destroyed")
     }
 
+    // One library-channel event, on the UI thread: the list follows the event, a
+    // deleted open page is closed, and a live event clears the error banner.
+    internal fun applyLibraryEvent(event: LibraryEvent) {
+        pages = pages.applying(event)
+        if (event is LibraryEvent.PageDeleted && selectedPage?.id == event.pageId) {
+            selectedPage = null
+        }
+        error = null
+    }
+
+    // The REST calls here run in a fresh Main-dispatcher scope per call, not a
+    // lifecycle scope, exactly as they did inside MainActivity.
+    private fun loadPages() {
+        CoroutineScope(Dispatchers.Main).launch {
+            apiClient.listPages().fold(
+                onSuccess = { loaded ->
+                    pages = loaded
+                    error = null
+                },
+                onFailure = { failure ->
+                    error = failure.message ?: "Loading pages failed"
+                },
+            )
+        }
+    }
+
     private fun connect() {
         val generation = ++connectionGeneration
         librarySocket?.close(1000, "reconnecting")
@@ -120,13 +133,7 @@ class LibraryStateHolder(
             apiClient.openLibrarySocket(
                 object : LibraryEventListener {
                     override fun onEvent(event: LibraryEvent) {
-                        runOnUiThread {
-                            pages = pages.applying(event)
-                            if (event is LibraryEvent.PageDeleted && selectedPage?.id == event.pageId) {
-                                selectedPage = null
-                            }
-                            error = null
-                        }
+                        runOnUiThread { applyLibraryEvent(event) }
                     }
 
                     override fun onError(message: String) {
@@ -134,11 +141,11 @@ class LibraryStateHolder(
                     }
 
                     override fun onClosed() {
-                        if (generation != connectionGeneration || !isSignedIn()) return
+                        if (!channelMayReconnect(generation, connectionGeneration, isSignedIn())) return
                         runOnUiThread { error = "Realtime disconnected" }
                         reconnectScope.launch {
                             delay(1_000)
-                            if (generation != connectionGeneration || !isSignedIn()) return@launch
+                            if (!channelMayReconnect(generation, connectionGeneration, isSignedIn())) return@launch
                             loadPages()
                             connect()
                         }
@@ -146,11 +153,13 @@ class LibraryStateHolder(
                 },
             )
     }
-
-    private fun removePage(pageId: String) {
-        pages = pages.without(pageId)
-        if (selectedPage?.id == pageId) {
-            selectedPage = null
-        }
-    }
 }
+
+// Whether a library channel opened as [generation] may still reconnect: it must
+// be the newest channel ([currentGeneration]), and the session must still be
+// signed in. Top-level so it is tested directly (LibraryStateHolderTest).
+internal fun channelMayReconnect(
+    generation: Int,
+    currentGeneration: Int,
+    signedIn: Boolean,
+): Boolean = generation == currentGeneration && signedIn

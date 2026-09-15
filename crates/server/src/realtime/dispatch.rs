@@ -487,9 +487,9 @@ where
 mod tests {
     //! Every page-channel message type against an in-memory [`PageStore`].
     //!
-    //! Lease-*granted* replies are deliberately not produced here:
     //! `send_page_frame_records_the_bytes_it_sent` asserts an exact
-    //! process-wide count for that message type.
+    //! process-wide frame count for `lease-changed`, which dispatch only ever
+    //! broadcasts and never sends as a reply, so no other test here moves it.
 
     use std::sync::Mutex;
 
@@ -816,6 +816,10 @@ mod tests {
         assert!(drain(&mut library).is_empty());
     }
 
+    // Leaves the process-wide `v_note_thumbnail_queue_depth` gauge one higher:
+    // the render job it spawns is cancelled with the test runtime, so its
+    // decrement never runs. Nothing here asserts that global gauge; one that
+    // did would have to account for this.
     #[tokio::test]
     async fn a_commit_that_creates_a_thumbnail_job_announces_it_as_generating() {
         let state = AppState::for_tests();
@@ -1008,6 +1012,46 @@ mod tests {
     // ---- leases -------------------------------------------------------------
 
     #[tokio::test]
+    async fn acquiring_a_free_lease_replies_granted_and_announces_the_new_holder() {
+        let state = AppState::for_tests();
+        let mut page = state.realtime.subscribe_page(PAGE);
+
+        let (keep_open, replies) = handle(
+            &state,
+            &FakeStore::default(),
+            PageClientMessage::AcquireLease,
+        )
+        .await;
+
+        assert!(keep_open);
+        assert_eq!(replies, [PageServerMessage::LeaseGranted]);
+        assert_eq!(
+            drain(&mut page),
+            [PageServerMessage::LeaseChanged {
+                holder: Some(SESSION.to_string())
+            }]
+        );
+        assert_eq!(
+            state.realtime.current_lease_holder(PAGE).as_deref(),
+            Some(SESSION)
+        );
+    }
+
+    #[tokio::test]
+    async fn renewing_a_held_lease_replies_granted_without_a_broadcast() {
+        let state = AppState::for_tests();
+        hold_lease(&state, SESSION);
+        let mut page = state.realtime.subscribe_page(PAGE);
+
+        let (keep_open, replies) =
+            handle(&state, &FakeStore::default(), PageClientMessage::RenewLease).await;
+
+        assert!(keep_open);
+        assert_eq!(replies, [PageServerMessage::LeaseGranted]);
+        assert!(drain(&mut page).is_empty(), "a renewal changes no holder");
+    }
+
+    #[tokio::test]
     async fn acquiring_or_renewing_a_lease_another_session_holds_is_denied() {
         let state = AppState::for_tests();
         hold_lease(&state, "session_b");
@@ -1080,20 +1124,20 @@ mod tests {
     #[tokio::test]
     async fn send_page_frame_records_the_bytes_it_sent() {
         let metrics = crate::observability::metrics();
-        let before = metrics.realtime_message_count("page", "lease-granted");
+        let before = metrics.realtime_message_count("page", "lease-changed");
         let mut sink: Vec<Message> = Vec::new();
 
-        let bytes = send_page_frame(&mut sink, PageServerMessage::LeaseGranted)
+        let bytes = send_page_frame(&mut sink, PageServerMessage::LeaseChanged { holder: None })
             .await
             .expect("a Vec sink never fails");
 
         let frames = text_frames(&sink);
-        assert_eq!(frames, [r#"{"type":"lease-granted"}"#]);
+        assert_eq!(frames, [r#"{"type":"lease-changed"}"#]);
         assert_eq!(bytes, frames[0].len());
-        // No other test in this binary sends `lease-granted`, so the delta on the
+        // No other test in this binary sends `lease-changed` as a frame, so the delta on the
         // process-wide histogram is exact.
         assert_eq!(
-            metrics.realtime_message_count("page", "lease-granted"),
+            metrics.realtime_message_count("page", "lease-changed"),
             before + 1
         );
     }
