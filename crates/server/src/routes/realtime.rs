@@ -8,7 +8,7 @@ use axum::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -28,7 +28,7 @@ use tracing::Instrument as _;
 use crate::observability::{db_query_span, metered};
 
 use crate::AppState;
-use crate::auth::{Claims, validate_jwt};
+use crate::auth::{Claims, extract_bearer, validate_jwt};
 
 const TICKET_TTL_SECONDS: i64 = 60;
 const LIBRARY_CHANNEL_CAPACITY: usize = 64;
@@ -362,14 +362,6 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: WebSoc
             }
         }
     }
-}
-
-fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let mut parts = value.splitn(2, char::is_whitespace);
-    let scheme = parts.next()?;
-    let token = parts.next()?.trim();
-    (scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty()).then(|| token.to_string())
 }
 
 fn random_hex(bytes: usize) -> String {

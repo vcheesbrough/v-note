@@ -209,7 +209,7 @@ impl Paper {
     /// paper has no horizontal rules.
     pub const fn rule_spacing(self) -> Option<f64> {
         match self {
-            Paper::None => Option::None,
+            Paper::None => None,
             Paper::RuledMarginNarrow | Paper::RuledNarrow => Some(RULE_SPACING_NARROW),
             Paper::RuledMarginWide | Paper::RuledWide => Some(RULE_SPACING_WIDE),
             Paper::SquaredSmall => Some(GRID_SPACING_SMALL),
@@ -223,7 +223,7 @@ impl Paper {
         match self {
             Paper::SquaredSmall => Some(GRID_SPACING_SMALL),
             Paper::SquaredLarge => Some(GRID_SPACING_LARGE),
-            _ => Option::None,
+            _ => None,
         }
     }
 
@@ -533,8 +533,8 @@ mod tests {
             let back: Paper = serde_json::from_str(&json).expect("paper should deserialize");
             assert_eq!(back, paper);
         }
-        assert_eq!(Paper::from_wire("ruled-margin-huge"), Option::None);
-        assert_eq!(Paper::from_wire(""), Option::None);
+        assert_eq!(Paper::from_wire("ruled-margin-huge"), None);
+        assert_eq!(Paper::from_wire(""), None);
         assert_eq!(Paper::ALL[0], Paper::None, "None leads the palette");
     }
 
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(Paper::RuledMarginWide.rule_spacing(), Some(144.0));
         assert_eq!(Paper::SquaredSmall.rule_spacing(), Some(96.0));
         assert_eq!(Paper::SquaredLarge.rule_spacing(), Some(144.0));
-        assert_eq!(Paper::None.rule_spacing(), Option::None);
+        assert_eq!(Paper::None.rule_spacing(), None);
 
         assert_eq!(Paper::SquaredSmall.column_spacing(), Some(96.0));
         assert_eq!(Paper::SquaredLarge.column_spacing(), Some(144.0));
@@ -557,7 +557,7 @@ mod tests {
             Paper::RuledMarginNarrow,
             Paper::RuledMarginWide,
         ] {
-            assert_eq!(paper.column_spacing(), Option::None);
+            assert_eq!(paper.column_spacing(), None);
         }
 
         let with_margin: Vec<Paper> = Paper::ALL
@@ -638,7 +638,7 @@ mod tests {
                 .iter()
                 .all(|pitch| f64::from(*candidate) % pitch == 0.0)
         });
-        assert_eq!(lower, Option::None, "a smaller common multiple exists");
+        assert_eq!(lower, None, "a smaller common multiple exists");
 
         // The enumeration agrees: a squared viewport reaching MARGIN_X puts a
         // column exactly there.
