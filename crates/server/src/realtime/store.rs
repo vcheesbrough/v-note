@@ -11,7 +11,7 @@ use tracing::Instrument as _;
 
 use crate::observability::{db_query_span, metered};
 
-pub(super) async fn page_belongs_to_owner(
+async fn page_belongs_to_owner(
     pool: &PgPool,
     page_id: &str,
     owner_id: &str,
@@ -28,7 +28,7 @@ pub(super) async fn page_belongs_to_owner(
 /// The page's current paper. An unrecognised stored value (only reachable if the
 /// `pages_paper_known` CHECK were dropped) degrades to a blank page rather than
 /// failing the connection.
-pub(super) async fn current_paper(pool: &PgPool, page_id: &str) -> Result<Paper, sqlx::Error> {
+async fn current_paper(pool: &PgPool, page_id: &str) -> Result<Paper, sqlx::Error> {
     let stored: String = sqlx::query_scalar("SELECT paper FROM pages WHERE id = $1")
         .bind(page_id)
         .fetch_one(metered(pool))
@@ -37,7 +37,7 @@ pub(super) async fn current_paper(pool: &PgPool, page_id: &str) -> Result<Paper,
     Ok(Paper::from_wire(&stored).unwrap_or_default())
 }
 
-pub(super) async fn max_seq(pool: &PgPool, page_id: &str) -> Result<u64, sqlx::Error> {
+async fn max_seq(pool: &PgPool, page_id: &str) -> Result<u64, sqlx::Error> {
     let seq: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1")
             .bind(page_id)
@@ -90,7 +90,7 @@ struct TombstoneBatchRow {
     stroke_ids: sqlx::types::Json<Vec<String>>,
 }
 
-pub(super) async fn load_page_replay(
+async fn load_page_replay(
     pool: &PgPool,
     page_id: &str,
     from_seq: u64,
@@ -137,7 +137,7 @@ pub(super) struct PersistedBatch {
     pub(super) updated_at: Option<String>,
 }
 
-pub(super) async fn persist_batch(
+async fn persist_batch(
     pool: &PgPool,
     page_id: &str,
     client_batch_id: &str,
@@ -291,7 +291,7 @@ pub(super) struct PersistedTombstones {
     pub(super) updated_at: Option<String>,
 }
 
-pub(super) async fn persist_tombstones(
+async fn persist_tombstones(
     pool: &PgPool,
     page_id: &str,
     client_mutation_id: &str,
@@ -398,7 +398,7 @@ pub(super) struct PersistedPaper {
     pub(super) updated_at: Option<String>,
 }
 
-pub(super) async fn persist_paper(
+async fn persist_paper(
     pool: &PgPool,
     page_id: &str,
     paper: Paper,
@@ -507,4 +507,104 @@ pub(super) async fn persist_paper(
         // page really was last edited now.
         updated_at: Some(updated_at),
     })
+}
+
+/// The page channel's persistence port. `dispatch` depends on this rather than
+/// on Postgres, so every client message is unit-tested against an in-memory
+/// store; [`PgPageStore`] is the production implementation.
+pub(super) trait PageStore: Send + Sync {
+    async fn page_belongs_to_owner(
+        &self,
+        page_id: &str,
+        owner_id: &str,
+    ) -> Result<bool, sqlx::Error>;
+    async fn current_paper(&self, page_id: &str) -> Result<Paper, sqlx::Error>;
+    async fn max_seq(&self, page_id: &str) -> Result<u64, sqlx::Error>;
+    async fn load_page_replay(
+        &self,
+        page_id: &str,
+        from_seq: u64,
+    ) -> Result<(Vec<StrokeBatch>, Vec<TombstoneBatch>), sqlx::Error>;
+    async fn persist_batch(
+        &self,
+        page_id: &str,
+        client_batch_id: &str,
+        strokes: &[Stroke],
+    ) -> Result<PersistedBatch, sqlx::Error>;
+    async fn persist_tombstones(
+        &self,
+        page_id: &str,
+        client_mutation_id: &str,
+        stroke_ids: &[String],
+    ) -> Result<PersistedTombstones, sqlx::Error>;
+    async fn persist_paper(
+        &self,
+        page_id: &str,
+        paper: Paper,
+    ) -> Result<PersistedPaper, sqlx::Error>;
+}
+
+/// [`PageStore`] over the application pool. Each method delegates to the
+/// spanned, metered query function above, so the db-span audit in
+/// `observability/tests.rs` still sees every call site.
+pub(super) struct PgPageStore {
+    pool: PgPool,
+}
+
+impl PgPageStore {
+    pub(super) fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+impl PageStore for PgPageStore {
+    async fn page_belongs_to_owner(
+        &self,
+        page_id: &str,
+        owner_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        page_belongs_to_owner(&self.pool, page_id, owner_id).await
+    }
+
+    async fn current_paper(&self, page_id: &str) -> Result<Paper, sqlx::Error> {
+        current_paper(&self.pool, page_id).await
+    }
+
+    async fn max_seq(&self, page_id: &str) -> Result<u64, sqlx::Error> {
+        max_seq(&self.pool, page_id).await
+    }
+
+    async fn load_page_replay(
+        &self,
+        page_id: &str,
+        from_seq: u64,
+    ) -> Result<(Vec<StrokeBatch>, Vec<TombstoneBatch>), sqlx::Error> {
+        load_page_replay(&self.pool, page_id, from_seq).await
+    }
+
+    async fn persist_batch(
+        &self,
+        page_id: &str,
+        client_batch_id: &str,
+        strokes: &[Stroke],
+    ) -> Result<PersistedBatch, sqlx::Error> {
+        persist_batch(&self.pool, page_id, client_batch_id, strokes).await
+    }
+
+    async fn persist_tombstones(
+        &self,
+        page_id: &str,
+        client_mutation_id: &str,
+        stroke_ids: &[String],
+    ) -> Result<PersistedTombstones, sqlx::Error> {
+        persist_tombstones(&self.pool, page_id, client_mutation_id, stroke_ids).await
+    }
+
+    async fn persist_paper(
+        &self,
+        page_id: &str,
+        paper: Paper,
+    ) -> Result<PersistedPaper, sqlx::Error> {
+        persist_paper(&self.pool, page_id, paper).await
+    }
 }

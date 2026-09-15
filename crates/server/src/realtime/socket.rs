@@ -17,13 +17,12 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{PageClientMessage, PageServerMessage, RealtimeTicketResponse};
 use serde::Deserialize;
-use sqlx::PgPool;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
 
-use super::dispatch::{dispatch_page_client_message, send_page, send_page_frame};
+use super::dispatch::{PageContext, dispatch_page_client_message, send_page, send_page_frame};
 use super::hub::{Fanout, fanout_delivery_span, random_hex};
-use super::store::{current_paper, max_seq, page_belongs_to_owner};
+use super::store::{PageStore, PgPageStore};
 use crate::AppState;
 use crate::auth::{Claims, extract_bearer, validate_jwt};
 
@@ -169,11 +168,9 @@ pub async fn page_socket(
         }
     };
 
-    let Some(pool) = state.db.clone() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "database not configured").into_response();
-    };
+    let store = PgPageStore::new(state.db.clone());
 
-    match page_belongs_to_owner(&pool, &page_id, &owner_id).await {
+    match store.page_belongs_to_owner(&page_id, &owner_id).await {
         Ok(true) => {}
         Ok(false) => return (StatusCode::FORBIDDEN, "page not found").into_response(),
         Err(error) => {
@@ -186,14 +183,19 @@ pub async fn page_socket(
     let upgrade_span = tracing::Span::current();
     ws.on_upgrade(move |socket| {
         async move {
-            handle_page_socket(state, pool, page_id, socket).await;
+            handle_page_socket(state, store, page_id, socket).await;
         }
         .instrument(upgrade_span)
     })
 }
 
 #[tracing::instrument(skip_all, fields(page_id = %page_id, session_id))]
-async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, socket: WebSocket) {
+async fn handle_page_socket(
+    state: AppState,
+    store: PgPageStore,
+    page_id: String,
+    socket: WebSocket,
+) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
     crate::observability::metrics().record_realtime_event("page", "connected");
     let session_id = format!("session_{}", random_hex(16));
@@ -201,7 +203,7 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
     let mut receiver = state.realtime.subscribe_page(&page_id);
     let (mut sender, mut inbound) = socket.split();
 
-    let last_seq = max_seq(&pool, &page_id).await.unwrap_or(0);
+    let last_seq = store.max_seq(&page_id).await.unwrap_or(0);
     let lease_holder = state.realtime.current_lease_holder(&page_id);
     // Carrying paper here makes the page channel self-sufficient: a reconnecting
     // client gets the authoritative value without a second REST round trip, which
@@ -213,7 +215,7 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
     // and tombstones, so a synthesized blank would render as a blank page for as
     // long as the socket stayed open. Failing loudly is recoverable; rendering
     // the wrong page silently is not.
-    let paper = match current_paper(&pool, &page_id).await {
+    let paper = match store.current_paper(&page_id).await {
         Ok(paper) => paper,
         Err(error) => {
             tracing::error!(error = %error, %page_id, "could not read page paper");
@@ -274,7 +276,7 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
                 match inbound_message {
                     Some(Ok(Message::Text(text))) => {
                         if !handle_page_client_message(
-                            &state, &pool, &page_id, &session_id, &mut sender, &text,
+                            &state, &store, &page_id, &session_id, &mut sender, &text,
                         )
                         .await
                         {
@@ -318,7 +320,7 @@ async fn handle_page_socket(state: AppState, pool: PgPool, page_id: String, sock
 )]
 async fn handle_page_client_message(
     state: &AppState,
-    pool: &PgPool,
+    store: &PgPageStore,
     page_id: &str,
     session_id: &str,
     sender: &mut SplitSink<WebSocket, Message>,
@@ -342,9 +344,13 @@ async fn handle_page_client_message(
     let message_type = message.message_type();
     tracing::Span::current().record("message_type", message_type);
 
-    let keep_open =
-        dispatch_page_client_message(state, pool, page_id, session_id, sender, message, received)
-            .await;
+    let ctx = PageContext {
+        state,
+        store,
+        page_id,
+        session_id,
+    };
+    let keep_open = dispatch_page_client_message(&ctx, sender, message, received).await;
     // Server-side handling only — parse to the last frame this handler sends.
     // Not end-to-end freshness, which needs client timestamps (#154).
     crate::observability::metrics()

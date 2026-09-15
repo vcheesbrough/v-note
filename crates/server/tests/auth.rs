@@ -9,14 +9,14 @@ use tower::util::ServiceExt;
 
 use common::{
     SignedTokenClaims, android_auth_config, one_hour_from_now, sign_test_token, test_auth_config,
-    test_jwks_cache,
+    test_jwks_cache, unreachable_pool,
 };
 
 #[tokio::test]
 async fn me_without_token_returns_401_when_auth_enabled() {
     let auth = Arc::new(test_auth_config());
     let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-    let app = build_router("test-version".to_string(), auth, jwks);
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
 
     let response = app
         .oneshot(
@@ -35,7 +35,7 @@ async fn me_without_token_returns_401_when_auth_enabled() {
 async fn me_with_malformed_bearer_returns_401() {
     let auth = Arc::new(test_auth_config());
     let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-    let app = build_router("test-version".to_string(), auth, jwks);
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
 
     let response = app
         .oneshot(
@@ -55,7 +55,7 @@ async fn me_with_malformed_bearer_returns_401() {
 async fn health_is_public_when_auth_enabled() {
     let auth = Arc::new(test_auth_config());
     let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-    let app = build_router("test-version".to_string(), auth, jwks);
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
 
     let response = app
         .oneshot(
@@ -74,7 +74,7 @@ async fn health_is_public_when_auth_enabled() {
 async fn mobile_callback_attempts_custom_scheme_handoff() {
     let auth = Arc::new(test_auth_config());
     let jwks = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-    let app = build_router("test-version".to_string(), auth, jwks);
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
 
     let response = app
         .oneshot(
@@ -110,7 +110,7 @@ async fn me_with_android_bearer_returns_200() {
     let config = android_auth_config();
     let auth = Arc::new(config.clone());
     let jwks = Arc::new(test_jwks_cache());
-    let app = build_router("test-version".to_string(), auth, jwks);
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
 
     let exp = one_hour_from_now();
     let token = sign_test_token(SignedTokenClaims {

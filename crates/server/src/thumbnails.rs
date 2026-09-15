@@ -22,9 +22,7 @@ const PADDING: f32 = 12.0;
 const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 4.0;
 
 pub fn recover_pending(state: AppState) {
-    let Some(pool) = state.db.clone() else {
-        return;
-    };
+    let pool = state.db.clone();
     // Runs at startup, detached from any request, so it is a trace of its own.
     let span = tracing::info_span!(parent: None, "thumbnail.recover");
     tokio::spawn(
@@ -79,9 +77,7 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
     );
     span.follows_from(tracing::Span::current());
     tokio::spawn(async move {
-        let Some(pool) = state.db.as_ref() else {
-            return;
-        };
+        let pool = &state.db;
         let started = Instant::now();
         let result = generate(pool, &page_id, source_seq).await;
         let thumbnail = match result {

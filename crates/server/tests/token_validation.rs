@@ -14,7 +14,7 @@ use tower::util::ServiceExt;
 
 use common::{
     SignedTokenClaims, TEST_JWT_KID, TEST_RSA_N, one_hour_from_now, sign_test_token,
-    test_auth_config, test_jwks_cache,
+    test_auth_config, test_jwks_cache, unreachable_pool,
 };
 
 const VALIDATION_FAILED: TokenValidationError =
@@ -139,6 +139,7 @@ async fn me_with_expired_bearer_returns_401() {
         "test-version".to_string(),
         Arc::new(config),
         Arc::new(test_jwks_cache()),
+        unreachable_pool(),
     );
 
     let response = app
