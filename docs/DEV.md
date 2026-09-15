@@ -207,6 +207,20 @@ Unit tests (host or Docker):
 source scripts/android-env.sh && cd android && ./gradlew :app:testDevDebugUnitTest
 ```
 
+Static gates (ktlint, detekt, Android Lint) — CI runs all three in the `build-android`
+step, so a push with a new finding is red:
+
+```bash
+just android-lint-docker    # CI-parity (no local JDK/SDK needed)
+source scripts/android-env.sh && cd android && ./gradlew :app:ktlintCheck :app:detekt :app:lintDevDebug
+```
+
+`android/detekt.yml` holds the detekt config (complexity rules on top of the defaults);
+`android/app/detekt-baseline.xml` and `android/app/lint-baseline.xml` freeze the findings
+that existed when the gate was introduced (#337). Only new findings fail. Shrink the
+baselines as code is split; regenerate detekt's with `:app:detektBaseline` only when
+that is the deliberate intent.
+
 Instrumented tests: `./gradlew :app:connectedDevDebugAndroidTest` with an emulator running. CI gates both supported device generations: Android 10/API 29 (Galaxy Note9) and Android 16/API 36 (Galaxy Tab S8 Ultra). Reproduce either lane with `just android-instrumented-docker 29` or `just android-instrumented-docker 36`; API 36 is the recipe default.
 
 ### Emulator (WSL2 / Hyper-V)
@@ -336,7 +350,9 @@ one record: `docker buildx prune --filter id=<ID>`, with the ID from `docker bui
 
 **Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `deploy`
 (after all three). A commit is green only when every one of them is; the combined
-GitHub status below reflects all of them.
+GitHub status below reflects all of them. `checks` gates Rust with clippy (`-D warnings`,
+plus the `[workspace.lints]` ratchet in `Cargo.toml` / `clippy.toml`) and rustfmt;
+`android` gates Kotlin with ktlint, detekt and Android Lint inside `build-android`.
 
 The e2e stack waits on the app's healthcheck (`service_healthy`), so a container
 that never becomes healthy fails the run with `dependency failed to start`

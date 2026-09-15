@@ -104,8 +104,8 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
 - **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
   `checks` (lint, rust-test, deploy-script-validation, grafana-dashboard-validation,
   android-build-box-pin),
-  `web` (build-web → e2e-web) and `android` (build-android, API 29/36
-  instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
+  `web` (build-web → e2e-web) and `android` (build-android — which also gates
+  ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
   auto-deploy-dev → tag) runs only when all three succeed. **`ci-watch` must follow
   every workflow of the pushed commit's pipeline to completion** — one green
   workflow while another is still running is not a result. Do not fold them back
