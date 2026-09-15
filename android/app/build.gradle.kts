@@ -5,6 +5,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jlleitschuh.gradle.ktlint")
+    id("io.gitlab.arturbosch.detekt")
 }
 
 val repoRoot = rootProject.projectDir.parentFile
@@ -166,6 +167,34 @@ android {
         compose = true
         buildConfig = true
     }
+
+    lint {
+        // Gate, not a report: CI runs `:app:lintDevDebug` in the Dockerfile.android
+        // builder stage (#337). Existing findings are frozen in the baseline; anything
+        // new — warning or error — fails the build.
+        abortOnError = true
+        warningsAsErrors = true
+        baseline = file("lint-baseline.xml")
+        // Time-dependent checks: they start firing when a newer dependency, AGP or API
+        // level is published, which would turn an unrelated push red. Dependency
+        // upgrades are their own iterations (#330-style), not a lint outcome.
+        disable +=
+            listOf(
+                "GradleDependency",
+                "NewerVersionAvailable",
+                "AndroidGradlePluginVersion",
+                "OldTargetApi",
+            )
+    }
+}
+
+detekt {
+    // Complexity ratchet (LongMethod, LargeClass, ComplexCondition, TooManyFunctions).
+    // Defaults plus `../detekt.yml`; existing findings are frozen in the baseline so
+    // only new ones fail. #337 slice 9 shrinks the baseline as functions are split.
+    buildUponDefaultConfig = true
+    config.setFrom(rootProject.file("detekt.yml"))
+    baseline = file("detekt-baseline.xml")
 }
 
 dependencies {
