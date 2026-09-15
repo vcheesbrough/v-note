@@ -209,8 +209,8 @@ where
     Tx: Sink<Message> + Unpin,
 {
     // Unlike commit_batch and set_paper, this path records no `lease_denied`
-    // event and no `thumbnail_generation_queued`. Carried over as found: #337
-    // is behaviour-preserving, and the gap is reported on the card.
+    // event and no `thumbnail_generation_queued`. Carried over as found by
+    // #337, which only restructures; the fix is tracked in #339.
     if let LeaseOutcome::Denied { holder } = ctx
         .state
         .realtime

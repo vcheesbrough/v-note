@@ -17,69 +17,192 @@ pub(crate) const MIN_CANVAS_SCALE: f64 = 0.08;
 const MAX_CANVAS_SCALE: f64 = 4.0;
 const WHEEL_ZOOM_STEP: f64 = 1.0163963568148535;
 
+/// The page-channel state the viewer renders. `Copy`, like the signals it holds.
+#[derive(Clone, Copy)]
+struct PageFeed {
+    batches: RwSignal<Vec<StrokeBatch>>,
+    status: RwSignal<String>,
+    error: RwSignal<Option<String>>,
+    last_seq: RwSignal<u64>,
+    paper: RwSignal<Paper>,
+}
+
+/// Pan and zoom of the viewer canvas, in CSS pixels, plus the drag in progress.
+#[derive(Clone, Copy)]
+struct PanZoom {
+    offset_x: RwSignal<f64>,
+    offset_y: RwSignal<f64>,
+    scale: RwSignal<f64>,
+    dragging: RwSignal<Option<(i32, f64, f64)>>,
+}
+
+impl PanZoom {
+    fn new() -> Self {
+        Self {
+            offset_x: RwSignal::new(80.0),
+            offset_y: RwSignal::new(80.0),
+            scale: RwSignal::new(MIN_CANVAS_SCALE),
+            dragging: RwSignal::new(None),
+        }
+    }
+
+    fn pointer_down(self, event: &PointerEvent) {
+        self.dragging.set(Some((
+            event.pointer_id(),
+            event.client_x() as f64,
+            event.client_y() as f64,
+        )));
+        if let Some(target) = canvas_target(event) {
+            let _ = target.set_pointer_capture(event.pointer_id());
+        }
+    }
+
+    fn pointer_move(self, event: &PointerEvent) {
+        if let Some((pointer_id, last_x, last_y)) = self.dragging.get_untracked()
+            && pointer_id == event.pointer_id()
+        {
+            let x = event.client_x() as f64;
+            let y = event.client_y() as f64;
+            self.offset_x.update(|value| *value += x - last_x);
+            self.offset_y.update(|value| *value += y - last_y);
+            self.dragging.set(Some((pointer_id, x, y)));
+        }
+    }
+
+    fn pointer_up(self, event: &PointerEvent) {
+        if self
+            .dragging
+            .get_untracked()
+            .is_some_and(|(pointer_id, _, _)| pointer_id == event.pointer_id())
+        {
+            self.dragging.set(None);
+        }
+    }
+
+    fn cancel_drag(self) {
+        self.dragging.set(None);
+    }
+
+    /// Zoom one wheel notch about the cursor, so the ink under it stays put.
+    fn wheel(self, event: &WheelEvent) {
+        event.prevent_default();
+        let old_scale = self.scale.get_untracked();
+        let Some(new_scale) = wheel_scale(old_scale, event.delta_y()) else {
+            return;
+        };
+        if let Some(target) = canvas_target(event) {
+            let rect = target.get_bounding_client_rect();
+            if rect.width() > 0.0 && rect.height() > 0.0 {
+                let canvas_x = event.client_x() as f64 - rect.left();
+                let canvas_y = event.client_y() as f64 - rect.top();
+                self.offset_x.set(zoom_offset(
+                    self.offset_x.get_untracked(),
+                    canvas_x,
+                    old_scale,
+                    new_scale,
+                ));
+                self.offset_y.set(zoom_offset(
+                    self.offset_y.get_untracked(),
+                    canvas_y,
+                    old_scale,
+                    new_scale,
+                ));
+            }
+        }
+        self.scale.set(new_scale);
+    }
+}
+
+fn canvas_target(event: &web_sys::MouseEvent) -> Option<HtmlCanvasElement> {
+    event
+        .target()
+        .and_then(|target| target.dyn_into::<HtmlCanvasElement>().ok())
+}
+
+/// The scale after one wheel notch (`delta_y < 0` zooms in), or `None` when the
+/// scale is already at the limit in that direction.
+fn wheel_scale(old_scale: f64, delta_y: f64) -> Option<f64> {
+    let factor = if delta_y < 0.0 {
+        WHEEL_ZOOM_STEP
+    } else {
+        1.0 / WHEEL_ZOOM_STEP
+    };
+    let new_scale = (old_scale * factor).clamp(MIN_CANVAS_SCALE, MAX_CANVAS_SCALE);
+    ((new_scale - old_scale).abs() >= f64::EPSILON).then_some(new_scale)
+}
+
+/// The offset along one axis that keeps the world point under `canvas` (a CSS
+/// position inside the canvas) fixed while the scale changes.
+fn zoom_offset(offset: f64, canvas: f64, old_scale: f64, new_scale: f64) -> f64 {
+    let world = (canvas - offset) / old_scale;
+    canvas - world * new_scale
+}
+
+/// Reset the feed and follow the page channel until the owning effect is
+/// cleaned up, which aborts the loop.
+fn follow_page_channel(page_id: String, initial_paper: Paper, feed: PageFeed) {
+    feed.batches.set(Vec::new());
+    feed.error.set(None);
+    feed.status.set("Connecting".to_string());
+    feed.last_seq.set(0);
+    feed.paper.set(initial_paper);
+    let (abort_handle, abort_registration) = AbortHandle::new_pair();
+    on_cleanup(move || abort_handle.abort());
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Ok(Err(error)) = Abortable::new(
+            realtime::page_realtime_loop(
+                page_id,
+                feed.batches,
+                feed.status,
+                feed.error,
+                feed.last_seq,
+                feed.paper,
+            ),
+            abort_registration,
+        )
+        .await
+        {
+            feed.error.set(Some(error));
+            feed.status.set("Disconnected".to_string());
+        }
+    });
+}
+
 #[component]
 pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoView {
     let canvas = NodeRef::<leptos::html::Canvas>::new();
-    let batches = RwSignal::new(Vec::<StrokeBatch>::new());
-    let viewer_error = RwSignal::new(None::<String>);
-    let viewer_status = RwSignal::new("Connecting".to_string());
-    let last_seq = RwSignal::new(0_u64);
-    let offset_x = RwSignal::new(80.0_f64);
-    let offset_y = RwSignal::new(80.0_f64);
-    let scale = RwSignal::new(MIN_CANVAS_SCALE);
-    let dragging = RwSignal::new(None::<(i32, f64, f64)>);
-    let canvas_resize_tick = RwSignal::new(0_u64);
     // Seeded from the library listing so the first frame is not blank, then
     // superseded by the authoritative value `Welcome` carries.
-    let paper = RwSignal::new(page.paper);
+    let feed = PageFeed {
+        batches: RwSignal::new(Vec::new()),
+        status: RwSignal::new("Connecting".to_string()),
+        error: RwSignal::new(None),
+        last_seq: RwSignal::new(0),
+        paper: RwSignal::new(page.paper),
+    };
+    let pan_zoom = PanZoom::new();
+    let canvas_resize_tick = RwSignal::new(0_u64);
     let initial_paper = page.paper;
     let page_id = page.id.clone();
     let page_title = library::page_display_title(&page);
 
-    Effect::new(move |_| {
-        batches.set(Vec::new());
-        viewer_error.set(None);
-        viewer_status.set("Connecting".to_string());
-        last_seq.set(0);
-        paper.set(initial_paper);
-        let page_id = page_id.clone();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        on_cleanup(move || abort_handle.abort());
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(Err(error)) = Abortable::new(
-                realtime::page_realtime_loop(
-                    page_id,
-                    batches,
-                    viewer_status,
-                    viewer_error,
-                    last_seq,
-                    paper,
-                ),
-                abort_registration,
-            )
-            .await
-            {
-                viewer_error.set(Some(error));
-                viewer_status.set("Disconnected".to_string());
-            }
-        });
-    });
+    Effect::new(move |_| follow_page_channel(page_id.clone(), initial_paper, feed));
 
     Effect::new(move |_| {
-        batches.track();
-        paper.track();
-        offset_x.track();
-        offset_y.track();
-        scale.track();
+        feed.batches.track();
+        feed.paper.track();
+        pan_zoom.offset_x.track();
+        pan_zoom.offset_y.track();
+        pan_zoom.scale.track();
         canvas_resize_tick.track();
         if let Some(canvas) = canvas.get() {
             render::draw_canvas(
                 &canvas,
-                &batches.get_untracked(),
-                paper.get_untracked(),
-                offset_x.get_untracked(),
-                offset_y.get_untracked(),
-                scale.get_untracked(),
+                &feed.batches.get_untracked(),
+                feed.paper.get_untracked(),
+                pan_zoom.offset_x.get_untracked(),
+                pan_zoom.offset_y.get_untracked(),
+                pan_zoom.scale.get_untracked(),
             );
         }
     });
@@ -97,11 +220,11 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
                 <button class="button secondary" on:click=move |_| on_close.run(())>"Back"</button>
                 <h2 class="canvas-title">{page_title}</h2>
                 <span class="live-status" aria-live="polite">
-                    {move || format!("{} · seq {}", viewer_status.get(), last_seq.get())}
+                    {move || format!("{} · seq {}", feed.status.get(), feed.last_seq.get())}
                 </span>
             </div>
 
-            {move || viewer_error.get().map(|error| view! {
+            {move || feed.error.get().map(|error| view! {
                 <p class="alert" role="alert">{error}</p>
             })}
 
@@ -111,56 +234,11 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
                 aria-label="Read-only ink canvas"
                 data-testid="ink-canvas"
                 class="ink-canvas"
-                on:pointerdown=move |event: PointerEvent| {
-                    dragging.set(Some((event.pointer_id(), event.client_x() as f64, event.client_y() as f64)));
-                    if let Some(target) = event.target().and_then(|target| target.dyn_into::<HtmlCanvasElement>().ok()) {
-                        let _ = target.set_pointer_capture(event.pointer_id());
-                    }
-                }
-                on:pointermove=move |event: PointerEvent| {
-                    if let Some((pointer_id, last_x, last_y)) = dragging.get_untracked()
-                        && pointer_id == event.pointer_id()
-                    {
-                        let x = event.client_x() as f64;
-                        let y = event.client_y() as f64;
-                        offset_x.update(|value| *value += x - last_x);
-                        offset_y.update(|value| *value += y - last_y);
-                        dragging.set(Some((pointer_id, x, y)));
-                    }
-                }
-                on:pointerup=move |event: PointerEvent| {
-                    if dragging
-                        .get_untracked()
-                        .is_some_and(|(pointer_id, _, _)| pointer_id == event.pointer_id())
-                    {
-                        dragging.set(None);
-                    }
-                }
-                on:pointercancel=move |_| dragging.set(None)
-                on:wheel=move |event: WheelEvent| {
-                    event.prevent_default();
-                    let factor = if event.delta_y() < 0.0 { WHEEL_ZOOM_STEP } else { 1.0 / WHEEL_ZOOM_STEP };
-                    let old_scale = scale.get_untracked();
-                    let new_scale = (old_scale * factor).clamp(MIN_CANVAS_SCALE, MAX_CANVAS_SCALE);
-                    if (new_scale - old_scale).abs() < f64::EPSILON {
-                        return;
-                    }
-
-                    if let Some(target) = event.target().and_then(|target| target.dyn_into::<HtmlCanvasElement>().ok()) {
-                        let rect = target.get_bounding_client_rect();
-                        let rect_width = rect.width();
-                        let rect_height = rect.height();
-                        if rect_width > 0.0 && rect_height > 0.0 {
-                            let canvas_x = event.client_x() as f64 - rect.left();
-                            let canvas_y = event.client_y() as f64 - rect.top();
-                            let world_x = (canvas_x - offset_x.get_untracked()) / old_scale;
-                            let world_y = (canvas_y - offset_y.get_untracked()) / old_scale;
-                            offset_x.set(canvas_x - world_x * new_scale);
-                            offset_y.set(canvas_y - world_y * new_scale);
-                        }
-                    }
-                    scale.set(new_scale);
-                }
+                on:pointerdown=move |event: PointerEvent| pan_zoom.pointer_down(&event)
+                on:pointermove=move |event: PointerEvent| pan_zoom.pointer_move(&event)
+                on:pointerup=move |event: PointerEvent| pan_zoom.pointer_up(&event)
+                on:pointercancel=move |_| pan_zoom.cancel_drag()
+                on:wheel=move |event: WheelEvent| pan_zoom.wheel(&event)
             />
             </div>
         </section>
@@ -252,6 +330,28 @@ fn mark_ink_applied(seq: u64) {
 mod tests {
     use super::*;
     use crate::render;
+
+    #[test]
+    fn a_wheel_notch_zooms_in_or_out_and_stops_at_the_limits() {
+        let zoomed_in = wheel_scale(1.0, -1.0).expect("room to zoom in");
+        let zoomed_out = wheel_scale(1.0, 1.0).expect("room to zoom out");
+        assert!(zoomed_in > 1.0 && zoomed_out < 1.0);
+        assert!(
+            (zoomed_in * zoomed_out - 1.0).abs() < 1e-12,
+            "in then out is a no-op"
+        );
+        assert_eq!(wheel_scale(MIN_CANVAS_SCALE, 1.0), None);
+        assert_eq!(wheel_scale(MAX_CANVAS_SCALE, -1.0), None);
+    }
+
+    #[test]
+    fn zooming_keeps_the_world_point_under_the_cursor_fixed() {
+        let (offset, cursor, old_scale, new_scale) = (80.0, 300.0, 0.5, 0.75);
+        let world_before = (cursor - offset) / old_scale;
+        let new_offset = zoom_offset(offset, cursor, old_scale, new_scale);
+        let world_after = (cursor - new_offset) / new_scale;
+        assert!((world_before - world_after).abs() < 1e-9);
+    }
 
     /// The page channel is authoritative for paper; nothing else changes it.
     #[test]

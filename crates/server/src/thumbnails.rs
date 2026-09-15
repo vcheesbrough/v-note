@@ -457,7 +457,7 @@ fn render_pressure_stroke(
         },
     );
     // Axis-aligned max, matching Android's live-canvas heuristic
-    // (`maxOf(maxX - minX, maxY - minY) < maxWidth` in PageCanvas.kt) — a
+    // (`maxOf(maxX - minX, maxY - minY) < maxWidth` in InkRenderer.kt) — a
     // bounding-box diagonal would classify some short diagonal strokes
     // differently than Android does for the same ink, so the library preview
     // would disagree with the page itself about the shape of a stroke.

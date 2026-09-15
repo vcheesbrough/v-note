@@ -41,7 +41,7 @@ Post-MVP backlog and full card map: [v-notes board](https://bored.desync.link/bo
 - **Android disconnect UX (MVP, chosen):** When Android loses server connectivity, it continues accepting stylus input for locally available pages and durably queues each batch. Show a persistent offline/syncing banner with pending-work state; reconnect automatically replays idempotently until acknowledged. Do not claim successful sync before acknowledgement. Cached page data exists only to support Android offline editing and must be visibly offline; SPA parity does not apply because the SPA remains online-only.
 - **Failed commit while connected (MVP, chosen):** A transport failure leaves the affected durable batch pending and retries it with backoff; capture remains available. A definitive server rejection moves that batch to an explicit rejected/recovery state and must not be silently retried or presented as committed. The UI distinguishes retrying/offline from rejection and includes useful technical detail such as correlation id where available.
 - **Stale read-only snapshot (MVP, chosen):** **SPA: no** — require live server data and do not offer a stale read-only view. **Android: local page state is retained only as needed for offline editing**, is visibly offline/syncing, and is reconciled through the durable outbox; it is not evidence of server acknowledgement.
-- **Realtime transport (chosen):** **Ship with exactly one concrete wire protocol** for the first implementation (pragmatic: one path to debug, one set of TLS/proxy quirks). **Do not treat that protocol as a permanent product commitment**—the plan assumes you may **switch or add** a different wire format later (different ops constraints, browser limits, mesh topology). **Duplex live sync** is therefore delivered through a **small, stable domain interface** (subscribe per `page_id`, send/receive **ordered delta batches**, reconnect with **cursor/sequence**, backpressure signals, credential refresh hooks), with the v1 protocol isolated in **one adapter module** per platform (server, Android, SPA). **v1 concrete choice:** see **Wire protocol v1 (chosen)** under **Stack decisions** (**WSS + JSON** on Traefik; **SSE+POST** documented as fallback only). **Product contracts** (ink envelope semantics and REST) stay **encoding/transport-agnostic** at the domain layer—only the adapter changes when the wire format changes.
+- **Realtime transport (chosen):** **Ship with exactly one concrete wire protocol** for the first implementation (pragmatic: one path to debug, one set of TLS/proxy quirks). **Do not treat that protocol as a permanent product commitment**—the plan assumes you may **switch or add** a different wire format later (different ops constraints, browser limits, mesh topology). **Duplex live sync** is therefore delivered through a **small, stable domain interface** (subscribe per `page_id`, send/receive **ordered delta batches**, reconnect with **cursor/sequence**, backpressure signals, credential refresh hooks), with the v1 protocol isolated in **one adapter module** per platform (server, Android, SPA). **As built (#337):** server `crates/server/src/realtime/` — `dispatch.rs` acts on a `PageStore` port and all page-channel SQL lives in `store.rs`; SPA `frontend/src/realtime.rs`; Android `api/` (`ApiClient` interface, `PageSocket`) with every JSON codec in `api/codec/`. See **Code map** under **Stack decisions**. **v1 concrete choice:** see **Wire protocol v1 (chosen)** under **Stack decisions** (**WSS + JSON** on Traefik; **SSE+POST** documented as fallback only). **Product contracts** (ink envelope semantics and REST) stay **encoding/transport-agnostic** at the domain layer—only the adapter changes when the wire format changes.
 - **SPA disconnect/error UX (MVP, chosen):** Web SPA remains **read-only** in MVP (**no ink capture/editing**—replay, search, pan/zoom only). It requires live server data and on disconnect or sync/server errors shows a persistent banner + blocked UI; it does not use the Android offline outbox or show stale cached ink as a substitute for a live subscription.
 - **Web experience (chosen for MVP):** SPA authenticates on **LAN/mesh**, renders **vector ink** on the **infinite canvas** with the same pan/zoom physics as Android, and surfaces **handwriting search**. **Freshness:** SPA must meet the **same near-instant / ≤ ~1s worst-case** bar as Android (see **Cross-device freshness**) by **subscribing through the same realtime adapter semantics**—live ink tail, not manual refresh as primary. **Sync/error transparency** applies equally; power-user diagnostics must not be **Android-only**. **Read-only MVP:** **no pen capture/editing**—not offline or stale-cache viewing (see **SPA disconnect/error UX**). **Online-required for live view:** if the private stack is unreachable or sync is degraded, **banner + blocked UI** until live path healthy—**no stale read-only cache** (see **Stale read-only snapshot**, **SPA disconnect/error UX**).
   **Future note:** **Browser-hosted pen capture** stays **explicit backlog** pending Pointer Events fidelity spikes—never prerequisite for ink replay or search. **Document underlays** (PDF/image imports) are **post-MVP** (see **Document ingestion — post-MVP**).
@@ -142,6 +142,34 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
   - **Auth on the live path:** **Bearer access token** on WebSocket upgrade (**Android**). **SPA:** mint a **short-lived realtime ticket** via REST after cookie auth; ticket is **narrow-scoped** (owner + session, short TTL) and consumed on upgrade.
   - **Reconnect / gap recovery:** Client tracks **`last_acked_seq`**. On reconnect: **gap fill** from `last_acked_seq + 1`; if gap is too large, **snapshot + tail**.
   - **Fallback (not v1):** **SSE + POST** documented only as a **degraded/fallback** path—**not shipped as the MVP hot path**.
+
+
+### Code map (where things go)
+
+Added by #337 so the modules it split do not regrow. When a file stops fitting its row, split it; do not stretch the row.
+
+**Server — `crates/server/src`**
+
+| Path | Owns | Not here |
+| --- | --- | --- |
+| `main.rs` | Composition root: config groups, telemetry, listener | Handlers, SQL |
+| `lib.rs` | `AppState`, router assembly, startup (migrations, thumbnail recovery) | Route logic |
+| `config.rs`, `config/` | Config groups and their validation | — |
+| `auth.rs` | OIDC discovery, JWT validation, auth middleware, bearer extraction | Route handlers |
+| `routes/` | HTTP handlers only (`auth.rs`, `pages.rs`) | Realtime, shared state |
+| `realtime/` | The v1 WSS adapter: `hub.rs` (channels, tickets, edit lease), `socket.rs` (upgrade + connection loops), `dispatch.rs` (what each client message does, against `PageStore`), `store.rs` (`PageStore` and its Postgres impl — the only page-channel SQL) | REST |
+| `thumbnails.rs` | Thumbnail jobs: render, store, cleanup, recovery | — |
+| `observability.rs` | Metrics (HTTP, thumbnail and realtime groups), request ids, spans, `metered` | Business logic |
+
+Tests: pure logic beside the code (`#[cfg(test)]`, a sibling `tests.rs` once large); SQL in `postgres_tests.rs` modules behind the `postgres-tests` feature; whole-router tests in `crates/server/tests/`.
+
+**Contract — `crates/protocol`:** every wire type and the paper spec. `schemas/` and `contracts/fixtures/` are asserted against it by `tests/schemas.rs` and `tests/contracts.rs`.
+
+**SPA — `frontend/src`:** `main.rs` (app shell) · `api.rs` (HTTP calls, WSS URLs) · `realtime.rs` (both socket loops) · `library.rs` (library state and reducers) · `viewer.rs` (`InkViewer`, pan/zoom, page-event reducers) · `render.rs` (Canvas2D).
+
+**Android — `android/app/src/main/java/link/desync/vnote`:** `api/` (`ApiClient` interface, `OkHttpApiClient`, `PageSocket`) · `api/codec/` (all JSON; JVM-tested against every fixture) · `model/` (data classes) · `auth/` (OIDC, tokens) · `library/` (page-list reducers, `LibraryStateHolder`) · `ink/` (`PageCanvasScreen`, `InkCanvas`, `StylusInput`, `StylusSamples`, `EraserGeometry`, `ToolPalette`, `PaperPalette`, `PageInkSession`, renderer, paper) · `MainActivity` (sign-in flow, screen switch) · `LibraryScreen` · `SessionState` · `ui/`.
+
+**Guardrails in CI:** `clippy::too_many_lines` at 100 (`clippy.toml`); detekt's complexity rules with a baseline that only shrinks (`android/detekt.yml`, `android/app/detekt-baseline.xml`). Lower a threshold when code allows; never raise one.
 
 ## E2E testing
 
