@@ -29,7 +29,7 @@ just run-compose         # deploy/docker-compose.yml → https://localhost:8443
 just build-android       # host Gradle → devDebug APK
 just build-android-docker # Docker build (no local SDK)
 just android-run         # reverse + install + launch (server must be up)
-just contract-validation # cargo test -p protocol (fixture round-trip)
+just contract-validation # cargo test -p protocol (fixture round-trip + schemas/ gate)
 just e2e                 # Playwright via e2e/docker-compose.test.yml
 ```
 
