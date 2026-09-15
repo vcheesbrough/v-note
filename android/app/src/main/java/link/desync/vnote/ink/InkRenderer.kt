@@ -6,9 +6,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import link.desync.vnote.auth.Stroke
-import link.desync.vnote.auth.StrokePoint
-import link.desync.vnote.auth.StrokeStyle
+import link.desync.vnote.model.Stroke
+import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.model.StrokeStyle
 import kotlin.math.sqrt
 import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 

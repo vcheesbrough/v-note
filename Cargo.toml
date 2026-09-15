@@ -4,12 +4,21 @@ members = ["crates/protocol", "crates/server", "frontend"]
 default-members = ["crates/protocol", "crates/server"]
 
 [workspace.package]
-version = "0.32.0"
+version = "0.33.0"
 edition = "2024"
 # MSRV. Resolver 3 only honours `rust-version` when one is declared, so this
 # is what makes the resolver bump above mean anything.
 rust-version = "1.98"
 license = "PolyForm-Noncommercial-1.0.0"
+
+[workspace.lints.rust]
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+# Function-length ratchet (threshold in `clippy.toml`). CI runs clippy with
+# `-D warnings`, so this is a hard gate; lower the threshold as long functions
+# are split, never raise it.
+too_many_lines = "warn"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -2,24 +2,57 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://v-note/schemas/stroke.schema.json",
   "title": "Stroke",
+  "description": "One ink stroke. `crates/protocol::Stroke` is the source of truth; this schema is asserted against every stroke-bearing fixture by `crates/protocol/tests/schemas.rs`.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["tool", "color", "width", "points"],
+  "required": ["id", "style", "points"],
   "properties": {
-    "tool": {
+    "id": {
       "type": "string",
-      "description": "Constant \"pen\" in MVP (single hardcoded tool)."
+      "minLength": 1,
+      "description": "Client-assigned immutable identity. Tombstones target this id."
     },
-    "color": {
-      "type": "string",
-      "description": "Constant #006400 dark green in MVP."
-    },
-    "width": {
-      "type": "number",
-      "description": "Constant 4.0 logical px in MVP."
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_kind", "style_version", "parameters"],
+      "description": "Immutable style snapshot captured at stylus-down (`crates/protocol::StrokeStyle`).",
+      "properties": {
+        "tool_kind": {
+          "type": "string",
+          "const": "solid_round",
+          "description": "Rendering model discriminator. Only `solid_round` exists today."
+        },
+        "style_version": {
+          "type": "integer",
+          "enum": [1, 2],
+          "description": "1 = constant-width nib, points MUST NOT carry pressure. 2 = pressure-modulated nib, points MAY carry pressure."
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["color", "width", "cap_style", "join_style"],
+          "properties": {
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9A-F]{6}$",
+              "description": "Opaque sRGB hex, uppercase, e.g. #006400 (crates/protocol rejects lowercase)."
+            },
+            "width": {
+              "type": "number",
+              "minimum": 1.0,
+              "maximum": 32.0,
+              "description": "Nib diameter in world logical px (full-pressure diameter for style_version 2); 1.0..32.0 in 0.5 steps."
+            },
+            "cap_style": { "type": "string", "const": "round" },
+            "join_style": { "type": "string", "const": "round" }
+          }
+        }
+      }
     },
     "points": {
       "type": "array",
+      "minItems": 1,
       "items": { "$ref": "stroke-point.schema.json" }
     }
   }

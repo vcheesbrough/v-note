@@ -14,7 +14,9 @@
     },
     "pressure": {
       "type": "number",
-      "description": "Reserved for post-MVP pressure/tilt; omitted in MVP."
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Normalised stylus pressure. Present only on pressure-sensitive (solid_round style_version 2) strokes; omitted on version 1. A version-2 point without it renders at full width."
     }
   }
 }

@@ -1,0 +1,4 @@
+# Threshold for `clippy::too_many_lines` (enabled workspace-wide in `Cargo.toml`).
+# Introduced at 300 (just above the longest function then) and lowered to 100 once
+# #337 split the long functions. Lower it further as code allows; never raise it.
+too-many-lines-threshold = 100

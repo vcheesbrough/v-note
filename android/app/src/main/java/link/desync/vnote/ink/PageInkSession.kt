@@ -9,11 +9,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import link.desync.vnote.auth.ApiClient
-import link.desync.vnote.auth.PageEvent
-import link.desync.vnote.auth.PageEventListener
-import link.desync.vnote.auth.PageSocket
-import link.desync.vnote.auth.Stroke
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.PageEventListener
+import link.desync.vnote.api.PageSocket
+import link.desync.vnote.model.PageEvent
+import link.desync.vnote.model.Stroke
 import java.util.UUID
 
 // Drives one open page's ink channel: connects the WSS, replays persisted
@@ -172,117 +172,131 @@ class PageInkSession(
 
     private fun handle(event: PageEvent) {
         when (event) {
-            is PageEvent.Welcome -> {
-                sessionId = event.sessionId
-                statusBanner = null
-                // Authoritative on every (re)connect, which is what
-                // self-corrects a value that went stale in the open library.
-                paperState = event.paper
-                confirmedPaper = event.paper
-                // A fresh connection supersedes anything still in flight.
-                pendingPaper = null
-                // Catch up on persisted ink, then take the lease if it is free.
-                beginReplay()
-                socket?.subscribe(lastSeq)
-                if (event.leaseHolder == null || event.leaseHolder == sessionId) {
-                    socket?.acquireLease()
-                } else {
-                    canEdit = false
-                    statusBanner = LEASE_BLOCKED
-                }
+            is PageEvent.Welcome -> onWelcome(event)
+            is PageEvent.StrokeBatch -> onStrokeBatch(event)
+            is PageEvent.Synced -> onSynced(event)
+            is PageEvent.TombstoneBatch -> onTombstoneBatch(event)
+            is PageEvent.PaperChanged -> onPaperChanged(event)
+            PageEvent.LeaseGranted -> onLeaseHeld()
+            is PageEvent.LeaseDenied -> onLeaseDenied()
+            is PageEvent.LeaseChanged -> onLeaseChanged(event)
+            is PageEvent.Failure -> onFailure(event)
+        }
+    }
+
+    private fun onWelcome(event: PageEvent.Welcome) {
+        sessionId = event.sessionId
+        statusBanner = null
+        // Authoritative on every (re)connect, which is what
+        // self-corrects a value that went stale in the open library.
+        paperState = event.paper
+        confirmedPaper = event.paper
+        // A fresh connection supersedes anything still in flight.
+        pendingPaper = null
+        // Catch up on persisted ink, then take the lease if it is free.
+        beginReplay()
+        socket?.subscribe(lastSeq)
+        if (event.leaseHolder == null || event.leaseHolder == sessionId) {
+            socket?.acquireLease()
+        } else {
+            canEdit = false
+            statusBanner = LEASE_BLOCKED
+        }
+    }
+
+    private fun onStrokeBatch(event: PageEvent.StrokeBatch) {
+        if (seenBatchIds.add(event.clientBatchId)) {
+            confirmedStrokes.addAll(event.strokes)
+            pendingBatches.remove(event.clientBatchId)
+            if (replaying) {
+                replayBatches += 1
             }
-            is PageEvent.StrokeBatch -> {
-                if (seenBatchIds.add(event.clientBatchId)) {
-                    confirmedStrokes.addAll(event.strokes)
-                    pendingBatches.remove(event.clientBatchId)
-                    if (replaying) {
-                        replayBatches += 1
-                    }
-                    // One state assignment swaps optimistic ink for the
-                    // confirmed batch, so Compose cannot render a blank gap.
-                    // Held back mid-replay; `Synced` publishes the whole page.
-                    publishUnlessReplaying()
-                }
-                if (event.seq > lastSeq) {
-                    lastSeq = event.seq
-                }
-            }
-            is PageEvent.Synced -> {
-                if (event.lastSeq > lastSeq) {
-                    lastSeq = event.lastSeq
-                }
-                endReplay()
-            }
-            is PageEvent.TombstoneBatch -> {
-                val locallyErasedIds = pendingErasures.remove(event.clientMutationId).orEmpty()
-                val deletedIds = locallyErasedIds + event.strokeIds
-                confirmedStrokes.removeAll { it.id in deletedIds }
-                pendingBatches.replaceAll { _, strokes -> strokes.filterNot { it.id in deletedIds } }
-                pendingBatches.entries.removeAll { (_, strokes) -> strokes.isEmpty() }
-                publishUnlessReplaying()
-            }
-            is PageEvent.PaperChanged -> {
-                paperState = event.paper
-                confirmedPaper = event.paper
-                // Only a change this session requested is reported as confirmed.
-                // Matching on the value is sufficient: if the paper now in force
-                // is the one asked for, that request has been satisfied — even
-                // if a sibling device happened to set the same value first.
-                if (pendingPaper == event.paper) {
-                    pendingPaper = null
-                    onPaperConfirmed(event.paper)
-                }
-            }
-            PageEvent.LeaseGranted -> {
-                canEdit = true
-                ensureLeaseRenewal()
-                if (statusBanner == LEASE_BLOCKED) {
-                    statusBanner = null
-                }
-            }
-            is PageEvent.LeaseDenied -> {
+            // One state assignment swaps optimistic ink for the
+            // confirmed batch, so Compose cannot render a blank gap.
+            // Held back mid-replay; `Synced` publishes the whole page.
+            publishUnlessReplaying()
+        }
+        if (event.seq > lastSeq) {
+            lastSeq = event.seq
+        }
+    }
+
+    private fun onSynced(event: PageEvent.Synced) {
+        if (event.lastSeq > lastSeq) {
+            lastSeq = event.lastSeq
+        }
+        endReplay()
+    }
+
+    private fun onTombstoneBatch(event: PageEvent.TombstoneBatch) {
+        val locallyErasedIds = pendingErasures.remove(event.clientMutationId).orEmpty()
+        val deletedIds = locallyErasedIds + event.strokeIds
+        confirmedStrokes.removeAll { it.id in deletedIds }
+        pendingBatches.replaceAll { _, strokes -> strokes.filterNot { it.id in deletedIds } }
+        pendingBatches.entries.removeAll { (_, strokes) -> strokes.isEmpty() }
+        publishUnlessReplaying()
+    }
+
+    private fun onPaperChanged(event: PageEvent.PaperChanged) {
+        paperState = event.paper
+        confirmedPaper = event.paper
+        // Only a change this session requested is reported as confirmed.
+        // Matching on the value is sufficient: if the paper now in force
+        // is the one asked for, that request has been satisfied — even
+        // if a sibling device happened to set the same value first.
+        if (pendingPaper == event.paper) {
+            pendingPaper = null
+            onPaperConfirmed(event.paper)
+        }
+    }
+
+    // This session holds the edit lease: granted directly, or announced as the
+    // new holder by a lease change.
+    private fun onLeaseHeld() {
+        canEdit = true
+        ensureLeaseRenewal()
+        if (statusBanner == LEASE_BLOCKED) {
+            statusBanner = null
+        }
+    }
+
+    private fun onLeaseDenied() {
+        canEdit = false
+        stopLeaseRenewal()
+        clearPendingErasures()
+        discardPendingBatches()
+        revertUnconfirmedPaper()
+        statusBanner = LEASE_BLOCKED
+    }
+
+    private fun onLeaseChanged(event: PageEvent.LeaseChanged) {
+        val holder = event.holder
+        when {
+            // Lease freed elsewhere — try to take it so this editor can ink.
+            holder == null -> socket?.acquireLease()
+            holder == sessionId -> onLeaseHeld()
+            else -> {
                 canEdit = false
                 stopLeaseRenewal()
-                clearPendingErasures()
-                discardPendingBatches()
-                revertUnconfirmedPaper()
                 statusBanner = LEASE_BLOCKED
             }
-            is PageEvent.LeaseChanged -> {
-                val holder = event.holder
-                when {
-                    // Lease freed elsewhere — try to take it so this editor can ink.
-                    holder == null -> socket?.acquireLease()
-                    holder == sessionId -> {
-                        canEdit = true
-                        ensureLeaseRenewal()
-                        if (statusBanner == LEASE_BLOCKED) {
-                            statusBanner = null
-                        }
-                    }
-                    else -> {
-                        canEdit = false
-                        stopLeaseRenewal()
-                        statusBanner = LEASE_BLOCKED
-                    }
-                }
-            }
-            is PageEvent.Failure -> {
-                // A replay that ends in an error still shows whatever arrived
-                // before it — `replay_failed` must not leave the page blank.
-                endReplay()
-                if (event.code == TOMBSTONE_FAILED) {
-                    restorePendingErasure(event.clientMutationId)
-                }
-                if (event.code == PAPER_FAILED) {
-                    revertUnconfirmedPaper()
-                }
-                canEdit = false
-                stopLeaseRenewal()
-                discardPendingBatches()
-                statusBanner = event.message
-            }
         }
+    }
+
+    private fun onFailure(event: PageEvent.Failure) {
+        // A replay that ends in an error still shows whatever arrived
+        // before it — `replay_failed` must not leave the page blank.
+        endReplay()
+        if (event.code == TOMBSTONE_FAILED) {
+            restorePendingErasure(event.clientMutationId)
+        }
+        if (event.code == PAPER_FAILED) {
+            revertUnconfirmedPaper()
+        }
+        canEdit = false
+        stopLeaseRenewal()
+        discardPendingBatches()
+        statusBanner = event.message
     }
 
     private fun ensureLeaseRenewal() {

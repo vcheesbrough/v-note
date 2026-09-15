@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod observability;
+mod realtime;
 mod routes;
 mod thumbnails;
 
@@ -18,16 +19,16 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::auth::{AuthConfig, JwksCache, auth_middleware};
 use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig, ServerConfig};
 use crate::observability::request_observability_middleware;
+use crate::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
-use crate::routes::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 
 #[derive(Clone)]
 pub struct AppState {
     pub app_version: String,
     pub auth: Arc<AuthConfig>,
     pub jwks_cache: Arc<JwksCache>,
-    pub db: Option<PgPool>,
+    pub db: PgPool,
     pub realtime: Arc<RealtimeHub>,
     /// Digital Asset Links JSON served at `/.well-known/assetlinks.json`;
     /// `None` when not configured (route returns 404).
@@ -117,14 +118,19 @@ pub async fn build_app_router(
         .await
         .map_err(StartupError::DatabaseMigrate)?;
 
-    Ok(build_router_full(
-        app_version().to_string(),
+    let state = AppState {
+        app_version: app_version().to_string(),
         auth,
         jwks_cache,
-        Some(pool),
-        android.assetlinks_json().map(Arc::from),
-        server.static_dir.clone(),
-    ))
+        db: pool,
+        realtime: Arc::new(RealtimeHub::default()),
+        assetlinks_json: android.assetlinks_json().map(Arc::from),
+    };
+    // Startup work, not router construction: resume thumbnail jobs a restart
+    // interrupted. Kept out of `router` so tests, whose pool never connects,
+    // build routers without launching a recovery query.
+    thumbnails::recover_pending(state.clone());
+    Ok(router(state, server.static_dir.clone()))
 }
 
 fn database_connect_options(database: &DatabaseConfig) -> PgConnectOptions {
@@ -136,41 +142,29 @@ fn database_connect_options(database: &DatabaseConfig) -> PgConnectOptions {
         .database(&database.name)
 }
 
+/// The application router over a caller-supplied pool, with no Android asset
+/// links and no static SPA directory — what the integration tests drive.
+/// Production goes through [`build_app_router`].
 pub fn build_router(
     app_version: String,
     auth: Arc<AuthConfig>,
     jwks_cache: Arc<JwksCache>,
+    db: PgPool,
 ) -> Router {
-    build_router_with_db(app_version, auth, jwks_cache, None)
+    router(
+        AppState {
+            app_version,
+            auth,
+            jwks_cache,
+            db,
+            realtime: Arc::new(RealtimeHub::default()),
+            assetlinks_json: None,
+        },
+        None,
+    )
 }
 
-pub fn build_router_with_db(
-    app_version: String,
-    auth: Arc<AuthConfig>,
-    jwks_cache: Arc<JwksCache>,
-    db: Option<PgPool>,
-) -> Router {
-    build_router_full(app_version, auth, jwks_cache, db, None, None)
-}
-
-pub fn build_router_full(
-    app_version: String,
-    auth: Arc<AuthConfig>,
-    jwks_cache: Arc<JwksCache>,
-    db: Option<PgPool>,
-    assetlinks_json: Option<Arc<str>>,
-    static_dir: Option<PathBuf>,
-) -> Router {
-    let state = AppState {
-        app_version,
-        auth,
-        jwks_cache,
-        db,
-        realtime: Arc::new(RealtimeHub::default()),
-        assetlinks_json,
-    };
-    thumbnails::recover_pending(state.clone());
-
+fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let public_api = Router::new()
         .route("/meta", get(meta))
         .with_state(state.clone());
@@ -240,4 +234,42 @@ async fn meta(axum::extract::State(state): axum::extract::State<AppState>) -> Js
         app_version: state.app_version,
         protocol_version: PROTOCOL_VERSION,
     })
+}
+
+/// A pool that never connects, for in-crate unit tests: port 1 on loopback
+/// refuses at once, and the short acquire timeout keeps a test that does reach
+/// the database fast. Lazy, so it needs a Tokio runtime but no Postgres.
+#[cfg(test)]
+pub(crate) fn unreachable_pool() -> PgPool {
+    PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(500))
+        .connect_lazy_with(PgConnectOptions::new().host("127.0.0.1").port(1))
+}
+
+#[cfg(test)]
+impl AppState {
+    /// State for in-crate unit tests: placeholder OIDC settings, an empty JWKS
+    /// cache, and [`unreachable_pool`].
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            app_version: "test".to_string(),
+            auth: Arc::new(AuthConfig {
+                issuer_url: "http://mock-oidc:8080/default".to_string(),
+                client_id: "v-note-test".to_string(),
+                client_secret: "test-secret".to_string(),
+                redirect_uri: "https://app:443/auth/callback".to_string(),
+                required_scope: "v-note:test:access".to_string(),
+                end_session_url: None,
+                authorize_endpoint: "http://mock-oidc:8080/default/authorize".to_string(),
+                token_endpoint: "http://mock-oidc:8080/default/token".to_string(),
+                jwks_uri: "http://mock-oidc:8080/default/jwks".to_string(),
+                android_issuer_url: None,
+                android_client_id: None,
+            }),
+            jwks_cache: Arc::new(JwksCache::with_keys(std::collections::HashMap::new())),
+            db: unreachable_pool(),
+            realtime: Arc::new(RealtimeHub::default()),
+            assetlinks_json: None,
+        }
+    }
 }

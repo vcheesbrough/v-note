@@ -27,7 +27,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::ObservabilityConfig;
 
-pub const REQUEST_ID_HEADER: &str = "x-request-id";
+pub use protocol::REQUEST_ID_HEADER;
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
 /// Metric/trace label form of [`protocol::PROTOCOL_VERSION`]. A bare `&str`
 /// because both consumers want a `'static` label, so there is no compile-time
@@ -60,149 +60,242 @@ pub fn metrics() -> &'static Metrics {
 
 pub struct Metrics {
     registry: Registry,
-    http_requests_total: IntCounterVec,
-    http_request_duration_seconds: HistogramVec,
+    http: HttpMetrics,
     auth_failures_total: IntCounterVec,
     page_mutations_total: IntCounterVec,
-    thumbnail_generation_duration_seconds: HistogramVec,
-    thumbnail_queue_depth: IntGauge,
-    thumbnail_recoveries_total: IntCounterVec,
-    thumbnail_artifact_bytes: Histogram,
-    realtime_events_total: IntCounterVec,
-    realtime_active_connections: IntGauge,
-    realtime_message_bytes: HistogramVec,
-    realtime_replay_bytes: Histogram,
-    realtime_replay_frames: Histogram,
-    realtime_replay_duration_seconds: Histogram,
-    realtime_message_handling_seconds: HistogramVec,
+    thumbnails: ThumbnailMetrics,
+    realtime: RealtimeMetrics,
     _build_info: IntGauge,
+}
+
+struct HttpMetrics {
+    requests_total: IntCounterVec,
+    request_duration_seconds: HistogramVec,
+}
+
+struct ThumbnailMetrics {
+    generation_duration_seconds: HistogramVec,
+    queue_depth: IntGauge,
+    recoveries_total: IntCounterVec,
+    artifact_bytes: Histogram,
+}
+
+struct RealtimeMetrics {
+    events_total: IntCounterVec,
+    active_connections: IntGauge,
+    message_bytes: HistogramVec,
+    replay_bytes: Histogram,
+    replay_frames: Histogram,
+    replay_duration_seconds: Histogram,
+    message_handling_seconds: HistogramVec,
+}
+
+/// Registers `collector` and hands it back for recording. A duplicate name is a
+/// programming error, so it panics at startup rather than failing quietly.
+fn register<C>(registry: &Registry, collector: C) -> C
+where
+    C: prometheus::core::Collector + Clone + 'static,
+{
+    registry
+        .register(Box::new(collector.clone()))
+        .expect("metric should register once");
+    collector
+}
+
+impl HttpMetrics {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            requests_total: register(
+                registry,
+                IntCounterVec::new(
+                    Opts::new(
+                        "v_note_http_requests_total",
+                        "HTTP requests by route and status",
+                    ),
+                    &["method", "route", "status"],
+                )
+                .expect("http request counter should build"),
+            ),
+            request_duration_seconds: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_http_request_duration_seconds",
+                        "HTTP request latency by route and status",
+                    ),
+                    &["method", "route", "status"],
+                )
+                .expect("http request histogram should build"),
+            ),
+        }
+    }
+}
+
+impl ThumbnailMetrics {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            generation_duration_seconds: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_thumbnail_generation_duration_seconds",
+                        "Thumbnail generation duration by result",
+                    ),
+                    &["result"],
+                )
+                .expect("thumbnail generation histogram should build"),
+            ),
+            queue_depth: register(
+                registry,
+                IntGauge::new(
+                    "v_note_thumbnail_queue_depth",
+                    "Thumbnail generations awaiting completion",
+                )
+                .expect("thumbnail queue gauge should build"),
+            ),
+            recoveries_total: register(
+                registry,
+                IntCounterVec::new(
+                    Opts::new(
+                        "v_note_thumbnail_recoveries_total",
+                        "Thumbnail generation recovery attempts by result",
+                    ),
+                    &["result"],
+                )
+                .expect("thumbnail recovery counter should build"),
+            ),
+            artifact_bytes: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_thumbnail_artifact_bytes",
+                        "Stored thumbnail PNG size in bytes",
+                    )
+                    .buckets(vec![
+                        256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
+                    ]),
+                )
+                .expect("thumbnail artifact histogram should build"),
+            ),
+        }
+    }
+}
+
+impl RealtimeMetrics {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            events_total: register(
+                registry,
+                IntCounterVec::new(
+                    Opts::new(
+                        "v_note_realtime_events_total",
+                        "Realtime WebSocket events by channel and result",
+                    ),
+                    &["channel", "result"],
+                )
+                .expect("realtime event counter should build"),
+            ),
+            active_connections: register(
+                registry,
+                IntGauge::new(
+                    "v_note_realtime_active_connections",
+                    "Currently open realtime WebSocket connections",
+                )
+                .expect("active realtime gauge should build"),
+            ),
+            // Cardinality budget: `channel` × `message_type`, both bounded enums.
+            // Never add `page_id`, `session_id`, `owner_id` or `client_batch_id` —
+            // those belong in span fields, not labels.
+            message_bytes: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_realtime_message_bytes",
+                        "Serialized size of realtime frames sent, by channel and message type",
+                    )
+                    .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
+                    &["channel", "message_type"],
+                )
+                .expect("realtime message size histogram should build"),
+            ),
+            replay_bytes: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_realtime_replay_bytes",
+                        "Total bytes sent for one page-channel subscribe replay",
+                    )
+                    .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
+                )
+                .expect("realtime replay bytes histogram should build"),
+            ),
+            replay_frames: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_realtime_replay_frames",
+                        "Frames sent for one page-channel subscribe replay, including the closing synced",
+                    )
+                    .buckets(REALTIME_REPLAY_FRAMES_BUCKETS.to_vec()),
+                )
+                .expect("realtime replay frames histogram should build"),
+            ),
+            replay_duration_seconds: register(
+                registry,
+                Histogram::with_opts(
+                    HistogramOpts::new(
+                        "v_note_realtime_replay_duration_seconds",
+                        "Wall time from a subscribe being received to its synced being sent",
+                    )
+                    .buckets(REALTIME_REPLAY_DURATION_BUCKETS.to_vec()),
+                )
+                .expect("realtime replay duration histogram should build"),
+            ),
+            message_handling_seconds: register(
+                registry,
+                HistogramVec::new(
+                    HistogramOpts::new(
+                        "v_note_realtime_message_handling_seconds",
+                        "Server-side handling time of inbound page-channel messages, by message type \
+                         (not end-to-end latency)",
+                    )
+                    .buckets(REALTIME_HANDLING_BUCKETS.to_vec()),
+                    &["message_type"],
+                )
+                .expect("realtime message handling histogram should build"),
+            ),
+        }
+    }
 }
 
 impl Metrics {
     fn new() -> Self {
         let registry = Registry::new();
-        let http_requests_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_http_requests_total",
-                "HTTP requests by route and status",
-            ),
-            &["method", "route", "status"],
-        )
-        .expect("http request counter should build");
-        let http_request_duration_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_http_request_duration_seconds",
-                "HTTP request latency by route and status",
-            ),
-            &["method", "route", "status"],
-        )
-        .expect("http request histogram should build");
-        let auth_failures_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_auth_failures_total",
-                "Authentication failures by reason",
-            ),
-            &["reason"],
-        )
-        .expect("auth failure counter should build");
-        let page_mutations_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_page_mutations_total",
-                "Page and ink mutations by operation/result",
-            ),
-            &["operation", "result"],
-        )
-        .expect("page mutation counter should build");
-        let thumbnail_generation_duration_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_thumbnail_generation_duration_seconds",
-                "Thumbnail generation duration by result",
-            ),
-            &["result"],
-        )
-        .expect("thumbnail generation histogram should build");
-        let thumbnail_queue_depth = IntGauge::new(
-            "v_note_thumbnail_queue_depth",
-            "Thumbnail generations awaiting completion",
-        )
-        .expect("thumbnail queue gauge should build");
-        let thumbnail_recoveries_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_thumbnail_recoveries_total",
-                "Thumbnail generation recovery attempts by result",
-            ),
-            &["result"],
-        )
-        .expect("thumbnail recovery counter should build");
-        let thumbnail_artifact_bytes = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_thumbnail_artifact_bytes",
-                "Stored thumbnail PNG size in bytes",
+        let http = HttpMetrics::new(&registry);
+        let auth_failures_total = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    "v_note_auth_failures_total",
+                    "Authentication failures by reason",
+                ),
+                &["reason"],
             )
-            .buckets(vec![
-                256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
-            ]),
-        )
-        .expect("thumbnail artifact histogram should build");
-        let realtime_events_total = IntCounterVec::new(
-            Opts::new(
-                "v_note_realtime_events_total",
-                "Realtime WebSocket events by channel and result",
-            ),
-            &["channel", "result"],
-        )
-        .expect("realtime event counter should build");
-        let realtime_active_connections = IntGauge::new(
-            "v_note_realtime_active_connections",
-            "Currently open realtime WebSocket connections",
-        )
-        .expect("active realtime gauge should build");
-        // Cardinality budget: `channel` × `message_type`, both bounded enums.
-        // Never add `page_id`, `session_id`, `owner_id` or `client_batch_id` —
-        // those belong in span fields, not labels.
-        let realtime_message_bytes = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_realtime_message_bytes",
-                "Serialized size of realtime frames sent, by channel and message type",
+            .expect("auth failure counter should build"),
+        );
+        let page_mutations_total = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    "v_note_page_mutations_total",
+                    "Page and ink mutations by operation/result",
+                ),
+                &["operation", "result"],
             )
-            .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
-            &["channel", "message_type"],
-        )
-        .expect("realtime message size histogram should build");
-        let realtime_replay_bytes = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_realtime_replay_bytes",
-                "Total bytes sent for one page-channel subscribe replay",
-            )
-            .buckets(REALTIME_BYTES_BUCKETS.to_vec()),
-        )
-        .expect("realtime replay bytes histogram should build");
-        let realtime_replay_frames = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_realtime_replay_frames",
-                "Frames sent for one page-channel subscribe replay, including the closing synced",
-            )
-            .buckets(REALTIME_REPLAY_FRAMES_BUCKETS.to_vec()),
-        )
-        .expect("realtime replay frames histogram should build");
-        let realtime_replay_duration_seconds = Histogram::with_opts(
-            HistogramOpts::new(
-                "v_note_realtime_replay_duration_seconds",
-                "Wall time from a subscribe being received to its synced being sent",
-            )
-            .buckets(REALTIME_REPLAY_DURATION_BUCKETS.to_vec()),
-        )
-        .expect("realtime replay duration histogram should build");
-        let realtime_message_handling_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "v_note_realtime_message_handling_seconds",
-                "Server-side handling time of inbound page-channel messages, by message type \
-                 (not end-to-end latency)",
-            )
-            .buckets(REALTIME_HANDLING_BUCKETS.to_vec()),
-            &["message_type"],
-        )
-        .expect("realtime message handling histogram should build");
+            .expect("page mutation counter should build"),
+        );
+        let thumbnails = ThumbnailMetrics::new(&registry);
+        let realtime = RealtimeMetrics::new(&registry);
         let build_info = IntGauge::with_opts(
             Opts::new("v_note_build_info", "v-note build and protocol metadata")
                 .const_label("protocol", PROTOCOL_VERSION)
@@ -210,47 +303,15 @@ impl Metrics {
         )
         .expect("build info gauge should build");
         build_info.set(1);
-
-        for collector in [
-            Box::new(http_requests_total.clone()) as Box<dyn prometheus::core::Collector>,
-            Box::new(http_request_duration_seconds.clone()),
-            Box::new(auth_failures_total.clone()),
-            Box::new(page_mutations_total.clone()),
-            Box::new(thumbnail_generation_duration_seconds.clone()),
-            Box::new(thumbnail_queue_depth.clone()),
-            Box::new(thumbnail_recoveries_total.clone()),
-            Box::new(thumbnail_artifact_bytes.clone()),
-            Box::new(realtime_events_total.clone()),
-            Box::new(realtime_active_connections.clone()),
-            Box::new(realtime_message_bytes.clone()),
-            Box::new(realtime_replay_bytes.clone()),
-            Box::new(realtime_replay_frames.clone()),
-            Box::new(realtime_replay_duration_seconds.clone()),
-            Box::new(realtime_message_handling_seconds.clone()),
-            Box::new(build_info.clone()),
-        ] {
-            registry
-                .register(collector)
-                .expect("metric should register once");
-        }
+        let build_info = register(&registry, build_info);
 
         Self {
             registry,
-            http_requests_total,
-            http_request_duration_seconds,
+            http,
             auth_failures_total,
             page_mutations_total,
-            thumbnail_generation_duration_seconds,
-            thumbnail_queue_depth,
-            thumbnail_recoveries_total,
-            thumbnail_artifact_bytes,
-            realtime_events_total,
-            realtime_active_connections,
-            realtime_message_bytes,
-            realtime_replay_bytes,
-            realtime_replay_frames,
-            realtime_replay_duration_seconds,
-            realtime_message_handling_seconds,
+            thumbnails,
+            realtime,
             _build_info: build_info,
         }
     }
@@ -266,31 +327,34 @@ impl Metrics {
     }
 
     pub fn record_thumbnail_generation(&self, result: &'static str, elapsed_seconds: f64) {
-        self.thumbnail_generation_duration_seconds
+        self.thumbnails
+            .generation_duration_seconds
             .with_label_values(&[result])
             .observe(elapsed_seconds);
     }
 
     pub fn thumbnail_generation_queued(&self) {
-        self.thumbnail_queue_depth.inc();
+        self.thumbnails.queue_depth.inc();
     }
 
     pub fn thumbnail_generation_finished(&self) {
-        self.thumbnail_queue_depth.dec();
+        self.thumbnails.queue_depth.dec();
     }
 
     pub fn record_thumbnail_recovery(&self, result: &'static str) {
-        self.thumbnail_recoveries_total
+        self.thumbnails
+            .recoveries_total
             .with_label_values(&[result])
             .inc();
     }
 
     pub fn observe_thumbnail_artifact_bytes(&self, bytes: usize) {
-        self.thumbnail_artifact_bytes.observe(bytes as f64);
+        self.thumbnails.artifact_bytes.observe(bytes as f64);
     }
 
     pub fn record_realtime_event(&self, channel: &'static str, result: &'static str) {
-        self.realtime_events_total
+        self.realtime
+            .events_total
             .with_label_values(&[channel, result])
             .inc();
     }
@@ -303,7 +367,8 @@ impl Metrics {
         message_type: &'static str,
         bytes: usize,
     ) {
-        self.realtime_message_bytes
+        self.realtime
+            .message_bytes
             .with_label_values(&[channel, message_type])
             .observe(bytes as f64);
     }
@@ -311,9 +376,10 @@ impl Metrics {
     /// One completed page-channel replay: every frame from the first
     /// `stroke-batch` to the closing `synced`.
     pub fn observe_realtime_replay(&self, frames: u64, bytes: u64, elapsed_seconds: f64) {
-        self.realtime_replay_frames.observe(frames as f64);
-        self.realtime_replay_bytes.observe(bytes as f64);
-        self.realtime_replay_duration_seconds
+        self.realtime.replay_frames.observe(frames as f64);
+        self.realtime.replay_bytes.observe(bytes as f64);
+        self.realtime
+            .replay_duration_seconds
             .observe(elapsed_seconds);
     }
 
@@ -324,29 +390,33 @@ impl Metrics {
         message_type: &'static str,
         elapsed_seconds: f64,
     ) {
-        self.realtime_message_handling_seconds
+        self.realtime
+            .message_handling_seconds
             .with_label_values(&[message_type])
             .observe(elapsed_seconds);
     }
 
     #[cfg(test)]
     pub(crate) fn realtime_message_count(&self, channel: &str, message_type: &str) -> u64 {
-        self.realtime_message_bytes
+        self.realtime
+            .message_bytes
             .with_label_values(&[channel, message_type])
             .get_sample_count()
     }
 
     pub fn realtime_connection_guard(&self) -> RealtimeConnectionGuard {
-        self.realtime_active_connections.inc();
+        self.realtime.active_connections.inc();
         RealtimeConnectionGuard
     }
 
     fn record_http(&self, method: &str, route: &str, status: StatusCode, elapsed: f64) {
         let status = status.as_u16().to_string();
-        self.http_requests_total
+        self.http
+            .requests_total
             .with_label_values(&[method, route, &status])
             .inc();
-        self.http_request_duration_seconds
+        self.http
+            .request_duration_seconds
             .with_label_values(&[method, route, &status])
             .observe(elapsed);
     }
@@ -367,7 +437,7 @@ pub struct RealtimeConnectionGuard;
 
 impl Drop for RealtimeConnectionGuard {
     fn drop(&mut self) {
-        metrics().realtime_active_connections.dec();
+        metrics().realtime.active_connections.dec();
     }
 }
 
@@ -836,230 +906,4 @@ fn normalized_route(path: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Metrics, PROTOCOL_VERSION, request_span, trace_context_from_span};
-
-    /// `PROTOCOL_VERSION` is duplicated across five places, and this one is a
-    /// bare `&str` with no compile-time link to the canonical constant. Without
-    /// this test a bump silently leaves every metric and span labelled with the
-    /// previous protocol version.
-    #[test]
-    fn protocol_version_label_matches_protocol() {
-        assert_eq!(PROTOCOL_VERSION, protocol::PROTOCOL_VERSION.to_string());
-    }
-
-    // The tests below build their own `Metrics` (its own registry) rather than
-    // reading the process-wide one, so exact counts hold under parallel tests.
-
-    /// Runs `check` with an OpenTelemetry layer installed, as in production, so
-    /// spans carry real trace context. The provider has no exporter.
-    fn with_otel_layer(check: impl FnOnce()) {
-        use opentelemetry::trace::TracerProvider as _;
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-        tracing::subscriber::with_default(subscriber, check);
-    }
-
-    const TRACEPARENT_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
-    const TRACEPARENT_SPAN_ID: &str = "00f067aa0ba902b7";
-
-    fn headers_with_traceparent(value: &'static str) -> axum::http::HeaderMap {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert("traceparent", axum::http::HeaderValue::from_static(value));
-        headers
-    }
-
-    #[test]
-    fn request_span_joins_the_trace_in_traceparent() {
-        with_otel_layer(|| {
-            let headers =
-                headers_with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
-            let span = request_span(&axum::http::Method::GET, "/api/pages", "req_1", &headers);
-
-            let context = trace_context_from_span(&span).expect("span should carry a trace");
-            // Same trace as the edge (Traefik) span, but its own span id: a child.
-            assert_eq!(context.trace_id, TRACEPARENT_TRACE_ID);
-            assert_ne!(context.span_id, TRACEPARENT_SPAN_ID);
-        });
-    }
-
-    #[test]
-    fn db_query_span_names_the_operation_and_call_site() {
-        with_otel_layer(|| {
-            let span = super::db_query_span("COMMIT", "persist_batch");
-            let metadata = span.metadata().expect("span should be enabled");
-            assert_eq!(metadata.name(), "db.query");
-            for field in ["db.system", "db.operation", "db.query_name"] {
-                assert!(metadata.fields().field(field).is_some(), "missing {field}");
-            }
-        });
-    }
-
-    #[test]
-    fn result_size_counts_rows_total_and_widest_row() {
-        let mut size = super::ResultSize::default();
-        for row_bytes in [120, 4_096, 0, 512] {
-            size.add_row(row_bytes);
-        }
-        assert_eq!(
-            size,
-            super::ResultSize {
-                rows: 4,
-                bytes: 4_728,
-                max_row_bytes: 4_096,
-                affected_rows: None,
-            }
-        );
-
-        let mut write = super::ResultSize::default();
-        write.add_affected(3);
-        write.add_affected(0);
-        assert_eq!(write.rows, 0);
-        assert_eq!(write.affected_rows, Some(3));
-    }
-
-    /// Every Postgres call site gets a `db.query` span, or its time is invisible
-    /// in Tempo — which is how `get_thumbnail` and the whole realtime/thumbnail
-    /// write path went untraced. Counts call sites in the non-test source.
-    #[test]
-    fn every_postgres_call_site_has_a_db_span() {
-        for (file, source) in [
-            ("routes/pages.rs", include_str!("routes/pages.rs")),
-            ("routes/realtime.rs", include_str!("routes/realtime.rs")),
-            ("thumbnails.rs", include_str!("thumbnails.rs")),
-        ] {
-            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
-            let tx_spans = code.matches("db_query_span(\"BEGIN\"").count()
-                + code.matches("db_query_span(\"COMMIT\"").count();
-            let query_spans = code.matches(".instrument(db_query_span(").count() - tx_spans;
-            let queries = code.matches("sqlx::query").count();
-            assert_eq!(
-                queries, query_spans,
-                "{file}: {queries} queries, {query_spans} db spans"
-            );
-            let metered = code.matches("(metered(").count();
-            assert_eq!(
-                queries, metered,
-                "{file}: {queries} queries, {metered} metered executors"
-            );
-            let transactions = code.matches(".begin()").count() + code.matches(".commit()").count();
-            assert_eq!(
-                transactions, tx_spans,
-                "{file}: {transactions} BEGIN/COMMIT, {tx_spans} db spans"
-            );
-        }
-    }
-
-    #[test]
-    fn request_span_without_a_valid_traceparent_starts_a_new_trace() {
-        with_otel_layer(|| {
-            for headers in [
-                axum::http::HeaderMap::new(),
-                headers_with_traceparent("not-a-traceparent"),
-                headers_with_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01"),
-            ] {
-                let span = request_span(&axum::http::Method::GET, "/health", "req_2", &headers);
-                let context = trace_context_from_span(&span).expect("span should carry a trace");
-                assert_ne!(context.trace_id, TRACEPARENT_TRACE_ID);
-                assert_ne!(context.trace_id, "00000000000000000000000000000000");
-            }
-        });
-    }
-
-    #[test]
-    fn realtime_message_bytes_are_bucketed_by_channel_and_message_type() {
-        let metrics = Metrics::new();
-        metrics.observe_realtime_message_bytes("page", "synced", 50);
-        metrics.observe_realtime_message_bytes("page", "stroke-batch", 2_300);
-        metrics.observe_realtime_message_bytes("library", "page-updated", 120);
-
-        let synced = metrics
-            .realtime_message_bytes
-            .with_label_values(&["page", "synced"]);
-        assert_eq!(synced.get_sample_count(), 1);
-        assert_eq!(synced.get_sample_sum(), 50.0);
-        assert_eq!(
-            metrics
-                .realtime_message_bytes
-                .with_label_values(&["library", "page-updated"])
-                .get_sample_count(),
-            1
-        );
-
-        let text = metrics.render().expect("metrics should render");
-        assert!(text.contains(
-            r#"v_note_realtime_message_bytes_bucket{channel="page",message_type="synced",le="128"} 1"#
-        ));
-        assert!(text.contains(
-            r#"v_note_realtime_message_bytes_bucket{channel="page",message_type="stroke-batch",le="2048"} 0"#
-        ));
-        assert!(text.contains(
-            r#"v_note_realtime_message_bytes_bucket{channel="page",message_type="stroke-batch",le="8192"} 1"#
-        ));
-    }
-
-    #[test]
-    fn replay_cost_is_one_observation_per_replay() {
-        let metrics = Metrics::new();
-        // The DensePageSeeder reference page as #323 measured it: 1200 batch
-        // frames plus `synced`, 2.74 MB.
-        metrics.observe_realtime_replay(1201, 2_740_000, 0.8);
-
-        assert_eq!(metrics.realtime_replay_frames.get_sample_count(), 1);
-        assert_eq!(metrics.realtime_replay_frames.get_sample_sum(), 1201.0);
-        assert_eq!(metrics.realtime_replay_bytes.get_sample_sum(), 2_740_000.0);
-        assert_eq!(
-            metrics.realtime_replay_duration_seconds.get_sample_count(),
-            1
-        );
-
-        // Today's dense replay lands below the top bucket, so its p95 is a real
-        // number rather than +Inf — the before-number #323 needs.
-        let text = metrics.render().expect("metrics should render");
-        assert!(text.contains(r#"v_note_realtime_replay_bytes_bucket{le="2097152"} 0"#));
-        assert!(text.contains(r#"v_note_realtime_replay_bytes_bucket{le="8388608"} 1"#));
-        assert!(text.contains(r#"v_note_realtime_replay_frames_bucket{le="1000"} 0"#));
-        assert!(text.contains(r#"v_note_realtime_replay_frames_bucket{le="2500"} 1"#));
-    }
-
-    #[test]
-    fn message_handling_is_labelled_by_inbound_type_only() {
-        let metrics = Metrics::new();
-        metrics.observe_realtime_message_handling("commit-batch", 0.012);
-        metrics.observe_realtime_message_handling("commit-batch", 0.003);
-        metrics.observe_realtime_message_handling("subscribe", 0.2);
-
-        let commit_batch = metrics
-            .realtime_message_handling_seconds
-            .with_label_values(&["commit-batch"]);
-        assert_eq!(commit_batch.get_sample_count(), 2);
-        assert!((commit_batch.get_sample_sum() - 0.015).abs() < 1e-9);
-
-        let text = metrics.render().expect("metrics should render");
-        assert!(text.contains(
-            r#"v_note_realtime_message_handling_seconds_count{message_type="subscribe"} 1"#
-        ));
-    }
-
-    #[test]
-    fn lagged_is_a_recorded_realtime_result() {
-        let metrics = Metrics::new();
-        metrics.record_realtime_event("page", "lagged");
-        metrics.record_realtime_event("library", "lagged");
-
-        assert_eq!(
-            metrics
-                .realtime_events_total
-                .with_label_values(&["page", "lagged"])
-                .get(),
-            1
-        );
-        let text = metrics.render().expect("metrics should render");
-        assert!(
-            text.contains(r#"v_note_realtime_events_total{channel="library",result="lagged"} 1"#)
-        );
-    }
-}
+mod tests;
