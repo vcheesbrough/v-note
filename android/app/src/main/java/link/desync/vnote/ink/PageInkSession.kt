@@ -9,11 +9,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import link.desync.vnote.auth.ApiClient
-import link.desync.vnote.auth.PageEvent
-import link.desync.vnote.auth.PageEventListener
-import link.desync.vnote.auth.PageSocket
-import link.desync.vnote.auth.Stroke
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.PageEventListener
+import link.desync.vnote.api.PageSocket
+import link.desync.vnote.model.PageEvent
+import link.desync.vnote.model.Stroke
 import java.util.UUID
 
 // Drives one open page's ink channel: connects the WSS, replays persisted

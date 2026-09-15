@@ -1,10 +1,10 @@
 package link.desync.vnote.ink
 
 import android.view.MotionEvent
-import link.desync.vnote.auth.SolidRoundParameters
-import link.desync.vnote.auth.Stroke
-import link.desync.vnote.auth.StrokePoint
-import link.desync.vnote.auth.StrokeStyle
+import link.desync.vnote.model.SolidRoundParameters
+import link.desync.vnote.model.Stroke
+import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.model.StrokeStyle
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

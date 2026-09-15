@@ -17,12 +17,13 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import link.desync.vnote.auth.ApiClient
-import link.desync.vnote.auth.SOLID_ROUND_PRESSURE_STYLE_VERSION
-import link.desync.vnote.auth.SolidRoundParameters
-import link.desync.vnote.auth.StrokeStyle
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
+import link.desync.vnote.model.SOLID_ROUND_PRESSURE_STYLE_VERSION
+import link.desync.vnote.model.SolidRoundParameters
+import link.desync.vnote.model.StrokeStyle
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -75,7 +76,7 @@ class PageCanvasInputInstrumentedTest {
                     accessTokenExpiryEpochSeconds = System.currentTimeMillis() / 1000 + 3600,
                 )
                 MainActivity.apiClientFactory = { store, authRepository ->
-                    ApiClient(baseUrl, store, authRepository).also { apiClient = it }
+                    OkHttpApiClient(baseUrl, store, authRepository).also { apiClient = it }
                 }
             }
 

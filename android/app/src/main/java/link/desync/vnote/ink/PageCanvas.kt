@@ -63,11 +63,11 @@ import androidx.tracing.trace
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import link.desync.vnote.auth.ApiClient
-import link.desync.vnote.auth.PageSummary
-import link.desync.vnote.auth.Stroke
-import link.desync.vnote.auth.StrokePoint
-import link.desync.vnote.auth.StrokeStyle
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.model.PageSummary
+import link.desync.vnote.model.Stroke
+import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.model.StrokeStyle
 import link.desync.vnote.ui.displayTitle
 import java.util.Locale
 import kotlin.math.abs

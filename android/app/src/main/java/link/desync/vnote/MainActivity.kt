@@ -63,19 +63,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.LibraryEventListener
+import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
-import link.desync.vnote.auth.LibraryEvent
-import link.desync.vnote.auth.LibraryEventListener
-import link.desync.vnote.auth.MeProfile
-import link.desync.vnote.auth.PageSummary
-import link.desync.vnote.auth.ThumbnailMetadata
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageCanvasScreen
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.ink.PaperPreferences
 import link.desync.vnote.ink.normalizedSamsungSpenAction
+import link.desync.vnote.model.LibraryEvent
+import link.desync.vnote.model.MeProfile
+import link.desync.vnote.model.PageSummary
+import link.desync.vnote.model.ThumbnailMetadata
 import link.desync.vnote.ui.displayTitle
 import link.desync.vnote.ui.displayUpdatedAge
 import link.desync.vnote.ui.hasDisplayTitle
@@ -128,7 +129,7 @@ class MainActivity : ComponentActivity() {
         authRepository = AuthRepository(applicationContext, authConfig, tokenStore)
         apiClient =
             apiClientFactory?.invoke(tokenStore, authRepository)
-                ?: ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+                ?: OkHttpApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
 
         setContent {
             VNoteTheme {
