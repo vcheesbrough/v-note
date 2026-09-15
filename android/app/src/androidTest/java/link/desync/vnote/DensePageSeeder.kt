@@ -4,18 +4,18 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
-import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.api.OkHttpApiClient
+import link.desync.vnote.api.PageEventListener
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
-import link.desync.vnote.auth.PageEvent
-import link.desync.vnote.auth.PageEventListener
-import link.desync.vnote.auth.SOLID_ROUND_PRESSURE_STYLE_VERSION
-import link.desync.vnote.auth.SolidRoundParameters
-import link.desync.vnote.auth.Stroke
-import link.desync.vnote.auth.StrokePoint
-import link.desync.vnote.auth.StrokeStyle
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.Paper
+import link.desync.vnote.model.PageEvent
+import link.desync.vnote.model.SOLID_ROUND_PRESSURE_STYLE_VERSION
+import link.desync.vnote.model.SolidRoundParameters
+import link.desync.vnote.model.Stroke
+import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.model.StrokeStyle
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -70,7 +70,7 @@ class DensePageSeeder {
             tokenStore.hasSession(),
         )
         val authRepository = AuthRepository(context, AuthConfig.fromBuildConfig(), tokenStore)
-        val apiClient = ApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+        val apiClient = OkHttpApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
 
         val strokeCount = strokesArg!!.toIntOrNull() ?: DEFAULT_STROKES
         val pointsPerStroke =

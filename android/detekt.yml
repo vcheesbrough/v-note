@@ -1,0 +1,45 @@
+# detekt configuration for the Android module (applied in app/build.gradle.kts with
+# `buildUponDefaultConfig = true`, so only deviations from detekt's defaults live here).
+#
+# This is the Kotlin counterpart of the `clippy::too_many_lines` ratchet in the Rust
+# workspace: the complexity rules are the gate, `app/detekt-baseline.xml` freezes the
+# findings that existed when the gate was introduced (#337), and any new finding fails
+# `:app:detekt` (run in CI by the Dockerfile.android builder stage). Shrink the
+# baseline, never widen it.
+#
+# Formatting is ktlint's job (`:app:ktlintCheck`); detekt's formatting rule set is not
+# applied, and the style rules that overlap with it or with ordinary Compose idiom are
+# switched off below so the baseline stays a list of things worth fixing.
+
+complexity:
+  # Tests are long by nature and are not what the ratchet is for.
+  excludes: ['**/test/**', '**/androidTest/**']
+  LongMethod:
+    active: true
+  LargeClass:
+    active: true
+  ComplexCondition:
+    active: true
+  TooManyFunctions:
+    active: true
+  CyclomaticComplexMethod:
+    active: true
+  LongParameterList:
+    # Composables take their state as parameters; that is the idiom, not a smell.
+    ignoreAnnotated: ['Composable']
+
+naming:
+  FunctionNaming:
+    # Compose names composables in PascalCase (the ktlint config makes the same exception).
+    ignoreAnnotated: ['Composable']
+
+style:
+  MagicNumber:
+    # dp/px/alpha literals in Compose UI code; a MagicNumber baseline would be pure noise.
+    active: false
+  MaxLineLength:
+    # ktlint owns line length.
+    active: false
+  ReturnCount:
+    # Early returns are idiomatic Kotlin; not a complexity signal we want to ratchet.
+    active: false

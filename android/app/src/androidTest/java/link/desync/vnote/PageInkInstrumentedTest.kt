@@ -4,15 +4,16 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
-import link.desync.vnote.auth.SolidRoundParameters
-import link.desync.vnote.auth.Stroke
-import link.desync.vnote.auth.StrokePoint
-import link.desync.vnote.auth.StrokeStyle
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
+import link.desync.vnote.model.SolidRoundParameters
+import link.desync.vnote.model.Stroke
+import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.model.StrokeStyle
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.WebSocket
@@ -78,7 +79,7 @@ class PageInkInstrumentedTest {
             object : AuthRepository(context, AuthConfig.fromBuildConfig(), tokenStore) {
                 override suspend fun refreshAccessTokenIfNeeded(force: Boolean): Boolean = true
             }
-        apiClient = ApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
+        apiClient = OkHttpApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
     }
 
     @After

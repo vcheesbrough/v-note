@@ -16,6 +16,12 @@ pub use paper::{
 
 pub const PROTOCOL_VERSION: u32 = 5;
 
+/// The request-correlation header. Clients send one per HTTP call and WSS
+/// handshake; the server echoes it on the response and stamps it on every log
+/// line and span for that request. Lowercase because HTTP header names are
+/// case-insensitive and the server builds its `HeaderName` from this literal.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: String,

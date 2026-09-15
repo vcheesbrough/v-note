@@ -11,7 +11,7 @@ use server::build_router;
 use server::observability::{CORRELATION_ID_HEADER, REQUEST_ID_HEADER, metrics, metrics_handler};
 use tower::util::ServiceExt;
 
-use common::test_auth_config;
+use common::{test_auth_config, unreachable_pool};
 
 fn test_router() -> axum::Router {
     // An empty JWKS cache, not the fixture one: nothing here presents a token.
@@ -20,6 +20,7 @@ fn test_router() -> axum::Router {
         "test-version".to_string(),
         Arc::new(test_auth_config()),
         jwks,
+        unreachable_pool(),
     )
 }
 

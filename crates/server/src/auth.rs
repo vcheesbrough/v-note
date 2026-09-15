@@ -330,7 +330,7 @@ pub async fn auth_middleware(
     }
 }
 
-fn extract_bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()

@@ -32,6 +32,29 @@
     {
       "type": "object",
       "additionalProperties": false,
+      "required": ["type", "revision", "client_mutation_id", "stroke_ids"],
+      "properties": {
+        "type": { "const": "tombstone-batch" },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Per-page monotonic tombstone revision assigned by the server."
+        },
+        "client_mutation_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Idempotency key of the commit-tombstones that produced it."
+        },
+        "stroke_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Ids of the erased strokes; delete wins over any later replay of the same ids."
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["type", "last_seq"],
       "properties": {
         "type": { "const": "synced" },

@@ -71,10 +71,6 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    const DB_UNAVAILABLE: Self = Self {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        message: "database not configured",
-    };
     const PAGE_NOT_FOUND: Self = Self {
         status: StatusCode::FORBIDDEN,
         message: "page not found",
@@ -93,10 +89,6 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, self.message).into_response()
     }
-}
-
-fn db(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
-    state.db.as_ref().ok_or(ApiError::DB_UNAVAILABLE)
 }
 
 #[tracing::instrument(skip_all)]
@@ -118,7 +110,7 @@ pub async fn list_pages(
         "#,
     )
     .bind(claims.sub.clone())
-    .fetch_all(metered(db(&state)?))
+    .fetch_all(metered(&state.db))
     .instrument(db_query_span("SELECT", "list_pages"))
     .await
     .map_err(server_error)?;
@@ -156,7 +148,7 @@ pub async fn create_page(
     .bind(claims.sub.clone())
     .bind(title)
     .bind(payload.paper.wire_value())
-    .fetch_one(metered(db(&state)?))
+    .fetch_one(metered(&state.db))
     .instrument(db_query_span("INSERT", "create_page"))
     .await
     .map_err(|error| {
@@ -193,7 +185,7 @@ pub async fn get_page(
     )
     .bind(page_id)
     .bind(claims.sub)
-    .fetch_optional(metered(db(&state)?))
+    .fetch_optional(metered(&state.db))
     .instrument(db_query_span("SELECT", "get_page"))
     .await
     .map_err(server_error)?;
@@ -216,7 +208,7 @@ pub async fn get_thumbnail(
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND owner_id = $2)")
             .bind(&page_id)
             .bind(&claims.sub)
-            .fetch_one(metered(db(&state)?))
+            .fetch_one(metered(&state.db))
             .instrument(db_query_span("SELECT", "get_thumbnail_owner"))
             .await
             .map_err(server_error)?;
@@ -228,7 +220,7 @@ pub async fn get_thumbnail(
     )
     .bind(&page_id)
     .bind(source_seq as i64)
-    .fetch_optional(metered(db(&state)?))
+    .fetch_optional(metered(&state.db))
     .instrument(db_query_span("SELECT", "get_thumbnail_png"))
     .await
     .map_err(server_error)?;
@@ -262,7 +254,7 @@ pub async fn delete_page(
     )
     .bind(page_id.clone())
     .bind(claims.sub.clone())
-    .execute(metered(db(&state)?))
+    .execute(metered(&state.db))
     .instrument(db_query_span("DELETE", "delete_page"))
     .await
     .map_err(|error| {
@@ -317,11 +309,6 @@ mod tests {
     #[tokio::test]
     async fn api_errors_render_the_same_responses_as_before() {
         for (error, expected_status, expected_body) in [
-            (
-                ApiError::DB_UNAVAILABLE,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "database not configured",
-            ),
             (
                 ApiError::PAGE_NOT_FOUND,
                 StatusCode::FORBIDDEN,

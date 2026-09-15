@@ -33,12 +33,16 @@ WORKDIR /workspace
 COPY . .
 # The Gradle wrapper distribution unpacks into /root/.gradle/wrapper, which is the
 # cache mount — so it is downloaded once, not on every commit.
+# ktlint, detekt and Android Lint run here as gates (#337): they are the Kotlin
+# counterpart of the `lint` step's clippy/rustfmt run. Reproduce locally with
+# `just android-lint-docker`.
 RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked \
     --mount=type=cache,id=v-note-gradle-project,target=/workspace/android/.gradle,sharing=locked \
     ./scripts/sync-version.sh \
     && cd android \
     && chmod +x ./gradlew \
     && ./gradlew --no-daemon --console=plain -Pandroid.sdk.dir=/opt/android-sdk \
+        :app:ktlintCheck :app:detekt :app:lintDevDebug \
         :app:assembleDevDebug \
         :app:assembleDevDebugAndroidTest \
         :app:testDevDebugUnitTest :app:testDevLocalDebugUnitTest :app:testProdDebugUnitTest

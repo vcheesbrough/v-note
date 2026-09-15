@@ -1,0 +1,26 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>ComplexCondition:Paper.kt$!pitch.isFinite() || pitch &lt;= 0.0 || !min.isFinite() || !max.isFinite() || max &lt; min</ID>
+    <ID>ComplexCondition:StylusInput.kt$selectedTool == CanvasTool.Eraser || toolType == MotionEvent.TOOL_TYPE_ERASER || buttonState and STYLUS_ERASER_BUTTON_MASK != 0 || hoverButtonEraserArmed</ID>
+    <ID>ComplexCondition:ViewportTransform.kt$ViewportGestureTracker$!pointerCountChanged &amp;&amp; spread &gt; 0f &amp;&amp; previousSpread != null &amp;&amp; previousSpread!! &gt; 0f</ID>
+    <ID>CyclomaticComplexMethod:InkCanvas.kt$@Composable @OptIn(ExperimentalComposeUiApi::class) internal fun InkCanvas( strokes: List&lt;Stroke&gt;, paper: Paper, canEdit: Boolean, selectedTool: CanvasTool, drawingStyle: StrokeStyle, onStrokeFinished: (Stroke) -&gt; Unit, onStrokesErased: (Collection&lt;String&gt;) -&gt; Unit, modifier: Modifier = Modifier, )</ID>
+    <ID>CyclomaticComplexMethod:PageChannelCodec.kt$internal fun decodePageEvent(json: JSONObject): PageEvent?</ID>
+    <ID>CyclomaticComplexMethod:ViewportTransform.kt$ViewportGestureTracker$fun update( pointerCount: Int, centroid: Offset, spread: Float, eventTimeMillis: Long, ): ViewportGestureStep</ID>
+    <ID>LongMethod:InkCanvas.kt$@Composable @OptIn(ExperimentalComposeUiApi::class) internal fun InkCanvas( strokes: List&lt;Stroke&gt;, paper: Paper, canEdit: Boolean, selectedTool: CanvasTool, drawingStyle: StrokeStyle, onStrokeFinished: (Stroke) -&gt; Unit, onStrokesErased: (Collection&lt;String&gt;) -&gt; Unit, modifier: Modifier = Modifier, )</ID>
+    <ID>LongMethod:LibraryScreen.kt$@Composable internal fun AppScreen( apiClient: ApiClient, sessionState: SessionState, onSignIn: () -&gt; Unit, onSignOut: () -&gt; Unit, onReload: () -&gt; Unit, pages: List&lt;PageSummary&gt;, libraryError: String?, onCreatePage: () -&gt; Unit, onOpenPage: (PageSummary) -&gt; Unit, onDeletePage: (PageSummary) -&gt; Unit, )</ID>
+    <ID>LongMethod:LibraryScreen.kt$@Composable private fun PageTile( apiClient: ApiClient, page: PageSummary, thumbnailUnavailable: Boolean, onOpen: () -&gt; Unit, onDelete: () -&gt; Unit, )</ID>
+    <ID>LongMethod:PageCanvasScreen.kt$@Composable fun PageCanvasScreen( apiClient: ApiClient, page: PageSummary, userId: String, onBack: () -&gt; Unit, modifier: Modifier = Modifier, )</ID>
+    <ID>LongMethod:ToolPalette.kt$@Composable internal fun DrawingToolControl( style: StrokeStyle, selected: Boolean, paletteOpen: Boolean, onClick: () -&gt; Unit, onPaletteDismiss: () -&gt; Unit, onStyleChange: (StrokeStyle) -&gt; Unit, )</ID>
+    <ID>LongParameterList:EraserGeometry.kt$( point: StrokePoint, livePath: MutableList&lt;StrokePoint&gt;, strokes: List&lt;Stroke&gt;, erasedThisGesture: MutableSet&lt;String&gt;, eraserRadius: Float, onStrokesErased: (Collection&lt;String&gt;) -&gt; Unit, )</ID>
+    <ID>LongParameterList:StylusInput.kt$( currentlyArmed: Boolean, selectedTool: CanvasTool, action: Int, toolType: Int, buttonState: Int, actionButton: Int = 0, )</ID>
+    <ID>LoopWithTooManyJumpStatements:PageInkSession.kt$PageInkSession$while</ID>
+    <ID>TooManyFunctions:AuthRepository.kt$AuthRepository</ID>
+    <ID>TooManyFunctions:MainActivity.kt$MainActivity : ComponentActivity</ID>
+    <ID>TooManyFunctions:OkHttpApiClient.kt$OkHttpApiClient : ApiClient</ID>
+    <ID>TooManyFunctions:PageInkSession.kt$PageInkSession</ID>
+    <ID>UnusedPrivateProperty:Theme.kt$private val DarkColors = darkColorScheme( primary = Color(0xFF66B889), )</ID>
+    <ID>UseCheckOrError:AuthRepository.kt$AuthRepository$throw IllegalStateException("Token request failed: $error")</ID>
+  </CurrentIssues>
+</SmellBaseline>

@@ -12,7 +12,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
 import link.desync.vnote.ink.Paper
@@ -82,7 +83,7 @@ class PagePaperInstrumentedTest {
                     accessTokenExpiryEpochSeconds = System.currentTimeMillis() / 1000 + 3600,
                 )
                 MainActivity.apiClientFactory = { store, authRepository ->
-                    ApiClient(baseUrl, store, authRepository).also { apiClient = it }
+                    OkHttpApiClient(baseUrl, store, authRepository).also { apiClient = it }
                 }
             }
 

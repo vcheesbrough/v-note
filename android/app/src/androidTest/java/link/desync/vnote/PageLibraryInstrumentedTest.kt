@@ -3,12 +3,13 @@ package link.desync.vnote
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
-import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.LibraryEventListener
+import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
-import link.desync.vnote.auth.LibraryEvent
-import link.desync.vnote.auth.LibraryEventListener
 import link.desync.vnote.auth.TokenStore
+import link.desync.vnote.model.LibraryEvent
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.WebSocket
@@ -45,7 +46,7 @@ class PageLibraryInstrumentedTest {
             object : AuthRepository(context, AuthConfig.fromBuildConfig(), tokenStore) {
                 override suspend fun refreshAccessTokenIfNeeded(force: Boolean): Boolean = true
             }
-        apiClient = ApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
+        apiClient = OkHttpApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
     }
 
     @After
