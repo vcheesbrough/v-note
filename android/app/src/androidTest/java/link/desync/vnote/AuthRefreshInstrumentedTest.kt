@@ -3,7 +3,8 @@ package link.desync.vnote
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
-import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
@@ -71,7 +72,7 @@ class AuthRefreshInstrumentedTest {
                 }
             }
 
-        val client = ApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
+        val client = OkHttpApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, authRepository)
         apiClient = client
 
         runBlocking {

@@ -1,6 +1,6 @@
 package link.desync.vnote
 
-import link.desync.vnote.auth.PageSummary
+import link.desync.vnote.model.PageSummary
 import link.desync.vnote.ui.displayTitle
 import org.junit.Assert.assertFalse
 import org.junit.Test

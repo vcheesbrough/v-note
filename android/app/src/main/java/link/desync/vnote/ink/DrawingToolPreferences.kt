@@ -1,11 +1,11 @@
 package link.desync.vnote.ink
 
 import android.content.Context
-import link.desync.vnote.auth.SOLID_ROUND_PRESSURE_STYLE_VERSION
-import link.desync.vnote.auth.SOLID_ROUND_STYLE_VERSION
-import link.desync.vnote.auth.SOLID_ROUND_TOOL
-import link.desync.vnote.auth.SolidRoundParameters
-import link.desync.vnote.auth.StrokeStyle
+import link.desync.vnote.model.SOLID_ROUND_PRESSURE_STYLE_VERSION
+import link.desync.vnote.model.SOLID_ROUND_STYLE_VERSION
+import link.desync.vnote.model.SOLID_ROUND_TOOL
+import link.desync.vnote.model.SolidRoundParameters
+import link.desync.vnote.model.StrokeStyle
 import kotlin.math.roundToInt
 
 internal class DrawingToolPreferences(

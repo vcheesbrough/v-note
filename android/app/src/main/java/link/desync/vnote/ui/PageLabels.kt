@@ -1,6 +1,6 @@
 package link.desync.vnote.ui
 
-import link.desync.vnote.auth.PageSummary
+import link.desync.vnote.model.PageSummary
 import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime

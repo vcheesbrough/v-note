@@ -16,7 +16,8 @@ import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import link.desync.vnote.auth.ApiClient
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
 import mockwebserver3.Dispatcher
@@ -69,7 +70,7 @@ class PageLibraryOrderingInstrumentedTest {
                     accessTokenExpiryEpochSeconds = System.currentTimeMillis() / 1000 + 3600,
                 )
                 MainActivity.apiClientFactory = { store, authRepository ->
-                    ApiClient(
+                    OkHttpApiClient(
                         baseUrl,
                         store,
                         authRepository,

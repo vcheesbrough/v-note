@@ -1,9 +1,9 @@
 package link.desync.vnote.ink
 
-import link.desync.vnote.auth.MIN_PRESSURE_WIDTH
-import link.desync.vnote.auth.SOLID_ROUND_PRESSURE_STYLE_VERSION
-import link.desync.vnote.auth.SolidRoundParameters
-import link.desync.vnote.auth.StrokeStyle
+import link.desync.vnote.model.MIN_PRESSURE_WIDTH
+import link.desync.vnote.model.SOLID_ROUND_PRESSURE_STYLE_VERSION
+import link.desync.vnote.model.SolidRoundParameters
+import link.desync.vnote.model.StrokeStyle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
