@@ -9,27 +9,19 @@ plugins {
 }
 
 val repoRoot = rootProject.projectDir.parentFile
-val versionFile = File(repoRoot, "version.txt")
-// CI injects the computed release tag (e.g. 0.4.1) via V_NOTE_RELEASE so versionName
-// matches the deployed image; local builds fall back to the cargo version in version.txt.
-val injectedRelease = System.getenv("V_NOTE_RELEASE")?.trim()?.takeIf { it.isNotEmpty() }
+// Resolved at configuration time from the root Cargo.toml, not version.txt: that file is
+// only written by syncVersionFromWorkspace at execution time, after AGP has read
+// versionName (#327). V_NOTE_RELEASE (CI's release tag) wins when set. Logic and tests
+// live in buildSrc/WorkspaceVersion.kt.
 val appVersionName =
-    injectedRelease
-        ?: if (versionFile.exists()) {
-            versionFile.readText().trim()
-        } else {
-            "0.1.0"
-        }
-
-// Monotonic versionCode from major.minor.patch so in-place upgrades are accepted
-// (e.g. 0.4.1 -> 4001). Pre-release suffixes are ignored for the code.
-val appVersionCode =
-    appVersionName.substringBefore('-').split('.').let { parts ->
-        val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
-        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
-        val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
-        (major * 1_000_000 + minor * 1_000 + patch).coerceAtLeast(1)
-    }
+    WorkspaceVersion.versionName(
+        injectedRelease = providers.environmentVariable("V_NOTE_RELEASE").orNull,
+        cargoToml =
+            providers
+                .fileContents(rootProject.layout.projectDirectory.file("../Cargo.toml"))
+                .asText.orNull,
+    )
+val appVersionCode = WorkspaceVersion.versionCode(appVersionName)
 
 android {
     namespace = "link.desync.vnote"
