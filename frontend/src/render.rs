@@ -322,9 +322,12 @@ fn pressure_segment_widths(stroke: &Stroke, scale: f64) -> impl Iterator<Item = 
 ///
 /// With round caps and joins a polyline covers exactly the union of its
 /// segments stroked one by one with round caps, and stroke colours are opaque,
-/// so this matches per-segment stroking while crossing into JS once per run
-/// rather than five times per segment. Zoomed out, every segment sits on the
-/// width floor and a whole stroke becomes one path.
+/// so the covered geometry matches per-segment stroking while crossing into JS
+/// once per run rather than five times per segment. Coverage does differ at
+/// hairline widths: separate strokes stacked antialiasing where caps overlapped,
+/// so dense sub-pixel ink used to look darker than one path draws it. Zoomed
+/// out, every segment sits on the width floor and a whole stroke becomes one
+/// path.
 fn draw_pressure_stroke(
     context: &CanvasRenderingContext2d,
     pen: &mut Pen,
