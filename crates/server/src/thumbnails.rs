@@ -50,7 +50,6 @@ pub fn recover_pending(state: AppState) {
             for (page_id, owner_id, source_seq) in pending {
                 let source_seq = source_seq as u64;
                 crate::observability::metrics().record_thumbnail_recovery("queued");
-                crate::observability::metrics().thumbnail_generation_queued();
                 state.realtime.publish_library_event(
                     &owner_id,
                     LibraryEvent::PageThumbnailUpdated {
@@ -65,7 +64,11 @@ pub fn recover_pending(state: AppState) {
     );
 }
 
+/// Starts rendering one thumbnail job. Counts it on the queue-depth gauge here,
+/// paired with the `thumbnail_generation_finished` the job always reaches, so no
+/// caller can queue a job without the gauge seeing it.
 pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u64) {
+    crate::observability::metrics().thumbnail_generation_queued();
     // A detached job, so a trace of its own rather than a child of the request
     // that queued it (a commit, erase or paper change would otherwise stay open
     // until the render finished). The link keeps the two navigable in Tempo.
