@@ -404,6 +404,19 @@ impl Metrics {
             .get_sample_count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn realtime_event_count(&self, channel: &str, result: &str) -> u64 {
+        self.realtime
+            .events_total
+            .with_label_values(&[channel, result])
+            .get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thumbnail_queue_depth(&self) -> i64 {
+        self.thumbnails.queue_depth.get()
+    }
+
     pub fn realtime_connection_guard(&self) -> RealtimeConnectionGuard {
         self.realtime.active_connections.inc();
         RealtimeConnectionGuard
