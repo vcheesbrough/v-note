@@ -4,7 +4,12 @@
 use futures_util::future::{AbortHandle, Abortable};
 use js_sys::Reflect;
 use leptos::prelude::*;
-use leptos::{ev, leptos_dom::helpers::window_event_listener};
+use leptos::{
+    ev,
+    leptos_dom::helpers::{
+        AnimationFrameRequestHandle, request_animation_frame_with_handle, window_event_listener,
+    },
+};
 use protocol::{PageServerMessage, PageSummary, Paper, StrokeBatch};
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, PointerEvent, WheelEvent};
@@ -188,6 +193,11 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
 
     Effect::new(move |_| follow_page_channel(page_id.clone(), initial_paper, feed));
 
+    // Changes only *request* a paint; the paint itself runs once per animation
+    // frame. A pointer or wheel device can report several events per frame and
+    // a replay delivers batches back to back, and painting for each of them
+    // redraws the whole page for frames nobody sees.
+    let pending_frame = StoredValue::new(None::<AnimationFrameRequestHandle>);
     Effect::new(move |_| {
         feed.batches.track();
         feed.paper.track();
@@ -195,15 +205,19 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
         pan_zoom.offset_y.track();
         pan_zoom.scale.track();
         canvas_resize_tick.track();
-        if let Some(canvas) = canvas.get() {
-            render::draw_canvas(
-                &canvas,
-                &feed.batches.get_untracked(),
-                feed.paper.get_untracked(),
-                pan_zoom.offset_x.get_untracked(),
-                pan_zoom.offset_y.get_untracked(),
-                pan_zoom.scale.get_untracked(),
-            );
+        canvas.track();
+        if pending_frame.with_value(Option::is_some) {
+            return;
+        }
+        let handle = request_animation_frame_with_handle(move || {
+            pending_frame.set_value(None);
+            paint(canvas, feed, pan_zoom);
+        });
+        pending_frame.set_value(handle.ok());
+    });
+    on_cleanup(move || {
+        if let Some(handle) = pending_frame.try_update_value(Option::take).flatten() {
+            handle.cancel();
         }
     });
 
@@ -245,6 +259,29 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
     }
 }
 
+/// Paint the page as it stands now. Borrows the batches rather than cloning
+/// them — a clone copies every point on the page, every frame.
+fn paint(canvas: NodeRef<leptos::html::Canvas>, feed: PageFeed, pan_zoom: PanZoom) {
+    let Some(canvas) = canvas.get_untracked() else {
+        return;
+    };
+    let performance = web_sys::window().and_then(|window| window.performance());
+    let started = performance.as_ref().map(|performance| performance.now());
+    feed.batches.with_untracked(|batches| {
+        render::draw_canvas(
+            &canvas,
+            batches,
+            feed.paper.get_untracked(),
+            pan_zoom.offset_x.get_untracked(),
+            pan_zoom.offset_y.get_untracked(),
+            pan_zoom.scale.get_untracked(),
+        );
+    });
+    if let (Some(performance), Some(started)) = (performance, started) {
+        mark_ink_drawn(performance.now() - started);
+    }
+}
+
 /// Pure reducer for the viewer's paper. The page channel is authoritative:
 /// `Welcome` carries it on every (re)connect and `PaperChanged` carries each
 /// change, which is what self-corrects a `PageSummary.paper` that went stale in
@@ -276,11 +313,7 @@ pub(crate) fn apply_page_event(
         }
         PageServerMessage::StrokeBatch(batch) => {
             let seq = batch.seq;
-            batches.update(|items| {
-                items.retain(|existing| existing.seq != seq);
-                items.push(batch);
-                items.sort_by_key(|item| item.seq);
-            });
+            batches.update(|items| insert_batch(items, batch));
             last_seq.update(|current| *current = (*current).max(seq));
             viewer_status.set("Live".to_string());
             viewer_error.set(None);
@@ -310,6 +343,29 @@ pub(crate) fn apply_page_event(
         | PageServerMessage::LeaseDenied { .. }
         | PageServerMessage::LeaseChanged { .. } => {}
     }
+}
+
+/// Insert a batch in `seq` order, replacing any batch already holding its seq.
+/// Batches almost always arrive in order, so appending is the common case;
+/// only an out-of-order or repeated seq pays for the search.
+fn insert_batch(items: &mut Vec<StrokeBatch>, batch: StrokeBatch) {
+    match items.binary_search_by_key(&batch.seq, |item| item.seq) {
+        Ok(index) => items[index] = batch,
+        Err(index) => items.insert(index, batch),
+    }
+}
+
+/// Expose paint counts and cost to e2e, alongside `__vNoteLastInkAppliedAt`.
+fn mark_ink_drawn(duration_ms: f64) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let draws = Reflect::get(&window, &"__vNoteInkDraws".into())
+        .ok()
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let _ = Reflect::set(&window, &"__vNoteInkDraws".into(), &(draws + 1.0).into());
+    let _ = Reflect::set(&window, &"__vNoteInkLastDrawMs".into(), &duration_ms.into());
 }
 
 fn mark_ink_applied(seq: u64) {
@@ -351,6 +407,27 @@ mod tests {
         let new_offset = zoom_offset(offset, cursor, old_scale, new_scale);
         let world_after = (cursor - new_offset) / new_scale;
         assert!((world_before - world_after).abs() < 1e-9);
+    }
+
+    fn batch(seq: u64, client_batch_id: &str) -> StrokeBatch {
+        StrokeBatch {
+            seq,
+            client_batch_id: client_batch_id.to_string(),
+            strokes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn batches_stay_in_seq_order_and_a_repeated_seq_replaces() {
+        let mut items = Vec::new();
+        for (seq, id) in [(1, "a"), (2, "b"), (5, "e"), (3, "c"), (2, "b-again")] {
+            insert_batch(&mut items, batch(seq, id));
+        }
+        let order: Vec<_> = items
+            .iter()
+            .map(|item| (item.seq, item.client_batch_id.as_str()))
+            .collect();
+        assert_eq!(order, [(1, "a"), (2, "b-again"), (3, "c"), (5, "e")]);
     }
 
     /// The page channel is authoritative for paper; nothing else changes it.

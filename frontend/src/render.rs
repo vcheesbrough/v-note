@@ -208,35 +208,92 @@ pub(crate) fn draw_canvas(
     context.set_line_cap("round");
     context.set_line_join("round");
 
+    let mut pen = Pen::default();
     for stroke in batches
         .iter()
         .flat_map(|batch| batch.strokes.iter())
         .filter(|stroke| stroke.points.len() >= 2)
+        .filter(|stroke| stroke_may_be_visible(stroke, &viewport))
     {
-        draw_stroke(&context, stroke, offset_x, offset_y, scale);
+        draw_stroke(&context, &mut pen, stroke, offset_x, offset_y, scale);
     }
 }
 
 const MIN_RENDERED_STROKE_WIDTH: f64 = 0.75;
 
+/// Pressure widths are snapped to this many CSS px before segments are merged,
+/// so a run of samples whose widths differ only sub-visibly shares one path.
+const PRESSURE_WIDTH_STEP: f64 = 0.125;
+
+/// The stroke style last sent to the context. Every setter is a JS/WASM
+/// boundary crossing (and a colour string is re-encoded on each one), so a
+/// value already in force is not sent again.
+#[derive(Default)]
+struct Pen {
+    color: Option<String>,
+    width: Option<f64>,
+}
+
+impl Pen {
+    fn color(&mut self, context: &CanvasRenderingContext2d, color: &str) {
+        if self.color.as_deref() != Some(color) {
+            context.set_stroke_style_str(color);
+            self.color = Some(color.to_string());
+        }
+    }
+
+    fn width(&mut self, context: &CanvasRenderingContext2d, width: f64) {
+        if self.width != Some(width) {
+            context.set_line_width(width);
+            self.width = Some(width);
+        }
+    }
+}
+
+/// Whether any of the stroke's ink can land inside the viewport. The points'
+/// world bounds are padded by half the widest nib the stroke can render — the
+/// preset width, which pressure only ever narrows — plus the on-screen floor,
+/// so a stroke is only skipped when it is certainly off screen.
+fn stroke_may_be_visible(stroke: &Stroke, viewport: &WorldViewport) -> bool {
+    let Some(first) = stroke.points.first() else {
+        return false;
+    };
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.x, first.y, first.x, first.y);
+    for point in &stroke.points[1..] {
+        min_x = min_x.min(point.x);
+        min_y = min_y.min(point.y);
+        max_x = max_x.max(point.x);
+        max_y = max_y.max(point.y);
+    }
+    let pad = stroke.style.parameters.width / 2.0 + MIN_RENDERED_STROKE_WIDTH / viewport.scale;
+    max_x + pad >= viewport.min_x
+        && min_x - pad <= viewport.max_x
+        && max_y + pad >= viewport.min_y
+        && min_y - pad <= viewport.max_y
+}
+
 fn draw_stroke(
     context: &CanvasRenderingContext2d,
+    pen: &mut Pen,
     stroke: &Stroke,
     offset_x: f64,
     offset_y: f64,
     scale: f64,
 ) {
-    context.set_stroke_style_str(&stroke.style.parameters.color);
+    pen.color(context, &stroke.style.parameters.color);
 
-    // Pressure-modulated (v2) strokes replay as per-segment variable-width
-    // paths; v1 keeps the single constant-width path below byte-identical.
+    // Pressure-modulated (v2) strokes replay as variable-width runs; v1 keeps
+    // the single constant-width path below byte-identical.
     if stroke.style.is_pressure_sensitive() {
-        draw_pressure_stroke(context, stroke, offset_x, offset_y, scale);
+        draw_pressure_stroke(context, pen, stroke, offset_x, offset_y, scale);
         return;
     }
 
     context.begin_path();
-    context.set_line_width((stroke.style.parameters.width * scale).max(MIN_RENDERED_STROKE_WIDTH));
+    pen.width(
+        context,
+        (stroke.style.parameters.width * scale).max(MIN_RENDERED_STROKE_WIDTH),
+    );
     if let Some(first) = stroke.points.first() {
         context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
         for point in stroke.points.iter().skip(1) {
@@ -246,25 +303,56 @@ fn draw_stroke(
     context.stroke();
 }
 
-/// Replay one v2 stroke as a chain of round-capped segments, each stroked at the
-/// mean of its endpoints' pressure widths (the shared curve in `protocol`).
-/// Round caps overlap consecutive segments so joins stay continuous.
+/// Each segment's on-screen width: the mean of its endpoints' pressure widths
+/// (the shared curve in `protocol`), floored and snapped to
+/// [`PRESSURE_WIDTH_STEP`].
+fn pressure_segment_widths(stroke: &Stroke, scale: f64) -> impl Iterator<Item = f64> + '_ {
+    let style = &stroke.style;
+    stroke.points.windows(2).map(move |pair| {
+        let width =
+            (style.rendered_width(pair[0].pressure) + style.rendered_width(pair[1].pressure)) / 2.0
+                * scale;
+        let snapped = (width / PRESSURE_WIDTH_STEP).round() * PRESSURE_WIDTH_STEP;
+        snapped.max(MIN_RENDERED_STROKE_WIDTH)
+    })
+}
+
+/// Replay one v2 stroke as runs of consecutive segments sharing a width, one
+/// round-joined polyline per run.
+///
+/// With round caps and joins a polyline covers exactly the union of its
+/// segments stroked one by one with round caps, and stroke colours are opaque,
+/// so this matches per-segment stroking while crossing into JS once per run
+/// rather than five times per segment. Zoomed out, every segment sits on the
+/// width floor and a whole stroke becomes one path.
 fn draw_pressure_stroke(
     context: &CanvasRenderingContext2d,
+    pen: &mut Pen,
     stroke: &Stroke,
     offset_x: f64,
     offset_y: f64,
     scale: f64,
 ) {
-    let style = &stroke.style;
-    for pair in stroke.points.windows(2) {
-        let (a, b) = (&pair[0], &pair[1]);
-        let width =
-            (style.rendered_width(a.pressure) + style.rendered_width(b.pressure)) / 2.0 * scale;
-        context.begin_path();
-        context.set_line_width(width.max(MIN_RENDERED_STROKE_WIDTH));
-        context.move_to(a.x * scale + offset_x, a.y * scale + offset_y);
-        context.line_to(b.x * scale + offset_x, b.y * scale + offset_y);
+    let to_css = |index: usize| {
+        let point = &stroke.points[index];
+        (point.x * scale + offset_x, point.y * scale + offset_y)
+    };
+    let mut run_width = None;
+    for (segment, width) in pressure_segment_widths(stroke, scale).enumerate() {
+        if run_width != Some(width) {
+            if run_width.is_some() {
+                context.stroke();
+            }
+            context.begin_path();
+            pen.width(context, width);
+            let (x, y) = to_css(segment);
+            context.move_to(x, y);
+            run_width = Some(width);
+        }
+        let (x, y) = to_css(segment + 1);
+        context.line_to(x, y);
+    }
+    if run_width.is_some() {
         context.stroke();
     }
 }
@@ -285,6 +373,80 @@ mod tests {
         assert!((to_css(viewport.max_x, offset_x) - css_w).abs() < 1e-9);
         assert!((to_css(viewport.max_y, offset_y) - css_h).abs() < 1e-9);
         assert_eq!(viewport.scale, scale);
+    }
+
+    fn pressure_stroke(width: f64, points: &[(f64, f64, f64)]) -> Stroke {
+        let mut style = protocol::StrokeStyle::default_solid_round_pressure();
+        style.parameters.width = width;
+        Stroke {
+            id: "stroke".to_string(),
+            style,
+            points: points
+                .iter()
+                .map(|&(x, y, pressure)| protocol::StrokePoint {
+                    x,
+                    y,
+                    t: 0,
+                    pressure: Some(pressure),
+                })
+                .collect(),
+        }
+    }
+
+    /// A stroke is culled only when its padded bounds miss the viewport; one
+    /// whose centreline is just off screen but whose nib reaches in still draws.
+    #[test]
+    fn strokes_are_culled_only_when_certainly_off_screen() {
+        let viewport = world_viewport(400.0, 300.0, 0.0, 0.0, 1.0);
+        let inside = pressure_stroke(8.0, &[(10.0, 10.0, 1.0), (50.0, 50.0, 1.0)]);
+        let far_right = pressure_stroke(8.0, &[(900.0, 10.0, 1.0), (950.0, 50.0, 1.0)]);
+        let far_above = pressure_stroke(8.0, &[(10.0, -900.0, 1.0), (50.0, -800.0, 1.0)]);
+        // Centreline 3 world units left of the edge; a 32-wide nib reaches 16 in.
+        let nib_reaches_in = pressure_stroke(32.0, &[(-3.0, 10.0, 1.0), (-3.0, 90.0, 1.0)]);
+        // Bounds straddle the viewport even though no point is inside it.
+        let spans_across = pressure_stroke(4.0, &[(-100.0, 150.0, 1.0), (600.0, 150.0, 1.0)]);
+        assert!(stroke_may_be_visible(&inside, &viewport));
+        assert!(!stroke_may_be_visible(&far_right, &viewport));
+        assert!(!stroke_may_be_visible(&far_above, &viewport));
+        assert!(stroke_may_be_visible(&nib_reaches_in, &viewport));
+        assert!(stroke_may_be_visible(&spans_across, &viewport));
+
+        // Panning the far stroke into view brings it back.
+        let panned = world_viewport(400.0, 300.0, -700.0, 0.0, 1.0);
+        assert!(stroke_may_be_visible(&far_right, &panned));
+    }
+
+    /// Zoomed out, every pressure segment sits on the on-screen floor, so the
+    /// whole stroke collapses into a single run; zoomed in, widths still follow
+    /// the shared pressure curve to within the snap step.
+    #[test]
+    fn pressure_segment_widths_snap_and_floor() {
+        let points: Vec<_> = (0..=10)
+            .map(|index| (index as f64 * 10.0, 0.0, index as f64 / 10.0))
+            .collect();
+        let stroke = pressure_stroke(8.0, &points);
+
+        let zoomed_out: Vec<_> = pressure_segment_widths(&stroke, 0.08).collect();
+        assert_eq!(zoomed_out.len(), 10);
+        assert!(
+            zoomed_out
+                .iter()
+                .all(|&width| width == MIN_RENDERED_STROKE_WIDTH)
+        );
+
+        let scale = 3.0;
+        let zoomed_in: Vec<_> = pressure_segment_widths(&stroke, scale).collect();
+        for (segment, width) in zoomed_in.iter().enumerate() {
+            let exact = (stroke.style.rendered_width(Some(segment as f64 / 10.0))
+                + stroke
+                    .style
+                    .rendered_width(Some((segment + 1) as f64 / 10.0)))
+                / 2.0
+                * scale;
+            assert!((width - exact).abs() <= PRESSURE_WIDTH_STEP / 2.0 + 1e-9);
+            assert_eq!(width % PRESSURE_WIDTH_STEP, 0.0);
+        }
+        assert!(zoomed_in.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     /// Panning moves the world window by exactly the inverse pan, so paper stays
