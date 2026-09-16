@@ -192,7 +192,6 @@ where
         publish_page_updated(ctx, &persisted.owner_id, updated_at);
     }
     if persisted.thumbnail_job_created {
-        crate::observability::metrics().thumbnail_generation_queued();
         queue_thumbnail(ctx, persisted.owner_id, persisted.revision);
     }
     true
@@ -208,14 +207,12 @@ where
     S: PageStore,
     Tx: Sink<Message> + Unpin,
 {
-    // Unlike commit_batch and set_paper, this path records no `lease_denied`
-    // event and no `thumbnail_generation_queued`. Carried over as found by
-    // #337, which only restructures; the fix is tracked in #339.
     if let LeaseOutcome::Denied { holder } = ctx
         .state
         .realtime
         .acquire_lease(ctx.page_id, ctx.session_id)
     {
+        crate::observability::metrics().record_realtime_event("page", "lease_denied");
         return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
     }
     let persisted = match ctx
@@ -319,7 +316,6 @@ where
         publish_page_updated(ctx, &persisted.owner_id, updated_at);
     }
     if persisted.thumbnail_job_created {
-        crate::observability::metrics().thumbnail_generation_queued();
         queue_thumbnail(ctx, persisted.owner_id, persisted.revision);
     }
     crate::observability::metrics().record_page_mutation("set_paper", "success");
@@ -338,6 +334,8 @@ fn publish_page_updated<S>(ctx: &PageContext<'_, S>, owner_id: &str, updated_at:
 }
 
 /// Announces the thumbnail job the store just created, then starts rendering it.
+/// The queue-depth gauge is counted by `thumbnails::enqueue`, so every mutation
+/// that mints a job moves it identically.
 fn queue_thumbnail<S>(ctx: &PageContext<'_, S>, owner_id: String, revision: u64) {
     ctx.state.realtime.publish_library_event(
         &owner_id,
@@ -490,6 +488,9 @@ mod tests {
     //! `send_page_frame_records_the_bytes_it_sent` asserts an exact
     //! process-wide frame count for `lease-changed`, which dispatch only ever
     //! broadcasts and never sends as a reply, so no other test here moves it.
+    //! Tests asserting exact deltas on the `lease_denied` counter or the
+    //! thumbnail queue-depth gauge hold [`METRICS_LOCK`], as does every other
+    //! test that moves either.
 
     use std::sync::Mutex;
 
@@ -503,6 +504,9 @@ mod tests {
     const SESSION: &str = "session_a";
     const OWNER: &str = "owner_1";
     const EDITED_AT: &str = "2026-09-15T00:00:00+00:00";
+
+    /// Serializes the tests that move process-wide metrics they assert on.
+    static METRICS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn fixture_stroke(id: &str) -> Stroke {
         let mut stroke: Stroke =
@@ -689,6 +693,32 @@ mod tests {
         }
     }
 
+    fn erase_message() -> PageClientMessage {
+        PageClientMessage::CommitTombstones {
+            client_mutation_id: "erase_1".to_string(),
+            stroke_ids: vec!["s1".to_string()],
+        }
+    }
+
+    fn persisted_tombstones() -> PersistedTombstones {
+        PersistedTombstones {
+            revision: 9,
+            owner_id: OWNER.to_string(),
+            stroke_ids: vec!["s1".to_string()],
+            thumbnail_job_created: false,
+            updated_at: None,
+        }
+    }
+
+    /// One of each lease-guarded mutation, labelled for assertion messages.
+    fn every_mutation() -> [(&'static str, PageClientMessage); 3] {
+        [
+            ("commit-batch", commit(&["kept"])),
+            ("commit-tombstones", erase_message()),
+            ("set-paper", set_paper_message()),
+        ]
+    }
+
     fn hold_lease(state: &AppState, session_id: &str) {
         assert!(matches!(
             state.realtime.acquire_lease(PAGE, session_id),
@@ -728,21 +758,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_batch_without_the_lease_is_denied_before_reaching_the_store() {
+    async fn every_mutation_without_the_lease_is_denied_and_counted_before_reaching_the_store() {
+        let _metrics = METRICS_LOCK.lock().await;
+        let metrics = crate::observability::metrics();
         let state = AppState::for_tests();
         hold_lease(&state, "session_b");
-        let store = FakeStore::default();
 
-        let (keep_open, replies) = handle(&state, &store, commit(&["kept"])).await;
+        for (name, message) in every_mutation() {
+            let before = metrics.realtime_event_count("page", "lease_denied");
+            let store = FakeStore::default();
 
-        assert!(keep_open);
-        assert_eq!(
-            replies,
-            [PageServerMessage::LeaseDenied {
-                holder: "session_b".to_string()
-            }]
-        );
-        assert!(store.calls().is_empty());
+            let (keep_open, replies) = handle(&state, &store, message).await;
+
+            assert!(keep_open, "{name}");
+            assert_eq!(
+                replies,
+                [PageServerMessage::LeaseDenied {
+                    holder: "session_b".to_string()
+                }],
+                "{name}"
+            );
+            assert!(store.calls().is_empty(), "{name}");
+            assert_eq!(
+                metrics.realtime_event_count("page", "lease_denied"),
+                before + 1,
+                "{name} should count its lease denial"
+            );
+        }
     }
 
     #[tokio::test]
@@ -816,36 +858,57 @@ mod tests {
         assert!(drain(&mut library).is_empty());
     }
 
-    // Leaves the process-wide `v_note_thumbnail_queue_depth` gauge one higher:
-    // the render job it spawns is cancelled with the test runtime, so its
-    // decrement never runs. Nothing here asserts that global gauge; one that
-    // did would have to account for this.
+    // Leaves the process-wide `v_note_thumbnail_queue_depth` gauge three higher:
+    // the render jobs it spawns are cancelled with the test runtime, so their
+    // decrements never run. Only this test moves that gauge in this binary.
     #[tokio::test]
-    async fn a_commit_that_creates_a_thumbnail_job_announces_it_as_generating() {
-        let state = AppState::for_tests();
-        let mut library = state.realtime.subscribe_library(OWNER);
-        let store = FakeStore {
-            batch: Mutex::new(Some(Ok(PersistedBatch {
-                thumbnail_job_created: true,
-                updated_at: None,
-                ..persisted_batch(vec![fixture_stroke("kept")])
-            }))),
-            ..FakeStore::default()
-        };
+    async fn every_mutation_that_creates_a_thumbnail_job_queues_and_announces_it() {
+        let _metrics = METRICS_LOCK.lock().await;
+        let metrics = crate::observability::metrics();
 
-        let (keep_open, _) = handle(&state, &store, commit(&["kept"])).await;
+        for (name, message) in every_mutation() {
+            let state = AppState::for_tests();
+            let mut library = state.realtime.subscribe_library(OWNER);
+            let store = FakeStore {
+                batch: Mutex::new(Some(Ok(PersistedBatch {
+                    thumbnail_job_created: true,
+                    updated_at: None,
+                    ..persisted_batch(vec![fixture_stroke("kept")])
+                }))),
+                tombstones: Mutex::new(Some(Ok(PersistedTombstones {
+                    thumbnail_job_created: true,
+                    ..persisted_tombstones()
+                }))),
+                paper: Mutex::new(Some(Ok(PersistedPaper {
+                    revision: 9,
+                    thumbnail_job_created: true,
+                    updated_at: None,
+                    ..persisted_paper(true)
+                }))),
+                ..FakeStore::default()
+            };
+            let before = metrics.thumbnail_queue_depth();
 
-        assert!(keep_open);
-        // Read before this task yields: the render job dispatch spawned has not
-        // run, so its eventual `failed` update (the test pool never connects)
-        // cannot interleave.
-        assert_eq!(
-            drain(&mut library),
-            [LibraryEvent::PageThumbnailUpdated {
-                page_id: PAGE.to_string(),
-                thumbnail: ThumbnailMetadata::Generating { source_seq: 9 },
-            }]
-        );
+            let (keep_open, _) = handle(&state, &store, message).await;
+
+            assert!(keep_open, "{name}");
+            // Read before this task yields: the render job dispatch spawned has
+            // not run, so neither its `finished` decrement nor its eventual
+            // `failed` update (the test pool never connects) can interleave.
+            assert_eq!(
+                metrics.thumbnail_queue_depth(),
+                before + 1,
+                "{name} should count its thumbnail job as queued"
+            );
+            assert_eq!(
+                drain(&mut library),
+                [LibraryEvent::PageThumbnailUpdated {
+                    page_id: PAGE.to_string(),
+                    thumbnail: ThumbnailMetadata::Generating { source_seq: 9 },
+                }],
+                "{name}"
+            );
+        }
     }
 
     // ---- commit-tombstones --------------------------------------------------
@@ -1053,6 +1116,9 @@ mod tests {
 
     #[tokio::test]
     async fn acquiring_or_renewing_a_lease_another_session_holds_is_denied() {
+        let _metrics = METRICS_LOCK.lock().await;
+        let metrics = crate::observability::metrics();
+        let before = metrics.realtime_event_count("page", "lease_denied");
         let state = AppState::for_tests();
         hold_lease(&state, "session_b");
         let mut page = state.realtime.subscribe_page(PAGE);
@@ -1071,6 +1137,10 @@ mod tests {
             );
         }
         assert!(drain(&mut page).is_empty());
+        assert_eq!(
+            metrics.realtime_event_count("page", "lease_denied"),
+            before + 2
+        );
     }
 
     #[tokio::test]
