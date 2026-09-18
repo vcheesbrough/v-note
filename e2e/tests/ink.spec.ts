@@ -589,8 +589,6 @@ test.describe('ink page channel', () => {
     const before = await scrapeMetrics(request);
     const compressed = (body: string) =>
       metricValue(body, 'v_note_realtime_events_total', { channel: 'page', result: 'compressed' });
-    const uncompressed = (body: string) =>
-      metricValue(body, 'v_note_realtime_events_total', { channel: 'page', result: 'uncompressed' });
 
     const snapshot = await driveSocket(page, {
       pageId,
@@ -624,11 +622,11 @@ test.describe('ink page channel', () => {
       })
       .toBeGreaterThan(compressed(before));
 
-    const after = await scrapeMetrics(request);
-    expect(
-      uncompressed(after),
-      'with the flag on, no browser upgrade should fall back to an uncompressed socket',
-    ).toBe(uncompressed(before));
+    // Deliberately *not* asserted: that `uncompressed` did not move. /metrics is
+    // process-wide and other workers open their own sockets throughout this
+    // window, so pinning an absolute non-change would make this test fail for
+    // something another test did. The delta above is the claim this test can
+    // actually make on its own.
   });
 
   test('SPA viewer renders live stroke batches without refresh', async ({ page, request }) => {
