@@ -102,6 +102,15 @@ where
     // agreement needs the client to have offered it too, so the flag being on
     // is necessary and not sufficient. This is the only server-side signal that
     // #342 is live on a connection, and it is what the e2e test asserts.
+    //
+    // Counted **here, at the handshake** — not after `upgraded.await` with the
+    // other connection events. That makes these two the only values in this
+    // counter that are not connection-lifecycle events, which is a deliberate
+    // trade rather than an oversight: what the rollout needs to know is what
+    // share of *upgrades* agreed the extension, and an upgrade that negotiates
+    // and then fails to come up is still evidence the negotiation works. Such a
+    // connection is counted both here and as `upgrade_error` below, so the two
+    // do not sum to the connection count when upgrades are failing.
     let negotiated = response
         .headers()
         .contains_key(axum::http::header::SEC_WEBSOCKET_EXTENSIONS);
