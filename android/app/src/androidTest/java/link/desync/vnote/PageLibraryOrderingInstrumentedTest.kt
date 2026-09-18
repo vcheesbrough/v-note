@@ -153,7 +153,7 @@ class PageLibraryOrderingInstrumentedTest {
         }
 
         composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
-        composeRule.onNodeWithContentDescription("Back to pages").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Back to library").assertIsDisplayed()
 
         composeRule.waitUntil(timeoutMillis = 5_000) { librarySocket.get() != null }
         edited.set(true)
@@ -164,7 +164,7 @@ class PageLibraryOrderingInstrumentedTest {
             ) == true,
         )
 
-        composeRule.onNodeWithContentDescription("Back to pages").performClick()
+        composeRule.onNodeWithContentDescription("Back to library").performClick()
         composeRule.waitUntil(timeoutMillis = 10_000) {
             pageListRequests.get() >= 2 && pageIsBefore("page_old", "page_new")
         }
@@ -308,7 +308,7 @@ class PageLibraryOrderingInstrumentedTest {
     private fun closePaletteAndReturnToLibrary() {
         composeRule.onNodeWithTag("drawing-tool").performClick()
         composeRule.onNodeWithTag("tool-palette").assertDoesNotExist()
-        composeRule.onNodeWithContentDescription("Back to pages").performClick()
+        composeRule.onNodeWithContentDescription("Back to library").performClick()
     }
 
     private fun pageIsBefore(

@@ -8,7 +8,6 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -235,7 +234,8 @@ class PagePaperInstrumentedTest {
                 true
             }.getOrDefault(false)
         }
-        composeRule.onNodeWithText("New page").performClick()
+        // The library's create control is the top bar's `+` button (#317).
+        composeRule.onNodeWithTag("create-page-button").performClick()
 
         composeRule.waitUntil(timeoutMillis = 10_000) { createRequestBodies.isNotEmpty() }
         val body = JSONObject(createRequestBodies.first())
@@ -244,15 +244,25 @@ class PagePaperInstrumentedTest {
 
     // ---- harness --------------------------------------------------------
 
-    /**
-     * Paper pixels blend toward white preserving their channel ordering, which
-     * is disjoint from the green-dominant ink classifier.
-     */
     private fun storedPaper(): Paper {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         return PaperPreferences(context, TEST_USER_ID).load()
     }
 
+    /**
+     * Paper pixels blend toward white preserving their channel ordering, which
+     * is disjoint from the green-dominant ink classifier.
+     *
+     * The ordering alone is not enough here. Unlike the SPA's counterpart in
+     * `e2e/tests/paper.spec.ts`, which reads the canvas back through
+     * `getImageData` and so sees only what the canvas drew, this is a screen
+     * capture: whatever is painted *over* the canvas is in it too, and the
+     * version watermark sits in the bottom-right corner of every screen. A
+     * near-neutral grey like that one lands on an ordering by rounding alone,
+     * so a mark must also carry a real channel separation — a rule (`#B0C4DE`)
+     * carries 46/255 and the margin (`#E06C6C`) 116/255 at full opacity,
+     * against under 4/255 for the watermark.
+     */
     private fun countPaperPixels(): Int {
         val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
         var count = 0
@@ -260,8 +270,12 @@ class PagePaperInstrumentedTest {
             for (x in 0 until pixels.width) {
                 val pixel = pixels[x, y]
                 if (pixel == Color.White) continue
-                val isRule = pixel.blue > pixel.green && pixel.green > pixel.red
-                val isMargin = pixel.red > pixel.green && pixel.red > pixel.blue
+                val red = pixel.red
+                val green = pixel.green
+                val blue = pixel.blue
+                val isRule = blue > green && green > red && blue - red >= MIN_MARK_SEPARATION
+                val isMargin =
+                    red > green && red > blue && red - maxOf(green, blue) >= MIN_MARK_SEPARATION
                 if (isRule || isMargin) count++
             }
         }
@@ -437,6 +451,13 @@ class PagePaperInstrumentedTest {
         private const val TEST_USER_ID = "paper-test-user"
         private const val SEED_STROKE_Y = 200f
         private const val SEED_ASSERTION_X = 300
+
+        /**
+         * Minimum channel separation, in Compose's 0..1 colour units, for a
+         * pixel to be a paper mark rather than a near-neutral grey drawn over
+         * the canvas. See [countPaperPixels].
+         */
+        private const val MIN_MARK_SEPARATION = 12f / 255f
     }
 }
 

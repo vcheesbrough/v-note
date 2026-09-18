@@ -1,8 +1,6 @@
 package link.desync.vnote.ink
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -22,7 +20,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -33,6 +30,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.ui.VNoteTopBar
 import link.desync.vnote.ui.displayTitle
 
 // The open-page screen: top bar (back, title, paper, pen and eraser controls), the
@@ -74,13 +72,9 @@ fun PageCanvasScreen(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        VNoteTopBar {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back to pages")
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back to library")
             }
             Text(
                 page.displayTitle(),

@@ -343,7 +343,7 @@ test.describe('page paper', () => {
         .poll(async () => countPaperPixels(page, 'rule'), { timeout: 5_000 })
         .toBeGreaterThan(5);
       expect(await countTexturePixels(page)).toBeGreaterThan(50);
-      await page.getByRole('button', { name: 'Back' }).click();
+      await page.getByRole('button', { name: 'Back to library', exact: true }).click();
     }
   });
 });
