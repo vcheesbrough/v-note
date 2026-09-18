@@ -2,17 +2,24 @@
 //! which owns the session state and switches between the library and the
 //! `viewer::InkViewer` for the selected page. Both screens wear the same
 //! `.top-bar`, so the chrome does not change shape when a page opens.
+//!
+//! Which screen is showing is held in the address bar (`route`), not only in a
+//! signal, so pages are linkable and the browser's Back button walks the app's
+//! own history instead of leaving it.
 
 mod api;
 mod library;
 mod realtime;
 mod render;
+mod route;
 mod viewer;
 
 use leptos::prelude::*;
+use leptos::{ev, leptos_dom::helpers::window_event_listener};
 use protocol::{MeResponse, MetaResponse, PageSummary, ThumbnailMetadata};
 
 use crate::library::{approximate_relative_datetime, page_has_title, remove_page, thumbnail_key};
+use crate::route::{Leave, Route};
 use crate::viewer::InkViewer;
 
 /// What `/api/me` has told us so far: `None` while the request is in flight,
@@ -85,7 +92,9 @@ fn LibraryBar(me: RwSignal<Session>) -> impl IntoView {
                     None => view! { <span class="muted">"Checking session…"</span> }.into_any(),
                     Some(Ok(_)) => ().into_any(),
                     Some(Err(status)) if signed_out(status) => view! {
-                        <a class="button primary" href="/auth/login">"Sign in"</a>
+                        // A full-page hand-off to the IdP, which always returns
+                        // the browser to `/` — so stash the deep link first.
+                        <a class="button primary" href="/auth/login" on:click=move |_| route::remember_return_route()>"Sign in"</a>
                     }
                     .into_any(),
                     Some(Err(_)) => view! { <span class="muted">"Session check failed"</span> }.into_any(),
@@ -119,7 +128,13 @@ fn PageTile(
 
     view! {
         <li class="page-tile">
-            <button class="page-preview-button" aria-label=open_label on:click=move |_| selected_page.set(Some(preview_page.clone()))>
+            <button class="page-preview-button" aria-label=open_label on:click=move |_| {
+                let page = preview_page.clone();
+                // Push before selecting: the entry the user goes Back to is the
+                // library they are standing on.
+                route::push(&Route::Page(page.id.clone()));
+                selected_page.set(Some(page));
+            }>
             {match (thumbnail_unavailable, thumbnail) {
                 (true, _) => view! {
                     <div class="page-preview thumbnail-failed" aria-label="Thumbnail unavailable while realtime is disconnected"></div>
@@ -177,9 +192,17 @@ fn Library(
     pages: RwSignal<Vec<PageSummary>>,
     selected_page: RwSignal<Option<PageSummary>>,
     library_error: RwSignal<Option<String>>,
+    route_notice: RwSignal<Option<String>>,
 ) -> impl IntoView {
     view! {
         <section class="library-shell" aria-label="Page library">
+            // Why the address bar did not open what it named. Its own signal
+            // because it outlives a reconnect: `library_error` is the live
+            // transport's state and every successful reload clears it.
+            {move || route_notice.get().map(|notice| view! {
+                <p class="alert" role="alert">{notice}</p>
+            })}
+
             {move || library_error.get().map(|error| view! {
                 <p class="alert" role="alert">{error}</p>
             })}
@@ -255,6 +278,39 @@ fn App() -> impl IntoView {
     let pages = RwSignal::new(Vec::<PageSummary>::new());
     let selected_page = RwSignal::new(None::<PageSummary>);
     let library_error = RwSignal::new(None::<String>);
+    // Why a route did not open what it named — a deep link to a page this
+    // owner does not have.
+    let route_notice = RwSignal::new(None::<String>);
+    // A page id the URL names that the library has not delivered yet. A cold
+    // load of `/p/{id}` knows the id long before it knows the page.
+    let pending_page_id = RwSignal::new(None::<String>);
+    // Whether `/api/pages` has answered at all; set by `api::load_pages`, so
+    // the retrying library socket establishes it too.
+    let pages_loaded = RwSignal::new(false);
+
+    // The address bar is read before anything else, so a deep link opens its
+    // page rather than flashing the library on the way there.
+    if let Route::Page(page_id) = route::initial_route() {
+        pending_page_id.set(Some(page_id));
+    }
+
+    // Show whichever page the URL names, or park the id until the library
+    // arrives with it.
+    let show_page_id = move |page_id: String| match pages
+        .get_untracked()
+        .iter()
+        .find(|page| page.id == page_id)
+        .cloned()
+    {
+        Some(page) => {
+            pending_page_id.set(None);
+            selected_page.set(Some(page));
+        }
+        None => {
+            selected_page.set(None);
+            pending_page_id.set(Some(page_id));
+        }
+    };
 
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
@@ -266,15 +322,62 @@ fn App() -> impl IntoView {
     Effect::new(move |_| {
         if matches!(me.get(), Some(Ok(_))) {
             wasm_bindgen_futures::spawn_local(async move {
-                if let Err(error) = api::load_pages(pages, library_error).await {
+                if let Err(error) = api::load_pages(pages, pages_loaded, library_error).await {
                     library_error.set(Some(error));
                 }
             });
             wasm_bindgen_futures::spawn_local(realtime::library_realtime_loop(
                 pages,
                 selected_page,
+                pages_loaded,
                 library_error,
             ));
+        }
+    });
+
+    // Resolve a deep-linked id against the library as soon as the library can
+    // answer. Only once it has answered is "not here" a real answer: before
+    // that the list is empty because nothing has loaded, and while signed out
+    // the URL is left alone so signing in still lands on the linked page.
+    Effect::new(move |_| {
+        let Some(page_id) = pending_page_id.get() else {
+            return;
+        };
+        match pages.get().iter().find(|page| page.id == page_id).cloned() {
+            Some(page) => {
+                pending_page_id.set(None);
+                selected_page.set(Some(page));
+            }
+            None if pages_loaded.get() => {
+                pending_page_id.set(None);
+                route::replace(&Route::Library);
+                route_notice.set(Some("That page is not in your library.".to_string()));
+            }
+            None => {}
+        }
+    });
+
+    // Back and Forward are the same navigation as a tile click or the back
+    // arrow, so they run through the same code: the URL says what to show.
+    Effect::new(move |_| {
+        let popstate = window_event_listener(ev::popstate, move |_| {
+            route::note_popstate();
+            match route::current_route() {
+                Route::Library => {
+                    pending_page_id.set(None);
+                    selected_page.set(None);
+                }
+                Route::Page(page_id) => show_page_id(page_id),
+            }
+        });
+        on_cleanup(move || popstate.remove());
+    });
+
+    // Opening anything answers the notice: it is about a link that failed, not
+    // about the library itself.
+    Effect::new(move |_| {
+        if selected_page.get().is_some() {
+            route_notice.set(None);
         }
     });
 
@@ -286,11 +389,18 @@ fn App() -> impl IntoView {
                 // The viewer brings its own `.top-bar` — same bar, different
                 // contents — so exactly one is on screen either way.
                 Some(page) => view! {
-                    <InkViewer page=page on_close=Callback::new(move |_| selected_page.set(None)) />
+                    // Leaving pops the entry the tile pushed where there is one;
+                    // only a rewritten URL (a cold deep link) leaves the screen
+                    // change to us, since no `popstate` follows it.
+                    <InkViewer page=page on_close=Callback::new(move |_| {
+                        if route::leave_page() == Leave::Rewrote {
+                            selected_page.set(None);
+                        }
+                    }) />
                 }.into_any(),
                 None => view! {
                     <LibraryBar me=me />
-                    <Library me=me meta=meta pages=pages selected_page=selected_page library_error=library_error />
+                    <Library me=me meta=meta pages=pages selected_page=selected_page library_error=library_error route_notice=route_notice />
                 }.into_any(),
             }}
         </main>
