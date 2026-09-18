@@ -11,6 +11,11 @@ test.describe('auth — happy path', () => {
 
   test('SPA loads for an authenticated session', async ({ page }) => {
     await page.goto('/', { waitUntil: 'load' });
+    // Sign out lives in the top bar's menu (#317), so the menu has to be opened
+    // before the link is on screen.
+    const menuButton = page.locator('summary[aria-label="Open main menu"]');
+    await expect(menuButton).toBeVisible({ timeout: 15_000 });
+    await menuButton.click();
     await expect(page.getByRole('link', { name: 'Sign out' })).toBeVisible({ timeout: 15_000 });
     await expect(page).not.toHaveURL(/\/auth\/login/);
   });
