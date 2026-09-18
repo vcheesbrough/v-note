@@ -230,13 +230,21 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
 
     view! {
         <section class="canvas-shell" aria-label="Open page">
-            <div class="canvas-header">
-                <button class="button secondary" on:click=move |_| on_close.run(())>"Back"</button>
-                <h2 class="canvas-title">{page_title}</h2>
-                <span class="live-status" aria-live="polite">
-                    {move || format!("{} · seq {}", feed.status.get(), feed.last_seq.get())}
-                </span>
-            </div>
+            // The same `.top-bar` the library wears, carrying the back arrow and
+            // the page name instead of the menu and the brand.
+            <header class="top-bar">
+                <div class="bar-left">
+                    <button class="icon-button" aria-label="Back to library" on:click=move |_| on_close.run(())>
+                        <span aria-hidden="true">"←"</span>
+                    </button>
+                    <h2 class="page-name">{page_title}</h2>
+                </div>
+                <div class="bar-right">
+                    <span class="live-status" aria-live="polite">
+                        {move || format!("{} · seq {}", feed.status.get(), feed.last_seq.get())}
+                    </span>
+                </div>
+            </header>
 
             {move || feed.error.get().map(|error| view! {
                 <p class="alert" role="alert">{error}</p>

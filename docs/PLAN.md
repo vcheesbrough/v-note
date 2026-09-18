@@ -166,9 +166,9 @@ Tests: pure logic beside the code (`#[cfg(test)]`, a sibling `tests.rs` once lar
 
 **Contract — `crates/protocol`:** every wire type and the paper spec. `schemas/` and `contracts/fixtures/` are asserted against it by `tests/schemas.rs` and `tests/contracts.rs`.
 
-**SPA — `frontend/src`:** `main.rs` (app shell) · `api.rs` (HTTP calls, WSS URLs) · `realtime.rs` (both socket loops) · `library.rs` (library state and reducers) · `viewer.rs` (`InkViewer`, pan/zoom, page-event reducers) · `render.rs` (Canvas2D).
+**SPA — `frontend/src`:** `main.rs` (app shell: the one top bar, its menu, and the library view) · `api.rs` (HTTP calls, WSS URLs) · `realtime.rs` (both socket loops) · `library.rs` (library state and reducers) · `viewer.rs` (`InkViewer`, pan/zoom, page-event reducers) · `render.rs` (Canvas2D).
 
-**Android — `android/app/src/main/java/link/desync/vnote`:** `api/` (`ApiClient` interface, `OkHttpApiClient`, `PageSocket`) · `api/codec/` (all JSON; JVM-tested against every fixture) · `model/` (data classes) · `auth/` (OIDC, tokens) · `library/` (page-list reducers, `LibraryStateHolder`) · `ink/` (`PageCanvasScreen`, `InkCanvas`, `StylusInput`, `StylusSamples`, `EraserGeometry`, `ToolPalette`, `PaperPalette`, `PageInkSession`, renderer, paper) · `MainActivity` (sign-in flow, screen switch) · `LibraryScreen` · `SessionState` · `ui/`.
+**Android — `android/app/src/main/java/link/desync/vnote`:** `api/` (`ApiClient` interface, `OkHttpApiClient`, `PageSocket`) · `api/codec/` (all JSON; JVM-tested against every fixture) · `model/` (data classes) · `auth/` (OIDC, tokens) · `library/` (page-list reducers, `LibraryStateHolder`, `PageTile`) · `ink/` (`PageCanvasScreen`, `InkCanvas`, `StylusInput`, `StylusSamples`, `EraserGeometry`, `ToolPalette`, `PaperPalette`, `PageInkSession`, renderer, paper) · `MainActivity` (sign-in flow, screen switch) · `LibraryScreen` (the library's top bar, menu and body) · `SessionState` · `ui/` (chrome shared by both screens: `VNoteTopBar`, `StatePanel`/`StatusBanner`, page labels, `theme/`).
 
 **Guardrails in CI:** `clippy::too_many_lines` at 100 (`clippy.toml`); detekt's complexity rules with a baseline that only shrinks (`android/detekt.yml`, `android/app/detekt-baseline.xml`). Lower a threshold when code allows; never raise one.
 

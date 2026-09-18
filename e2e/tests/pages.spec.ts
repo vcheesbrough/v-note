@@ -21,7 +21,7 @@ test.describe('page library', () => {
     await expectCanvasFillsFrame(page);
     await page.setViewportSize({ width: 1100, height: 700 });
     await expectCanvasFillsFrame(page);
-    await page.getByRole('button', { name: 'Back' }).click();
+    await page.getByRole('button', { name: 'Back to library', exact: true }).click();
 
     page.on('dialog', (dialog) => dialog.accept());
     await page.getByRole('button', { name: 'Delete page', exact: true }).first().click();
