@@ -284,8 +284,8 @@ fn App() -> impl IntoView {
     // A page id the URL names that the library has not delivered yet. A cold
     // load of `/p/{id}` knows the id long before it knows the page.
     let pending_page_id = RwSignal::new(None::<String>);
-    // Whether `/api/pages` has answered at all, which is what tells an id that
-    // is not in `pages` apart from one the list has simply not reached yet.
+    // Whether `/api/pages` has answered at all; set by `api::load_pages`, so
+    // the retrying library socket establishes it too.
     let pages_loaded = RwSignal::new(false);
 
     // The address bar is read before anything else, so a deep link opens its
@@ -322,14 +322,14 @@ fn App() -> impl IntoView {
     Effect::new(move |_| {
         if matches!(me.get(), Some(Ok(_))) {
             wasm_bindgen_futures::spawn_local(async move {
-                match api::load_pages(pages, library_error).await {
-                    Ok(()) => pages_loaded.set(true),
-                    Err(error) => library_error.set(Some(error)),
+                if let Err(error) = api::load_pages(pages, pages_loaded, library_error).await {
+                    library_error.set(Some(error));
                 }
             });
             wasm_bindgen_futures::spawn_local(realtime::library_realtime_loop(
                 pages,
                 selected_page,
+                pages_loaded,
                 library_error,
             ));
         }

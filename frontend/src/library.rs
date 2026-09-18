@@ -6,6 +6,8 @@ use js_sys::Date;
 use leptos::prelude::*;
 use protocol::{LibraryEvent, PageSummary, ThumbnailMetadata};
 
+use crate::route::{self, Route};
+
 const UNTITLED_PAGE: &str = "Untitled page";
 
 pub(crate) fn page_has_title(page: &PageSummary) -> bool {
@@ -72,7 +74,7 @@ fn close_if_open(selected_page: RwSignal<Option<PageSummary>>, page_id: &str) {
         .is_some_and(|page| page.id == page_id)
     {
         selected_page.set(None);
-        crate::route::replace(&crate::route::Route::Library);
+        route::replace(&Route::Library);
     }
 }
 

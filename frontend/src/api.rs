@@ -60,8 +60,13 @@ pub(crate) async fn fetch_me() -> Result<MeResponse, u16> {
     }
 }
 
+/// `GET /api/pages`. `pages_loaded` records that the library has answered at
+/// all, which is what tells an id that is not in `pages` apart from one the
+/// list has simply not reached yet. It lives here rather than at a call site
+/// because every successful load establishes it, including the retrying one.
 pub(crate) async fn load_pages(
     pages: RwSignal<Vec<PageSummary>>,
+    pages_loaded: RwSignal<bool>,
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
     let response = Request::get("/api/pages")
@@ -77,6 +82,7 @@ pub(crate) async fn load_pages(
         .await
         .map_err(|error| format!("invalid pages response: {error}"))?;
     pages.set(body.pages);
+    pages_loaded.set(true);
     library_error.set(None);
     Ok(())
 }
