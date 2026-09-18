@@ -40,9 +40,9 @@ fn apk_download_url() -> String {
     format!("/dl/apk?release={}", release_version())
 }
 
-/// The library's hamburger menu: identity, the Android download and the
-/// sign-in/out link. `/dl/apk` is public, so the download is offered in both
-/// session states.
+/// The library's hamburger menu: identity, the Android download and sign out.
+/// `/dl/apk` is public, so the download is offered without a session too;
+/// signing in belongs to the bar, not here.
 #[component]
 fn MainMenu(me: RwSignal<Session>) -> impl IntoView {
     view! {
@@ -56,9 +56,11 @@ fn MainMenu(me: RwSignal<Session>) -> impl IntoView {
                         <a class="menu-link" href="/auth/logout">"Sign out"</a>
                     }
                     .into_any(),
+                    // Without a session there is nothing to say about the
+                    // account, and signing in is the bar's control — the menu
+                    // must not offer one for a state it has not established.
                     _ => view! {
                         <a class="menu-link" href=apk_download_url() download=apk_download_filename()>"Download Android app (.apk)"</a>
-                        <a class="menu-link" href="/auth/login">"Sign in"</a>
                     }
                     .into_any(),
                 }}
