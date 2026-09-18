@@ -37,7 +37,7 @@ pub fn recover_pending(state: AppState) {
                WHERE t.status = 'generating'"#,
             )
             .fetch_all(metered(&pool))
-            .instrument(db_query_span("SELECT", "recover_pending_thumbnails"))
+            .instrument(db_query_span!("SELECT", "recover_pending_thumbnails"))
             .await;
             let pending = match pending {
                 Ok(pending) => pending,
@@ -105,7 +105,7 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
                 .bind(&page_id)
                 .bind(source_seq as i64)
                 .execute(metered(pool))
-                .instrument(db_query_span("UPDATE", "thumbnail_mark_failed"))
+                .instrument(db_query_span!("UPDATE", "thumbnail_mark_failed"))
                 .await;
                 ThumbnailMetadata::Failed { source_seq }
             }
@@ -135,7 +135,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(page_id)
     .bind(source_seq as i64)
     .fetch_optional(metered(pool))
-    .instrument(db_query_span("SELECT", "thumbnail_job_paper"))
+    .instrument(db_query_span!("SELECT", "thumbnail_job_paper"))
     .await
     .map_err(|error| error.to_string())?
     .ok_or("thumbnail job row is missing")?;
@@ -148,7 +148,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(page_id)
     .bind(source_seq as i64)
     .fetch_all(metered(pool))
-    .instrument(db_query_span("SELECT", "thumbnail_strokes"))
+    .instrument(db_query_span!("SELECT", "thumbnail_strokes"))
     .await
     .map_err(|error| error.to_string())?;
     let tombstones: std::collections::HashSet<String> = sqlx::query_scalar(
@@ -157,7 +157,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(page_id)
     .bind(source_seq as i64)
     .fetch_all(metered(pool))
-    .instrument(db_query_span("SELECT", "thumbnail_tombstones"))
+    .instrument(db_query_span!("SELECT", "thumbnail_tombstones"))
     .await
     .map_err(|error| error.to_string())?
     .into_iter()
@@ -177,7 +177,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .bind(source_seq as i64)
     .bind(png)
     .execute(metered(pool))
-    .instrument(db_query_span("UPDATE", "thumbnail_store_png"))
+    .instrument(db_query_span!("UPDATE", "thumbnail_store_png"))
     .await
     .map_err(|error| error.to_string())?;
     crate::observability::metrics().observe_thumbnail_artifact_bytes(png_bytes);
@@ -523,7 +523,7 @@ async fn cleanup(pool: &PgPool, page_id: &str) -> Result<(), sqlx::Error> {
     )
     .bind(page_id)
     .execute(metered(pool))
-    .instrument(db_query_span("DELETE", "thumbnail_cleanup"))
+    .instrument(db_query_span!("DELETE", "thumbnail_cleanup"))
     .await?;
     Ok(())
 }

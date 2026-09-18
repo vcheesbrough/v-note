@@ -64,5 +64,7 @@ uuid = { version = "1", features = ["v4"] }
 axum-extra = { version = "0.12", features = ["cookie"] }
 # Same backend as [dependencies]: enabling a second one makes jsonwebtoken panic.
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+# `testing` adds the in-memory span exporter the span-attribute tests read back.
+opentelemetry_sdk = { version = "0.32.1", features = ["testing"] }
 serde = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
