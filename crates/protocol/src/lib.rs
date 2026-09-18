@@ -349,8 +349,8 @@ pub struct PageReplay {
     pub batches: Vec<StrokeBatch>,
     /// Every tombstone batch on the page, replayed even when `from_seq` skips
     /// the stroke batches they deleted from — a reconnecting client may still
-    /// hold those strokes. Defaulted on read so a payload written before
-    /// tombstones joined the snapshot still parses.
+    /// hold those strokes. `default` keeps the reader tolerant while the schema
+    /// keeps this `required`, so the server must always emit it.
     #[serde(default)]
     pub tombstones: Vec<TombstoneBatch>,
 }
