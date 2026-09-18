@@ -86,6 +86,14 @@ services:
       VNOTE__DATABASE__USER: v_note
       VNOTE__DATABASE__PASSWORD: test-password
       VNOTE__DATABASE__NAME: v_note
+      # #342: the whole realtime suite runs with `permessage-deflate` offered,
+      # so every WebSocket test below exercises the compressed path through a
+      # real browser rather than only the dedicated negotiation test. The leaf
+      # ships **off** (see `RealtimeConfig::compression`) — e2e deliberately
+      # runs the target state, not the shipping default, because the acceptance
+      # for #342 is that a real browser negotiates and then works. The off path
+      # is the pre-#342 wire and is covered by the config unit tests.
+      VNOTE__REALTIME__COMPRESSION: "true"
     # `test` is deliberately absent: the probe command is inherited from the
     # image (Dockerfile.web), so there is still exactly one definition of what
     # "healthy" means. Only the timings are overridden, because the image is

@@ -257,6 +257,10 @@ fn apply_defaults(
         ("android.assetlinks-json", ""),
         // Feature flag (#323). On by default; see `RealtimeConfig`.
         ("realtime.coalesce-replay", "true"),
+        // Feature flag (#342). Off here, but the dev and prod sovereign leaves
+        // are both `"true"` — this is the no-leaf fallback, not what a
+        // deployed server does. See `RealtimeConfig`.
+        ("realtime.compression", "false"),
     ];
     let mut builder = builder;
     for (key, value) in defaults {
@@ -488,6 +492,23 @@ pub struct RealtimeConfig {
     /// client again.
     #[serde(default = "coalesce_replay_default")]
     pub coalesce_replay: bool,
+
+    /// Offer RFC 7692 `permessage-deflate` on both realtime channels (#342).
+    ///
+    /// **Off by default here, but the sovereign leaves for dev and prod are
+    /// both `"true"`** — so this default is what a bare `cargo run` or a test
+    /// gets, not what a deployed server does. Do not read it as "compression is
+    /// off in production".
+    ///
+    /// Unlike `coalesce_replay` this does not change the wire *shape* —
+    /// compression is negotiated per connection, so a client that does not
+    /// offer the extension is served exactly as before. The flag exists because
+    /// landing it meant replacing the WebSocket implementation under
+    /// `realtime`, and a stack swap wants a runtime way back that does not need
+    /// a rollback build. Flipping it affects only connections opened after the
+    /// change, since the extension is agreed at upgrade time.
+    #[serde(default = "compression_default")]
+    pub compression: bool,
 }
 
 /// Mirrors the `realtime.coalesce-replay` default leaf, so a `realtime` branch
@@ -496,10 +517,17 @@ fn coalesce_replay_default() -> bool {
     true
 }
 
+/// Mirrors the `realtime.compression` default leaf, so a `realtime` branch
+/// supplied by sovereign-config without this key still means "off".
+fn compression_default() -> bool {
+    false
+}
+
 impl Default for RealtimeConfig {
     fn default() -> Self {
         Self {
             coalesce_replay: coalesce_replay_default(),
+            compression: compression_default(),
         }
     }
 }

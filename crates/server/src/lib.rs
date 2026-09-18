@@ -36,6 +36,10 @@ pub struct AppState {
     /// `realtime.coalesce-replay` (#323): send a `subscribe` replay as one
     /// `page-replay` frame rather than a frame per stored batch.
     pub coalesce_replay: bool,
+    /// `realtime.compression` (#342): offer `permessage-deflate` on the
+    /// realtime upgrades. Read once per upgrade, so flipping it only affects
+    /// connections opened afterwards.
+    pub realtime_compression: bool,
 }
 
 /// The build version: the release tag baked in at compile time (`V_NOTE_RELEASE`,
@@ -130,6 +134,7 @@ pub async fn build_app_router(
         realtime: Arc::new(RealtimeHub::default()),
         assetlinks_json: android.assetlinks_json().map(Arc::from),
         coalesce_replay: realtime.coalesce_replay,
+        realtime_compression: realtime.compression,
     };
     // Startup work, not router construction: resume thumbnail jobs a restart
     // interrupted. Kept out of `router` so tests, whose pool never connects,
@@ -165,6 +170,7 @@ pub fn build_router(
             realtime: Arc::new(RealtimeHub::default()),
             assetlinks_json: None,
             coalesce_replay: RealtimeConfig::default().coalesce_replay,
+            realtime_compression: RealtimeConfig::default().compression,
         },
         None,
     )
@@ -277,6 +283,7 @@ impl AppState {
             realtime: Arc::new(RealtimeHub::default()),
             assetlinks_json: None,
             coalesce_replay: RealtimeConfig::default().coalesce_replay,
+            realtime_compression: RealtimeConfig::default().compression,
         }
     }
 }
