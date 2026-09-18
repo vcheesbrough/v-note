@@ -16,7 +16,7 @@ workspace = true
 postgres-tests = []
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 axum-extra = { version = "0.12", features = ["cookie"] }
 # 0.8's plain `tls-rustls` also enables `rustls/aws-lc-rs`. `-no-provider` builds the
 # TLS config from the process-default provider instead — ring, installed in `main.rs`.
@@ -59,9 +59,11 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+yawc = { version = "0.4.2", features = ["axum"] }
 
 [dev-dependencies]
 axum-extra = { version = "0.12", features = ["cookie"] }
+flate2 = "1.1.10"
 # Same backend as [dependencies]: enabling a second one makes jsonwebtoken panic.
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 # `testing` adds the in-memory span exporter the span-attribute tests read back.
