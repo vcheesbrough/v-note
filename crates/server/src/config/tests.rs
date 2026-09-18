@@ -464,6 +464,88 @@ fn android_rejects_malformed_assetlinks_json() {
 }
 
 // ---------------------------------------------------------------------------
+// realtime
+// ---------------------------------------------------------------------------
+
+/// The flag ships **on**: an operator has to ask for the old shape.
+#[test]
+fn realtime_coalesce_replay_defaults_to_on() {
+    let realtime: RealtimeConfig =
+        load_group(&cfg(&[]), "realtime").expect("realtime group defaults");
+
+    assert!(realtime.coalesce_replay);
+}
+
+/// Every leaf is text in sovereign-config, so the rollback switch has to work
+/// when written as a string — in either spelling of the env key.
+#[test]
+fn realtime_coalesce_replay_can_be_turned_off_from_a_text_leaf() {
+    for key in [
+        "VNOTE__REALTIME__COALESCE-REPLAY",
+        "VNOTE__REALTIME__COALESCE_REPLAY",
+    ] {
+        let realtime: RealtimeConfig =
+            load_group(&cfg(&[(key, "false")]), "realtime").expect("false should load");
+        assert!(!realtime.coalesce_replay, "{key} should turn it off");
+    }
+}
+
+/// The real leaf, as written to sovereign-config at
+/// `/v-note/{dev,prod}/server/realtime/coalesce-replay`, is read from the
+/// sovereign layer — in both settings.
+#[test]
+fn realtime_flag_is_read_from_the_sovereign_layer() {
+    for (leaf, expected) in [("true", true), ("false", false)] {
+        let config = cfg_with_sovereign(&[("realtime.coalesce-replay", leaf)], &[]);
+        let realtime: RealtimeConfig =
+            load_group(&config, "realtime").expect("sovereign value loads");
+
+        assert_eq!(
+            realtime.coalesce_replay, expected,
+            "sovereign leaf `{leaf}`"
+        );
+    }
+}
+
+/// Env out-ranks sovereign-config, so an operator can force the rollback shape
+/// on one container without touching the shared subtree.
+#[test]
+fn realtime_env_override_beats_the_sovereign_value() {
+    let config = cfg_with_sovereign(
+        &[("realtime.coalesce-replay", "true")],
+        &[("VNOTE__REALTIME__COALESCE_REPLAY", "false")],
+    );
+    let realtime: RealtimeConfig = load_group(&config, "realtime").expect("env override loads");
+
+    assert!(!realtime.coalesce_replay);
+}
+
+/// The sovereign layer is merged wholesale, so a `realtime` branch that exists
+/// only for some later leaf must not silently drop the flag back to `false`.
+#[test]
+fn realtime_branch_without_the_flag_still_means_on() {
+    let config = cfg_with_sovereign(&[("realtime.some-later-leaf", "x")], &[]);
+    let realtime: RealtimeConfig =
+        load_group(&config, "realtime").expect("a branch without the flag still loads");
+
+    assert!(realtime.coalesce_replay);
+}
+
+/// A leaf that is not a boolean fails startup rather than being read as `false`
+/// — a typo'd flag must not silently roll the change back.
+#[test]
+fn realtime_non_boolean_flag_fails_to_deserialize() {
+    let config = cfg(&[("VNOTE__REALTIME__COALESCE-REPLAY", "yes-please")]);
+    let error =
+        load_group::<RealtimeConfig>(&config, "realtime").expect_err("non-boolean is rejected");
+
+    match error {
+        ConfigError::Load { ref group, .. } => assert_eq!(group, "realtime"),
+        other => panic!("expected Load, got: {other}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // server
 // ---------------------------------------------------------------------------
 

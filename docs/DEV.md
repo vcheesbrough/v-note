@@ -57,9 +57,10 @@ system below.
 ### Runtime configuration (`VNOTE__*`)
 
 Since iteration 19 the server's runtime config lives in **sovereign-config**
-(`/v-note/{dev,prod}/server`), loaded as five independent groups —
-`database`, `oidc`, `observability`, `android`, `server`. **The server refuses to
-start (non-zero exit, redacted error) if any value is missing or invalid.**
+(`/v-note/{dev,prod}/server`), loaded as six independent groups —
+`database`, `oidc`, `observability`, `android`, `realtime`, `server`. **The server
+refuses to start (non-zero exit, redacted error) if any value is missing or
+invalid.**
 
 Config is layered: in-memory defaults → sovereign-config (only when an access URL
 is set) → `VNOTE__*` environment overrides. Local dev and e2e have no
@@ -110,9 +111,40 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__OBSERVABILITY__SERVICE-NAME` | `v-note` | trace service name |
 | `VNOTE__OBSERVABILITY__METRICS-ADDR` | `0.0.0.0:9090` | internal Prometheus listener; `disabled`/blank turns it off |
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
+| `VNOTE__REALTIME__COALESCE-REPLAY` | `true` | **Feature flag (#323).** Answer a `subscribe` with one coalesced `page-replay` frame. Set `false` to restore the pre-#323 shape (a `stroke-batch` per stored batch, then `synced`) without rebuilding — see below. A non-boolean value **fails startup** rather than reading as `false` |
 | `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
 | `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
 | `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
+
+#### `realtime.coalesce-replay` — runtime rollback for #323
+
+Both replay shapes are valid **protocol 6**, and every shipped client still
+understands the per-message form, so this flag can be flipped on a running
+deployment without a client update. Turning it **off** is also what lets the
+server serve a **protocol 5** client again.
+
+The leaf exists in sovereign-config for both environments, so flipping it needs
+no deploy and no code change:
+
+```
+/v-note/dev/server/realtime/coalesce-replay  = "true"
+/v-note/prod/server/realtime/coalesce-replay = "true"
+```
+
+```bash
+VNOTE__REALTIME__COALESCE_REPLAY=false cargo run -p server   # shell-friendly
+VNOTE__REALTIME__COALESCE-REPLAY: "false"                    # compose
+```
+
+Env out-ranks sovereign-config, so the env form forces one container onto the
+rollback shape without touching the shared subtree; edit the sovereign leaf to
+change the whole environment. Either way the server must restart to pick it up —
+config is read once at startup.
+
+Which shape is in force is visible without shell access: the `replay_page` span
+carries `coalesced`, and `v_note_realtime_replay_frames` reads **1** per replay
+when on versus one-per-stored-batch when off (the **Replay frames** panel on the
+`v-note — overview` dashboard).
 
 **OIDC is mandatory:** the server refuses to start without `VNOTE__OIDC__ISSUER-URL` and related leaves. Local dev and CI use **mock OIDC** (`deploy/docker-compose.local.yml`, `e2e/docker-compose.test.yml`) — not auth-disabled anonymous mode.
 

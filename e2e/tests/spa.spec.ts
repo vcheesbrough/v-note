@@ -1,10 +1,15 @@
 import { expect, test } from '@playwright/test';
 
-test('spa loads and renders metadata', async ({ page }) => {
+test('spa loads and renders metadata', async ({ page, request }) => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: 'v-note' })).toBeVisible();
-  await expect(page.getByText(/Protocol\s+5/)).toBeVisible();
+  // Derived from /api/meta rather than pinned, so a `PROTOCOL_VERSION` bump
+  // does not have to be remembered here too — the constant itself is pinned by
+  // the Rust and Kotlin fixture tests. What this asserts is that the SPA
+  // renders the protocol the server actually reports.
+  const meta = await (await request.get('/api/meta')).json();
+  await expect(page.getByText(new RegExp(`Protocol\\s+${meta.protocol_version}`))).toBeVisible();
 
   const release = (await page.locator('.version-watermark').innerText()).replace(/^v/, '');
   const downloadLink = page.locator('.apk-link a');

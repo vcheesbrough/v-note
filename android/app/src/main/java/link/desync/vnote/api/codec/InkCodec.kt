@@ -9,7 +9,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 // JSON codecs for canonical ink, shared by the page channel's server messages
-// (`stroke-batch`) and its client messages (`commit-batch`).
+// (`stroke-batch`, `page-replay`, `tombstone-batch`) and its client messages
+// (`commit-batch`).
 
 // A sequenced stroke batch: the body of a `stroke-batch` message, and the shape
 // of each batch in a page replay.
@@ -18,6 +19,35 @@ internal fun decodeStrokeBatch(json: JSONObject): PageEvent.StrokeBatch =
         seq = json.getLong("seq"),
         clientBatchId = json.getString("client_batch_id"),
         strokes = decodeStrokes(json.getJSONArray("strokes")),
+    )
+
+// The coalesced replay frame: `batches` and `tombstones` reuse the shapes the
+// per-message `stroke-batch` / `tombstone-batch` frames already decode, so the
+// session can apply them through the same handlers.
+internal fun decodePageReplay(json: JSONObject): PageEvent.PageReplay =
+    PageEvent.PageReplay(
+        pageId = json.getString("page_id"),
+        lastSeq = json.getLong("last_seq"),
+        batches = json.getJSONArray("batches").map(::decodeStrokeBatch),
+        // Absent on a payload written before tombstones joined the snapshot.
+        tombstones = json.optJSONArray("tombstones").map(::decodeTombstoneBatch),
+    )
+
+private fun <T> JSONArray?.map(decode: (JSONObject) -> T): List<T> =
+    if (this == null) {
+        emptyList()
+    } else {
+        buildList { for (index in 0 until length()) add(decode(getJSONObject(index))) }
+    }
+
+internal fun decodeTombstoneBatch(json: JSONObject): PageEvent.TombstoneBatch =
+    PageEvent.TombstoneBatch(
+        revision = json.getLong("revision"),
+        clientMutationId = json.getString("client_mutation_id"),
+        strokeIds =
+            json.getJSONArray("stroke_ids").let { ids ->
+                buildList { for (index in 0 until ids.length()) add(ids.getString(index)) }
+            },
     )
 
 private fun decodeStrokes(array: JSONArray): List<Stroke> =

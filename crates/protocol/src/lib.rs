@@ -14,7 +14,7 @@ pub use paper::{
     paper_marks, paper_texture_alpha, paper_texture_tile, preview_viewport, visit_paper_marks,
 };
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// The request-correlation header. Clients send one per HTTP call and WSS
 /// handshake; the server echoes it on the response and stamps it on every log
@@ -338,12 +338,21 @@ pub struct ToolPreset {
 }
 
 /// Full ordered replay of a page's ink (snapshot). Used as the golden
-/// page-replay contract and as the server snapshot payload shape.
+/// page-replay contract and as the server snapshot payload shape: one frame
+/// carries every surviving stroke batch, every tombstone batch, and the head
+/// `seq` the subscriber is now caught up to, so a dense page costs one frame
+/// instead of one per batch (card #323).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PageReplay {
     pub page_id: String,
     pub last_seq: u64,
     pub batches: Vec<StrokeBatch>,
+    /// Every tombstone batch on the page, replayed even when `from_seq` skips
+    /// the stroke batches they deleted from — a reconnecting client may still
+    /// hold those strokes. Defaulted on read so a payload written before
+    /// tombstones joined the snapshot still parses.
+    #[serde(default)]
+    pub tombstones: Vec<TombstoneBatch>,
 }
 
 // ---- Page channel (per-`page_id` WSS) ------------------------------------
@@ -420,8 +429,14 @@ pub enum PageServerMessage {
         #[serde(default)]
         paper: Paper,
     },
-    /// A sequenced stroke batch (gap-fill replay, snapshot, or live fan-out).
+    /// A sequenced stroke batch, fanned out live to the page's other sessions
+    /// on commit. Replay no longer uses this — see [`Self::PageReplay`].
     StrokeBatch(StrokeBatch),
+    /// The whole `subscribe` replay in one frame: surviving batches, every
+    /// tombstone batch, and the head `seq`. Subsumes the N x `stroke-batch` +
+    /// M x `tombstone-batch` + `synced` sequence it replaced, so receiving it
+    /// means the session is caught up to `last_seq`.
+    PageReplay(PageReplay),
     TombstoneBatch(TombstoneBatch),
     /// End of gap-fill replay; this session is caught up to `last_seq`.
     Synced {
@@ -461,6 +476,7 @@ impl PageServerMessage {
         match self {
             Self::Welcome { .. } => "welcome",
             Self::StrokeBatch(_) => "stroke-batch",
+            Self::PageReplay(_) => "page-replay",
             Self::TombstoneBatch(_) => "tombstone-batch",
             Self::Synced { .. } => "synced",
             Self::LeaseGranted => "lease-granted",

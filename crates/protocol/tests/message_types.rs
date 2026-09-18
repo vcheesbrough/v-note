@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 
 use protocol::{
-    LibraryEvent, PageClientMessage, PageServerMessage, PageSummary, Paper, StrokeBatch,
-    ThumbnailMetadata, TombstoneBatch,
+    LibraryEvent, PageClientMessage, PageReplay, PageServerMessage, PageSummary, Paper,
+    StrokeBatch, ThumbnailMetadata, TombstoneBatch,
 };
 use serde::Serialize;
 
@@ -45,19 +45,20 @@ fn assert_labels_match_serde<T: Serialize>(
     }
 }
 
-const PAGE_SERVER_VARIANTS: usize = 9;
+const PAGE_SERVER_VARIANTS: usize = 10;
 
 fn page_server_index(message: &PageServerMessage) -> usize {
     match message {
         PageServerMessage::Welcome { .. } => 0,
         PageServerMessage::StrokeBatch(_) => 1,
-        PageServerMessage::TombstoneBatch(_) => 2,
-        PageServerMessage::Synced { .. } => 3,
-        PageServerMessage::LeaseGranted => 4,
-        PageServerMessage::LeaseDenied { .. } => 5,
-        PageServerMessage::PaperChanged { .. } => 6,
-        PageServerMessage::LeaseChanged { .. } => 7,
-        PageServerMessage::Error { .. } => 8,
+        PageServerMessage::PageReplay(_) => 2,
+        PageServerMessage::TombstoneBatch(_) => 3,
+        PageServerMessage::Synced { .. } => 4,
+        PageServerMessage::LeaseGranted => 5,
+        PageServerMessage::LeaseDenied { .. } => 6,
+        PageServerMessage::PaperChanged { .. } => 7,
+        PageServerMessage::LeaseChanged { .. } => 8,
+        PageServerMessage::Error { .. } => 9,
     }
 }
 
@@ -74,6 +75,12 @@ fn page_server_message_types_match_serde_tags() {
             seq: 1,
             client_batch_id: "batch_1".to_string(),
             strokes: Vec::new(),
+        }),
+        PageServerMessage::PageReplay(PageReplay {
+            page_id: "page_1".to_string(),
+            last_seq: 1,
+            batches: Vec::new(),
+            tombstones: Vec::new(),
         }),
         PageServerMessage::TombstoneBatch(TombstoneBatch {
             revision: 2,

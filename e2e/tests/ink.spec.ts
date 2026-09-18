@@ -19,7 +19,7 @@ test.describe('ink page channel', () => {
       actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
       settleMs: 500,
     });
-    const migrated = snapshot.messages.find((message) => message.type === 'stroke-batch');
+    const [migrated] = replay(snapshot.messages).batches;
     expect(migrated, 'legacy batch loads through the v3 page channel').toBeTruthy();
     expect(migrated.strokes[0].id).toMatch(/^stroke_legacy_[0-9a-f]{32}$/);
     expect(migrated.strokes[0].style).toEqual({
@@ -350,10 +350,9 @@ test.describe('ink page channel', () => {
       actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
       settleMs: 700,
     });
-    const snapshotBatches = snapshot.messages.filter((m) => m.type === 'stroke-batch');
-    expect(snapshotBatches.map((m) => m.seq).sort()).toEqual([1, 2]);
-    const snapshotSynced = snapshot.messages.find((m) => m.type === 'synced');
-    expect(snapshotSynced?.last_seq).toBe(2);
+    const snapshotReplay = replay(snapshot.messages);
+    expect(snapshotReplay.batches.map((batch: any) => batch.seq)).toEqual([1, 2]);
+    expect(snapshotReplay.lastSeq).toBe(2);
 
     // Reconnect from seq 1 → gap fill returns only seq 2.
     const ticket3 = await realtimeTicket(request);
@@ -363,8 +362,9 @@ test.describe('ink page channel', () => {
       actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 1 } }],
       settleMs: 700,
     });
-    const gapBatches = gap.messages.filter((m) => m.type === 'stroke-batch');
-    expect(gapBatches.map((m) => m.seq)).toEqual([2]);
+    const gapReplay = replay(gap.messages);
+    expect(gapReplay.batches.map((batch: any) => batch.seq)).toEqual([2]);
+    expect(gapReplay.lastSeq).toBe(2);
   });
 
   test('replays tombstones on fresh load and reconnect without resurrecting ink', async ({ page, request }) => {
@@ -407,9 +407,7 @@ test.describe('ink page channel', () => {
       settleMs: 700,
     });
     expect(replayedStrokeIds(fresh.messages)).not.toContain(strokeId);
-    expect(fresh.messages.some((message) =>
-      message.type === 'tombstone-batch' && message.stroke_ids.includes(strokeId),
-    )).toBeTruthy();
+    expect(replayedTombstonedIds(fresh.messages)).toContain(strokeId);
 
     const reconnect = await driveSocket(page, {
       pageId,
@@ -417,10 +415,10 @@ test.describe('ink page channel', () => {
       actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 1 } }],
       settleMs: 700,
     });
+    // `from_seq: 1` skips the batch the stroke was committed in, but its
+    // tombstone still rides in the frame — a reconnecting client may cache it.
     expect(replayedStrokeIds(reconnect.messages)).not.toContain(strokeId);
-    expect(reconnect.messages.some((message) =>
-      message.type === 'tombstone-batch' && message.stroke_ids.includes(strokeId),
-    )).toBeTruthy();
+    expect(replayedTombstonedIds(reconnect.messages)).toContain(strokeId);
   });
 
   test('re-adding an erased stroke id stays deleted (delete-wins on live add)', async ({ page, request }) => {
@@ -480,6 +478,65 @@ test.describe('ink page channel', () => {
     expect(replayedStrokeIds(fresh.messages)).not.toContain(strokeId);
   });
 
+  /**
+   * The headline of #323: a page with N stored batches replays in **one**
+   * frame, not N. Before coalescing, the `DensePageSeeder` reference page sent
+   * 1,267 frames / 7.30 MB on every open and every reconnect.
+   *
+   * The frame count is what is asserted; the byte count is recorded as an
+   * annotation so the report carries a before/after number without making CI
+   * flaky on an absolute size.
+   */
+  test('a dense page replays in a single frame however many batches it holds', async ({ page, request }) => {
+    test.skip(!COALESCED_REPLAY, 'asserts the coalesced shape; realtime.coalesce-replay is off');
+    test.setTimeout(120_000);
+    const pageId = await createPage(request, uniqueTitle('ink-dense-replay'));
+    const batchCount = 60;
+
+    const seeded = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [
+        { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        ...Array.from({ length: batchCount }, (_, index) => ({
+          delayMs: 10,
+          message: {
+            type: 'commit-batch',
+            client_batch_id: `dense-replay-${index}`,
+            strokes: sampleStrokes(`stroke-dense-replay-${index}`),
+          },
+        })),
+      ],
+      settleMs: 2_000,
+    });
+    const committed = seeded.messages.filter((m) => m.type === 'stroke-batch');
+    expect(committed, 'every seeded batch is acknowledged').toHaveLength(batchCount);
+
+    const replayed = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
+      settleMs: 2_000,
+    });
+
+    // One frame — `replay()` also asserts no `synced` follows it.
+    const frame = replay(replayed.messages);
+    expect(frame.batches).toHaveLength(batchCount);
+    expect(frame.lastSeq).toBe(batchCount);
+    expect(replayedStrokeIds(replayed.messages).sort()).toEqual(
+      Array.from({ length: batchCount }, (_, index) => `stroke-dense-replay-${index}`).sort(),
+    );
+    test.info().annotations.push({
+      type: 'replay-frames',
+      description: `${replayed.messages.filter((m) => m.type === 'page-replay').length} for ${batchCount} batches`,
+    });
+    test.info().annotations.push({
+      type: 'replay-bytes',
+      description: String(JSON.stringify(frame).length),
+    });
+  });
+
   test('opening a page records realtime frame sizes and replay cost', async ({ page, request }) => {
     const title = uniqueTitle('ink-metrics');
     await createPage(request, title);
@@ -501,7 +558,7 @@ test.describe('ink page channel', () => {
       .poll(async () => metricValue(await scrapeMetrics(request), 'v_note_realtime_replay_frames_count'))
       .toBeGreaterThan(metricValue(before, 'v_note_realtime_replay_frames_count'));
     const after = await scrapeMetrics(request);
-    for (const messageType of ['welcome', 'synced']) {
+    for (const messageType of ['welcome', COALESCED_REPLAY ? 'page-replay' : 'synced']) {
       const name = 'v_note_realtime_message_bytes_count';
       expect(metricValue(after, name, pageFrame(messageType)), `${messageType} frames counted`).toBeGreaterThan(
         metricValue(before, name, pageFrame(messageType)),
@@ -920,10 +977,44 @@ async function driveSocket(
   }, params);
 }
 
+/// Whether the server under test has `realtime.coalesce-replay` on (the
+/// default). CI runs the default; set this to `false` to point the same suite at
+/// a deployment running the pre-#323 rollback shape.
+const COALESCED_REPLAY = (process.env.E2E_COALESCE_REPLAY ?? 'true') !== 'false';
+
+/// A `subscribe` replay, normalised across both wire shapes so that tests about
+/// *what* replays (gap fill, delete-wins, tombstone survival) do not have to care
+/// *how* it is framed. The framing itself is asserted in exactly one place —
+/// `a dense page replays in a single frame…` — so these tests stay meaningful
+/// under either setting of the flag.
+function replay(messages: any[]): { batches: any[]; tombstones: any[]; lastSeq: number } {
+  if (COALESCED_REPLAY) {
+    const frames = messages.filter((message) => message.type === 'page-replay');
+    expect(frames, 'a subscribe produces exactly one page-replay frame').toHaveLength(1);
+    expect(
+      messages.filter((message) => message.type === 'synced'),
+      'the replay frame carries last_seq, so no separate synced follows',
+    ).toHaveLength(0);
+    return { batches: frames[0].batches, tombstones: frames[0].tombstones, lastSeq: frames[0].last_seq };
+  }
+  // Pre-#323 shape: a frame per stored batch, a frame per tombstone batch, then `synced`.
+  const synced = messages.find((message) => message.type === 'synced');
+  expect(synced, 'the per-message replay is closed by synced').toBeTruthy();
+  return {
+    batches: messages.filter((message) => message.type === 'stroke-batch'),
+    tombstones: messages.filter((message) => message.type === 'tombstone-batch'),
+    lastSeq: synced.last_seq,
+  };
+}
+
 function replayedStrokeIds(messages: any[]): string[] {
-  return messages
-    .filter((message) => message.type === 'stroke-batch')
-    .flatMap((message) => message.strokes.map((stroke: any) => stroke.id));
+  return replay(messages).batches.flatMap((batch: any) =>
+    batch.strokes.map((stroke: any) => stroke.id),
+  );
+}
+
+function replayedTombstonedIds(messages: any[]): string[] {
+  return replay(messages).tombstones.flatMap((batch: any) => batch.stroke_ids);
 }
 
 function sampleStrokes(id = `stroke-${crypto.randomUUID()}`) {

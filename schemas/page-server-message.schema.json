@@ -32,6 +32,30 @@
     {
       "type": "object",
       "additionalProperties": false,
+      "required": ["type", "page_id", "last_seq", "batches", "tombstones"],
+      "properties": {
+        "type": { "const": "page-replay" },
+        "page_id": { "type": "string", "minLength": 1 },
+        "last_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Head seq the subscriber is caught up to; this frame subsumes `synced`."
+        },
+        "batches": {
+          "type": "array",
+          "items": { "$ref": "stroke-batch.schema.json" },
+          "description": "Surviving stroke batches in seq order, with delete-wins already applied."
+        },
+        "tombstones": {
+          "type": "array",
+          "items": { "$ref": "tombstone-batch.schema.json" },
+          "description": "Every tombstone batch on the page, replayed even when from_seq skips the batches they deleted from."
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["type", "revision", "client_mutation_id", "stroke_ids"],
       "properties": {
         "type": { "const": "tombstone-batch" },

@@ -4,13 +4,18 @@
   "title": "PageReplay",
   "type": "object",
   "additionalProperties": false,
-  "required": ["page_id", "last_seq", "batches"],
+  "required": ["page_id", "last_seq", "batches", "tombstones"],
   "properties": {
     "page_id": { "type": "string", "minLength": 1 },
     "last_seq": { "type": "integer", "minimum": 0 },
     "batches": {
       "type": "array",
       "items": { "$ref": "stroke-batch.schema.json" }
+    },
+    "tombstones": {
+      "type": "array",
+      "items": { "$ref": "tombstone-batch.schema.json" },
+      "description": "Every tombstone batch on the page, replayed even when from_seq skips the batches they deleted from."
     }
   }
 }
