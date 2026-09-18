@@ -174,6 +174,7 @@ class PageInkSession(
         when (event) {
             is PageEvent.Welcome -> onWelcome(event)
             is PageEvent.StrokeBatch -> onStrokeBatch(event)
+            is PageEvent.PageReplay -> onPageReplay(event)
             is PageEvent.Synced -> onSynced(event)
             is PageEvent.TombstoneBatch -> onTombstoneBatch(event)
             is PageEvent.PaperChanged -> onPaperChanged(event)
@@ -219,6 +220,19 @@ class PageInkSession(
         if (event.seq > lastSeq) {
             lastSeq = event.seq
         }
+    }
+
+    // One frame, applied through the same handlers the per-message frames used:
+    // `replaying` holds back every intermediate publish, so the whole page is
+    // painted once, by the `synced` this frame carries.
+    private fun onPageReplay(event: PageEvent.PageReplay) {
+        for (batch in event.batches) {
+            onStrokeBatch(batch)
+        }
+        for (tombstone in event.tombstones) {
+            onTombstoneBatch(tombstone)
+        }
+        onSynced(PageEvent.Synced(event.lastSeq))
     }
 
     private fun onSynced(event: PageEvent.Synced) {

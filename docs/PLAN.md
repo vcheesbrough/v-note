@@ -115,7 +115,7 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
 | **Android build** | **`dev` / `prod` product flavors** | Base URL (`v-notes-dev` vs `v-notes`), Authentik client, App Link host per env |
 | **Android exclusions** | **No RN / Flutter / Views-XML capture** | Native Kotlin only for pen capture |
 | **Server exclusions** | **Not .NET** | SignalR / ASP.NET out of scope |
-| **Wire protocol v1** | **WSS + JSON** | Coalesced stroke batches; `last_acked_seq` gap-fill or snapshot+tail; binary deferred; SSE+POST fallback-only |
+| **Wire protocol v1** | **WSS + JSON** | Coalesced stroke batches; `last_acked_seq` gap-fill or snapshot+tail, both as one `page-replay` frame (#323); binary deferred; SSE+POST fallback-only |
 | **Contracts** | **`schemas/`** + **`contracts/fixtures/`** + **`crates/protocol`** | JSON Schema (WSS, strokes, REST); `crates/protocol/tests/schemas.rs` validates every fixture **and** every serialised message variant against the schemas in CI (`checks` → `rust-test`, since #337); Android asserts the fixtures on the JVM; the SPA shares `crates/protocol`. **utoipa** OpenAPI not adopted — no API consumer outside this repo; revisit if one appears. Pact deferred |
 | **HWR v1 provider** | **PaddleOCR** (self-hosted) | **Separate compose service** on mini (sidecar); **dev/prod image tags**; pluggable **provider trait**; internal network from API/worker |
 | **HWR worker** | **Rust worker** (queue + provider abstractions) | Claims jobs via **queue provider trait** (Postgres impl); **rasterizes** world-space ink regions; calls **recognition provider trait** (PaddleOCR v1); 5s idle debounce enqueue; English-only; retry + **re-index on erase** |
@@ -141,6 +141,7 @@ All **`choose-stack`** items are **locked** (user choices + agent defaults below
   - **Framing:** **JSON** envelopes; **coalesced stroke batches**. Domain interface remains **encoding-agnostic**—adapter maps batches to/from JSON; **binary/packed encoding deferred**.
   - **Auth on the live path:** **Bearer access token** on WebSocket upgrade (**Android**). **SPA:** mint a **short-lived realtime ticket** via REST after cookie auth; ticket is **narrow-scoped** (owner + session, short TTL) and consumed on upgrade.
   - **Reconnect / gap recovery:** Client tracks **`last_acked_seq`**. On reconnect: **gap fill** from `last_acked_seq + 1`; if gap is too large, **snapshot + tail**.
+  - **Replay is one frame (#323, protocol 6):** a `subscribe` is answered with a single **`page-replay`** message — surviving `batches` (delete-wins applied server-side), every `tombstones` batch, and `last_seq`. Gap fill and full snapshot are the same message; only `from_seq` differs. **Live fan-out is separate and unchanged:** each commit still broadcasts one `stroke-batch` / `tombstone-batch`. Gated by **`realtime.coalesce-replay`** (default **on**); setting it `false` restores the pre-#323 per-message shape at runtime, which is both the rollback path and what lets the server serve a protocol 5 client.
   - **Fallback (not v1):** **SSE + POST** documented only as a **degraded/fallback** path—**not shipped as the MVP hot path**.
 
 
@@ -225,9 +226,14 @@ Locked engineering/ops conventions — product behaviour stays in **Decisions ma
 | Axis | Type | Meaning |
 | --- | --- | --- |
 | **`release`** | Semver (`0.N.P` / `1.N.P`) | Product + deploy version — from root workspace **`version`** |
-| **`protocol`** | Integer (**`5`** today) | **Breaking** REST/WSS contract — bump only when **`schemas/`** change incompatibly |
+| **`protocol`** | Integer (**`6`** today) | **Breaking** REST/WSS contract — bump only when **`schemas/`** change incompatibly |
 
-**Protocol history:** `4 → 5` in **iteration 20** (card **#202**, page paper) — `PageSummary.paper`, `CreatePageRequest.paper` and `Welcome.paper` (all `#[serde(default)]`, so pre-v5 payloads still parse) plus the new `set-paper` / `paper-changed` page-channel messages. `PROTOCOL_VERSION` is duplicated in **five** places, one of them a bare `&str` with no compile-time link to the canonical constant; both of those are now covered by tests that derive from `protocol::PROTOCOL_VERSION`, so a bump cannot leave a stale label behind.
+**Protocol history:**
+
+- `4 → 5` in **iteration 20** (card **#202**, page paper) — `PageSummary.paper`, `CreatePageRequest.paper` and `Welcome.paper` (all `#[serde(default)]`, so pre-v5 payloads still parse) plus the new `set-paper` / `paper-changed` page-channel messages.
+- `5 → 6` in **iteration 37** (card **#323**, coalesced snapshot replay) — the new **`page-replay`** page-channel message carries a whole `subscribe` replay in **one** frame: surviving `batches` (delete-wins already applied), every `tombstones` batch, and the `last_seq` that used to arrive as a separate `synced`. It replaces the previous N × `stroke-batch` + M × `tombstone-batch` + `synced` sequence, so a dense page costs 1 frame instead of ~1,267. **Breaking**, because a client that does not understand the message renders a blank page. `stroke-batch` / `tombstone-batch` / `synced` are unchanged and still used for live fan-out.
+
+`PROTOCOL_VERSION` is duplicated in **five** places, one of them a bare `&str` with no compile-time link to the canonical constant; both of those are covered by tests that derive from `protocol::PROTOCOL_VERSION`, so a bump cannot leave a stale label behind.
 
 **Single source of truth:** root **`Cargo.toml`** workspace **`version`** → propagated at **CI build** to server, SPA, and Android **`versionName`**. The same Woodpecker push pipeline that tags **`registry.desync.link/v-note:{release}`** must produce the **matching Android APK** for that **`release`**.
 

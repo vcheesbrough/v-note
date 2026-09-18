@@ -115,6 +115,8 @@ fn schema_for_fixture(fixture: &str) -> Option<&'static str> {
         "page.json" => "page.schema.json",
         "pages.json" => "pages.schema.json",
         "page-replay.json" => "page-replay.schema.json",
+        // Note: `page-server-page-replay.json` is matched by the
+        // `page-server-` prefix rule below, as the wire *message*.
         "realtime-ticket.json" => "realtime-ticket.schema.json",
         "stroke.json" | "stroke-pressure.json" => "stroke.schema.json",
         "stroke-batch.json" => "stroke-batch.schema.json",
@@ -249,6 +251,15 @@ fn sample_tombstones() -> TombstoneBatch {
     }
 }
 
+fn sample_replay() -> PageReplay {
+    PageReplay {
+        page_id: "page_01j00000000000000000000000".to_string(),
+        last_seq: 7,
+        batches: vec![sample_batch()],
+        tombstones: vec![sample_tombstones()],
+    }
+}
+
 fn sample_page(thumbnail: ThumbnailMetadata) -> PageSummary {
     PageSummary {
         id: "page_01j00000000000000000000000".to_string(),
@@ -287,6 +298,13 @@ fn server_samples() -> Vec<PageServerMessage> {
             paper: Paper::None,
         },
         PageServerMessage::StrokeBatch(sample_batch()),
+        PageServerMessage::PageReplay(sample_replay()),
+        PageServerMessage::PageReplay(PageReplay {
+            page_id: "page_01j00000000000000000000000".to_string(),
+            last_seq: 0,
+            batches: Vec::new(),
+            tombstones: Vec::new(),
+        }),
         PageServerMessage::TombstoneBatch(sample_tombstones()),
         PageServerMessage::Synced { last_seq: 7 },
         PageServerMessage::LeaseGranted,
@@ -318,6 +336,7 @@ fn server_samples() -> Vec<PageServerMessage> {
         match sample {
             PageServerMessage::Welcome { .. }
             | PageServerMessage::StrokeBatch(_)
+            | PageServerMessage::PageReplay(_)
             | PageServerMessage::TombstoneBatch(_)
             | PageServerMessage::Synced { .. }
             | PageServerMessage::LeaseGranted
