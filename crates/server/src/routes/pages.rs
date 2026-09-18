@@ -111,7 +111,7 @@ pub async fn list_pages(
     )
     .bind(claims.sub.clone())
     .fetch_all(metered(&state.db))
-    .instrument(db_query_span("SELECT", "list_pages"))
+    .instrument(db_query_span!("SELECT", "list_pages"))
     .await
     .map_err(server_error)?;
 
@@ -149,7 +149,7 @@ pub async fn create_page(
     .bind(title)
     .bind(payload.paper.wire_value())
     .fetch_one(metered(&state.db))
-    .instrument(db_query_span("INSERT", "create_page"))
+    .instrument(db_query_span!("INSERT", "create_page"))
     .await
     .map_err(|error| {
         crate::observability::metrics().record_page_mutation("create_page", "error");
@@ -186,7 +186,7 @@ pub async fn get_page(
     .bind(page_id)
     .bind(claims.sub)
     .fetch_optional(metered(&state.db))
-    .instrument(db_query_span("SELECT", "get_page"))
+    .instrument(db_query_span!("SELECT", "get_page"))
     .await
     .map_err(server_error)?;
 
@@ -209,7 +209,7 @@ pub async fn get_thumbnail(
             .bind(&page_id)
             .bind(&claims.sub)
             .fetch_one(metered(&state.db))
-            .instrument(db_query_span("SELECT", "get_thumbnail_owner"))
+            .instrument(db_query_span!("SELECT", "get_thumbnail_owner"))
             .await
             .map_err(server_error)?;
     if !owned {
@@ -221,7 +221,7 @@ pub async fn get_thumbnail(
     .bind(&page_id)
     .bind(source_seq as i64)
     .fetch_optional(metered(&state.db))
-    .instrument(db_query_span("SELECT", "get_thumbnail_png"))
+    .instrument(db_query_span!("SELECT", "get_thumbnail_png"))
     .await
     .map_err(server_error)?;
     match png {
@@ -255,7 +255,7 @@ pub async fn delete_page(
     .bind(page_id.clone())
     .bind(claims.sub.clone())
     .execute(metered(&state.db))
-    .instrument(db_query_span("DELETE", "delete_page"))
+    .instrument(db_query_span!("DELETE", "delete_page"))
     .await
     .map_err(|error| {
         crate::observability::metrics().record_page_mutation("delete_page", "error");
