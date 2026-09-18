@@ -545,6 +545,111 @@ fn realtime_non_boolean_flag_fails_to_deserialize() {
     }
 }
 
+/// The mirror image of `coalesce-replay` (#342): compression ships **off**, so
+/// the stack swap reaches prod inert and an operator has to ask for it.
+#[test]
+fn realtime_compression_defaults_to_off() {
+    let realtime: RealtimeConfig =
+        load_group(&cfg(&[]), "realtime").expect("realtime group defaults");
+
+    assert!(!realtime.compression);
+}
+
+/// Every leaf is text in sovereign-config, so the switch that turns #342 on in
+/// dev has to work written as a string. Unlike `coalesce-replay` the key is a
+/// single word, so there is no kebab/underscore pair to cover.
+#[test]
+fn realtime_compression_can_be_turned_on_from_a_text_leaf() {
+    let realtime: RealtimeConfig = load_group(
+        &cfg(&[("VNOTE__REALTIME__COMPRESSION", "true")]),
+        "realtime",
+    )
+    .expect("true should load");
+
+    assert!(realtime.compression);
+}
+
+/// The real leaf at `/v-note/{dev,prod}/server/realtime/compression`, read from
+/// the sovereign layer in both settings.
+#[test]
+fn realtime_compression_is_read_from_the_sovereign_layer() {
+    for (leaf, expected) in [("true", true), ("false", false)] {
+        let config = cfg_with_sovereign(&[("realtime.compression", leaf)], &[]);
+        let realtime: RealtimeConfig =
+            load_group(&config, "realtime").expect("sovereign value loads");
+
+        assert_eq!(realtime.compression, expected, "sovereign leaf `{leaf}`");
+    }
+}
+
+/// Env out-ranks sovereign-config, so one container can be rolled back off
+/// compression without touching the shared subtree — the stack-swap escape
+/// hatch #342 exists for.
+#[test]
+fn realtime_compression_env_override_beats_the_sovereign_value() {
+    let config = cfg_with_sovereign(
+        &[("realtime.compression", "true")],
+        &[("VNOTE__REALTIME__COMPRESSION", "false")],
+    );
+    let realtime: RealtimeConfig = load_group(&config, "realtime").expect("env override loads");
+
+    assert!(!realtime.compression);
+}
+
+/// Both realtime flags are independent: a subtree carrying only one must not
+/// disturb the other's default.
+#[test]
+fn realtime_flags_do_not_default_each_other() {
+    let compression_only = cfg_with_sovereign(&[("realtime.compression", "true")], &[]);
+    let realtime: RealtimeConfig =
+        load_group(&compression_only, "realtime").expect("compression-only branch loads");
+    assert!(realtime.compression);
+    assert!(
+        realtime.coalesce_replay,
+        "compression must not disturb coalesce-replay's default"
+    );
+
+    let coalesce_only = cfg_with_sovereign(&[("realtime.coalesce-replay", "false")], &[]);
+    let realtime: RealtimeConfig =
+        load_group(&coalesce_only, "realtime").expect("coalesce-only branch loads");
+    assert!(!realtime.coalesce_replay);
+    assert!(
+        !realtime.compression,
+        "coalesce-replay must not disturb compression's default"
+    );
+}
+
+/// A typo'd compression leaf fails startup rather than being read as `false` —
+/// an operator who asked for compression must not get it silently ignored.
+///
+/// Note what this does *not* claim: the permissive spellings are accepted, so
+/// `on` / `yes` / `1` all deserialize to `true` rather than failing. Only a
+/// value that is not a boolean in any spelling is rejected.
+#[test]
+fn realtime_non_boolean_compression_fails_to_deserialize() {
+    let config = cfg(&[("VNOTE__REALTIME__COMPRESSION", "yes-please")]);
+    let error =
+        load_group::<RealtimeConfig>(&config, "realtime").expect_err("non-boolean is rejected");
+
+    match error {
+        ConfigError::Load { ref group, .. } => assert_eq!(group, "realtime"),
+        other => panic!("expected Load, got: {other}"),
+    }
+}
+
+/// The permissive spellings above, pinned — so the claim in
+/// `realtime_non_boolean_compression_fails_to_deserialize` stays honest if the
+/// `config` crate's coercion ever changes.
+#[test]
+fn realtime_compression_accepts_the_permissive_boolean_spellings() {
+    for leaf in ["on", "yes", "1", "TRUE"] {
+        let realtime: RealtimeConfig =
+            load_group(&cfg(&[("VNOTE__REALTIME__COMPRESSION", leaf)]), "realtime")
+                .unwrap_or_else(|error| panic!("`{leaf}` should coerce: {error}"));
+        assert!(realtime.compression, "`{leaf}` should mean on");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // server
 // ---------------------------------------------------------------------------

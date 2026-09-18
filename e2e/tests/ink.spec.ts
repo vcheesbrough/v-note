@@ -571,6 +571,64 @@ test.describe('ink page channel', () => {
     ).toBeGreaterThan(metricValue(before, 'v_note_realtime_message_handling_seconds_count', { message_type: 'subscribe' }));
   });
 
+  // #342. Two things have to be true and neither implies the other: that the
+  // server and a real browser agree `permessage-deflate` at upgrade, and that
+  // the connection then works — a compressed socket that cannot replay its ink
+  // is worse than no compression. The first is asserted from the server's own
+  // view of the handshake it sent (`result="compressed"`), because the browser
+  // WebSocket API exposes neither the negotiated extensions nor the compressed
+  // byte count; the second is asserted from the page channel itself.
+  //
+  // This test is why `VNOTE__REALTIME__COMPRESSION` is on in the e2e compose.
+  // If it starts failing with `compressed` flat at zero, suspect something
+  // between the browser and the server stripping `Sec-WebSocket-Extensions`
+  // before suspecting the server.
+  test('a real browser negotiates permessage-deflate and the page channel still replays', async ({ page, request }) => {
+    const pageId = await createPage(request, uniqueTitle('ink-deflate'));
+    const ticket = await realtimeTicket(request);
+    const before = await scrapeMetrics(request);
+    const compressed = (body: string) =>
+      metricValue(body, 'v_note_realtime_events_total', { channel: 'page', result: 'compressed' });
+
+    const snapshot = await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
+        { delayMs: 100, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 100,
+          message: { type: 'commit-batch', client_batch_id: 'deflate-1', strokes: sampleStrokes('stroke_deflate_1') },
+        },
+      ],
+      settleMs: 500,
+    });
+
+    // The socket did real work over the compressed transport, in both
+    // directions: a server→client welcome, and a client→server commit the
+    // server inflated, sequenced and fanned back out.
+    expect(snapshot.messages.some((m) => m.type === 'welcome'), 'welcome received').toBeTruthy();
+    const batch = snapshot.messages.find(
+      (m) => m.type === 'stroke-batch' && m.client_batch_id === 'deflate-1',
+    );
+    expect(batch, 'the committed batch is sequenced and fanned out').toBeTruthy();
+    expect(batch.strokes[0].id).toBe('stroke_deflate_1');
+
+    // /metrics is process-wide and shared with other workers, so assert the
+    // delta this connection caused rather than an absolute count.
+    await expect
+      .poll(async () => compressed(await scrapeMetrics(request)), {
+        message: 'the browser upgrade agreed permessage-deflate',
+      })
+      .toBeGreaterThan(compressed(before));
+
+    // Deliberately *not* asserted: that `uncompressed` did not move. /metrics is
+    // process-wide and other workers open their own sockets throughout this
+    // window, so pinning an absolute non-change would make this test fail for
+    // something another test did. The delta above is the claim this test can
+    // actually make on its own.
+  });
+
   test('SPA viewer renders live stroke batches without refresh', async ({ page, request }) => {
     const title = uniqueTitle('ink-spa-live');
     const pageId = await createPage(request, title);

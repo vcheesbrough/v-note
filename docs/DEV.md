@@ -112,6 +112,7 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__OBSERVABILITY__METRICS-ADDR` | `0.0.0.0:9090` | internal Prometheus listener; `disabled`/blank turns it off |
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
 | `VNOTE__REALTIME__COALESCE-REPLAY` | `true` | **Feature flag (#323).** Answer a `subscribe` with one coalesced `page-replay` frame. Set `false` to restore the pre-#323 shape (a `stroke-batch` per stored batch, then `synced`) without rebuilding — see below. A non-boolean value **fails startup** rather than reading as `false` |
+| `VNOTE__REALTIME__COMPRESSION` | `false` code default, but **`true` in dev and prod** | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. The code default is off; the sovereign leaves are **on** — see below. A non-boolean value **fails startup** rather than reading as `false` |
 | `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
 | `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
 | `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
@@ -145,6 +146,65 @@ Which shape is in force is visible without shell access: the `replay_page` span
 carries `coalesced`, and `v_note_realtime_replay_frames` reads **1** per replay
 when on versus one-per-stored-batch when off (the **Replay frames** panel on the
 `v-note — overview` dashboard).
+
+#### `realtime.compression` — runtime rollback for #342
+
+Landing `permessage-deflate` meant **replacing the WebSocket implementation**
+under `crates/server/src/realtime/`: `axum`'s `ws` feature is `tokio-tungstenite`,
+and tungstenite has never implemented RFC 7692 ([snapview/tungstenite-rs#2](https://github.com/snapview/tungstenite-rs/issues/2),
+open since 2017). The server now upgrades through [`yawc`](https://crates.io/crates/yawc)
+instead, and `axum` no longer pulls tungstenite in at all. This flag is the way
+back from that swap **without a rollback build**.
+
+Unlike `coalesce-replay`, this does **not** change the wire shape. Compression
+is negotiated per connection, so a client that does not offer the extension is
+served exactly the pre-#342 bytes either way, and no client change was needed:
+browsers offer `permessage-deflate` automatically on `new WebSocket()`, and
+OkHttp negotiates it and compresses outbound messages ≥ 1 KiB.
+
+The code default is `false`, but **both sovereign leaves are set `"true"`**, so a
+deployed server has compression **on** unless something overrides it:
+
+```
+/v-note/dev/server/realtime/compression  = "true"
+/v-note/prod/server/realtime/compression = "true"
+```
+
+That is worth reading twice when reasoning about an environment: the `false` in
+`apply_defaults` is only what applies when the leaf is absent — a bare
+`cargo run` or a test. It is not what dev or prod does.
+
+One consequence for #342's own A/B: the sovereign layer no longer gives an
+**uncompressed** dev baseline. Take the "before" half from the `master` image or
+from `VNOTE__REALTIME__COMPRESSION=false` on the container, not by assuming the
+default.
+
+```bash
+VNOTE__REALTIME__COMPRESSION=true cargo run -p server   # shell-friendly
+VNOTE__REALTIME__COMPRESSION: "true"                    # compose
+```
+
+As with `coalesce-replay`, env out-ranks sovereign-config and the server reads
+config once at startup. One extra wrinkle: the extension is agreed **at upgrade
+time**, so a restart only changes connections opened afterwards — sockets that
+were already open keep whatever they negotiated until they reconnect.
+
+Whether it is actually live is visible without shell access, and the distinction
+matters because agreement needs *both* sides: `v_note_realtime_events_total`
+carries `result="compressed"` / `result="uncompressed"` per upgrade, plotted as
+**permessage-deflate negotiation rate by channel (#342)** on the `v-note — overview`
+dashboard, and the upgrade span carries `permessage_deflate`. A flat **0** with
+the flag on means clients are not offering the extension, or something in front
+of the server is stripping `Sec-WebSocket-Extensions` — not that the flag failed
+to apply.
+
+Settings that are deliberate rather than defaults, all in `realtime/socket.rs`:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Compression level | **6** (balanced) | #323 bought a 13% replay-latency win that compression trades CPU against; level 9 on a multi-megabyte replay frame is where that gets given back |
+| Context takeover | **on** | The continuous win is live `stroke-batch` fan-out, where consecutive frames are near-identical JSON and a carried-over dictionary is most of the benefit. Costs a per-connection zlib window |
+| Max inbound message | **1 MiB** | Stated explicitly because `yawc` defaults to 1 MiB where `axum`/`tungstenite` defaulted to 64 MiB. Largest real client message is a `commit-batch` (p95 ~8 KB), and it caps what a peer can force the server to inflate. Reads only — the server's own replay frames are megabytes and unaffected |
 
 **OIDC is mandatory:** the server refuses to start without `VNOTE__OIDC__ISSUER-URL` and related leaves. Local dev and CI use **mock OIDC** (`deploy/docker-compose.local.yml`, `e2e/docker-compose.test.yml`) — not auth-disabled anonymous mode.
 
