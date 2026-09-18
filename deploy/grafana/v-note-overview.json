@@ -945,6 +945,64 @@
       }
     },
     {
+      "id": 28,
+      "type": "timeseries",
+      "title": "permessage-deflate negotiation rate by channel (#342)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum by (channel) (rate(v_note_realtime_events_total{env=\"$env\", result=\"compressed\"}[$__rate_interval])) / clamp_min(sum by (channel) (rate(v_note_realtime_events_total{env=\"$env\", result=~\"compressed|uncompressed\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "{{channel}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisLabel": "share of new connections"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Share of realtime upgrades that actually agreed `permessage-deflate`, read off the handshake response the server sent. Agreement needs both sides, so `realtime.compression` being on is necessary and not sufficient: a flat 0 here with the flag on means clients are not offering the extension, or something between them and the server is stripping `Sec-WebSocket-Extensions`. This is the signal that #342 is live, and the one to watch when rolling the flag out or back."
+    },
+    {
       "id": 16,
       "type": "row",
       "title": "HTTP",
@@ -953,7 +1011,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 51
       },
       "panels": []
     },
@@ -969,7 +1027,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 52
       },
       "targets": [
         {
@@ -1023,7 +1081,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 52
       },
       "targets": [
         {
@@ -1074,7 +1132,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 52
+        "y": 60
       },
       "panels": []
     },
@@ -1090,7 +1148,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 53
+        "y": 61
       },
       "targets": [
         {
@@ -1165,7 +1223,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 53
+        "y": 61
       },
       "targets": [
         {
@@ -1230,7 +1288,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 53
+        "y": 61
       },
       "targets": [
         {
@@ -1285,7 +1343,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 61
+        "y": 69
       },
       "targets": [
         {
@@ -1349,7 +1407,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 61
+        "y": 69
       },
       "targets": [
         {
@@ -1424,7 +1482,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 61
+        "y": 69
       },
       "description": "Failed renders (the page shows a failed thumbnail) and failed startup recoveries over the selected time range. Anything above zero is worth a look — the error is in the logs panel.",
       "targets": [
@@ -1496,7 +1554,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 77
       },
       "id": 27,
       "panels": [],
@@ -1515,7 +1573,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 70
+        "y": 78
       },
       "targets": [
         {

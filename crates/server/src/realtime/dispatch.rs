@@ -1,17 +1,18 @@
 //! What each inbound page-channel message does: lease handling, commits,
 //! paper changes, and replay. Transport-agnostic — replies go to any
-//! `Sink<Message>`, persistence goes through [`PageStore`] — so every message
+//! `Sink<Frame>`, persistence goes through [`PageStore`] — so every message
 //! type is unit-tested below against an in-memory store.
 
 use std::collections::HashSet;
 use std::time::Instant;
 
-use axum::extract::ws::Message;
 use futures_util::{Sink, SinkExt};
 use protocol::{
     LibraryEvent, PageClientMessage, PageReplay, PageServerMessage, Paper, Stroke, StrokeBatch,
     ThumbnailMetadata, TombstoneBatch,
 };
+
+use yawc::frame::Frame;
 
 use super::hub::LeaseOutcome;
 use super::store::PageStore;
@@ -36,7 +37,7 @@ pub(super) async fn dispatch_page_client_message<S, Tx>(
 ) -> bool
 where
     S: PageStore,
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<Frame> + Unpin,
 {
     match message {
         PageClientMessage::Subscribe { from_seq } => {
@@ -73,7 +74,7 @@ where
 
 async fn acquire_lease<S, Tx>(ctx: &PageContext<'_, S>, sender: &mut Tx) -> bool
 where
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<Frame> + Unpin,
 {
     match ctx
         .state
@@ -98,7 +99,7 @@ where
 
 async fn renew_lease<S, Tx>(ctx: &PageContext<'_, S>, sender: &mut Tx) -> bool
 where
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<Frame> + Unpin,
 {
     match ctx
         .state
@@ -134,7 +135,7 @@ async fn commit_batch<S, Tx>(
 ) -> bool
 where
     S: PageStore,
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<Frame> + Unpin,
 {
     // Single active editor: only the lease holder may ink. Acquiring
     // also renews the holder's lease on each commit.
@@ -213,7 +214,7 @@ async fn commit_tombstones<S, Tx>(
 ) -> bool
 where
     S: PageStore,
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<Frame> + Unpin,
 {
     if let LeaseOutcome::Denied { holder } = ctx
         .state
@@ -269,7 +270,7 @@ async fn set_paper<S, Tx>(
 ) -> bool
 where
     S: PageStore,
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<Frame> + Unpin,
 {
     // Paper is a visible page mutation that bumps the revision, mints a
     // thumbnail and re-sorts the library — exactly the class the
@@ -398,7 +399,7 @@ async fn replay_page<S, Tx>(
 ) -> bool
 where
     S: PageStore,
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<Frame> + Unpin,
 {
     let (batches, tombstones) = match store.load_page_replay(page_id, from_seq).await {
         Ok(replay) => replay,
@@ -484,7 +485,7 @@ async fn send_replay_frames<S>(
     cost: &mut ReplayCost,
 ) -> bool
 where
-    S: Sink<Message> + Unpin,
+    S: Sink<Frame> + Unpin,
 {
     let deleted_ids: HashSet<&str> = tombstones
         .iter()
@@ -514,7 +515,7 @@ where
 
 pub(super) async fn send_page<S>(sender: &mut S, message: PageServerMessage) -> bool
 where
-    S: Sink<Message> + Unpin,
+    S: Sink<Frame> + Unpin,
 {
     send_page_frame(sender, message).await.is_some()
 }
@@ -525,12 +526,18 @@ where
 /// the histogram counts only frames that reached the socket.
 pub(super) async fn send_page_frame<S>(sender: &mut S, message: PageServerMessage) -> Option<usize>
 where
-    S: Sink<Message> + Unpin,
+    S: Sink<Frame> + Unpin,
 {
     let message_type = message.message_type();
     let payload = serde_json::to_string(&message).ok()?;
     let bytes = payload.len();
-    sender.send(Message::Text(payload.into())).await.ok()?;
+    // `bytes` is the JSON length, i.e. the payload *before* `permessage-deflate`
+    // (#342) — the frame on the wire is smaller whenever the extension is
+    // negotiated. Kept as the uncompressed size deliberately: this histogram
+    // exists to track how large our messages are, which is a property of the
+    // protocol, not of whether a given peer offered compression. Wire cost is
+    // measured at the socket instead.
+    sender.send(Frame::text(payload)).await.ok()?;
     crate::observability::metrics().observe_realtime_message_bytes("page", message_type, bytes);
     Some(bytes)
 }
@@ -549,6 +556,7 @@ mod tests {
     use std::sync::Mutex;
 
     use tokio::sync::broadcast;
+    use yawc::frame::OpCode;
 
     use super::*;
     use crate::realtime::hub::Fanout;
@@ -570,11 +578,12 @@ mod tests {
         stroke
     }
 
-    fn text_frames(sink: &[Message]) -> Vec<&str> {
+    fn text_frames(sink: &[Frame]) -> Vec<&str> {
         sink.iter()
-            .map(|message| match message {
-                Message::Text(text) => text.as_str(),
-                other => panic!("expected a text frame, got {other:?}"),
+            .map(|frame| match frame.into_parts_str() {
+                Ok((OpCode::Text, text)) => text,
+                Ok((opcode, _)) => panic!("expected a text frame, got {opcode:?}"),
+                Err(error) => panic!("frame payload should be UTF-8: {error}"),
             })
             .collect()
     }
@@ -690,7 +699,7 @@ mod tests {
             page_id: PAGE,
             session_id: SESSION,
         };
-        let mut sink: Vec<Message> = Vec::new();
+        let mut sink: Vec<Frame> = Vec::new();
         let keep_open =
             dispatch_page_client_message(&ctx, &mut sink, message, Instant::now()).await;
         let replies = text_frames(&sink)
@@ -1191,9 +1200,9 @@ mod tests {
             ..FakeStore::default()
         };
 
-        let mut coalesced: Vec<Message> = Vec::new();
+        let mut coalesced: Vec<Frame> = Vec::new();
         assert!(replay_page(&store(), PAGE, &mut coalesced, 0, Instant::now(), true).await);
-        let mut per_message: Vec<Message> = Vec::new();
+        let mut per_message: Vec<Frame> = Vec::new();
         assert!(replay_page(&store(), PAGE, &mut per_message, 0, Instant::now(), false).await);
 
         assert_eq!(text_frames(&coalesced).len(), 1);
@@ -1392,12 +1401,12 @@ mod tests {
     // ---- frame chokepoint ---------------------------------------------------
 
     // `send_page_frame` is generic over the sink precisely so the chokepoint can
-    // be exercised without a socket: a `Vec<Message>` is a sink that never fails.
+    // be exercised without a socket: a `Vec<Frame>` is a sink that never fails.
     #[tokio::test]
     async fn send_page_frame_records_the_bytes_it_sent() {
         let metrics = crate::observability::metrics();
         let before = metrics.realtime_message_count("page", "lease-changed");
-        let mut sink: Vec<Message> = Vec::new();
+        let mut sink: Vec<Frame> = Vec::new();
 
         let bytes = send_page_frame(&mut sink, PageServerMessage::LeaseChanged { holder: None })
             .await
@@ -1430,7 +1439,7 @@ mod tests {
             head_seq: 50,
             ..FakeStore::default()
         };
-        let mut sink: Vec<Message> = Vec::new();
+        let mut sink: Vec<Frame> = Vec::new();
 
         assert!(
             replay_page(&store, PAGE, &mut sink, 0, Instant::now(), true).await,
@@ -1493,7 +1502,7 @@ mod tests {
             head_seq: 2,
             ..FakeStore::default()
         };
-        let mut sink: Vec<Message> = Vec::new();
+        let mut sink: Vec<Frame> = Vec::new();
         assert!(replay_page(&store, PAGE, &mut sink, 0, Instant::now(), true).await);
 
         let frames = text_frames(&sink);
