@@ -541,18 +541,23 @@ fn request_span(
 /// exports that as `code.file.path` / `code.module.name` / `code.line.number`.
 /// Expanding at the call site makes those name the query, not this file (#343).
 macro_rules! db_query_span {
-    ($operation:expr, $query_name:expr $(,)?) => {
+    ($operation:expr, $query_name:expr $(,)?) => {{
+        // The function this replaced took `&'static str`, which made a
+        // runtime-built label a compile error. `const` keeps that guarantee:
+        // both are low-cardinality Tempo attributes, never SQL text or values.
+        const OPERATION: &str = $operation;
+        const QUERY_NAME: &str = $query_name;
         ::tracing::info_span!(
             "db.query",
             db.system = "postgresql",
-            db.operation = $operation,
-            db.query_name = $query_name,
+            db.operation = OPERATION,
+            db.query_name = QUERY_NAME,
             db.response.returned_rows = ::tracing::field::Empty,
             db.response.bytes = ::tracing::field::Empty,
             db.response.max_row_bytes = ::tracing::field::Empty,
             db.response.affected_rows = ::tracing::field::Empty,
         )
-    };
+    }};
 }
 pub(crate) use db_query_span;
 

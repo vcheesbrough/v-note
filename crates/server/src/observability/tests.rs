@@ -95,7 +95,12 @@ fn db_query_span_is_exported_with_its_call_site_location() {
     };
     assert_eq!(attribute("code.file.path"), file!());
     assert_eq!(attribute("code.module.name"), module_path!());
-    assert_eq!(attribute("code.line.number"), call_site_line.to_string());
+    assert_eq!(
+        attribute("code.line.number"),
+        call_site_line.to_string(),
+        "the span should report the line it was opened on; if `db_query_span!` \
+         above no longer sits one line before the `line!()`, fix the offset",
+    );
     assert_eq!(attribute("db.query_name"), "call_site_probe");
 }
 
