@@ -6,6 +6,8 @@ use js_sys::Date;
 use leptos::prelude::*;
 use protocol::{LibraryEvent, PageSummary, ThumbnailMetadata};
 
+use crate::route::{self, Route};
+
 const UNTITLED_PAGE: &str = "Untitled page";
 
 pub(crate) fn page_has_title(page: &PageSummary) -> bool {
@@ -53,17 +55,27 @@ pub(crate) fn apply_event(
     selected_page: RwSignal<Option<PageSummary>>,
     event: LibraryEvent,
 ) {
-    // Clearing a deleted page's selection is the only cross-signal effect; the
-    // list mutation itself is a pure reducer so it can be unit-tested.
-    if let LibraryEvent::PageDeleted { page_id } = &event
-        && selected_page
-            .get_untracked()
-            .as_ref()
-            .is_some_and(|page| &page.id == page_id)
-    {
-        selected_page.set(None);
+    // Closing a deleted page is the only cross-signal effect; the list mutation
+    // itself is a pure reducer so it can be unit-tested.
+    if let LibraryEvent::PageDeleted { page_id } = &event {
+        close_if_open(selected_page, page_id);
     }
     pages.update(|items| apply_library_event_to_pages(items, event));
+}
+
+/// Close the viewer if it is showing `page_id`, and take that id out of the
+/// address bar with it: the page is gone, so a reload or a Back into that entry
+/// must not try to open it again. Rewriting rather than pushing keeps the
+/// deleted page out of Forward too.
+fn close_if_open(selected_page: RwSignal<Option<PageSummary>>, page_id: &str) {
+    if selected_page
+        .get_untracked()
+        .as_ref()
+        .is_some_and(|page| page.id == page_id)
+    {
+        selected_page.set(None);
+        route::replace(&Route::Library);
+    }
 }
 
 /// Apply a library event to the in-memory page list, keeping recent-first
@@ -129,13 +141,7 @@ pub(crate) fn remove_page(
     page_id: &str,
 ) {
     pages.update(|items| items.retain(|page| page.id != page_id));
-    if selected_page
-        .get_untracked()
-        .as_ref()
-        .is_some_and(|page| page.id == page_id)
-    {
-        selected_page.set(None);
-    }
+    close_if_open(selected_page, page_id);
 }
 
 #[cfg(test)]
