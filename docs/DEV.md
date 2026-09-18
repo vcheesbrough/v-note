@@ -112,7 +112,7 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__OBSERVABILITY__METRICS-ADDR` | `0.0.0.0:9090` | internal Prometheus listener; `disabled`/blank turns it off |
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
 | `VNOTE__REALTIME__COALESCE-REPLAY` | `true` | **Feature flag (#323).** Answer a `subscribe` with one coalesced `page-replay` frame. Set `false` to restore the pre-#323 shape (a `stroke-batch` per stored batch, then `synced`) without rebuilding — see below. A non-boolean value **fails startup** rather than reading as `false` |
-| `VNOTE__REALTIME__COMPRESSION` | `false` | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. Ships **off** — see below. A non-boolean value **fails startup** rather than reading as `false` |
+| `VNOTE__REALTIME__COMPRESSION` | `false` code default, but **`true` in dev and prod** | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. The code default is off; the sovereign leaves are **on** — see below. A non-boolean value **fails startup** rather than reading as `false` |
 | `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
 | `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
 | `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
@@ -162,10 +162,22 @@ served exactly the pre-#342 bytes either way, and no client change was needed:
 browsers offer `permessage-deflate` automatically on `new WebSocket()`, and
 OkHttp negotiates it and compresses outbound messages ≥ 1 KiB.
 
+The code default is `false`, but **both sovereign leaves are set `"true"`**, so a
+deployed server has compression **on** unless something overrides it:
+
 ```
-/v-note/dev/server/realtime/compression  = "false"
-/v-note/prod/server/realtime/compression = "false"
+/v-note/dev/server/realtime/compression  = "true"
+/v-note/prod/server/realtime/compression = "true"
 ```
+
+That is worth reading twice when reasoning about an environment: the `false` in
+`apply_defaults` is only what applies when the leaf is absent — a bare
+`cargo run` or a test. It is not what dev or prod does.
+
+One consequence for #342's own A/B: the sovereign layer no longer gives an
+**uncompressed** dev baseline. Take the "before" half from the `master` image or
+from `VNOTE__REALTIME__COMPRESSION=false` on the container, not by assuming the
+default.
 
 ```bash
 VNOTE__REALTIME__COMPRESSION=true cargo run -p server   # shell-friendly
