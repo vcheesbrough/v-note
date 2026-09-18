@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://v-note/schemas/tombstone-batch.schema.json",
+  "title": "TombstoneBatch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["revision", "client_mutation_id", "stroke_ids"],
+  "properties": {
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-page monotonic tombstone revision assigned by the server."
+    },
+    "client_mutation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Idempotency key of the commit-tombstones that produced it."
+    },
+    "stroke_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Ids of the erased strokes; delete wins over any later replay of the same ids."
+    }
+  }
+}

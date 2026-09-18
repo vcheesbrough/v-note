@@ -273,9 +273,75 @@ fn deserializes_page_channel_fixtures() {
         other => panic!("expected stroke-batch, got {other:?}"),
     }
 
+    let replay: PageServerMessage = serde_json::from_str(&fixture("page-server-page-replay.json"))
+        .expect("server page-replay fixture should parse");
+    match replay {
+        PageServerMessage::PageReplay(replay) => {
+            assert_eq!(replay.last_seq, 2);
+            assert_eq!(
+                replay
+                    .batches
+                    .iter()
+                    .map(|batch| batch.seq)
+                    .collect::<Vec<_>>(),
+                vec![1, 2],
+                "replay batches arrive in seq order"
+            );
+            assert_eq!(
+                replay.tombstones.len(),
+                1,
+                "tombstones ride in the same frame"
+            );
+        }
+        other => panic!("expected page-replay, got {other:?}"),
+    }
+
     let denied: PageServerMessage = serde_json::from_str(&fixture("page-server-lease-denied.json"))
         .expect("lease-denied fixture should parse");
     assert!(matches!(denied, PageServerMessage::LeaseDenied { .. }));
+}
+
+/// A replay frame has delete-wins already applied by the server, so no stroke
+/// it carries may be named by a tombstone in the same frame. Both golden
+/// payloads are held to that, because a client that had to re-filter would be
+/// a client that can render an erased stroke.
+#[test]
+fn page_replay_fixtures_carry_no_tombstoned_strokes() {
+    for (name, replay) in [
+        (
+            "page-replay.json",
+            serde_json::from_str::<PageReplay>(&fixture("page-replay.json"))
+                .expect("page replay fixture should parse"),
+        ),
+        (
+            "page-server-page-replay.json",
+            match serde_json::from_str::<PageServerMessage>(&fixture(
+                "page-server-page-replay.json",
+            ))
+            .expect("server page-replay fixture should parse")
+            {
+                PageServerMessage::PageReplay(replay) => replay,
+                other => panic!("expected page-replay, got {other:?}"),
+            },
+        ),
+    ] {
+        assert!(
+            !replay.tombstones.is_empty(),
+            "{name} should exercise the tombstone path"
+        );
+        let deleted: std::collections::HashSet<&str> = replay
+            .tombstones
+            .iter()
+            .flat_map(|batch| batch.stroke_ids.iter().map(String::as_str))
+            .collect();
+        for stroke in replay.batches.iter().flat_map(|batch| batch.strokes.iter()) {
+            assert!(
+                !deleted.contains(stroke.id.as_str()),
+                "{name}: stroke {} is tombstoned but still in the replay",
+                stroke.id
+            );
+        }
+    }
 }
 
 #[test]

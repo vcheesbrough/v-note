@@ -10,7 +10,7 @@ use leptos::{
         AnimationFrameRequestHandle, request_animation_frame_with_handle, window_event_listener,
     },
 };
-use protocol::{PageServerMessage, PageSummary, Paper, StrokeBatch};
+use protocol::{PageServerMessage, PageSummary, Paper, StrokeBatch, TombstoneBatch};
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, PointerEvent, WheelEvent};
 
@@ -319,18 +319,34 @@ pub(crate) fn apply_page_event(
             viewer_error.set(None);
             mark_ink_applied(seq);
         }
+        // The whole replay in one frame (#323), carrying the `last_seq` that
+        // used to arrive as `synced`. Its batches are *merged*, not assigned:
+        // a reconnect subscribes from the viewer's cursor, so the frame holds
+        // only the batches after it and everything already on screen must
+        // survive. Its tombstones then apply to the whole page, for the same
+        // reason — they may erase ink from a batch this frame did not carry.
+        PageServerMessage::PageReplay(replay) => {
+            let seq = replay.last_seq;
+            batches.update(|items| {
+                for batch in replay.batches {
+                    insert_batch(items, batch);
+                }
+                let removed = tombstoned_ids(&replay.tombstones);
+                retain_surviving(items, &removed);
+            });
+            last_seq.update(|current| *current = (*current).max(seq));
+            viewer_status.set("Synced".to_string());
+            viewer_error.set(None);
+            mark_ink_applied(seq);
+        }
         PageServerMessage::Synced { last_seq: seq } => {
             last_seq.update(|current| *current = (*current).max(seq));
             viewer_status.set("Synced".to_string());
             viewer_error.set(None);
         }
         PageServerMessage::TombstoneBatch(tombstones) => {
-            let removed: std::collections::HashSet<_> = tombstones.stroke_ids.into_iter().collect();
-            batches.update(|items| {
-                for batch in items {
-                    batch.strokes.retain(|stroke| !removed.contains(&stroke.id));
-                }
-            });
+            let removed = tombstoned_ids(std::slice::from_ref(&tombstones));
+            batches.update(|items| retain_surviving(items, &removed));
             viewer_status.set("Live".to_string());
         }
         PageServerMessage::Error { message, .. } => {
@@ -342,6 +358,25 @@ pub(crate) fn apply_page_event(
         | PageServerMessage::LeaseGranted
         | PageServerMessage::LeaseDenied { .. }
         | PageServerMessage::LeaseChanged { .. } => {}
+    }
+}
+
+/// Every stroke id the given tombstone batches erase.
+fn tombstoned_ids(tombstones: &[TombstoneBatch]) -> std::collections::HashSet<&str> {
+    tombstones
+        .iter()
+        .flat_map(|batch| batch.stroke_ids.iter().map(String::as_str))
+        .collect()
+}
+
+/// Drop every stroke named by a tombstone. Delete wins, so this is applied to
+/// a replay too even though the server already filtered it — a cheap pass that
+/// keeps the viewer correct if the two ever disagree.
+fn retain_surviving(items: &mut [StrokeBatch], removed: &std::collections::HashSet<&str>) {
+    for batch in items {
+        batch
+            .strokes
+            .retain(|stroke| !removed.contains(stroke.id.as_str()));
     }
 }
 
@@ -428,6 +463,63 @@ mod tests {
             .map(|item| (item.seq, item.client_batch_id.as_str()))
             .collect();
         assert_eq!(order, [(1, "a"), (2, "b-again"), (3, "c"), (5, "e")]);
+    }
+
+    /// A reconnect subscribes from the viewer's cursor, so its replay frame
+    /// holds only the batches after it. Merging — not assigning — is what keeps
+    /// the ink already on screen from being wiped by a gap fill.
+    #[test]
+    fn a_gap_fill_frame_merges_into_the_ink_already_on_screen() {
+        let mut items = vec![batch(1, "a"), batch(2, "b")];
+
+        // The frame a `subscribe { from_seq: 2 }` produces.
+        for incoming in [batch(3, "c"), batch(4, "d")] {
+            insert_batch(&mut items, incoming);
+        }
+
+        let order: Vec<_> = items
+            .iter()
+            .map(|item| (item.seq, item.client_batch_id.as_str()))
+            .collect();
+        assert_eq!(order, [(1, "a"), (2, "b"), (3, "c"), (4, "d")]);
+    }
+
+    /// A replay frame is trusted for order but not for delete-wins: the viewer
+    /// re-applies the tombstones it carries, so an erased stroke can never be
+    /// rendered even if the server and client ever disagree (#323).
+    #[test]
+    fn a_replay_frames_tombstones_remove_its_own_strokes() {
+        let stroke = |id: &str| protocol::Stroke {
+            id: id.to_string(),
+            style: protocol::StrokeStyle::default_solid_round(),
+            points: Vec::new(),
+        };
+        let mut items = vec![
+            StrokeBatch {
+                seq: 1,
+                client_batch_id: "a".to_string(),
+                strokes: vec![stroke("kept"), stroke("erased")],
+            },
+            StrokeBatch {
+                seq: 2,
+                client_batch_id: "b".to_string(),
+                strokes: vec![stroke("later")],
+            },
+        ];
+        let tombstones = vec![TombstoneBatch {
+            revision: 1,
+            client_mutation_id: "erase_1".to_string(),
+            stroke_ids: vec!["erased".to_string()],
+        }];
+
+        let removed = tombstoned_ids(&tombstones);
+        retain_surviving(&mut items, &removed);
+
+        let surviving: Vec<&str> = items
+            .iter()
+            .flat_map(|batch| batch.strokes.iter().map(|stroke| stroke.id.as_str()))
+            .collect();
+        assert_eq!(surviving, ["kept", "later"]);
     }
 
     /// The page channel is authoritative for paper; nothing else changes it.

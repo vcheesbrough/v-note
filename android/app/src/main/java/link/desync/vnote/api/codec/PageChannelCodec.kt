@@ -19,16 +19,9 @@ internal fun decodePageEvent(json: JSONObject): PageEvent? =
                 paper = Paper.fromWire(json.optString("paper").ifBlank { null }) ?: Paper.None,
             )
         "stroke-batch" -> decodeStrokeBatch(json)
+        "page-replay" -> decodePageReplay(json)
         "synced" -> PageEvent.Synced(json.getLong("last_seq"))
-        "tombstone-batch" ->
-            PageEvent.TombstoneBatch(
-                revision = json.getLong("revision"),
-                clientMutationId = json.getString("client_mutation_id"),
-                strokeIds =
-                    json.getJSONArray("stroke_ids").let { ids ->
-                        buildList { for (index in 0 until ids.length()) add(ids.getString(index)) }
-                    },
-            )
+        "tombstone-batch" -> decodeTombstoneBatch(json)
         "paper-changed" ->
             Paper.fromWire(json.getString("paper"))?.let { paper ->
                 PageEvent.PaperChanged(paper = paper, revision = json.getLong("revision"))

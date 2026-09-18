@@ -156,6 +156,51 @@ class ContractFixtureTest {
         )
     }
 
+    // The coalesced replay frame (#323): one message carrying every surviving
+    // batch, every tombstone batch, and the head `seq`.
+    @Test
+    fun pageReplayMessageDecodes() {
+        assertEquals(
+            PageEvent.PageReplay(
+                pageId = "page_01j00000000000000000000000",
+                lastSeq = 2,
+                batches =
+                    listOf(
+                        PageEvent.StrokeBatch(
+                            seq = 1,
+                            clientBatchId = BATCH_A,
+                            strokes = listOf(v1Stroke("stroke_server_1", point(10, 20, 0), point(30, 25, 16))),
+                        ),
+                        PageEvent.StrokeBatch(
+                            seq = 2,
+                            clientBatchId = BATCH_B,
+                            strokes = listOf(v1Stroke("stroke_server_2", point(5, 60, 0), point(80, 90, 16))),
+                        ),
+                    ),
+                tombstones =
+                    listOf(
+                        PageEvent.TombstoneBatch(
+                            revision = 1,
+                            clientMutationId = "erase_cccccccccccccccccccccccc",
+                            strokeIds = listOf("stroke_server_erased"),
+                        ),
+                    ),
+            ),
+            decodePageEvent(fixture("page-server-page-replay.json")),
+        )
+    }
+
+    // A replay written before tombstones joined the snapshot still decodes,
+    // with no tombstones rather than a parse failure.
+    @Test
+    fun pageReplayWithoutTombstonesDecodesToNone() {
+        val decoded =
+            decodePageEvent(
+                JSONObject("""{"type":"page-replay","page_id":"page_1","last_seq":0,"batches":[]}"""),
+            )
+        assertEquals(PageEvent.PageReplay("page_1", 0, emptyList(), emptyList()), decoded)
+    }
+
     @Test
     fun unknownServerMessagesAreIgnored() {
         assertNull(decodePageEvent(JSONObject("""{"type":"from-the-future"}""")))
@@ -186,6 +231,18 @@ class ContractFixtureTest {
             batches.map { batch -> batch.strokes.map { it.id } },
         )
         assertEquals(replay.getLong("last_seq"), batches.last().seq)
+
+        // Delete-wins is applied server-side, so nothing the tombstones name
+        // may appear in the batches the client is handed.
+        val tombstonesJson = replay.getJSONArray("tombstones")
+        val erased =
+            (0 until tombstonesJson.length())
+                .flatMap { index ->
+                    val ids = tombstonesJson.getJSONObject(index).getJSONArray("stroke_ids")
+                    (0 until ids.length()).map { ids.getString(it) }
+                }.toSet()
+        assertEquals(setOf("stroke_replay_erased"), erased)
+        assertTrue(batches.none { batch -> batch.strokes.any { it.id in erased } })
     }
 
     @Test
@@ -317,6 +374,7 @@ class ContractFixtureTest {
         const val CREATED_AT = "2026-06-10T22:00:00Z"
         const val HOLDER = "session_fedcba9876543210"
         const val BATCH_A = "batch_aaaaaaaaaaaaaaaaaaaaaaaa"
+        const val BATCH_B = "batch_bbbbbbbbbbbbbbbbbbbbbbbb"
 
         val ASSERTED_HERE =
             setOf(
@@ -331,6 +389,7 @@ class ContractFixtureTest {
                 "page-client-subscribe.json",
                 "page-replay.json",
                 "page-server-lease-denied.json",
+                "page-server-page-replay.json",
                 "page-server-paper-changed.json",
                 "page-server-stroke-batch.json",
                 "page-server-welcome.json",

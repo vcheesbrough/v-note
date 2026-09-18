@@ -479,16 +479,17 @@ class PageInkInstrumentedTest {
     }
 
     /**
-     * The server replays one `stroke-batch` per stored batch, so a page with N
-     * strokes arrives as N messages. They must land on the canvas as one paint
-     * at `synced`, not N — that stepwise reveal is the bug in #312.
+     * Individual `stroke-batch` messages arriving inside the replay window —
+     * which is what a sibling device's live commit looks like while this
+     * session is still catching up — must land on the canvas as one paint at
+     * `synced`, not N. That stepwise reveal is the bug in #312.
      *
      * `lease-granted` is sent *after* the batches and the channel is ordered, so
      * `canEdit` proves every batch has already been handled: the emptiness
      * asserted here is held-back ink, not ink that has yet to arrive.
      */
     @Test
-    fun replayIsWithheldUntilSyncedThenPublishedInOneStep() {
+    fun batchesArrivingDuringReplayAreWithheldUntilSyncedThenPublishedInOneStep() {
         val socket = AtomicReference<WebSocket>()
         openPage(socket) { webSocket, type ->
             if (type == "subscribe") {
@@ -507,27 +508,47 @@ class PageInkInstrumentedTest {
         session.disconnect()
     }
 
-    /** A tombstone inside the replay is applied in that same single publish. */
+    /**
+     * What the server actually sends since #323: the whole replay in **one**
+     * `page-replay` frame. N stored batches cost one message, and the page is
+     * painted once — no `synced` follows, because the frame carries it.
+     */
     @Test
-    fun replayAppliesItsOwnTombstonesBeforePublishing() {
-        val socket = AtomicReference<WebSocket>()
-        openPage(socket) { webSocket, type ->
+    fun aCoalescedReplayFramePaintsTheWholePageInOneStep() {
+        openPage { webSocket, type ->
             if (type == "subscribe") {
-                webSocket.send(replayBatch(0))
-                webSocket.send(replayBatch(1))
-                webSocket.send(
-                    """{"type":"tombstone-batch","revision":1,"client_mutation_id":"m1",""" +
-                        """"stroke_ids":["replay-stroke-0"]}""",
-                )
+                webSocket.send(replayFrame(REPLAY_STROKES))
             }
         }
 
         val session = openSession()
 
-        assertTrue("replay delivered", awaitUntil { session.canEdit })
-        assertEquals(0, session.strokes.size)
+        assertTrue(
+            "whole page painted from one frame",
+            awaitUntil { session.strokes.size == REPLAY_STROKES },
+        )
+        assertEquals(
+            (0 until REPLAY_STROKES).map { "replay-stroke-$it" },
+            session.strokes.map { it.id },
+        )
+        session.disconnect()
+    }
 
-        socket.get().send("""{"type":"synced","last_seq":2}""")
+    /** A tombstone inside the replay frame is applied in that same publish. */
+    @Test
+    fun replayAppliesItsOwnTombstonesBeforePublishing() {
+        openPage { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send(
+                    replayFrame(
+                        batchCount = 2,
+                        tombstonedStrokeIds = listOf("replay-stroke-0"),
+                    ),
+                )
+            }
+        }
+
+        val session = openSession()
 
         assertTrue("surviving stroke painted", awaitUntil { session.strokes.size == 1 })
         assertEquals("replay-stroke-1", session.strokes[0].id)
@@ -615,28 +636,55 @@ class PageInkInstrumentedTest {
         )
     }
 
-    private fun replayBatch(index: Int): String =
+    /** One stored batch as its own `stroke-batch` frame. */
+    private fun replayBatch(index: Int): String = """{"type":"stroke-batch",${batchFields(index)}}"""
+
+    /** The same batch as an element of a `page-replay` frame's `batches`. */
+    private fun replayBatchBody(index: Int): String = """{${batchFields(index)}}"""
+
+    private fun batchFields(index: Int): String =
         """
-        {
-          "type": "stroke-batch",
-          "seq": ${index + 1},
-          "client_batch_id": "replay-$index",
-          "strokes": [{
-            "id": "replay-stroke-$index",
-            "style": {
-              "tool_kind": "solid_round",
-              "style_version": 1,
-              "parameters": {
-                "color": "#006400",
-                "width": 4.0,
-                "cap_style": "round",
-                "join_style": "round"
-              }
-            },
-            "points": [{"x": ${index * 10}.0, "y": 2.0, "t": 0}]
-          }]
-        }
+        "seq": ${index + 1},
+        "client_batch_id": "replay-$index",
+        "strokes": [{
+          "id": "replay-stroke-$index",
+          "style": {
+            "tool_kind": "solid_round",
+            "style_version": 1,
+            "parameters": {
+              "color": "#006400",
+              "width": 4.0,
+              "cap_style": "round",
+              "join_style": "round"
+            }
+          },
+          "points": [{"x": ${index * 10}.0, "y": 2.0, "t": 0}]
+        }]
         """.trimIndent()
+
+    /**
+     * One coalesced `page-replay` frame carrying [batchCount] stored batches
+     * and, when given, a tombstone batch erasing [tombstonedStrokeIds].
+     *
+     * The tombstoned strokes are still present in `batches` here, unlike a real
+     * server frame, so the client's own delete-wins pass is what the assertion
+     * rests on.
+     */
+    private fun replayFrame(
+        batchCount: Int,
+        tombstonedStrokeIds: List<String> = emptyList(),
+    ): String {
+        val tombstones =
+            if (tombstonedStrokeIds.isEmpty()) {
+                "[]"
+            } else {
+                """[{"revision":1,"client_mutation_id":"m1",""" +
+                    """"stroke_ids":[${tombstonedStrokeIds.joinToString(",") { "\"$it\"" }}]}]"""
+            }
+        val batches = (0 until batchCount).joinToString(",") { replayBatchBody(it) }
+        return """{"type":"page-replay","page_id":"page_1","last_seq":$batchCount,""" +
+            """"batches":[$batches],"tombstones":$tombstones}"""
+    }
 
     private fun awaitUntil(
         timeoutMs: Long = 5_000,

@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use axum_server::tls_rustls::RustlsConfig;
 use server::build_app_router;
 use server::config::{
-    AndroidConfig, DatabaseConfig, ObservabilityConfig, OidcConfig, ServerConfig, build_config,
-    load_group,
+    AndroidConfig, DatabaseConfig, ObservabilityConfig, OidcConfig, RealtimeConfig, ServerConfig,
+    build_config, load_group,
 };
 use server::observability::{init_tracing, run_metrics_server};
 
@@ -26,12 +26,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let oidc = load_group::<OidcConfig>(&cfg, "oidc")?;
     let android = load_group::<AndroidConfig>(&cfg, "android")?;
     let server = load_group::<ServerConfig>(&cfg, "server")?;
+    let realtime = load_group::<RealtimeConfig>(&cfg, "realtime")?;
     drop(cfg);
 
     let _telemetry_guard = init_tracing(&observability);
     let metrics_addr = observability.metrics_socket_addr();
 
-    let app = build_app_router(&database, &oidc, &android, &server).await?;
+    let app = build_app_router(&database, &oidc, &android, &server, &realtime).await?;
     tokio::spawn(async move {
         if let Err(error) = run_metrics_server(metrics_addr).await {
             tracing::error!(error = %error, "internal metrics listener stopped");

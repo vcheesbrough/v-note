@@ -33,15 +33,19 @@ pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
 /// because both consumers want a `'static` label, so there is no compile-time
 /// link to the canonical constant — `protocol_version_label_matches_protocol`
 /// below is that link.
-const PROTOCOL_VERSION: &str = "5";
+const PROTOCOL_VERSION: &str = "6";
 
 /// Realtime frame and replay sizes: from a ~50 B `synced` up to a multi-MB
-/// replay (the `DensePageSeeder` reference page replays ~2.7 MB today).
+/// replay. Since #323 a replay is a single frame, so the top buckets now
+/// measure one `page-replay` rather than a whole run of `stroke-batch`es (the
+/// `DensePageSeeder` reference page replayed 7.30 MB before that change).
 const REALTIME_BYTES_BUCKETS: [f64; 9] = [
     128.0, 512.0, 2048.0, 8192.0, 32768.0, 131072.0, 524288.0, 2097152.0, 8388608.0,
 ];
-/// Frames per replay: one per stored stroke batch and tombstone batch, plus the
-/// closing `synced`. The dense reference page sends ~1200; #323 drives it to 1.
+/// Frames per replay. Since #323 this is **1** — the whole snapshot is one
+/// `page-replay` frame. The wide upper buckets are kept deliberately: they are
+/// what makes a regression back towards per-batch frames visible rather than
+/// saturating the top bucket. The dense reference page sent 1,267 before.
 const REALTIME_REPLAY_FRAMES_BUCKETS: [f64; 12] = [
     1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
 ];
