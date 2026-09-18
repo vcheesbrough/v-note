@@ -328,7 +328,7 @@
     {
       "id": 6,
       "type": "row",
-      "title": "Realtime — subscribe replay (what #323 moves)",
+      "title": "Realtime — subscribe replay (coalesced by #323)",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -411,7 +411,7 @@
           "sort": "desc"
         }
       },
-      "description": "One observation per completed page-channel Subscribe replay: every stroke-batch and tombstone-batch frame plus the closing synced. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets — read `mean` over a window holding one replay for a baseline."
+      "description": "One observation per completed page-channel Subscribe replay. Since #323 a replay is a single `page-replay` frame carrying every stroke batch, every tombstone batch and `last_seq`, so frames should read 1 — anything higher is a regression. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets — read `mean` over a window holding one replay for a baseline."
     },
     {
       "id": 8,
@@ -487,12 +487,12 @@
           "sort": "desc"
         }
       },
-      "description": "One observation per completed page-channel Subscribe replay: every stroke-batch and tombstone-batch frame plus the closing synced. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets — read `mean` over a window holding one replay for a baseline."
+      "description": "One observation per completed page-channel Subscribe replay. Since #323 a replay is a single `page-replay` frame carrying every stroke batch, every tombstone batch and `last_seq`, so frames should read 1 — anything higher is a regression. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets — read `mean` over a window holding one replay for a baseline."
     },
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Replay duration p50 / p95 (subscribe received → synced sent)",
+      "title": "Replay duration p50 / p95 (subscribe received → replay sent)",
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
@@ -579,7 +579,7 @@
           "sort": "desc"
         }
       },
-      "description": "Wall time from a Subscribe arriving to its synced frame being sent, including the replay query and every frame send."
+      "description": "Wall time from a Subscribe arriving to its replay frame being sent, including the replay query and the send."
     },
     {
       "id": 10,

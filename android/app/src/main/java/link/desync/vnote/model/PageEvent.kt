@@ -22,6 +22,16 @@ sealed interface PageEvent {
         val strokes: List<Stroke>,
     ) : PageEvent
 
+    // The whole `subscribe` replay in one frame (#323): surviving batches with
+    // delete-wins already applied, every tombstone batch, and the head `seq`
+    // that used to arrive as a separate `synced`.
+    data class PageReplay(
+        val pageId: String,
+        val lastSeq: Long,
+        val batches: List<StrokeBatch>,
+        val tombstones: List<TombstoneBatch>,
+    ) : PageEvent
+
     data class Synced(
         val lastSeq: Long,
     ) : PageEvent

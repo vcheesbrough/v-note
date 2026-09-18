@@ -1,4 +1,5 @@
 {
+  "type": "page-replay",
   "page_id": "page_01j00000000000000000000000",
   "last_seq": 2,
   "batches": [
@@ -7,12 +8,11 @@
       "client_batch_id": "batch_aaaaaaaaaaaaaaaaaaaaaaaa",
       "strokes": [
         {
-          "id": "stroke_replay_1",
+          "id": "stroke_server_1",
           "style": { "tool_kind": "solid_round", "style_version": 1, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
           "points": [
             { "x": 10.0, "y": 20.0, "t": 0 },
-            { "x": 30.0, "y": 25.0, "t": 16 },
-            { "x": 50.0, "y": 40.0, "t": 32 }
+            { "x": 30.0, "y": 25.0, "t": 16 }
           ]
         }
       ]
@@ -22,19 +22,11 @@
       "client_batch_id": "batch_bbbbbbbbbbbbbbbbbbbbbbbb",
       "strokes": [
         {
-          "id": "stroke_replay_2",
+          "id": "stroke_server_2",
           "style": { "tool_kind": "solid_round", "style_version": 1, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
           "points": [
             { "x": 5.0, "y": 60.0, "t": 0 },
             { "x": 80.0, "y": 90.0, "t": 16 }
-          ]
-        },
-        {
-          "id": "stroke_replay_3",
-          "style": { "tool_kind": "solid_round", "style_version": 1, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
-          "points": [
-            { "x": 100.0, "y": 12.0, "t": 0 },
-            { "x": 70.0, "y": 8.0, "t": 16 }
           ]
         }
       ]
@@ -44,7 +36,7 @@
     {
       "revision": 1,
       "client_mutation_id": "erase_cccccccccccccccccccccccc",
-      "stroke_ids": ["stroke_replay_erased"]
+      "stroke_ids": ["stroke_server_erased"]
     }
   ]
 }

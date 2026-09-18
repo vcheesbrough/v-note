@@ -9,7 +9,7 @@ use std::time::Instant;
 use axum::extract::ws::Message;
 use futures_util::{Sink, SinkExt};
 use protocol::{
-    LibraryEvent, PageClientMessage, PageServerMessage, Paper, Stroke, StrokeBatch,
+    LibraryEvent, PageClientMessage, PageReplay, PageServerMessage, Paper, Stroke, StrokeBatch,
     ThumbnailMetadata, TombstoneBatch,
 };
 
@@ -40,7 +40,15 @@ where
 {
     match message {
         PageClientMessage::Subscribe { from_seq } => {
-            replay_page(ctx.store, ctx.page_id, sender, from_seq, received).await
+            replay_page(
+                ctx.store,
+                ctx.page_id,
+                sender,
+                from_seq,
+                received,
+                ctx.state.coalesce_replay,
+            )
+            .await
         }
         PageClientMessage::AcquireLease => acquire_lease(ctx, sender).await,
         PageClientMessage::RenewLease => renew_lease(ctx, sender).await,
@@ -368,16 +376,25 @@ impl ReplayCost {
     }
 }
 
-/// Replays a page to one subscriber: surviving stroke batches, every tombstone
-/// batch, then `synced`. Its frames, bytes and duration are recorded once
-/// `synced` is sent; a replay cut short by a failed read or send records none.
-#[tracing::instrument(skip_all, fields(from_seq = from_seq, frames, bytes))]
+/// Replays a page to one subscriber.
+///
+/// With `coalesce` (the `realtime.coalesce-replay` default) it is a **single**
+/// `page-replay` frame: surviving stroke batches, every tombstone batch, and the
+/// head `seq` the subscriber is now caught up to. With the flag off it is the
+/// pre-#323 shape — a `stroke-batch` per stored batch, a `tombstone-batch` per
+/// tombstone batch, then `synced` — which every client still understands, so the
+/// flag is a runtime rollback rather than a rebuild.
+///
+/// Its frames, bytes and duration are recorded once the last frame is sent; a
+/// replay cut short by a failed read or send records none.
+#[tracing::instrument(skip_all, fields(from_seq = from_seq, coalesced = coalesce, frames, bytes))]
 async fn replay_page<S, Tx>(
     store: &S,
     page_id: &str,
     sender: &mut Tx,
     from_seq: u64,
     received: Instant,
+    coalesce: bool,
 ) -> bool
 where
     S: PageStore,
@@ -399,16 +416,25 @@ where
             .await;
         }
     };
-    let mut cost = ReplayCost::default();
-    if !send_replay_frames(sender, batches, tombstones, &mut cost).await {
-        return false;
-    }
     let last_seq = store.max_seq(page_id).await.unwrap_or(from_seq);
-    let Some(synced_bytes) = send_page_frame(sender, PageServerMessage::Synced { last_seq }).await
-    else {
-        return false;
-    };
-    cost.add_frame(synced_bytes);
+    let mut cost = ReplayCost::default();
+    if coalesce {
+        let replay = build_page_replay(page_id, last_seq, batches, tombstones);
+        let Some(bytes) = send_page_frame(sender, PageServerMessage::PageReplay(replay)).await
+        else {
+            return false;
+        };
+        cost.add_frame(bytes);
+    } else {
+        if !send_replay_frames(sender, batches, tombstones, &mut cost).await {
+            return false;
+        }
+        let Some(bytes) = send_page_frame(sender, PageServerMessage::Synced { last_seq }).await
+        else {
+            return false;
+        };
+        cost.add_frame(bytes);
+    }
 
     let span = tracing::Span::current();
     span.record("frames", cost.frames);
@@ -421,8 +447,36 @@ where
     true
 }
 
-/// Sends a replay's stroke-batch and tombstone-batch frames, adding each to
-/// `cost`. Returns false when a send fails.
+/// Assembles one replay payload: stroke batches with delete-wins applied, and
+/// every tombstone batch. Tombstones ride along even when `from_seq` skips the
+/// batches they deleted from, because a reconnecting client may still cache
+/// those strokes.
+fn build_page_replay(
+    page_id: &str,
+    last_seq: u64,
+    mut batches: Vec<StrokeBatch>,
+    tombstones: Vec<TombstoneBatch>,
+) -> PageReplay {
+    let deleted_ids: HashSet<&str> = tombstones
+        .iter()
+        .flat_map(|batch| batch.stroke_ids.iter().map(String::as_str))
+        .collect();
+    for batch in &mut batches {
+        batch
+            .strokes
+            .retain(|stroke| !deleted_ids.contains(stroke.id.as_str()));
+    }
+    PageReplay {
+        page_id: page_id.to_string(),
+        last_seq,
+        batches,
+        tombstones,
+    }
+}
+
+/// The pre-#323 replay shape, kept behind `realtime.coalesce-replay = false`:
+/// one `stroke-batch` frame per stored batch, then one per tombstone batch,
+/// adding each to `cost`. Returns false when a send fails.
 async fn send_replay_frames<S>(
     sender: &mut S,
     batches: Vec<StrokeBatch>,
@@ -1029,9 +1083,60 @@ mod tests {
 
     // ---- subscribe ----------------------------------------------------------
 
+    /// The whole replay is **one** `page-replay` message — surviving ink,
+    /// every tombstone batch, and the head `seq` that used to arrive as a
+    /// separate `synced` (#323).
     #[tokio::test]
-    async fn subscribe_replays_surviving_ink_then_tombstones_then_synced() {
+    async fn subscribe_replays_surviving_ink_and_tombstones_in_one_message() {
         let state = AppState::for_tests();
+        let tombstones = TombstoneBatch {
+            revision: 2,
+            client_mutation_id: "erase_1".to_string(),
+            stroke_ids: vec!["erased".to_string()],
+        };
+        let store = FakeStore {
+            replay: (
+                vec![StrokeBatch {
+                    seq: 1,
+                    client_batch_id: "batch_1".to_string(),
+                    strokes: vec![fixture_stroke("kept"), fixture_stroke("erased")],
+                }],
+                vec![tombstones.clone()],
+            ),
+            head_seq: 1,
+            ..FakeStore::default()
+        };
+
+        let (keep_open, replies) =
+            handle(&state, &store, PageClientMessage::Subscribe { from_seq: 0 }).await;
+
+        assert!(keep_open);
+        assert_eq!(
+            replies,
+            [PageServerMessage::PageReplay(PageReplay {
+                page_id: PAGE.to_string(),
+                last_seq: 1,
+                batches: vec![StrokeBatch {
+                    seq: 1,
+                    client_batch_id: "batch_1".to_string(),
+                    strokes: vec![fixture_stroke("kept")],
+                }],
+                tombstones: vec![tombstones],
+            })]
+        );
+        assert_eq!(
+            store.calls(),
+            ["load_page_replay page_1 0", "max_seq page_1"]
+        );
+    }
+
+    /// `realtime.coalesce-replay = false` restores the pre-#323 wire shape, so
+    /// the change can be rolled back at runtime rather than by rebuilding. The
+    /// ink and the tombstones delivered are identical; only the framing differs.
+    #[tokio::test]
+    async fn the_flag_off_restores_the_per_message_replay_shape() {
+        let mut state = AppState::for_tests();
+        state.coalesce_replay = false;
         let tombstones = TombstoneBatch {
             revision: 2,
             client_mutation_id: "erase_1".to_string(),
@@ -1064,11 +1169,108 @@ mod tests {
                 }),
                 PageServerMessage::TombstoneBatch(tombstones),
                 PageServerMessage::Synced { last_seq: 1 },
-            ]
+            ],
+            "delete-wins still applied, and `synced` still closes the replay"
         );
+    }
+
+    /// Both shapes are counted by the same #324 instrumentation, so the
+    /// `frames` histogram is what tells an operator which shape is in force.
+    #[tokio::test]
+    async fn both_replay_shapes_are_counted_by_the_same_instrumentation() {
+        let batches: Vec<StrokeBatch> = (1..=3)
+            .map(|seq| StrokeBatch {
+                seq,
+                client_batch_id: format!("batch_{seq}"),
+                strokes: vec![fixture_stroke(&format!("stroke_{seq}"))],
+            })
+            .collect();
+        let store = || FakeStore {
+            replay: (batches.clone(), Vec::new()),
+            head_seq: 3,
+            ..FakeStore::default()
+        };
+
+        let mut coalesced: Vec<Message> = Vec::new();
+        assert!(replay_page(&store(), PAGE, &mut coalesced, 0, Instant::now(), true).await);
+        let mut per_message: Vec<Message> = Vec::new();
+        assert!(replay_page(&store(), PAGE, &mut per_message, 0, Instant::now(), false).await);
+
+        assert_eq!(text_frames(&coalesced).len(), 1);
+        // 3 x stroke-batch + synced — the shape #323 replaced.
+        assert_eq!(text_frames(&per_message).len(), 4);
+    }
+
+    /// Gap-fill: `from_seq` is passed through to the store untouched, and the
+    /// head `seq` the client is told about is the store's, not `from_seq`.
+    #[tokio::test]
+    async fn subscribe_from_a_seq_asks_the_store_for_only_later_batches() {
+        let state = AppState::for_tests();
+        let store = FakeStore {
+            replay: (
+                vec![StrokeBatch {
+                    seq: 8,
+                    client_batch_id: "batch_8".to_string(),
+                    strokes: vec![fixture_stroke("late")],
+                }],
+                Vec::new(),
+            ),
+            head_seq: 8,
+            ..FakeStore::default()
+        };
+
+        let (keep_open, replies) =
+            handle(&state, &store, PageClientMessage::Subscribe { from_seq: 7 }).await;
+
+        assert!(keep_open);
+        match &replies[..] {
+            [PageServerMessage::PageReplay(replay)] => {
+                assert_eq!(replay.last_seq, 8);
+                assert_eq!(
+                    replay
+                        .batches
+                        .iter()
+                        .map(|batch| batch.seq)
+                        .collect::<Vec<_>>(),
+                    vec![8]
+                );
+            }
+            other => panic!("expected one page-replay, got {other:?}"),
+        }
         assert_eq!(
             store.calls(),
-            ["load_page_replay page_1 0", "max_seq page_1"]
+            ["load_page_replay page_1 7", "max_seq page_1"]
+        );
+    }
+
+    /// A reconnecting client may still cache strokes a tombstone deleted, so
+    /// tombstones replay even when `from_seq` skips their source batches.
+    #[tokio::test]
+    async fn subscribe_replays_tombstones_even_when_from_seq_skips_their_batches() {
+        let state = AppState::for_tests();
+        let tombstones = TombstoneBatch {
+            revision: 4,
+            client_mutation_id: "erase_1".to_string(),
+            stroke_ids: vec!["erased".to_string()],
+        };
+        let store = FakeStore {
+            replay: (Vec::new(), vec![tombstones.clone()]),
+            head_seq: 9,
+            ..FakeStore::default()
+        };
+
+        let (keep_open, replies) =
+            handle(&state, &store, PageClientMessage::Subscribe { from_seq: 9 }).await;
+
+        assert!(keep_open);
+        assert_eq!(
+            replies,
+            [PageServerMessage::PageReplay(PageReplay {
+                page_id: PAGE.to_string(),
+                last_seq: 9,
+                batches: Vec::new(),
+                tombstones: vec![tombstones],
+            })]
         );
     }
 
@@ -1212,8 +1414,47 @@ mod tests {
         );
     }
 
+    /// N stored batches cost **one** frame, whatever N is, and the #324
+    /// `frames`/`bytes` instrumentation counts that one frame (#323).
     #[tokio::test]
-    async fn replay_frames_apply_delete_wins_and_count_every_frame() {
+    async fn a_dense_replay_is_one_frame_whatever_the_batch_count() {
+        let batches: Vec<StrokeBatch> = (1..=50)
+            .map(|seq| StrokeBatch {
+                seq,
+                client_batch_id: format!("batch_{seq}"),
+                strokes: vec![fixture_stroke(&format!("stroke_{seq}"))],
+            })
+            .collect();
+        let store = FakeStore {
+            replay: (batches, Vec::new()),
+            head_seq: 50,
+            ..FakeStore::default()
+        };
+        let mut sink: Vec<Message> = Vec::new();
+
+        assert!(
+            replay_page(&store, PAGE, &mut sink, 0, Instant::now(), true).await,
+            "a successful replay keeps the socket open"
+        );
+
+        let frames = text_frames(&sink);
+        assert_eq!(frames.len(), 1, "50 stored batches must cost one frame");
+        let payload: serde_json::Value =
+            serde_json::from_str(frames[0]).expect("frame should be JSON");
+        assert_eq!(payload["type"], "page-replay");
+        assert_eq!(payload["last_seq"], 50);
+        assert_eq!(
+            payload["batches"].as_array().expect("batches array").len(),
+            50,
+            "every batch still reaches the client"
+        );
+    }
+
+    /// Delete-wins is applied before the frame is built, so a tombstoned
+    /// stroke never reaches the client — and the one frame is what the #324
+    /// counters see.
+    #[tokio::test]
+    async fn the_replay_frame_applies_delete_wins_and_is_counted_once() {
         let batches = vec![
             StrokeBatch {
                 seq: 1,
@@ -1231,36 +1472,33 @@ mod tests {
             client_mutation_id: "erase_1".to_string(),
             stroke_ids: vec!["erased".to_string()],
         }];
-        let mut sink: Vec<Message> = Vec::new();
-        let mut cost = ReplayCost::default();
 
-        assert!(send_replay_frames(&mut sink, batches, tombstones, &mut cost).await);
-
-        let frames = text_frames(&sink);
-        let types: Vec<String> = frames
+        let replay = build_page_replay(PAGE, 2, batches, tombstones);
+        assert_eq!(replay.page_id, PAGE);
+        assert_eq!(replay.last_seq, 2);
+        let surviving: Vec<&str> = replay
+            .batches
             .iter()
-            .map(|frame| {
-                serde_json::from_str::<serde_json::Value>(frame).expect("frame should be JSON")
-                    ["type"]
-                    .as_str()
-                    .expect("frame should carry a type")
-                    .to_string()
-            })
+            .flat_map(|batch| batch.strokes.iter().map(|stroke| stroke.id.as_str()))
             .collect();
-        // One frame per stored batch plus one per tombstone batch — the shape
-        // #323 collapses into a single frame.
-        assert_eq!(types, ["stroke-batch", "stroke-batch", "tombstone-batch"]);
-        assert!(frames[0].contains(r#""id":"kept""#));
-        assert!(
-            !frames[0].contains(r#""id":"erased""#),
+        assert_eq!(
+            surviving,
+            ["kept", "later"],
             "delete-wins filtering must still drop tombstoned strokes"
         );
-        assert_eq!(
-            cost,
-            ReplayCost {
-                frames: 3,
-                bytes: frames.iter().map(|frame| frame.len() as u64).sum(),
-            }
-        );
+        assert_eq!(replay.tombstones.len(), 1);
+
+        let store = FakeStore {
+            replay: (replay.batches.clone(), replay.tombstones.clone()),
+            head_seq: 2,
+            ..FakeStore::default()
+        };
+        let mut sink: Vec<Message> = Vec::new();
+        assert!(replay_page(&store, PAGE, &mut sink, 0, Instant::now(), true).await);
+
+        let frames = text_frames(&sink);
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains(r#""id":"kept""#));
+        assert!(!frames[0].contains(r#""id":"erased""#));
     }
 }

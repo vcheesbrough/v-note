@@ -255,6 +255,8 @@ fn apply_defaults(
         ("server.http-port", "8080"),
         // Present so the `android` sub-branch always exists; empty means "not configured".
         ("android.assetlinks-json", ""),
+        // Feature flag (#323). On by default; see `RealtimeConfig`.
+        ("realtime.coalesce-replay", "true"),
     ];
     let mut builder = builder;
     for (key, value) in defaults {
@@ -464,6 +466,48 @@ impl ValidatedConfig for AndroidConfig {
                 "must be valid JSON",
             ));
         }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// realtime
+// ---------------------------------------------------------------------------
+
+/// Page-channel behaviour flags.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct RealtimeConfig {
+    /// Answer a `subscribe` with one coalesced `page-replay` frame (#323)
+    /// instead of N x `stroke-batch` + M x `tombstone-batch` + `synced`.
+    ///
+    /// **On by default.** The flag exists so the old shape can be restored
+    /// without a rollback build: both shapes are valid protocol 6, and every
+    /// client still understands the per-message form, so flipping this off is
+    /// safe at runtime and is also what makes the server serve a protocol 5
+    /// client again.
+    #[serde(default = "coalesce_replay_default")]
+    pub coalesce_replay: bool,
+}
+
+/// Mirrors the `realtime.coalesce-replay` default leaf, so a `realtime` branch
+/// supplied by sovereign-config without this key still means "on".
+fn coalesce_replay_default() -> bool {
+    true
+}
+
+impl Default for RealtimeConfig {
+    fn default() -> Self {
+        Self {
+            coalesce_replay: coalesce_replay_default(),
+        }
+    }
+}
+
+impl ValidatedConfig for RealtimeConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        // A `bool` field already makes every illegal state unrepresentable:
+        // a leaf that is not a recognised boolean fails coercion in `load_group`.
         Ok(())
     }
 }

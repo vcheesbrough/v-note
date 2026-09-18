@@ -167,8 +167,9 @@ fn realtime_message_bytes_are_bucketed_by_channel_and_message_type() {
 #[test]
 fn replay_cost_is_one_observation_per_replay() {
     let metrics = Metrics::new();
-    // The DensePageSeeder reference page as #323 measured it: 1200 batch
-    // frames plus `synced`, 2.74 MB.
+    // The DensePageSeeder reference page as #323 measured it *before*
+    // coalescing: 1200 batch frames plus `synced`, 2.74 MB. Kept as the
+    // regression shape — this is what the counters must still be able to show.
     metrics.observe_realtime_replay(1201, 2_740_000, 0.8);
 
     assert_eq!(metrics.realtime.replay_frames.get_sample_count(), 1);
@@ -186,6 +187,22 @@ fn replay_cost_is_one_observation_per_replay() {
     assert!(text.contains(r#"v_note_realtime_replay_bytes_bucket{le="8388608"} 1"#));
     assert!(text.contains(r#"v_note_realtime_replay_frames_bucket{le="1000"} 0"#));
     assert!(text.contains(r#"v_note_realtime_replay_frames_bucket{le="2500"} 1"#));
+}
+
+/// After #323 every replay is one frame, so the `frames` histogram must be able
+/// to say so exactly — a bottom bucket of `le="1"` is what distinguishes a
+/// coalesced replay from a two-frame one.
+#[test]
+fn a_coalesced_replay_is_one_frame_in_the_bottom_bucket() {
+    let metrics = Metrics::new();
+    metrics.observe_realtime_replay(1, 7_296_892, 0.08);
+
+    assert_eq!(metrics.realtime.replay_frames.get_sample_sum(), 1.0);
+    let text = metrics.render().expect("metrics should render");
+    assert!(text.contains(r#"v_note_realtime_replay_frames_bucket{le="1"} 1"#));
+    // The bytes are unchanged by coalescing — the same ink, one envelope.
+    assert!(text.contains(r#"v_note_realtime_replay_bytes_bucket{le="2097152"} 0"#));
+    assert!(text.contains(r#"v_note_realtime_replay_bytes_bucket{le="8388608"} 1"#));
 }
 
 #[test]

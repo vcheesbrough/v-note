@@ -17,7 +17,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{AuthConfig, JwksCache, auth_middleware};
-use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig, ServerConfig};
+use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig, RealtimeConfig, ServerConfig};
 use crate::observability::request_observability_middleware;
 use crate::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
@@ -33,6 +33,9 @@ pub struct AppState {
     /// Digital Asset Links JSON served at `/.well-known/assetlinks.json`;
     /// `None` when not configured (route returns 404).
     pub assetlinks_json: Option<Arc<str>>,
+    /// `realtime.coalesce-replay` (#323): send a `subscribe` replay as one
+    /// `page-replay` frame rather than a frame per stored batch.
+    pub coalesce_replay: bool,
 }
 
 /// The build version: the release tag baked in at compile time (`V_NOTE_RELEASE`,
@@ -100,6 +103,7 @@ pub async fn build_app_router(
     oidc: &OidcConfig,
     android: &AndroidConfig,
     server: &ServerConfig,
+    realtime: &RealtimeConfig,
 ) -> Result<Router, StartupError> {
     let auth = Arc::new(
         AuthConfig::from_oidc(oidc)
@@ -125,6 +129,7 @@ pub async fn build_app_router(
         db: pool,
         realtime: Arc::new(RealtimeHub::default()),
         assetlinks_json: android.assetlinks_json().map(Arc::from),
+        coalesce_replay: realtime.coalesce_replay,
     };
     // Startup work, not router construction: resume thumbnail jobs a restart
     // interrupted. Kept out of `router` so tests, whose pool never connects,
@@ -159,6 +164,7 @@ pub fn build_router(
             db,
             realtime: Arc::new(RealtimeHub::default()),
             assetlinks_json: None,
+            coalesce_replay: RealtimeConfig::default().coalesce_replay,
         },
         None,
     )
@@ -270,6 +276,7 @@ impl AppState {
             db: unreachable_pool(),
             realtime: Arc::new(RealtimeHub::default()),
             assetlinks_json: None,
+            coalesce_replay: RealtimeConfig::default().coalesce_replay,
         }
     }
 }
