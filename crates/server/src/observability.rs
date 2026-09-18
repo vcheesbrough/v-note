@@ -535,18 +535,26 @@ fn request_span(
 /// slow query is identifiable in Tempo without recording SQL text or bound
 /// values, which can carry user content. The `db.response.*` fields are filled
 /// in by [`metered`] when the query finishes.
-pub fn db_query_span(operation: &'static str, query_name: &'static str) -> tracing::Span {
-    tracing::info_span!(
-        "db.query",
-        db.system = "postgresql",
-        db.operation = operation,
-        db.query_name = query_name,
-        db.response.returned_rows = tracing::field::Empty,
-        db.response.bytes = tracing::field::Empty,
-        db.response.max_row_bytes = tracing::field::Empty,
-        db.response.affected_rows = tracing::field::Empty,
-    )
+///
+/// A macro rather than a function because `tracing` stamps a span with the
+/// location of the `info_span!` that built it, and the OpenTelemetry layer
+/// exports that as `code.file.path` / `code.module.name` / `code.line.number`.
+/// Expanding at the call site makes those name the query, not this file (#343).
+macro_rules! db_query_span {
+    ($operation:expr, $query_name:expr $(,)?) => {
+        ::tracing::info_span!(
+            "db.query",
+            db.system = "postgresql",
+            db.operation = $operation,
+            db.query_name = $query_name,
+            db.response.returned_rows = ::tracing::field::Empty,
+            db.response.bytes = ::tracing::field::Empty,
+            db.response.max_row_bytes = ::tracing::field::Empty,
+            db.response.affected_rows = ::tracing::field::Empty,
+        )
+    };
 }
+pub(crate) use db_query_span;
 
 /// Wraps a query's executor — `metered(pool)`, `metered(&mut *tx)` — so the
 /// enclosing `db.query` span records the size of what came back:

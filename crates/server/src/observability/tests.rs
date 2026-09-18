@@ -50,13 +50,53 @@ fn request_span_joins_the_trace_in_traceparent() {
 #[test]
 fn db_query_span_names_the_operation_and_call_site() {
     with_otel_layer(|| {
-        let span = super::db_query_span("COMMIT", "persist_batch");
+        let span = super::db_query_span!("COMMIT", "persist_batch");
         let metadata = span.metadata().expect("span should be enabled");
         assert_eq!(metadata.name(), "db.query");
         for field in ["db.system", "db.operation", "db.query_name"] {
             assert!(metadata.fields().field(field).is_some(), "missing {field}");
         }
     });
+}
+
+/// #343: every `db.query` span in Tempo pointed at `observability.rs`, because
+/// `db_query_span` was a function and `tracing` stamps a span with the location
+/// of the `info_span!` that built it. This file is not `observability.rs`, so a
+/// span built here must say so — in the exported attributes, which is what
+/// Tempo shows.
+#[test]
+fn db_query_span_is_exported_with_its_call_site_location() {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    let call_site_line = tracing::subscriber::with_default(subscriber, || {
+        let _span = super::db_query_span!("SELECT", "call_site_probe");
+        line!() - 1
+    });
+
+    let spans = exporter.get_finished_spans().expect("spans should export");
+    let [span] = spans.as_slice() else {
+        panic!("expected one exported span, got {}", spans.len());
+    };
+    assert_eq!(span.name, "db.query");
+    let attribute = |key: &str| {
+        span.attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == key)
+            .unwrap_or_else(|| panic!("missing {key}"))
+            .value
+            .to_string()
+    };
+    assert_eq!(attribute("code.file.path"), file!());
+    assert_eq!(attribute("code.module.name"), module_path!());
+    assert_eq!(attribute("code.line.number"), call_site_line.to_string());
+    assert_eq!(attribute("db.query_name"), "call_site_probe");
 }
 
 #[test]
@@ -93,9 +133,9 @@ fn every_postgres_call_site_has_a_db_span() {
         ("thumbnails.rs", include_str!("../thumbnails.rs")),
     ] {
         let code = source.split("#[cfg(test)]").next().unwrap_or(source);
-        let tx_spans = code.matches("db_query_span(\"BEGIN\"").count()
-            + code.matches("db_query_span(\"COMMIT\"").count();
-        let query_spans = code.matches(".instrument(db_query_span(").count() - tx_spans;
+        let tx_spans = code.matches("db_query_span!(\"BEGIN\"").count()
+            + code.matches("db_query_span!(\"COMMIT\"").count();
+        let query_spans = code.matches(".instrument(db_query_span!(").count() - tx_spans;
         let queries = code.matches("sqlx::query").count();
         assert_eq!(
             queries, query_spans,
