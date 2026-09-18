@@ -144,10 +144,11 @@ pub(crate) fn leave_page() -> Leave {
 /// Remember where we were before handing the browser to the IdP. Only a page is
 /// worth remembering — the library is where sign-in lands anyway.
 pub(crate) fn remember_return_route() {
-    if let Route::Page(_) = current_route()
+    let route = current_route();
+    if let Route::Page(_) = route
         && let Some(storage) = session_storage()
     {
-        let _ = storage.set_item(RETURN_TO_KEY, &path_for_route(&current_route()));
+        let _ = storage.set_item(RETURN_TO_KEY, &path_for_route(&route));
     }
 }
 

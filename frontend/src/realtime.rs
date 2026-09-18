@@ -13,10 +13,13 @@ use crate::{api, library, viewer};
 pub(crate) async fn library_realtime_loop(
     pages: RwSignal<Vec<PageSummary>>,
     selected_page: RwSignal<Option<PageSummary>>,
+    pages_loaded: RwSignal<bool>,
     library_error: RwSignal<Option<String>>,
 ) {
     loop {
-        if let Err(error) = library_realtime_once(pages, selected_page, library_error).await {
+        if let Err(error) =
+            library_realtime_once(pages, selected_page, pages_loaded, library_error).await
+        {
             library_error.set(Some(error));
             TimeoutFuture::new(1_000).await;
         }
@@ -26,11 +29,12 @@ pub(crate) async fn library_realtime_loop(
 async fn library_realtime_once(
     pages: RwSignal<Vec<PageSummary>>,
     selected_page: RwSignal<Option<PageSummary>>,
+    pages_loaded: RwSignal<bool>,
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
     let ticket = api::realtime_ticket("realtime ticket").await?;
 
-    api::load_pages(pages, library_error).await?;
+    api::load_pages(pages, pages_loaded, library_error).await?;
 
     let ws_url = api::realtime_url(&ticket.ticket)?;
     let mut socket = WebSocket::open(&ws_url)
