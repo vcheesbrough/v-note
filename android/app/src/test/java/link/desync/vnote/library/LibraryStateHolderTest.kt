@@ -106,6 +106,7 @@ class LibraryStateHolderTest {
         api.completeListPages(Result.failure(RuntimeException("offline")))
 
         assertEquals("offline", holder.error)
+        assertTrue("a failed snapshot must not touch the list", holder.pages.isEmpty())
         assertEquals(1, api.socketsOpened)
     }
 

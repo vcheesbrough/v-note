@@ -21,8 +21,10 @@ import okhttp3.WebSocket
 internal class LibraryStateHolder(
     private val apiClient: ApiClient,
     // Runs the reconnect delay and the snapshot fetch that precedes each
-    // channel; the activity's lifecycle scope. State is written on it, so it
-    // must dispatch to the main thread.
+    // channel; the activity's lifecycle scope, which dispatches to the main
+    // thread. Compose state is written on this scope, so a production scope has
+    // to be main-dispatched; unit tests substitute a direct dispatcher because
+    // they read the state without recomposing.
     private val reconnectScope: CoroutineScope,
     // A channel that closes after sign-out must not reconnect.
     private val isSignedIn: () -> Boolean,
@@ -57,6 +59,10 @@ internal class LibraryStateHolder(
 
     fun closePage() {
         selectedPage = null
+        // Shares the connect path's snapshot guard: a refetch superseded by a
+        // sign-out or a reconnect is dropped rather than applied late. Safe
+        // because each of those either clears the list deliberately or takes its
+        // own snapshot straight after.
         val generation = connectionGeneration
         CoroutineScope(Dispatchers.Main).launch { loadSnapshot(generation) }
     }
@@ -123,6 +129,14 @@ internal class LibraryStateHolder(
     // a stale library until the next refetch (#347). With the channel opened
     // only afterwards, no event can be lost that way. A failed fetch still
     // connects — the banner reports it, and the channel is what recovers.
+    //
+    // The cost is that realtime waits on this call: `OkHttpClient()`'s default
+    // 10 s read timeout with no `callTimeout`, and a 401 here adds a refresh and
+    // a second request, so the worst case is roughly two request cycles before
+    // any event can arrive — on top of the reconnect backoff. Worth it, because
+    // a dropped event is silent and permanent where a late channel is neither.
+    // The option not taken: connect first and buffer events until the snapshot
+    // lands, which would also close the gap between the two.
     //
     // The fetch is a full round trip, so [generation] is re-checked across it. A
     // sign-out or a newer channel started while it was in flight must win: this
