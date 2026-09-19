@@ -15,8 +15,9 @@ mod route;
 mod viewer;
 
 use leptos::prelude::*;
-use leptos::{ev, leptos_dom::helpers::window_event_listener};
+use leptos::{ev, html, leptos_dom::helpers::window_event_listener};
 use protocol::{MeResponse, MetaResponse, PageSummary, ThumbnailMetadata};
+use wasm_bindgen::JsCast;
 
 use crate::library::{approximate_relative_datetime, page_has_title, remove_page, thumbnail_key};
 use crate::route::{Leave, Route};
@@ -50,24 +51,81 @@ fn apk_download_url() -> String {
 /// The library's hamburger menu: identity, the Android download and sign out.
 /// `/dl/apk` is public, so the download is offered without a session too;
 /// signing in belongs to the bar, not here.
+///
+/// `<details>` gives the disclosure for free but nothing that closes it again —
+/// the browser only ever toggles it from the summary. So clicking away, Escape
+/// and picking an item all have to clear `open` by hand, and the apk item makes
+/// that visible: it downloads without navigating, so nothing else would.
 #[component]
 fn MainMenu(me: RwSignal<Session>) -> impl IntoView {
+    let menu: NodeRef<html::Details> = NodeRef::new();
+    let summary: NodeRef<html::Summary> = NodeRef::new();
+    let close = move || {
+        if let Some(menu) = menu.get_untracked() {
+            menu.set_open(false);
+        }
+    };
+
+    Effect::new(move |_| {
+        // Only a click that lands outside the disclosure dismisses it. One
+        // inside must not: the summary's own click bubbles to here too, and
+        // closing on it would undo the toggle that just opened the menu.
+        let click = window_event_listener(ev::click, move |event| {
+            let Some(menu) = menu.get_untracked() else {
+                return;
+            };
+            let inside = event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Node>().ok())
+                .is_some_and(|node| menu.contains(Some(&node)));
+            if !inside {
+                close();
+            }
+        });
+        on_cleanup(move || click.remove());
+    });
+
+    Effect::new(move |_| {
+        let keydown = window_event_listener(ev::keydown, move |event| {
+            if event.key() != "Escape" {
+                return;
+            }
+            let Some(menu) = menu.get_untracked() else {
+                return;
+            };
+            // Only an open menu answers Escape, or every Escape in the library
+            // would pull focus to the hamburger.
+            if !menu.open() {
+                return;
+            }
+            menu.set_open(false);
+            // A keyboard dismissal hands focus back to the control that owns
+            // the panel instead of letting it fall to `body`, which would send
+            // the next Tab back to the top of the document. Click-away must not
+            // do this: there the focus belongs wherever the user clicked.
+            if let Some(summary) = summary.get_untracked() {
+                let _ = summary.focus();
+            }
+        });
+        on_cleanup(move || keydown.remove());
+    });
+
     view! {
-        <details class="app-menu">
-            <summary aria-label="Open main menu"><span aria-hidden="true">"☰"</span></summary>
+        <details class="app-menu" node_ref=menu>
+            <summary node_ref=summary aria-label="Open main menu"><span aria-hidden="true">"☰"</span></summary>
             <div class="app-menu-panel">
                 {move || match me.get() {
                     Some(Ok(profile)) => view! {
                         <p class="menu-identity">{profile.email.clone().unwrap_or_else(|| profile.sub.clone())}</p>
-                        <a class="menu-link" href=apk_download_url() download=apk_download_filename()>"Download Android app (.apk)"</a>
-                        <a class="menu-link" href="/auth/logout">"Sign out"</a>
+                        <a class="menu-link" href=apk_download_url() download=apk_download_filename() on:click=move |_| close()>"Download Android app (.apk)"</a>
+                        <a class="menu-link" href="/auth/logout" on:click=move |_| close()>"Sign out"</a>
                     }
                     .into_any(),
                     // Without a session there is nothing to say about the
                     // account, and signing in is the bar's control — the menu
                     // must not offer one for a state it has not established.
                     _ => view! {
-                        <a class="menu-link" href=apk_download_url() download=apk_download_filename()>"Download Android app (.apk)"</a>
+                        <a class="menu-link" href=apk_download_url() download=apk_download_filename() on:click=move |_| close()>"Download Android app (.apk)"</a>
                     }
                     .into_any(),
                 }}
