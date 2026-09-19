@@ -136,7 +136,9 @@ pub async fn callback(
         .get(STATE_COOKIE)
         .map(|cookie| cookie.value().to_string());
     let Some(cookie_state) = cookie_state else {
-        // Nothing to clear, and nothing proven — answer without touching cookies.
+        // Nothing proven, so nothing is cleared — note that `auth_pkce` may still be
+        // present on its own, and clearing it here would be the same cross-site
+        // login-denial the ordering above exists to prevent.
         return (StatusCode::BAD_REQUEST, "missing state cookie").into_response();
     };
     if cookie_state != params.state {

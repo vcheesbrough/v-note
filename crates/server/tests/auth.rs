@@ -554,3 +554,31 @@ async fn callback_exchanges_the_code_with_the_verifier_and_no_client_secret() {
     assert!(body.contains("grant_type=authorization_code"), "{body}");
     assert!(body.contains("code=the-code"), "{body}");
 }
+
+/// The sibling of `callback_with_a_foreign_state_does_not_clear_an_in_flight_flow`:
+/// no state cookie at all. A verifier may still be present on its own, and
+/// clearing it would be the same cross-site login-denial in a different shape.
+#[tokio::test]
+async fn callback_without_a_state_cookie_clears_nothing() {
+    let auth = Arc::new(test_auth_config());
+    let jwks = Arc::new(test_jwks_cache());
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/callback?code=c&state=attacker-state")
+                .header("cookie", "auth_pkce=victim-verifier")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        set_cookies(&response).is_empty(),
+        "a caller with no state cookie must not be able to expire someone's verifier: {:?}",
+        set_cookies(&response)
+    );
+}

@@ -120,12 +120,13 @@ steps:
 
   # The push gates (checks, web, android) are enforced by the workflow-level
   # depends_on above, not by step dependencies.
-  # `branch: master` is a blast-radius guard, not a convenience. This applies the
-  # blueprint to the **shared** Authentik at auth.desync.link, and the blueprint
-  # declares the **prod** objects as well as dev — so without this a push to any
-  # feature branch rewrites prod's OIDC provider. #274 proved it: the branch push
-  # that introduced the unified providers deleted the live confidential providers
-  # for both environments before the PR was even reviewed.
+  # `branch: master` is a blast-radius guard, not a convenience — and it is still
+  # needed now that this applies only `blueprint-dev.yaml`. The per-env split stops
+  # a dev apply reaching *prod*; this stops an *unreviewed* branch redefining dev's
+  # own provider on the shared Authentik, which would break dev login for everyone
+  # until the branch was fixed or reverted. #274 proved both halves: that branch
+  # push deleted the live providers for both environments before review, and left
+  # dev unable to authenticate.
   apply-authentik-blueprint-auto-dev:
     when:
       - event: push

@@ -19,7 +19,7 @@
 
 ## Woodpecker deploy pipeline
 
-Normal push builds automatically deploy **dev** once every push workflow passes. Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
+Pushes **to `master`** automatically deploy **dev** once every push workflow passes; a feature-branch push builds and tests only, and touches neither dev nor Authentik (#274). Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
 
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
@@ -188,9 +188,14 @@ unable to authenticate until the leaf catches up.
 > a single dev+prod file, applied from a feature-branch push, deleted the live
 > providers for **both** environments during #274.
 >
-> **Operator step, once:** the pre-split blueprint instance is still registered in
-> Authentik under `instance_name: v-note`. Delete it, or it will keep reasserting
-> the old combined content over the per-env instances (`v-note-dev`, `v-note-prod`).
+> **Operator step, once — tracked as [#367](https://bored.desync.link/boards/v-notes?card=367), sequenced after #274 deploys.**
+> The pre-split blueprint instance is still registered in Authentik under
+> `instance_name: v-note`, holding the *combined* dev+prod content. Authentik
+> re-applies registered instances on its own schedule, so **until it is deleted the
+> split above is enforced in the pipeline but not in the live system** — the
+> combined content keeps being reasserted over both environments. Delete it only
+> after a deploy has created `v-note-dev` and `v-note-prod`, then confirm both
+> environments' authorize endpoints still return 302.
 
 **The two `*_metrics_addr` entries are aliases, not copies.** `AddValuePath`
 exposes one stored value at several canonical paths, so the pipeline and the app
@@ -345,9 +350,9 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 
 - **One dashboard, both environments:** an `env` variable (`label_values(v_note_realtime_active_connections, env)`) filters every query. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
 - **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every push to `master`**, after `auto-deploy-dev`, so the dashboard always matches what is deployed to dev. (Until #274 this ran from any branch; dev deploys are now master-only, so a branch dashboard would have charted a build that was never deployed.) It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push to `master` wins, as it does for dev itself. `deploy-prod` never publishes, because it could roll the dashboard back to an older release.
-- **UI edits are overwritten** on the next push that deploys dev. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
+- **UI edits are overwritten** on the next push to `master` that deploys dev. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
 - **Offline validation:** [`scripts/test-grafana-dashboard.sh`](../scripts/test-grafana-dashboard.sh), run in the `checks` step `grafana-dashboard-validation`, checks that the JSON parses, keeps its uid, has no committed id, filters every query by `env`, references no unbounded id, and charts only metrics `observability.rs` registers. It also checks the publish script's `--dry-run` payload, its input guards, and its live path against a stub `curl` (2xx passes; non-2xx and transport failures fail without leaking the token).
-- **Pre-merge check:** pushing a branch publishes its dashboard, so once that push's `deploy` workflow is green, check the panels under Applications / v-note against dev and record the check in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.
+- **Pre-merge check:** since #274 a branch push publishes **nothing** — the dashboard follows `master` only, in step with dev. Validate a dashboard change offline with the `--dry-run` below and the `checks` step above, then check the panels under Applications / v-note after the merge lands on dev, and record that in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.
 
 ### Set App Links JSON
 
