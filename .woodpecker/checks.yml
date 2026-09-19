@@ -73,6 +73,18 @@ steps:
       - apk add --no-cache python3 py3-yaml bash
       - ./scripts/test-authentik-blueprints.sh
 
+  # scripts/smoke-oidc-login.sh is the post-deploy gate #372 was missing, and it
+  # runs only against live infrastructure — so a broken assertion in it would be
+  # found by the next outage rather than by CI. This drives it against a local
+  # stub IdP and asserts it both passes a healthy login and fails each way the
+  # flow can break. curl is unpinned for the reason given on the Grafana steps.
+  oidc-login-smoke-validation:
+    depends_on: []
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    commands:
+      - apk add --no-cache python3 bash curl
+      - ./scripts/test-smoke-oidc-login.sh
+
   # deploy.yml publishes the Grafana dashboard on every push to master once dev is
   # deployed, so a broken one would otherwise land straight on the shared dashboard. This
   # validates deploy/grafana/v-note-overview.json and the publish script's payload

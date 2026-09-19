@@ -13,7 +13,11 @@
 #   3. the two files stay structurally identical, which the "keep them in step"
 #      comment otherwise asserts on the honour system;
 #   4. each file carries its own `instance_name`-worthy identity and the entries
-#      the migration depends on (unified public provider, retired objects).
+#      the migration depends on (unified public provider, retired objects);
+#   5. the provider declares the grants it needs. Authentik defaults a
+#      blueprint-created provider to *no* grants, which rejects every authorize
+#      request — #372 shipped exactly that and took login down in both
+#      environments.
 #
 # Mirrors scripts/test-grafana-dashboard.sh: a repo-owned artifact applied by CI
 # to shared infrastructure deserves a check that runs without that infrastructure.
@@ -124,6 +128,30 @@ for env, doc in loaded.items():
             all(r.get("matching_mode") == "strict" for r in attrs.get("redirect_uris", [])),
             f"{env}: every redirect URI is strict-matched",
         )
+
+        # #372: a blueprint-created provider defaults to an empty grant list, and
+        # an empty list makes Authentik reject *every* authorize request with
+        # `invalid_request`. The field is silently absent rather than wrong, so
+        # nothing but an explicit check catches it.
+        grants = attrs.get("grant_types")
+        check(
+            isinstance(grants, list) and grants,
+            f"{env}: provider declares a non-empty grant_types",
+        )
+        grants = grants if isinstance(grants, list) else []
+        for required in ("authorization_code", "refresh_token"):
+            check(required in grants, f"{env}: provider grants {required}")
+        # A public client holds no secret, so any grant that authenticates the
+        # client by secret — or hands out a token without the code exchange —
+        # must stay off.
+        for forbidden in (
+            "implicit",
+            "hybrid",
+            "password",
+            "client_credentials",
+            "urn:ietf:params:oauth:grant-type:device_code",
+        ):
+            check(forbidden not in grants, f"{env}: provider does not grant {forbidden}")
 
     retired = {
         e["identifiers"].get("name") or e["identifiers"].get("slug")

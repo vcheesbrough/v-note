@@ -402,6 +402,45 @@ async fn callback_with_an_idp_error_and_matching_state_clears_the_flow() {
     assert_eq!(cookie_value(&response, "auth_pkce").as_deref(), Some(""));
 }
 
+/// The #372 callback verbatim. Authentik reported a provider it would not accept
+/// as a bare `error=invalid_request`, and put the only diagnostic detail in
+/// `error_description` — which the callback parsed past and dropped, so the logs
+/// recorded the symptom and never the cause. The field is now captured for that
+/// log line, and this pins that the extra parameter still deserializes and does
+/// not change what the user or the flow sees.
+#[tokio::test]
+async fn callback_accepts_an_idp_error_description_alongside_the_error() {
+    let auth = Arc::new(test_auth_config());
+    let jwks = Arc::new(test_jwks_cache());
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/auth/callback?state=the-state&error=invalid_request\
+                     &error_description=The%20request%20is%20otherwise%20malformed",
+                )
+                .header("cookie", "auth_state=the-state; auth_pkce=the-verifier")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(cookie_value(&response, "auth_state").as_deref(), Some(""));
+    assert_eq!(cookie_value(&response, "auth_pkce").as_deref(), Some(""));
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "authentication denied: invalid_request",
+    );
+}
+
 /// A state mismatch must still be caught first — the verifier is not a
 /// substitute for CSRF protection on the callback.
 #[tokio::test]

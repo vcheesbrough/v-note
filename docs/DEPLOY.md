@@ -162,6 +162,38 @@ non-empty `oidc/client-secret`. The sovereign-config leaves for
 `oidc/android/client-id` and `oidc/android/issuer-url` are likewise inert and
 can go at the same time.
 
+### Grant types are not optional in a blueprint (#372)
+
+A provider created by a blueprint gets **no grant types at all** unless the
+blueprint names them. Authentik does not fall back to a sensible default and
+does not report the omission: the provider applies cleanly, looks right in the
+admin UI, and then rejects **every** authorize request with
+
+```
+error=invalid_request&error_description=The request is otherwise malformed
+```
+
+which the server renders as `authentication denied: invalid_request` — a blank
+page with one line of text. #274 created both providers this way, and login was
+down in dev and prod until #372. So both blueprints declare:
+
+```yaml
+grant_types:
+  - authorization_code
+  - refresh_token
+```
+
+`refresh_token` is required because the Android client requests `offline_access`
+and refreshes. Nothing else belongs there: the provider is a **public** client
+with no secret, so `password` and `client_credentials` must stay off, and
+`implicit`/`hybrid` would hand out a token without the PKCE-bound code exchange.
+`scripts/test-authentik-blueprints.sh` enforces exactly that list, and
+`scripts/smoke-oidc-login.sh` re-checks it against the live IdP after each
+deploy — see [DEV.md](DEV.md) for running both locally.
+
+**This is a blueprint-authoring trap, not a one-off:** any new Authentik
+provider added here needs its `grant_types` spelled out.
+
 ### Migrating an environment to the unified client (#274)
 
 The blueprint **renames** the provider (`v-note-browser-{env}` → `v-note-{env}`),

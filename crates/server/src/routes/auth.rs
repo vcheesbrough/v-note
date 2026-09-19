@@ -111,6 +111,12 @@ pub struct CallbackQuery {
     state: String,
     #[serde(default)]
     error: Option<String>,
+    // Captured only to be logged. In #372 every environment's login failed with a
+    // bare `error=invalid_request`, and the reason was carried entirely by
+    // `error_description` ("The request is otherwise malformed") — which the
+    // callback discarded, so the logs named the symptom and never the cause.
+    #[serde(default)]
+    error_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,7 +153,11 @@ pub async fn callback(
 
     // From here the caller has proven it owns this flow, so ending it is safe.
     if let Some(error) = &params.error {
-        tracing::warn!(error = %error, "auth callback received error");
+        tracing::warn!(
+            error = %error,
+            error_description = params.error_description.as_deref().unwrap_or("<none>"),
+            "auth callback received error",
+        );
         return abort_flow(
             jar,
             StatusCode::FORBIDDEN,
