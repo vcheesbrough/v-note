@@ -133,8 +133,13 @@ class PagePaperInstrumentedTest {
         // One frame carries both halves of the claim: paper painted, and the
         // seeded stroke still green-dominant ink where it was drawn — the paper
         // colours are provably outside that classifier, and paper is drawn
-        // underneath in any case.
-        val pixels = composeRule.awaitInkPixels { countPaperPixels(it) > 0 }
+        // underneath in any case. Both halves are in the wait, so the frame
+        // handed back is one that already satisfies them.
+        val pixels =
+            composeRule.awaitInkPixels {
+                val seed = it[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()]
+                countPaperPixels(it) > 0 && seed.green > seed.red && seed.green > seed.blue
+            }
         assertTrue("paper pixels painted", countPaperPixels(pixels) > 0)
 
         val ink = pixels[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()]

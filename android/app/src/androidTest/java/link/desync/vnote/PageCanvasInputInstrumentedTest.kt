@@ -307,10 +307,13 @@ class PageCanvasInputInstrumentedTest {
         sendStylus(MotionEvent.ACTION_UP, endX, strokeY, pressure = 1f, downTime = downTime)
         assertNotNull("drawing commits a batch", awaitMutation("commit-batch"))
 
-        // Wait until the committed stroke is rasterized at its high-pressure end.
+        // Wait for a frame that already carries the claim, rather than one that
+        // merely has some ink: a wait weaker than the assertion can hand back a
+        // half-rasterized frame the assertion then rejects.
         val pixels =
             composeRule.awaitInkPixels {
-                greenThickness(it, (endX - 25f).toInt(), strokeY.toInt()) > 0
+                greenThickness(it, (endX - 25f).toInt(), strokeY.toInt()) >
+                    greenThickness(it, (startX + 25f).toInt(), strokeY.toInt()) + 2
             }
         val low = greenThickness(pixels, (startX + 25f).toInt(), strokeY.toInt())
         val high = greenThickness(pixels, (endX - 25f).toInt(), strokeY.toInt())
@@ -356,7 +359,7 @@ class PageCanvasInputInstrumentedTest {
         sendStylus(MotionEvent.ACTION_UP, 300f, 300f, pressure = 0.9f, downTime = downTime)
         assertNotNull("tap commits a batch", awaitMutation("commit-batch"))
 
-        val pixels = composeRule.awaitInkPixels { greenThickness(it, 300, 300) > 0 }
+        val pixels = composeRule.awaitInkPixels { greenThickness(it, 300, 300) > 2 }
         assertTrue("v2 tap renders a visible dot", greenThickness(pixels, 300, 300) > 2)
     }
 
@@ -458,8 +461,13 @@ class PageCanvasInputInstrumentedTest {
         }
 
         // One frame carries both halves of the claim: the live stroke reached the
-        // screen while the committed seed ink was still on it.
-        val pixels = composeRule.awaitInkPixels { hasInkAt(it, 360, LIVE_STROKE_Y.toInt()) }
+        // screen while the committed seed ink was still on it. Both halves are in
+        // the wait, so the frame handed back is one that already satisfies them.
+        val pixels =
+            composeRule.awaitInkPixels {
+                hasInkAt(it, 360, LIVE_STROKE_Y.toInt()) &&
+                    hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt())
+            }
         assertTrue("live ink painted before lift", hasInkAt(pixels, 360, LIVE_STROKE_Y.toInt()))
         assertTrue(
             "committed ink still painted",
@@ -477,7 +485,8 @@ class PageCanvasInputInstrumentedTest {
     @Test
     fun erasedStrokeLeavesTheCommittedLayer() {
         openEditor()
-        val seeded = composeRule.awaitInkPixels()
+        val seeded =
+            composeRule.awaitInkPixels { hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }
         assertTrue("seed painted", hasInkAt(seeded, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()))
         composeRule.onNodeWithTag("eraser-tool").performClick().assertIsSelected()
 
@@ -488,7 +497,8 @@ class PageCanvasInputInstrumentedTest {
 
         val erased =
             composeRule.awaitInkPixels {
-                !hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt())
+                !hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) &&
+                    hasInkAt(it, SEED_ASSERTION_X, SECOND_STROKE_Y.toInt())
             }
         assertTrue(
             "erased stroke cleared from the cached layer",
