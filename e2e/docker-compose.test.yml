@@ -39,13 +39,24 @@ services:
                 },
                 {
                   "requestParam": "client_id",
-                  "match": "v-note-android-test",
+                  "match": "v-note-other-test",
                   "claims": {
-                    "sub": "v-note-android-test-user",
+                    "sub": "v-note-other-test-user",
+                    "aud": ["v-note-test"],
+                    "scope": "openid profile email v-note:test:access",
+                    "preferred_username": "other-test-user",
+                    "email": "other@example.com"
+                  }
+                },
+                {
+                  "requestParam": "client_id",
+                  "match": "v-note-legacy-android-test",
+                  "claims": {
+                    "sub": "legacy-android-user",
                     "aud": ["v-note-android-test"],
                     "scope": "openid profile email v-note:test:access",
-                    "preferred_username": "android-test-user",
-                    "email": "android@example.com"
+                    "preferred_username": "legacy-android-user",
+                    "email": "legacy-android@example.com"
                   }
                 },
                 {
@@ -76,11 +87,8 @@ services:
       VNOTE__OBSERVABILITY__ENVIRONMENT: test
       VNOTE__OIDC__ISSUER-URL: http://mock-oidc:8080/default
       VNOTE__OIDC__CLIENT-ID: v-note-test
-      VNOTE__OIDC__CLIENT-SECRET: test-secret
       VNOTE__OIDC__REDIRECT-URI: https://app:443/auth/callback
       VNOTE__OIDC__REQUIRED-SCOPE: v-note:test:access
-      VNOTE__OIDC__ANDROID__CLIENT-ID: v-note-android-test
-      VNOTE__OIDC__ANDROID__ISSUER-URL: http://mock-oidc:8080/default
       VNOTE__DATABASE__HOST: postgres
       VNOTE__DATABASE__PORT: "5432"
       VNOTE__DATABASE__USER: v_note
@@ -187,7 +195,8 @@ services:
       BASE_URL: https://app:443
       OIDC_TOKEN_URL: http://mock-oidc:8080/default/token
       OIDC_CLIENT_ID: v-note-test
-      OIDC_CLIENT_SECRET: test-secret
+      # Mock-IdP-only: mints test tokens via client_credentials. The app is public (#274).
+      MOCK_OIDC_CLIENT_SECRET: test-secret
       REQUIRED_SCOPE: v-note:test:access
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report

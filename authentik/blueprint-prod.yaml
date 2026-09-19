@@ -1,0 +1,112 @@
+# **prod only.** Split per environment (#274) so applying a blueprint can never
+# reach the other environment's objects. The previous single file declared dev
+# *and* prod, so any step that applied it — including a manual **dev** deployment
+# from a feature branch — rewrote **prod**'s OIDC provider. Entries here delete
+# live credentials, so the blast radius is kept equal to the environment being
+# deployed.
+#
+# Both files are otherwise identical in shape; keep them in step.
+version: 1
+metadata:
+  name: v-note OIDC (prod)
+  labels:
+    blueprints.goauthentik.io/description: "v-note OAuth2 provider and access scope — prod"
+
+entries:
+  - model: authentik_core.group
+    state: present
+    identifiers:
+      name: v-note-prod-users
+    attrs:
+      name: v-note-prod-users
+
+  - model: authentik_providers_oauth2.scopemapping
+    state: present
+    identifiers:
+      name: "v-note:prod:access"
+    attrs:
+      name: "v-note:prod:access"
+      scope_name: "v-note:prod:access"
+      description: "Grants access to v-note prod"
+      expression: |
+        return {}
+
+  # One **public** provider serves both the SPA and the Android app (#274). Both
+  # run Authorization Code + PKCE, so neither holds a secret — a native app cannot
+  # keep one, and the server-side browser exchange is bound by the PKCE verifier
+  # instead. Carrying both redirect URIs is what gives every token a single `aud`
+  # and `iss`, which let the server drop its dual-audience logic.
+  #
+  # The issuer derives from the **application slug**, so keeping the slug
+  # `v-note-prod` leaves the browser issuer unchanged and moves only Android.
+  - model: authentik_providers_oauth2.oauth2provider
+    state: present
+    identifiers:
+      name: v-note-prod
+    attrs:
+      name: v-note-prod
+      client_id: v-note-prod
+      client_type: public
+      redirect_uris:
+        - url: "https://v-notes.desync.link/auth/callback"
+          matching_mode: strict
+        - url: "https://v-notes.desync.link/auth/mobile/callback"
+          matching_mode: strict
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      sub_mode: hashed_user_id
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, "v-note:prod:access"]]
+
+  - model: authentik_core.application
+    state: present
+    identifiers:
+      slug: v-note-prod
+    attrs:
+      name: v-note (prod)
+      slug: v-note-prod
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, v-note-prod]]
+
+  - model: authentik_policies.policybinding
+    state: present
+    identifiers:
+      order: 0
+      target: !Find [authentik_core.application, [slug, v-note-prod]]
+      group: !Find [authentik_core.group, [name, v-note-prod-users]]
+    attrs:
+      order: 0
+      enabled: true
+      negate: false
+      timeout: 30
+      target: !Find [authentik_core.application, [slug, v-note-prod]]
+      group: !Find [authentik_core.group, [name, v-note-prod-users]]
+
+  # -------------------------------------------------------------------------
+  # Retired by #274: the separate Android application and the old confidential
+  # browser provider. Ordered after the entries above so the application is
+  # already repointed at the unified provider before these are deleted.
+  #
+  # Blueprint identity is `name`/`slug`, so the browser provider is *renamed*
+  # (v-note-browser-prod → v-note-prod) rather than edited in place; without
+  # this the old confidential object would survive as an orphan, still holding a
+  # usable client secret.
+  # -------------------------------------------------------------------------
+
+  - model: authentik_core.application
+    state: absent
+    identifiers:
+      slug: v-note-android-prod
+
+  - model: authentik_providers_oauth2.oauth2provider
+    state: absent
+    identifiers:
+      name: v-note-android-prod
+
+  - model: authentik_providers_oauth2.oauth2provider
+    state: absent
+    identifiers:
+      name: v-note-browser-prod

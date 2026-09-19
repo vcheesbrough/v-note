@@ -14,7 +14,9 @@ export default async function globalSetup() {
 
   const tokenUrl = required('OIDC_TOKEN_URL');
   const clientId = required('OIDC_CLIENT_ID');
-  const clientSecret = required('OIDC_CLIENT_SECRET');
+  // The app itself is a public PKCE client and holds no secret (#274). This is
+  // purely the mock IdP's `client_credentials` shortcut for minting a test token.
+  const clientSecret = required('MOCK_OIDC_CLIENT_SECRET');
   const requiredScope = required('REQUIRED_SCOPE');
 
   await waitForMock(tokenUrl);

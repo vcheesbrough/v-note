@@ -59,8 +59,22 @@ steps:
     commands:
       - ./scripts/test-deploy-v-note.sh
 
-  # deploy.yml publishes the Grafana dashboard on every push once dev is deployed,
-  # so a broken one would otherwise land straight on the shared dashboard. This
+  # The blueprints are applied by CI to the shared Authentik, and since #274 split
+  # them per environment the prod file is exercised only by a manual prod deploy —
+  # so a typo in it would surface at the worst possible moment. Validates both
+  # without an Authentik instance: they parse, neither mentions the other
+  # environment, they stay structurally identical, and the migration's own
+  # invariants (one public provider, no secret, both redirect URIs, retirements
+  # ordered last) hold. Its own step for the same reason as the Grafana one.
+  authentik-blueprint-validation:
+    depends_on: []
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    commands:
+      - apk add --no-cache python3 py3-yaml bash
+      - ./scripts/test-authentik-blueprints.sh
+
+  # deploy.yml publishes the Grafana dashboard on every push to master once dev is
+  # deployed, so a broken one would otherwise land straight on the shared dashboard. This
   # validates deploy/grafana/v-note-overview.json and the publish script's payload
   # without Grafana or a token. Its own step: the docker CLI image has no jq.
   # jq is unpinned for the reason given on publish-grafana-dashboard in deploy.yml.

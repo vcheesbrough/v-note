@@ -21,6 +21,56 @@ test.describe('auth — happy path', () => {
   });
 });
 
+// #274 turned the SPA's code exchange from a confidential (client-secret) swap
+// into a public Authorization Code + PKCE swap. Nothing previously drove the real
+// `/auth/callback`, so the exchange itself was uncovered — this walks the whole
+// redirect chain in a real browser against the mock IdP.
+test.describe('auth — full login flow (PKCE)', () => {
+  test('a signed-out browser completes the code exchange and ends up signed in', async ({
+    browser,
+  }) => {
+    // A clean context: no seeded cookie, no bearer header — the flow has to
+    // establish the session entirely by itself.
+    const context = await browser.newContext({
+      baseURL: process.env.BASE_URL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+      extraHTTPHeaders: {},
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto('/auth/login', { waitUntil: 'load' });
+
+      // The chain ends back on the app root, not on the IdP or an error page.
+      // Compare host+path: the browser drops the default :443 from BASE_URL.
+      const appHost = new URL(process.env.BASE_URL!).hostname;
+      await expect
+        .poll(() => {
+          const url = new URL(page.url());
+          return `${url.hostname}${url.pathname}`;
+        })
+        .toBe(`${appHost}/`);
+
+      const cookies = await context.cookies();
+      const session = cookies.find((c) => c.name === 'auth');
+      expect(session, 'the exchange must set the session cookie').toBeTruthy();
+      expect(session!.httpOnly).toBe(true);
+      expect(session!.value.split('.')).toHaveLength(3);
+
+      // The verifier is single-use: the callback clears it.
+      const verifier = cookies.find((c) => c.name === 'auth_pkce' && c.value !== '');
+      expect(verifier, 'the PKCE verifier must not outlive the exchange').toBeFalsy();
+
+      // The session the exchange produced is actually usable.
+      const me = await context.request.get('/api/me');
+      expect(me.status()).toBe(200);
+      expect(await me.json()).toHaveProperty('sub');
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 test.describe('auth — rejection', () => {
   const unauthOptions = {
     baseURL: process.env.BASE_URL,
@@ -48,16 +98,18 @@ test.describe('auth — rejection', () => {
     await ctx.dispose();
   });
 
-  test('GET /api/me with android-shaped bearer token returns 200', async () => {
+  // #274: the Android app now authenticates against the same public client as
+  // the SPA, so a second identity is just a different `sub` under one audience.
+  test('GET /api/me with a second identity on the unified client returns 200', async () => {
     const tokenUrl = process.env.OIDC_TOKEN_URL;
-    test.skip(!tokenUrl, 'OIDC_TOKEN_URL required for android bearer test');
+    test.skip(!tokenUrl, 'OIDC_TOKEN_URL required for unified client test');
 
     const ctx = await request.newContext({ ignoreHTTPSErrors: true });
     const tokenRes = await ctx.post(tokenUrl!, {
       form: {
         grant_type: 'client_credentials',
-        client_id: 'v-note-android-test',
-        client_secret: process.env.OIDC_CLIENT_SECRET,
+        client_id: 'v-note-other-test',
+        client_secret: process.env.MOCK_OIDC_CLIENT_SECRET,
         scope: 'openid profile email v-note:test:access',
       },
     });
@@ -73,7 +125,37 @@ test.describe('auth — rejection', () => {
     const res = await apiCtx.get('/api/me');
     expect(res.status()).toBe(200);
     const body = await res.json();
-    expect(body.sub).toBe('v-note-android-test-user');
+    expect(body.sub).toBe('v-note-other-test-user');
+    await apiCtx.dispose();
+    await ctx.dispose();
+  });
+
+  // The retired standalone Android provider minted its own `aud`/`iss`. The
+  // server accepted that via `oidc/android/*` before #274 and must not now.
+  test('GET /api/me with a legacy Android-audience token returns 401', async () => {
+    const tokenUrl = process.env.OIDC_TOKEN_URL;
+    test.skip(!tokenUrl, 'OIDC_TOKEN_URL required for legacy audience test');
+
+    const ctx = await request.newContext({ ignoreHTTPSErrors: true });
+    const tokenRes = await ctx.post(tokenUrl!, {
+      form: {
+        grant_type: 'client_credentials',
+        client_id: 'v-note-legacy-android-test',
+        client_secret: process.env.MOCK_OIDC_CLIENT_SECRET,
+        scope: 'openid profile email v-note:test:access',
+      },
+    });
+    expect(tokenRes.ok()).toBeTruthy();
+    const tokenBody = await tokenRes.json();
+
+    const apiCtx = await request.newContext({
+      ...unauthOptions,
+      extraHTTPHeaders: {
+        Authorization: `Bearer ${tokenBody.access_token}`,
+      },
+    });
+    const res = await apiCtx.get('/api/me');
+    expect(res.status()).toBe(401);
     await apiCtx.dispose();
     await ctx.dispose();
   });
@@ -87,7 +169,7 @@ test.describe('auth — rejection', () => {
       form: {
         grant_type: 'client_credentials',
         client_id: 'v-note-test-wrong',
-        client_secret: process.env.OIDC_CLIENT_SECRET,
+        client_secret: process.env.MOCK_OIDC_CLIENT_SECRET,
         scope: 'openid profile email v-note:wrong:access',
       },
     });
@@ -140,6 +222,17 @@ test.describe('auth — public routes', () => {
     expect(location).toContain('mock-oidc');
     expect(location).toContain('client_id=');
     expect(location).toContain('state=');
+    // #274: public client — the authorize request is bound by PKCE, not a secret.
+    expect(location).toContain('code_challenge=');
+    expect(location).toContain('code_challenge_method=S256');
+    expect(location).not.toContain('client_secret');
+
+    // The verifier is held in an HttpOnly, /auth-scoped cookie for the round trip.
+    const setCookie = res.headersArray().filter((h) => h.name.toLowerCase() === 'set-cookie');
+    const pkceCookie = setCookie.find((h) => h.value.startsWith('auth_pkce='));
+    expect(pkceCookie, 'login must set the PKCE verifier cookie').toBeTruthy();
+    expect(pkceCookie!.value).toContain('HttpOnly');
+    expect(pkceCookie!.value).toContain('Path=/auth');
     await ctx.dispose();
   });
 });

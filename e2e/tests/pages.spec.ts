@@ -152,8 +152,8 @@ async function fetchOtherOwnerToken(): Promise<string> {
     const res = await ctx.post(tokenUrl, {
       form: {
         grant_type: 'client_credentials',
-        client_id: 'v-note-android-test',
-        client_secret: process.env.OIDC_CLIENT_SECRET,
+        client_id: 'v-note-other-test',
+        client_secret: process.env.MOCK_OIDC_CLIENT_SECRET,
         scope: 'openid profile email v-note:test:access',
       },
     });
