@@ -1,6 +1,8 @@
 package link.desync.vnote.library
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.api.LibraryEventListener
@@ -19,8 +21,9 @@ import org.junit.Test
 
 /**
  * The library holder's own decisions, beyond the list rules in
- * [LibraryPagesTest]: closing a deleted open page, and refusing to reconnect a
- * stale or signed-out channel (#337 review).
+ * [LibraryPagesTest]: closing a deleted open page, refusing to reconnect a
+ * stale or signed-out channel (#337 review), and ordering the snapshot fetch
+ * ahead of the channel it precedes (#347).
  */
 class LibraryStateHolderTest {
     private val holder =
@@ -71,10 +74,93 @@ class LibraryStateHolderTest {
         assertFalse(channelMayReconnect(before, holder.connectionGeneration, signedIn = true))
     }
 
+    /**
+     * The regression behind #347: the snapshot fetch assigns the whole list, so
+     * while it is in flight the channel must not be live — an event delivered
+     * in that window was silently rolled back when the fetch landed on top of
+     * it, leaving a stale library until the next refetch.
+     */
+    @Test
+    fun theChannelOpensOnlyOnceTheSnapshotHasBeenApplied() {
+        val api = SnapshotControlledApiClient()
+        val holder = holderWith(api)
+
+        holder.start()
+
+        assertEquals("no channel while the snapshot is in flight", 0, api.socketsOpened)
+        assertTrue(holder.pages.isEmpty())
+
+        api.completeListPages(Result.success(listOf(page("new"), page("old"))))
+
+        assertEquals(listOf("new", "old"), holder.pages.map { it.id })
+        assertEquals("the channel opens once the list is applied", 1, api.socketsOpened)
+    }
+
+    /** A library that failed to load still needs the channel to recover it. */
+    @Test
+    fun aFailedSnapshotStillOpensTheChannel() {
+        val api = SnapshotControlledApiClient()
+        val holder = holderWith(api)
+
+        holder.start()
+        api.completeListPages(Result.failure(RuntimeException("offline")))
+
+        assertEquals("offline", holder.error)
+        assertEquals(1, api.socketsOpened)
+    }
+
+    /**
+     * Awaiting the snapshot widens the window between the decision to connect
+     * and the connect itself, so the sign-out guard has to hold across it.
+     */
+    @Test
+    fun signingOutWhileTheSnapshotIsInFlightNeitherConnectsNorRepopulates() {
+        val api = SnapshotControlledApiClient()
+        val holder = holderWith(api)
+
+        holder.start()
+        holder.clear()
+        api.completeListPages(Result.success(listOf(page("new"))))
+
+        assertEquals("a superseded snapshot must not open a channel", 0, api.socketsOpened)
+        assertTrue("a superseded snapshot must not repopulate the library", holder.pages.isEmpty())
+    }
+
+    // Unconfined runs each coroutine inline on this thread up to its first
+    // suspension and resumes it inline on the thread that completes it, so the
+    // tests above step the fetch by hand with no sleeps or idling.
+    private fun holderWith(api: ApiClient): LibraryStateHolder =
+        LibraryStateHolder(
+            apiClient = api,
+            reconnectScope = CoroutineScope(Dispatchers.Unconfined),
+            isSignedIn = { true },
+            runOnUiThread = { block -> block() },
+        )
+
     private fun page(id: String): PageSummary =
         PageSummary(id = id, title = id, createdAt = "2026-07-22T00:00:00Z", updatedAt = "2026-07-22T00:00:00Z")
 
-    // Nothing under test reaches the network; any call is a test bug.
+    // Holds `listPages` open until the test releases it, and counts the channels
+    // opened, so the order of snapshot and channel is observable.
+    private class SnapshotControlledApiClient : ApiClient by UnusedApiClient {
+        private val pending = CompletableDeferred<Result<List<PageSummary>>>()
+
+        var socketsOpened = 0
+            private set
+
+        fun completeListPages(result: Result<List<PageSummary>>) {
+            pending.complete(result)
+        }
+
+        override suspend fun listPages(): Result<List<PageSummary>> = pending.await()
+
+        override fun openLibrarySocket(listener: LibraryEventListener): WebSocket? {
+            socketsOpened += 1
+            return null
+        }
+    }
+
+    // The baseline every fake narrows: a call nobody overrode is a test bug.
     private object UnusedApiClient : ApiClient {
         override suspend fun fetchMe(): Result<MeProfile> = error("unused")
 

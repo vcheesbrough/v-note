@@ -339,8 +339,11 @@ class PageLibraryOrderingInstrumentedTest {
                                         webSocket: WebSocket,
                                         response: okhttp3.Response,
                                     ) {
-                                        realtimeUpgrades.incrementAndGet()
+                                        // Reference first: a test that waits on
+                                        // the counter then reads the reference
+                                        // must not see the previous socket.
                                         librarySocket.set(webSocket)
+                                        realtimeUpgrades.incrementAndGet()
                                     }
 
                                     override fun onClosing(
