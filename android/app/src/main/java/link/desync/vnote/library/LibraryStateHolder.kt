@@ -20,7 +20,9 @@ import okhttp3.WebSocket
 // rules themselves are the pure functions in LibraryPages.kt.
 internal class LibraryStateHolder(
     private val apiClient: ApiClient,
-    // Runs the reconnect delay; the activity's lifecycle scope.
+    // Runs the reconnect delay and the snapshot fetch that precedes each
+    // channel; the activity's lifecycle scope. State is written on it, so it
+    // must dispatch to the main thread.
     private val reconnectScope: CoroutineScope,
     // A channel that closes after sign-out must not reconnect.
     private val isSignedIn: () -> Boolean,
@@ -45,8 +47,8 @@ internal class LibraryStateHolder(
 
     // Loads the list and opens the library channel, once a session is signed in.
     fun start() {
-        loadPages()
-        connect()
+        val generation = connectionGeneration
+        reconnectScope.launch { if (loadSnapshot(generation)) connect() }
     }
 
     fun openPage(page: PageSummary) {
@@ -55,7 +57,8 @@ internal class LibraryStateHolder(
 
     fun closePage() {
         selectedPage = null
-        loadPages()
+        val generation = connectionGeneration
+        CoroutineScope(Dispatchers.Main).launch { loadSnapshot(generation) }
     }
 
     fun createPage(paper: Paper) {
@@ -110,20 +113,34 @@ internal class LibraryStateHolder(
         error = null
     }
 
-    // The REST calls here run in a fresh Main-dispatcher scope per call, not a
-    // lifecycle scope, exactly as they did inside MainActivity.
-    private fun loadPages() {
-        CoroutineScope(Dispatchers.Main).launch {
-            apiClient.listPages().fold(
-                onSuccess = { loaded ->
-                    pages = loaded
-                    error = null
-                },
-                onFailure = { failure ->
-                    error = failure.message ?: "Loading pages failed"
-                },
-            )
-        }
+    // Fetches the list and applies it, then reports whether the caller may go on
+    // to open a channel. State is written on the caller's dispatcher, which is
+    // the main thread at every call site (see [reconnectScope]).
+    //
+    // Callers that connect must await this rather than fire it off alongside
+    // `connect()`: the assignment below replaces the whole list, so a fetch
+    // resolving *after* a channel event silently rolls that event back, leaving
+    // a stale library until the next refetch (#347). With the channel opened
+    // only afterwards, no event can be lost that way. A failed fetch still
+    // connects — the banner reports it, and the channel is what recovers.
+    //
+    // The fetch is a full round trip, so [generation] is re-checked across it. A
+    // sign-out or a newer channel started while it was in flight must win: this
+    // snapshot is stale by then, and must neither repopulate a signed-out
+    // library nor open a stray socket.
+    private suspend fun loadSnapshot(generation: Int): Boolean {
+        val snapshot = apiClient.listPages()
+        if (!channelMayReconnect(generation, connectionGeneration, isSignedIn())) return false
+        snapshot.fold(
+            onSuccess = { loaded ->
+                pages = loaded
+                error = null
+            },
+            onFailure = { failure ->
+                error = failure.message ?: "Loading pages failed"
+            },
+        )
+        return true
     }
 
     private fun connect() {
@@ -146,8 +163,7 @@ internal class LibraryStateHolder(
                         reconnectScope.launch {
                             delay(1_000)
                             if (!channelMayReconnect(generation, connectionGeneration, isSignedIn())) return@launch
-                            loadPages()
-                            connect()
+                            if (loadSnapshot(generation)) connect()
                         }
                     }
                 },
