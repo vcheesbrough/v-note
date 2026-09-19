@@ -97,10 +97,15 @@ has **no repo-shipped MCP launcher** during bootstrap.
 Run the **`ci-watch`** skill (baseline §4) once push CI exists. Skill
 parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
 
-- **PR review agent (bootstrapped):** Woodpecker runs [`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml)
-  on every PR — Claude PR agent via [claude-pr-agent](https://github.com/vcheesbrough/claude-pr-agent).
-  Repo prompt: [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md).
-  Secrets/setup: [`docs/PR-AGENT.md`](docs/PR-AGENT.md).
+- **PR review agent — disabled, do not rely on it.**
+  [`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml) is gated behind
+  `when: evaluate: 'false'` (since 2026-06-06, Claude account/OAuth issues), so
+  **no remote review runs on any PR**. Its
+  [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md) is dead
+  with it and must **not** be applied as a rubric. PR review here is the local
+  `pr-self-review` subagent only (baseline §5, §3 below). The pipeline and its
+  setup notes ([`docs/PR-AGENT.md`](docs/PR-AGENT.md)) are kept only so the
+  documented re-enable path still works.
 - **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
   `checks` (lint, rust-test, deploy-script-validation, grafana-dashboard-validation,
   android-build-box-pin),
@@ -132,13 +137,14 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
 
 ## 3. PR merge procedure (repo specifics)
 
-Run the **`pr-review-loop`** skill (baseline §5: self-review every PR you open,
-then the one-comment-at-a-time triage loop; treat remote review agents —
-Woodpecker `pr-review`, Cursor Automation — as supplementary and unreliable).
-Skill parameters: `OWNER=vcheesbrough`, `REPO=v-note`, rubric
-[`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md). The
-squash-merge + branch-cleanup below is repo-specific and runs at ship time (not
-part of the skill).
+Run the **`pr-review-loop`** skill (baseline §5: Part A hands the review to the
+`pr-self-review` subagent in a clean context, then the one-comment-at-a-time
+triage loop; treat remote review agents — Woodpecker `pr-review`, Cursor
+Automation — as supplementary and unreliable, and note that `pr-review` is
+currently disabled outright, see §2). Skill parameters: `OWNER=vcheesbrough`,
+`REPO=v-note`. Review criteria are the baseline five plus the E2E policy in §2 —
+there is no repo rubric file. The squash-merge + branch-cleanup below is
+repo-specific and runs at ship time (not part of the skill).
 
 When merging a PR to **`master`** (user request or iteration ship), **always
 squash**, then **delete the feature branch** locally and on the remote:
