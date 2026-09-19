@@ -126,6 +126,24 @@ pub async fn callback(
 ) -> Response {
     let auth = &state.auth;
 
+    // `state` is checked **before** anything else, including an IdP `error`, and
+    // before any cookie is cleared. The callback is a top-level GET, so `SameSite=Lax`
+    // sends the flow cookies on a cross-site navigation: were an unauthenticated
+    // branch to clear them, `…/auth/callback?state=x&error=y` from any page would
+    // wipe a victim's in-flight login. Only a request that proves knowledge of the
+    // state nonce is allowed to end the flow.
+    let cookie_state = jar
+        .get(STATE_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let Some(cookie_state) = cookie_state else {
+        // Nothing to clear, and nothing proven — answer without touching cookies.
+        return (StatusCode::BAD_REQUEST, "missing state cookie").into_response();
+    };
+    if cookie_state != params.state {
+        return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
+    }
+
+    // From here the caller has proven it owns this flow, so ending it is safe.
     if let Some(error) = &params.error {
         tracing::warn!(error = %error, "auth callback received error");
         return abort_flow(
@@ -133,16 +151,6 @@ pub async fn callback(
             StatusCode::FORBIDDEN,
             format!("authentication denied: {error}"),
         );
-    }
-
-    let cookie_state = jar
-        .get(STATE_COOKIE)
-        .map(|cookie| cookie.value().to_string());
-    let Some(cookie_state) = cookie_state else {
-        return abort_flow(jar, StatusCode::BAD_REQUEST, "missing state cookie");
-    };
-    if cookie_state != params.state {
-        return abort_flow(jar, StatusCode::BAD_REQUEST, "state mismatch");
     }
 
     // The PKCE verifier is mandatory: without it the exchange would fall back to

@@ -2,8 +2,11 @@
 #   Push:       after checks, web and android all pass → verify-release-images →
 #               apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
 #               ∥ publish-grafana-dashboard
-#   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint →
-#               deploy-dev | deploy-prod → tag-release-*
+#   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint-<target>
+#               → deploy-dev | deploy-prod → tag-release-*
+# The push path runs on `master` only: it applies a blueprint and deploys dev,
+# both shared infrastructure (#274). Blueprints are split per environment so no
+# step can reach another environment's Authentik objects.
 # See checks.yml for why the push pipeline is split into workflows.
 
 when:
@@ -75,22 +78,45 @@ steps:
           ./scripts/check-image-metadata.sh "$$REPO:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
         done
 
-  apply-authentik-blueprint:
+  # One step per target, each applying only that environment's blueprint (#274).
+  # A single step applying a dev+prod file meant a manual **dev** deployment from
+  # a feature branch rewrote **prod**'s OIDC provider — `validate-deployment` only
+  # restricts the prod *target* to master, not the blueprint's reach.
+  apply-authentik-blueprint-dev:
     when:
       - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - validate-deployment
     pull: true
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
+    image: &authentik-plugin ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
+    settings: &authentik-dev-settings
+      api_url: https://auth.desync.link
+      api_token:
+        from_secret: authentik_api_token
+      file: authentik/blueprint-dev.yaml
+      # Per-file instance names: two files sharing one instance would each
+      # overwrite the other's stored content on every apply.
+      instance_name: v-note-dev
+      timeout_seconds: 900
+      # No `vars`: #274 made the provider public (PKCE), so the blueprint no
+      # longer interpolates a client secret.
+
+  apply-authentik-blueprint-prod:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - validate-deployment
+    pull: true
+    image: *authentik-plugin
     settings:
       api_url: https://auth.desync.link
       api_token:
         from_secret: authentik_api_token
-      file: authentik/blueprint.yaml
-      instance_name: v-note
+      file: authentik/blueprint-prod.yaml
+      instance_name: v-note-prod
       timeout_seconds: 900
-      # No `vars`: #274 made both providers public (PKCE), so the blueprint no
-      # longer interpolates a client secret.
 
   # The push gates (checks, web, android) are enforced by the workflow-level
   # depends_on above, not by step dependencies.
@@ -107,16 +133,8 @@ steps:
     depends_on:
       - verify-release-images
     pull: true
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
-    settings:
-      api_url: https://auth.desync.link
-      api_token:
-        from_secret: authentik_api_token
-      file: authentik/blueprint.yaml
-      instance_name: v-note
-      timeout_seconds: 900
-      # No `vars`: #274 made both providers public (PKCE), so the blueprint no
-      # longer interpolates a client secret.
+    image: *authentik-plugin
+    settings: *authentik-dev-settings
 
   deploy-dev:
     when:
@@ -125,7 +143,7 @@ steps:
     depends_on:
       - validate-deployment
       - compute-version
-      - apply-authentik-blueprint
+      - apply-authentik-blueprint-dev
     image: *docker-image
     volumes: *docker-socket
     # The whole dev environment, defined once and reused by auto-deploy-dev.
@@ -206,7 +224,8 @@ steps:
   # whatever is deployed to dev. It was previously published from any branch, but
   # dev itself is now master-only (#274 — a branch push must not touch shared
   # infrastructure), so a branch's dashboard would chart metrics from a build that
-  # was never deployed. The last push wins, and the version message names the branch. Never from deploy-prod, which
+  # was never deployed. The last push wins, and the version message names the
+  # branch. Never from deploy-prod, which
   # could roll the dashboard back to an older release. It does not gate
   # tag-release-auto-dev. grafana_api_token is the shared woodpecker-ci
   # service-account token (/woodpecker/shared, Edit on the Applications folder).
@@ -236,7 +255,7 @@ steps:
     depends_on:
       - validate-deployment
       - compute-version
-      - apply-authentik-blueprint
+      - apply-authentik-blueprint-prod
     image: *docker-image
     volumes: *docker-socket
     environment:

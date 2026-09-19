@@ -23,10 +23,10 @@ Normal push builds automatically deploy **dev** once every push workflow passes.
 
 1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
-3. **apply-authentik-blueprint** — `authentik/blueprint.yaml` to **`auth.desync.link`** before roll-out
+3. **apply-authentik-blueprint-{dev,prod}** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 so a dev deploy cannot reach prod's provider)
 4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
-6. **publish-grafana-dashboard** — **every push, on any branch**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
+6. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
 Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced. Prod remains manual-only and is never deployed from a push event.
 
@@ -139,6 +139,11 @@ resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
 | `v_note_dev_metrics_addr` | **Alias** of `/v-note/dev/server/observability/metrics-addr` — see below |
 | `v_note_prod_metrics_addr` | **Alias** of `/v-note/prod/server/observability/metrics-addr` |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
+| Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
+
+Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
+`/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
+— **no `.env` on the host**.
 
 ### Retiring the OIDC client secret (#274)
 
@@ -176,15 +181,16 @@ app container (config is read once at startup — `deploy-v-note.sh` force-recre
 so a redeploy is sufficient). Applying the blueprint first leaves the environment
 unable to authenticate until the leaf catches up.
 
-> `apply-authentik-blueprint-auto-dev` is restricted to `branch: master`. It
-> applies to the **shared** Authentik and the blueprint declares the **prod**
-> objects too, so an unrestricted push would let any feature branch rewrite
-> prod's provider.
-| Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
-
-Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
-`/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
-— **no `.env` on the host**.
+> **Blast radius.** The blueprint is split per environment
+> (`authentik/blueprint-{dev,prod}.yaml`) and each pipeline step applies only its
+> own target's file, so no dev deploy can reach prod's provider. The push-path
+> apply is additionally restricted to `branch: master`. Both guards exist because
+> a single dev+prod file, applied from a feature-branch push, deleted the live
+> providers for **both** environments during #274.
+>
+> **Operator step, once:** the pre-split blueprint instance is still registered in
+> Authentik under `instance_name: v-note`. Delete it, or it will keep reasserting
+> the old combined content over the per-env instances (`v-note-dev`, `v-note-prod`).
 
 **The two `*_metrics_addr` entries are aliases, not copies.** `AddValuePath`
 exposes one stored value at several canonical paths, so the pipeline and the app
@@ -338,7 +344,7 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 **`v-note — overview`** (uid **`v-note-overview`**) lives in Grafana under **Applications / v-note** (folder uid `v-note`). Its source of truth is [`deploy/grafana/v-note-overview.json`](../deploy/grafana/v-note-overview.json): application dashboards ship in the application repo, in the same PR as the metrics they chart.
 
 - **One dashboard, both environments:** an `env` variable (`label_values(v_note_realtime_active_connections, env)`) filters every query. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
-- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every push, on any branch**, after `auto-deploy-dev`, so the dashboard always matches what is deployed to dev. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself: a feature-branch push replaces the shared dashboard until the next push. `deploy-prod` never publishes, because it could roll the dashboard back to an older release.
+- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every push to `master`**, after `auto-deploy-dev`, so the dashboard always matches what is deployed to dev. (Until #274 this ran from any branch; dev deploys are now master-only, so a branch dashboard would have charted a build that was never deployed.) It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push to `master` wins, as it does for dev itself. `deploy-prod` never publishes, because it could roll the dashboard back to an older release.
 - **UI edits are overwritten** on the next push that deploys dev. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
 - **Offline validation:** [`scripts/test-grafana-dashboard.sh`](../scripts/test-grafana-dashboard.sh), run in the `checks` step `grafana-dashboard-validation`, checks that the JSON parses, keeps its uid, has no committed id, filters every query by `env`, references no unbounded id, and charts only metrics `observability.rs` registers. It also checks the publish script's `--dry-run` payload, its input guards, and its live path against a stub `curl` (2xx passes; non-2xx and transport failures fail without leaking the token).
 - **Pre-merge check:** pushing a branch publishes its dashboard, so once that push's `deploy` workflow is green, check the panels under Applications / v-note against dev and record the check in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.

@@ -333,6 +333,11 @@ async fn callback_without_the_verifier_cookie_is_rejected() {
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // The abandoned flow is ended, not left replayable for the rest of the 300 s
+    // window: both transient cookies come back expired.
+    assert_eq!(cookie_value(&response, "auth_state").as_deref(), Some(""));
+    assert_eq!(cookie_value(&response, "auth_pkce").as_deref(), Some(""));
+
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body should be readable");
@@ -340,6 +345,61 @@ async fn callback_without_the_verifier_cookie_is_rejected() {
         String::from_utf8(body.to_vec()).expect("body should be UTF-8"),
         "missing PKCE verifier cookie"
     );
+}
+
+/// `state` is validated before anything is cleared. The callback is a top-level
+/// GET and the flow cookies are `SameSite=Lax`, so a cross-site navigation to
+/// `/auth/callback?state=…&error=…` carries them — if that path cleared cookies,
+/// any page on the internet could cancel a victim's in-flight login.
+#[tokio::test]
+async fn callback_with_a_foreign_state_does_not_clear_an_in_flight_flow() {
+    let auth = Arc::new(test_auth_config());
+    let jwks = Arc::new(test_jwks_cache());
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/callback?state=attacker-state&error=access_denied")
+                .header(
+                    "cookie",
+                    "auth_state=victim-state; auth_pkce=victim-verifier",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        set_cookies(&response).is_empty(),
+        "an unauthenticated caller must not be able to end someone else's flow: {:?}",
+        set_cookies(&response)
+    );
+}
+
+/// The same request *with* the right state is allowed to end the flow.
+#[tokio::test]
+async fn callback_with_an_idp_error_and_matching_state_clears_the_flow() {
+    let auth = Arc::new(test_auth_config());
+    let jwks = Arc::new(test_jwks_cache());
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/callback?state=the-state&error=access_denied")
+                .header("cookie", "auth_state=the-state; auth_pkce=the-verifier")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(cookie_value(&response, "auth_state").as_deref(), Some(""));
+    assert_eq!(cookie_value(&response, "auth_pkce").as_deref(), Some(""));
 }
 
 /// A state mismatch must still be caught first — the verifier is not a
@@ -362,6 +422,11 @@ async fn callback_state_mismatch_is_still_rejected_with_a_verifier_present() {
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        set_cookies(&response).is_empty(),
+        "a state mismatch must leave the real flow's cookies alone"
+    );
+
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body should be readable");

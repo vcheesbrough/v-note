@@ -111,7 +111,8 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
   ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
-  auto-deploy-dev → tag) runs only when all three succeed. **`ci-watch` must follow
+  auto-deploy-dev → tag, **`master` only** — it touches shared Authentik and dev)
+  runs only when all three succeed. **`ci-watch` must follow
   every workflow of the pushed commit's pipeline to completion** — one green
   workflow while another is still running is not a result. Do not fold them back
   into one file: Woodpecker runs step `depends_on` as whole stages, so steps in one
