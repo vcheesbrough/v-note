@@ -48,9 +48,9 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_ISSUER_URL",
-                "\"https://auth.desync.link/application/o/v-note-android-dev/\"",
+                "\"https://auth.desync.link/application/o/v-note-dev/\"",
             )
-            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-android-dev\"")
+            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-dev\"")
             buildConfigField(
                 "String",
                 "OIDC_REDIRECT_URI",
@@ -59,7 +59,7 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_END_SESSION_URL",
-                "\"https://auth.desync.link/application/o/v-note-android-dev/end-session/\"",
+                "\"https://auth.desync.link/application/o/v-note-dev/end-session/\"",
             )
             buildConfigField(
                 "String",
@@ -76,9 +76,9 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_ISSUER_URL",
-                "\"https://auth.desync.link/application/o/v-note-android-dev/\"",
+                "\"https://auth.desync.link/application/o/v-note-dev/\"",
             )
-            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-android-dev\"")
+            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-dev\"")
             buildConfigField(
                 "String",
                 "OIDC_REDIRECT_URI",
@@ -87,7 +87,7 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_END_SESSION_URL",
-                "\"https://auth.desync.link/application/o/v-note-android-dev/end-session/\"",
+                "\"https://auth.desync.link/application/o/v-note-dev/end-session/\"",
             )
             buildConfigField(
                 "String",
@@ -102,9 +102,9 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_ISSUER_URL",
-                "\"https://auth.desync.link/application/o/v-note-android-prod/\"",
+                "\"https://auth.desync.link/application/o/v-note-prod/\"",
             )
-            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-android-prod\"")
+            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-prod\"")
             buildConfigField(
                 "String",
                 "OIDC_REDIRECT_URI",
@@ -113,7 +113,7 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_END_SESSION_URL",
-                "\"https://auth.desync.link/application/o/v-note-android-prod/end-session/\"",
+                "\"https://auth.desync.link/application/o/v-note-prod/end-session/\"",
             )
             buildConfigField(
                 "String",

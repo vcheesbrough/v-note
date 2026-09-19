@@ -132,8 +132,6 @@ resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
 
 | Woodpecker secret key | Used for |
 | --- | --- |
-| `v_note_dev_oidc_client_secret` | SPA confidential client (dev) |
-| `v_note_prod_oidc_client_secret` | SPA confidential client (prod) |
 | `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
 | `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
@@ -180,7 +178,9 @@ been deleted — rotating a signing certificate means rewriting that leaf (see
 | Key | Used for |
 | --- | --- |
 | `POSTGRES_PASSWORD` | Local Postgres in `deploy/docker-compose.yml` |
-| `OIDC_CLIENT_SECRET` | SPA client secret (mock OIDC or Authentik) |
+
+There is no OIDC client secret: the SPA and Android share one **public** Authentik
+client using Authorization Code + **PKCE** (**#274**).
 
 Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merges with committed **`deploy/compose.env`**). Seed: **`./scripts/patch-v-note-openbao-secrets.sh`**.
 
@@ -219,8 +219,8 @@ subtree, secret leaves included — treat it like a password.
    ```
 3. Redeploy. To rotate, `rotate_connection` and repeat — no app change needed.
 
-Secret leaves (`database/password`, `oidc/client-secret`) are stored with
-`put_secret` and revealed to the app at load. `POSTGRES_PASSWORD` **also** stays in
+The secret leaf (`database/password`) is stored with `put_secret` and revealed to
+the app at load. `POSTGRES_PASSWORD` **also** stays in
 OpenBao because the `postgres` service consumes it directly — the same value lives
 in two stores.
 

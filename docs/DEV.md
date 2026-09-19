@@ -97,13 +97,10 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__DATABASE__PASSWORD` | **required** | secret leaf in sovereign-config |
 | `VNOTE__OIDC__ISSUER-URL` | **required** | OIDC issuer (mock-oidc locally — `deploy/compose.env`) |
 | `VNOTE__OIDC__AUTHORIZE-URL` | optional | browser-facing `/authorize` when it differs from discovery |
-| `VNOTE__OIDC__CLIENT-ID` | **required** | SPA confidential client |
-| `VNOTE__OIDC__CLIENT-SECRET` | **required** | secret leaf (`test-secret` for local mock OIDC) |
+| `VNOTE__OIDC__CLIENT-ID` | **required** | the single public client shared by the SPA and Android (#274) |
 | `VNOTE__OIDC__REDIRECT-URI` | **required** | e.g. `https://v-notes-dev.desync.link/auth/callback` |
 | `VNOTE__OIDC__REQUIRED-SCOPE` | **required** | `v-note:dev:access` or `v-note:prod:access` |
 | `VNOTE__OIDC__END-SESSION-URL` | optional | RP-initiated logout redirect |
-| `VNOTE__OIDC__ANDROID__CLIENT-ID` | optional | Android Authentik app client id |
-| `VNOTE__OIDC__ANDROID__ISSUER-URL` | optional | Android provider issuer (separate Authentik app) |
 | `VNOTE__OBSERVABILITY__ENVIRONMENT` | **required** | OTEL `deployment.environment` (`dev` \| `production`) |
 | `VNOTE__OBSERVABILITY__OTLP-ENDPOINT` | unset | when set, exports OTLP traces to Alloy, e.g. `http://monitor-alloy:4317` |
 | `VNOTE__OBSERVABILITY__OTLP-PROTOCOL` | `grpc` | only gRPC is supported; anything else fails startup |
@@ -365,7 +362,7 @@ The build also stamps `OCI_IMAGE_VERSION` / `OCI_IMAGE_REVISION` /
 `OCI_IMAGE_CREATED` and `V_NOTE_RELEASE` from git, so a local image's version
 label, `/api/meta` and `v_note_build_info{version=…}` all agree.
 
-Non-secret compose defaults are in **`deploy/compose.env`** (committed). Secrets (**`POSTGRES_PASSWORD`**, **`OIDC_CLIENT_SECRET`**) live in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator).
+Non-secret compose defaults are in **`deploy/compose.env`** (committed). The only secret (**`POSTGRES_PASSWORD`**) lives in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator). There is no OIDC client secret: since **#274** the SPA and Android share one **public** Authentik client using Authorization Code + **PKCE**.
 
 The local overlay maps those into the `VNOTE__*` layer and blanks
 `SOVEREIGN_CONFIG_ACCESS_URL_FILE`, so local dev never talks to sovereign-config.

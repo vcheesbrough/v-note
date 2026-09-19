@@ -64,7 +64,6 @@ fn oidc_env() -> Vec<(&'static str, &'static str)> {
             "https://auth.example/app/o/v-note/",
         ),
         ("VNOTE__OIDC__CLIENT-ID", "v-note-browser"),
-        ("VNOTE__OIDC__CLIENT-SECRET", "shhh"),
         (
             "VNOTE__OIDC__REDIRECT-URI",
             "https://v-notes.example/auth/callback",
@@ -172,7 +171,6 @@ fn oidc_maps_kebab_keys_into_rich_types() {
         "https://auth.example/app/o/v-note/"
     );
     assert_eq!(oidc.client_id, "v-note-browser");
-    assert_eq!(oidc.client_secret, "shhh");
     assert_eq!(
         oidc.redirect_uri.as_str(),
         "https://v-notes.example/auth/callback"
@@ -181,12 +179,13 @@ fn oidc_maps_kebab_keys_into_rich_types() {
     // Optional leaves absent → None, not an error.
     assert!(oidc.authorize_url.is_none());
     assert!(oidc.end_session_url.is_none());
-    assert!(oidc.android.client_id.is_none());
-    assert!(oidc.android.issuer_url.is_none());
 }
 
+/// #274 unified the SPA and Android clients, so `oidc/android/*` is gone. A
+/// stale leaf left behind in a sovereign-config subtree must not fail the load —
+/// the group has to stay deserializable through the rollout.
 #[test]
-fn oidc_nested_android_subtree_deserializes() {
+fn oidc_ignores_retired_android_subtree() {
     let config = cfg(&with(
         oidc_env(),
         &[
@@ -197,13 +196,19 @@ fn oidc_nested_android_subtree_deserializes() {
             ),
         ],
     ));
-    let oidc: OidcConfig = load_group(&config, "oidc").expect("should load");
+    let oidc: OidcConfig = load_group(&config, "oidc").expect("stale android leaves are ignored");
 
-    assert_eq!(oidc.android.client_id.as_deref(), Some("v-note-android"));
-    assert_eq!(
-        oidc.android.issuer_url.expect("issuer url").as_str(),
-        "https://auth.example/app/o/v-note-android/"
-    );
+    assert_eq!(oidc.client_id, "v-note-browser");
+}
+
+/// The client secret is no longer part of the model: the unified client is
+/// public (PKCE), so a leftover `oidc/client-secret` leaf is inert.
+#[test]
+fn oidc_ignores_retired_client_secret() {
+    let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__CLIENT-SECRET", "shhh")]));
+    let oidc: OidcConfig = load_group(&config, "oidc").expect("stale client-secret is ignored");
+
+    assert_eq!(oidc.client_id, "v-note-browser");
 }
 
 #[test]
@@ -215,16 +220,12 @@ fn oidc_blank_optional_leaves_are_treated_as_absent() {
         &[
             ("VNOTE__OIDC__AUTHORIZE-URL", ""),
             ("VNOTE__OIDC__END-SESSION-URL", "   "),
-            ("VNOTE__OIDC__ANDROID__CLIENT-ID", ""),
-            ("VNOTE__OIDC__ANDROID__ISSUER-URL", ""),
         ],
     ));
     let oidc: OidcConfig = load_group(&config, "oidc").expect("blank optionals should load");
 
     assert!(oidc.authorize_url.is_none());
     assert!(oidc.end_session_url.is_none());
-    assert!(oidc.android.client_id.is_none());
-    assert!(oidc.android.issuer_url.is_none());
 }
 
 #[test]
@@ -268,23 +269,6 @@ fn oidc_missing_client_id_is_rejected() {
         error.to_string().contains("client-id"),
         "error should name the missing leaf: {error}"
     );
-}
-
-#[test]
-fn oidc_blank_client_secret_is_rejected_without_leaking_it() {
-    let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__CLIENT-SECRET", "  ")]));
-    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank secret rejected");
-
-    match error {
-        ConfigError::Invalid {
-            ref path,
-            ref reason,
-        } => {
-            assert_eq!(path, "oidc.client-secret");
-            assert_eq!(reason, "must not be empty");
-        }
-        other => panic!("expected Invalid, got: {other}"),
-    }
 }
 
 #[test]
@@ -778,14 +762,11 @@ fn every_string_leaf_is_trimmed_including_secrets() {
 /// it becomes empty, which `validate` still rejects by field path.
 #[test]
 fn whitespace_only_value_is_still_rejected() {
-    let config = cfg(&with(
-        oidc_env(),
-        &[("VNOTE__OIDC__CLIENT-SECRET", "   \n ")],
-    ));
-    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank secret rejected");
+    let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__CLIENT-ID", "   \n ")]));
+    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank client id rejected");
 
     match error {
-        ConfigError::Invalid { ref path, .. } => assert_eq!(path, "oidc.client-secret"),
+        ConfigError::Invalid { ref path, .. } => assert_eq!(path, "oidc.client-id"),
         other => panic!("expected Invalid, got: {other}"),
     }
 }
@@ -815,7 +796,7 @@ fn trailing_newline_on_a_json_leaf_is_trimmed() {
 /// fails here rather than silently breaking `cargo run` for local dev.
 #[test]
 fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
-    // oidc (including the nested android subtree)
+    // oidc
     let oidc: OidcConfig = load_group(
         &cfg(&[
             ("VNOTE__OIDC__ISSUER_URL", "https://auth.example/o/v-note/"),
@@ -824,7 +805,6 @@ fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
                 "https://auth.example/authorize",
             ),
             ("VNOTE__OIDC__CLIENT_ID", "browser"),
-            ("VNOTE__OIDC__CLIENT_SECRET", "shhh"),
             (
                 "VNOTE__OIDC__REDIRECT_URI",
                 "https://v.example/auth/callback",
@@ -834,11 +814,6 @@ fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
                 "VNOTE__OIDC__END_SESSION_URL",
                 "https://auth.example/logout",
             ),
-            ("VNOTE__OIDC__ANDROID__CLIENT_ID", "android"),
-            (
-                "VNOTE__OIDC__ANDROID__ISSUER_URL",
-                "https://auth.example/o/a/",
-            ),
         ]),
         "oidc",
     )
@@ -847,8 +822,6 @@ fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
     assert_eq!(oidc.required_scope, "v-note:prod:access");
     assert!(oidc.authorize_url.is_some());
     assert!(oidc.end_session_url.is_some());
-    assert_eq!(oidc.android.client_id.as_deref(), Some("android"));
-    assert!(oidc.android.issuer_url.is_some());
 
     // observability
     let observability: ObservabilityConfig = load_group(
@@ -949,48 +922,26 @@ fn secret_leaves_never_leak_their_value_in_errors() {
         "database/password leaked into a Load error: {error}"
     );
 
-    // Same for oidc/client-secret.
-    let config = cfg(&with(
-        oidc_env(),
-        &[("VNOTE__OIDC__CLIENT-SECRET", SENTINEL)],
-    ));
-    let oidc: OidcConfig = load_group(&config, "oidc").expect("a String secret accepts any value");
-    assert_eq!(oidc.client_secret, SENTINEL);
-
-    let config = cfg(&with(
-        oidc_env(),
-        &[
-            ("VNOTE__OIDC__CLIENT-SECRET", SENTINEL),
-            ("VNOTE__OIDC__ISSUER-URL", "not a url"),
-        ],
-    ));
-    let error =
-        load_group::<OidcConfig>(&config, "oidc").expect_err("malformed URL should be rejected");
-    assert!(
-        !error.to_string().contains(SENTINEL),
-        "oidc/client-secret leaked into a Load error: {error}"
-    );
+    // The `oidc` group no longer holds a secret (#274 made the client public),
+    // so `database/password` is the only value this guarantee has to cover.
 }
 
 /// The redaction guarantee that *is* unconditional: checks I perform myself never
 /// echo the value, only the field path.
 #[test]
 fn validate_errors_name_the_field_but_never_the_value() {
-    const SENTINEL: &str = "s3cr3t-sentinel-value";
-
     let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__REQUIRED-SCOPE", "   ")]));
     let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank scope rejected");
     assert!(error.to_string().contains("oidc.required-scope"));
     assert!(!error.to_string().contains("   "));
 
-    // A blank secret is reported by path alone.
-    let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__CLIENT-SECRET", " ")]));
-    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank secret rejected");
+    // A blank client id is reported by path alone.
+    let config = cfg(&with(oidc_env(), &[("VNOTE__OIDC__CLIENT-ID", " ")]));
+    let error = load_group::<OidcConfig>(&config, "oidc").expect_err("blank client id rejected");
     assert_eq!(
         error.to_string(),
-        "invalid config `oidc.client-secret`: must not be empty"
+        "invalid config `oidc.client-id`: must not be empty"
     );
-    assert!(!error.to_string().contains(SENTINEL));
 }
 
 // ---------------------------------------------------------------------------

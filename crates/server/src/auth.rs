@@ -17,40 +17,24 @@ use crate::config::OidcConfig;
 
 pub const AUTH_COOKIE: &str = "auth";
 pub const STATE_COOKIE: &str = "auth_state";
+/// Holds the PKCE `code_verifier` across the IdP round trip. Scoped to `/auth`
+/// and short-lived, exactly like [`STATE_COOKIE`].
+pub const PKCE_COOKIE: &str = "auth_pkce";
 
-#[derive(Clone)]
+/// The SPA and the Android app share **one public OIDC client** (#274), so
+/// there is a single `client_id` and a single `issuer_url` — and therefore a
+/// single accepted JWT `aud`/`iss`. No client secret exists: the browser flow
+/// is Authorization Code + PKCE, exchanged server-side.
+#[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub issuer_url: String,
     pub client_id: String,
-    pub client_secret: String,
     pub redirect_uri: String,
     pub required_scope: String,
     pub end_session_url: Option<String>,
     pub authorize_endpoint: String,
     pub token_endpoint: String,
     pub jwks_uri: String,
-    /// Optional issuer URL for the Android OIDC provider (separate Authentik app).
-    pub android_issuer_url: Option<String>,
-    /// OAuth2 `client_id` for the Android provider. Tokens carry this in `aud`.
-    pub android_client_id: Option<String>,
-}
-
-impl std::fmt::Debug for AuthConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthConfig")
-            .field("issuer_url", &self.issuer_url)
-            .field("client_id", &self.client_id)
-            .field("client_secret", &"[REDACTED]")
-            .field("redirect_uri", &self.redirect_uri)
-            .field("required_scope", &self.required_scope)
-            .field("end_session_url", &self.end_session_url)
-            .field("authorize_endpoint", &self.authorize_endpoint)
-            .field("token_endpoint", &self.token_endpoint)
-            .field("jwks_uri", &self.jwks_uri)
-            .field("android_issuer_url", &self.android_issuer_url)
-            .field("android_client_id", &self.android_client_id)
-            .finish()
-    }
 }
 
 #[derive(Deserialize)]
@@ -81,15 +65,12 @@ impl AuthConfig {
         Ok(Self {
             issuer_url,
             client_id: oidc.client_id.clone(),
-            client_secret: oidc.client_secret.clone(),
             redirect_uri: oidc.redirect_uri.to_string(),
             required_scope: oidc.required_scope.clone(),
             end_session_url: oidc.end_session_url.as_ref().map(Url::to_string),
             authorize_endpoint,
             token_endpoint: discovery.token_endpoint,
             jwks_uri: discovery.jwks_uri,
-            android_issuer_url: oidc.android.issuer_url.as_ref().map(Url::to_string),
-            android_client_id: oidc.android.client_id.clone(),
         })
     }
 
@@ -260,16 +241,10 @@ pub async fn validate_jwt(
 
     let mut validation = Validation::new(header.alg);
     validation.algorithms = allowed_algs.to_vec();
-    let mut audiences = vec![config.client_id.as_str()];
-    if let Some(android_cid) = config.android_client_id.as_deref() {
-        audiences.push(android_cid);
-    }
-    validation.set_audience(&audiences);
-    let mut issuers = vec![config.issuer_url.as_str()];
-    if let Some(android_iss) = config.android_issuer_url.as_deref() {
-        issuers.push(android_iss);
-    }
-    validation.set_issuer(&issuers);
+    // One public client serves both the SPA and Android (#274), so exactly one
+    // audience and one issuer are ever accepted.
+    validation.set_audience(&[config.client_id.as_str()]);
+    validation.set_issuer(&[config.issuer_url.as_str()]);
     // jsonwebtoken skips the audience check entirely when a token has no `aud`, so
     // `set_audience` alone accepts audience-less tokens. `iss` is already enforced by
     // `Claims` deserialization; requiring it here too keeps the rule in one place.

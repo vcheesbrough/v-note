@@ -567,6 +567,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "const-str"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -778,6 +784,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
+ "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
 ]
@@ -995,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "console_error_panic_hook",
  "futures-util",
@@ -2746,7 +2753,7 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "protocol"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "jsonschema",
  "serde",
@@ -3450,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "axum 0.8.9",
  "axum-extra",
@@ -3472,6 +3479,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sovereign-config-provider",
  "sqlx",
  "time",

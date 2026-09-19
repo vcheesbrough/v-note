@@ -89,11 +89,8 @@ steps:
       file: authentik/blueprint.yaml
       instance_name: v-note
       timeout_seconds: 900
-      vars:
-        AUTHENTIK_V_NOTE_DEV_CLIENT_SECRET:
-          from_secret: v_note_dev_oidc_client_secret
-        AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
-          from_secret: v_note_prod_oidc_client_secret
+      # No `vars`: #274 made both providers public (PKCE), so the blueprint no
+      # longer interpolates a client secret.
 
   # The push gates (checks, web, android) are enforced by the workflow-level
   # depends_on above, not by step dependencies.
@@ -111,11 +108,8 @@ steps:
       file: authentik/blueprint.yaml
       instance_name: v-note
       timeout_seconds: 900
-      vars:
-        AUTHENTIK_V_NOTE_DEV_CLIENT_SECRET:
-          from_secret: v_note_dev_oidc_client_secret
-        AUTHENTIK_V_NOTE_PROD_CLIENT_SECRET:
-          from_secret: v_note_prod_oidc_client_secret
+      # No `vars`: #274 made both providers public (PKCE), so the blueprint no
+      # longer interpolates a client secret.
 
   deploy-dev:
     when:

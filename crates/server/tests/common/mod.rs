@@ -26,30 +26,18 @@ pub const TEST_RSA_PRIVATE_PEM: &str = include_str!("../fixtures/test_rsa_privat
 pub const TEST_RSA_N: &str = "n2LSwWaKa37_PfC0fQehlQkhj4KFZc5htmDM5PDWOvnwuxmQ9AC48APxN-p1gjxR6O7MRsui-73c2pbk2Fp7nLQPmhupMEMw2bXDKV3iUaqppBGgMnbG43RnK6ho814E1aeaDdoicAlOUZQhp2PkRRd-2xemtazForez00ig-HN7W_JAh00ZaXP6JifiPqseSLKB1DnaNj1rIxfyPBdxrKyvDtKTudT3pn1yI8Wkl3mI57upEG7CCssZcLmKhWB3dMdHOaT2dnFqeOka4e3dt7i6jJj6h7LuAb4mfuYYAfJDhq5Ls8x9kb_I4U2NoCLYUtC3UlnwUIacvLzp4_iVkQ";
 pub const TEST_RSA_E: &str = "AQAB";
 
-/// The web client's OIDC configuration — no Android issuer or client id.
+/// The single public OIDC client shared by the SPA and the Android app (#274).
+/// There is one `client_id` and one issuer, so one accepted `aud`/`iss`.
 pub fn test_auth_config() -> AuthConfig {
     AuthConfig {
         issuer_url: "http://mock-oidc:8080/default".to_string(),
         client_id: "v-note-test".to_string(),
-        client_secret: "test-secret".to_string(),
         redirect_uri: "https://app:443/auth/callback".to_string(),
         required_scope: "v-note:test:access".to_string(),
         end_session_url: None,
         authorize_endpoint: "http://mock-oidc:8080/default/authorize".to_string(),
         token_endpoint: "http://mock-oidc:8080/default/token".to_string(),
         jwks_uri: "http://mock-oidc:8080/default/jwks".to_string(),
-        android_issuer_url: None,
-        android_client_id: None,
-    }
-}
-
-/// [`test_auth_config`] plus the second issuer/audience pair the Android client
-/// authenticates with.
-pub fn android_auth_config() -> AuthConfig {
-    AuthConfig {
-        android_issuer_url: Some("http://mock-oidc:8080/default-android".to_string()),
-        android_client_id: Some("v-note-android-test".to_string()),
-        ..test_auth_config()
     }
 }
 

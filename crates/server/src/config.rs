@@ -339,17 +339,10 @@ impl ValidatedConfig for DatabaseConfig {
 // oidc
 // ---------------------------------------------------------------------------
 
-/// Optional, non-secret native-app OIDC leaves. Present → a second accepted JWT
-/// `aud`/`iss` for the Android app (see #274).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct OidcAndroidConfig {
-    #[serde(default, deserialize_with = "blank_as_none")]
-    pub client_id: Option<String>,
-    #[serde(default, deserialize_with = "blank_as_none")]
-    pub issuer_url: Option<Url>,
-}
-
+/// A single **public** OIDC client serves both the SPA and the Android app
+/// (#274): one `client_id`, one issuer, therefore one accepted JWT `aud`/`iss`.
+/// There is deliberately no client secret — the browser flow is Authorization
+/// Code + PKCE exchanged server-side, and a native app cannot hold a secret.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct OidcConfig {
@@ -358,19 +351,15 @@ pub struct OidcConfig {
     #[serde(default, deserialize_with = "blank_as_none")]
     pub authorize_url: Option<Url>,
     pub client_id: String,
-    pub client_secret: String,
     pub redirect_uri: Url,
     pub required_scope: String,
     #[serde(default, deserialize_with = "blank_as_none")]
     pub end_session_url: Option<Url>,
-    #[serde(default)]
-    pub android: OidcAndroidConfig,
 }
 
 impl ValidatedConfig for OidcConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         require_non_empty("oidc.client-id", &self.client_id)?;
-        require_non_empty("oidc.client-secret", &self.client_secret)?;
         require_non_empty("oidc.required-scope", &self.required_scope)?;
         Ok(())
     }
@@ -554,9 +543,8 @@ impl ValidatedConfig for RealtimeConfig {
 /// out-rank it for `tls-cert`, `tls-key` and `static-dir` (env is the top layer),
 /// but `http-port` has no such override and a remote value would win over the
 /// default. Deliberately unenforced: no `server` branch exists in either env
-/// subtree, and write access to it already implies control of `database/password`
-/// and `oidc/client-secret`, so this is a tidiness boundary rather than a
-/// security one.
+/// subtree, and write access to it already implies control of `database/password`,
+/// so this is a tidiness boundary rather than a security one.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ServerConfig {

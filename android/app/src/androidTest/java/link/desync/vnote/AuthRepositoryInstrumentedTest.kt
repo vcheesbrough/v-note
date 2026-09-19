@@ -46,8 +46,8 @@ class AuthRepositoryInstrumentedTest {
                 context = context,
                 config =
                     AuthConfig(
-                        issuerUrl = "https://auth.example.test/application/o/v-note-android-dev/",
-                        clientId = "v-note-android-dev",
+                        issuerUrl = "https://auth.example.test/application/o/v-note-dev/",
+                        clientId = "v-note-dev",
                         redirectUri = "https://v-notes-dev.desync.link/auth/mobile/callback",
                         endSessionUrl = "https://auth.example.test/end-session/",
                         scopes = "openid profile email offline_access v-note:dev:access",
@@ -92,11 +92,14 @@ class AuthRepositoryInstrumentedTest {
         val request = server.takeRequest()
         assertEquals("/token", request.target)
         val body = request.body?.utf8().orEmpty()
-        assertTrue(body.contains("client_id=v-note-android-dev"))
+        assertTrue(body.contains("client_id=v-note-dev"))
         assertTrue(body.contains("grant_type=authorization_code"))
         assertTrue(body.contains("code=auth-code"))
         assertTrue(body.contains("redirect_uri=https%3A%2F%2Fv-notes-dev.desync.link%2Fauth%2Fmobile%2Fcallback"))
+        // PKCE: the unified client is public (#274), so the verifier — not a
+        // secret — is what binds this code to this app.
         assertTrue(body.contains("code_verifier="))
+        assertTrue("a public client must never send a secret", !body.contains("client_secret"))
     }
 
     @Test
@@ -132,7 +135,7 @@ class AuthRepositoryInstrumentedTest {
                 .body
                 ?.utf8()
                 .orEmpty()
-        assertTrue(body.contains("client_id=v-note-android-dev"))
+        assertTrue(body.contains("client_id=v-note-dev"))
         assertTrue(body.contains("grant_type=refresh_token"))
         assertTrue(body.contains("refresh_token=old-refresh"))
     }
@@ -142,7 +145,7 @@ class AuthRepositoryInstrumentedTest {
             AuthorizationRequest
                 .Builder(
                     serviceConfiguration,
-                    "v-note-android-dev",
+                    "v-note-dev",
                     ResponseTypeValues.CODE,
                     Uri.parse("https://v-notes-dev.desync.link/auth/mobile/callback"),
                 ).setScopes("openid", "profile", "email", "offline_access", "v-note:dev:access")

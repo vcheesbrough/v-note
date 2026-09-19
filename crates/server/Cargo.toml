@@ -45,6 +45,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "for
 rustls = { version = "0.23", features = ["ring"] }
 serde.workspace = true
 serde_json.workspace = true
+# PKCE S256 challenge only (RFC 7636) — not a general crypto dependency.
+sha2 = "0.11"
 sovereign-config-provider = { git = "https://github.com/vcheesbrough/sovereign-config", tag = "2.19.4", features = ["config"] }
 # 0.9 deleted the combined runtime+TLS features; `runtime-tokio` + `tls-rustls-ring`
 # is the exact expansion of the 0.8 `runtime-tokio-rustls` this replaced (ring +

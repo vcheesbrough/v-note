@@ -34,7 +34,8 @@ RESP=$(curl -sf -H "X-Vault-Token: ${BAO_TOKEN}" \
   exit 1
 }
 
-SECRET_KEYS=(POSTGRES_PASSWORD OIDC_CLIENT_SECRET)
+# No OIDC secret: the client is public + PKCE since #274.
+SECRET_KEYS=(POSTGRES_PASSWORD)
 python3 - "$COMPOSE_ENV" "$OUT_ENV" "$RESP" "${SECRET_KEYS[@]}" <<'PY'
 import json, pathlib, shlex, sys
 
