@@ -5,11 +5,10 @@ import android.view.MotionEvent
 import android.view.View
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -309,13 +308,10 @@ class PageCanvasInputInstrumentedTest {
         assertNotNull("drawing commits a batch", awaitMutation("commit-batch"))
 
         // Wait until the committed stroke is rasterized at its high-pressure end.
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching {
-                val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
-                greenThickness(pixels, (endX - 25f).toInt(), strokeY.toInt()) > 0
-            }.getOrDefault(false)
-        }
-        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+        val pixels =
+            composeRule.awaitInkPixels {
+                greenThickness(it, (endX - 25f).toInt(), strokeY.toInt()) > 0
+            }
         val low = greenThickness(pixels, (startX + 25f).toInt(), strokeY.toInt())
         val high = greenThickness(pixels, (endX - 25f).toInt(), strokeY.toInt())
         assertTrue("high-pressure end thicker than low: low=$low high=$high", high > low + 2)
@@ -324,7 +320,7 @@ class PageCanvasInputInstrumentedTest {
     // Vertical run of dark-green ink pixels through column [x], within ±30px of
     // [centerY] (kept clear of the seed lines at y=200 and y=400).
     private fun greenThickness(
-        pixels: androidx.compose.ui.graphics.PixelMap,
+        pixels: PixelMap,
         x: Int,
         centerY: Int,
     ): Int {
@@ -360,13 +356,7 @@ class PageCanvasInputInstrumentedTest {
         sendStylus(MotionEvent.ACTION_UP, 300f, 300f, pressure = 0.9f, downTime = downTime)
         assertNotNull("tap commits a batch", awaitMutation("commit-batch"))
 
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching {
-                val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
-                greenThickness(pixels, 300, 300) > 0
-            }.getOrDefault(false)
-        }
-        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+        val pixels = composeRule.awaitInkPixels { greenThickness(it, 300, 300) > 0 }
         assertTrue("v2 tap renders a visible dot", greenThickness(pixels, 300, 300) > 2)
     }
 
@@ -448,12 +438,7 @@ class PageCanvasInputInstrumentedTest {
             "edit lease granted; requests=$requestPaths messages=$pageMessages",
             leaseGranted.await(5, TimeUnit.SECONDS),
         )
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching {
-                val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
-                pixels[SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()] != Color.White
-            }.getOrDefault(false)
-        }
+        composeRule.awaitInkPixels { hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }
     }
 
     /**
@@ -472,11 +457,14 @@ class PageCanvasInputInstrumentedTest {
             sendStylus(MotionEvent.ACTION_MOVE, x.toFloat(), LIVE_STROKE_Y, downTime = downTime)
         }
 
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching { hasInkAt(360, LIVE_STROKE_Y.toInt()) }.getOrDefault(false)
-        }
-        assertTrue("live ink painted before lift", hasInkAt(360, LIVE_STROKE_Y.toInt()))
-        assertTrue("committed ink still painted", hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()))
+        // One frame carries both halves of the claim: the live stroke reached the
+        // screen while the committed seed ink was still on it.
+        val pixels = composeRule.awaitInkPixels { hasInkAt(it, 360, LIVE_STROKE_Y.toInt()) }
+        assertTrue("live ink painted before lift", hasInkAt(pixels, 360, LIVE_STROKE_Y.toInt()))
+        assertTrue(
+            "committed ink still painted",
+            hasInkAt(pixels, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()),
+        )
 
         sendStylus(MotionEvent.ACTION_UP, 460f, LIVE_STROKE_Y, downTime = downTime)
     }
@@ -489,7 +477,8 @@ class PageCanvasInputInstrumentedTest {
     @Test
     fun erasedStrokeLeavesTheCommittedLayer() {
         openEditor()
-        assertTrue("seed painted", hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()))
+        val seeded = composeRule.awaitInkPixels()
+        assertTrue("seed painted", hasInkAt(seeded, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()))
         composeRule.onNodeWithTag("eraser-tool").performClick().assertIsSelected()
 
         val downTime = android.os.SystemClock.uptimeMillis()
@@ -497,28 +486,27 @@ class PageCanvasInputInstrumentedTest {
         assertTombstoneBeforeLift("seed-first")
         sendStylus(MotionEvent.ACTION_UP, 300f, FIRST_STROKE_Y, downTime = downTime)
 
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching { !hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }.getOrDefault(false)
-        }
+        val erased =
+            composeRule.awaitInkPixels {
+                !hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt())
+            }
         assertTrue(
             "erased stroke cleared from the cached layer",
-            !hasInkAt(SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()),
+            !hasInkAt(erased, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()),
         )
         assertTrue(
             "the untouched stroke is still cached and drawn",
-            hasInkAt(SEED_ASSERTION_X, SECOND_STROKE_Y.toInt()),
+            hasInkAt(erased, SEED_ASSERTION_X, SECOND_STROKE_Y.toInt()),
         )
     }
 
     // Any non-white pixel: the canvas is white and this page has no paper, so
     // colour does not matter — only whether something was drawn there.
     private fun hasInkAt(
+        pixels: PixelMap,
         x: Int,
         y: Int,
-    ): Boolean {
-        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
-        return pixels[x, y] != Color.White
-    }
+    ): Boolean = pixels[x, y] != Color.White
 
     private fun assertTombstoneBeforeLift(expectedStrokeId: String) {
         val message = awaitMutation("commit-tombstones")

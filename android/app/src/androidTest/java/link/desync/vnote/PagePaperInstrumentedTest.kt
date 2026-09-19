@@ -1,11 +1,10 @@
 package link.desync.vnote
 
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -131,15 +130,13 @@ class PagePaperInstrumentedTest {
         composeRule.onNodeWithTag("paper-tool").performClick()
         composeRule.onNodeWithTag("paper-option-squared-small").performClick()
 
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching { countPaperPixels() > 0 }.getOrDefault(false)
-        }
-        assertTrue("paper pixels painted", countPaperPixels() > 0)
-
-        // The seeded stroke is still green-dominant ink where it was drawn: the
-        // paper colours are provably outside that classifier, and paper is drawn
+        // One frame carries both halves of the claim: paper painted, and the
+        // seeded stroke still green-dominant ink where it was drawn — the paper
+        // colours are provably outside that classifier, and paper is drawn
         // underneath in any case.
-        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+        val pixels = composeRule.awaitInkPixels { countPaperPixels(it) > 0 }
+        assertTrue("paper pixels painted", countPaperPixels(pixels) > 0)
+
         val ink = pixels[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()]
         assertTrue(
             "seeded ink stays ink-coloured, got $ink",
@@ -152,10 +149,8 @@ class PagePaperInstrumentedTest {
     fun welcomeCarriedPaperRendersOnOpen() {
         welcomePaper = "ruled-wide"
         openEditor()
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching { countPaperPixels() > 0 }.getOrDefault(false)
-        }
-        assertTrue("Welcome-carried paper is rendered", countPaperPixels() > 0)
+        val pixels = composeRule.awaitInkPixels { countPaperPixels(it) > 0 }
+        assertTrue("Welcome-carried paper is rendered", countPaperPixels(pixels) > 0)
     }
 
     /** Without the edit lease the control is disabled; the lease banner explains why. */
@@ -195,9 +190,7 @@ class PagePaperInstrumentedTest {
         composeRule.onNodeWithTag("paper-option-squared-large").performClick()
 
         assertNotNull("set-paper sent", awaitMutation("set-paper"))
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching { countPaperPixels() == 0 }.getOrDefault(false)
-        }
+        composeRule.awaitInkPixels { countPaperPixels(it) == 0 }
         assertEquals(
             "a refused change must not become the new-page default",
             Paper.None,
@@ -216,10 +209,8 @@ class PagePaperInstrumentedTest {
         assertNotNull("set-paper sent", awaitMutation("set-paper"))
         // The server rejects, the session reverts to Paper.None, and no paper
         // pixels survive on the canvas.
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching { countPaperPixels() == 0 }.getOrDefault(false)
-        }
-        assertEquals("optimistic paper reverted", 0, countPaperPixels())
+        val pixels = composeRule.awaitInkPixels { countPaperPixels(it) == 0 }
+        assertEquals("optimistic paper reverted", 0, countPaperPixels(pixels))
     }
 
     /** A new page is born with the paper last picked on this device. */
@@ -263,8 +254,7 @@ class PagePaperInstrumentedTest {
      * carries 46/255 and the margin (`#E06C6C`) 116/255 at full opacity,
      * against under 4/255 for the watermark.
      */
-    private fun countPaperPixels(): Int {
-        val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
+    private fun countPaperPixels(pixels: PixelMap): Int {
         var count = 0
         for (y in 0 until pixels.height) {
             for (x in 0 until pixels.width) {
@@ -306,12 +296,7 @@ class PagePaperInstrumentedTest {
             "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
             seedDelivered.await(5, TimeUnit.SECONDS),
         )
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching {
-                val pixels = composeRule.onNodeWithTag("ink-canvas").captureToImage().toPixelMap()
-                pixels[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()] != Color.White
-            }.getOrDefault(false)
-        }
+        composeRule.awaitInkPixels { it[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()] != Color.White }
     }
 
     private fun awaitMutation(
