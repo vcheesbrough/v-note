@@ -43,13 +43,27 @@ fail() {
 
 # The app does OIDC discovery at startup with its own retries, and the container
 # has just been recreated, so /auth/login can 5xx briefly before it settles.
+#
+# One request per attempt, reading the status and the Location together: asking
+# twice starts two flows (each mints its own state and PKCE verifier) and lets
+# the two answers disagree, so the URL asserted below would not be the one whose
+# status was checked. `|| true` keeps a refused connection from killing the loop
+# under `set -e` — that is the case the retry exists for.
 authorize_url=""
+status=000
 for attempt in $(seq 1 "$ATTEMPTS"); do
-  status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$SCHEME://$HOST/auth/login" || echo 000)
-  if [ "$status" = "303" ] || [ "$status" = "302" ]; then
-    authorize_url=$(curl -sS -o /dev/null -w '%{redirect_url}' --max-time 15 "$SCHEME://$HOST/auth/login")
-    break
-  fi
+  probe=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 \
+    "$SCHEME://$HOST/auth/login" 2>/dev/null || true)
+  status="${probe%% *}"
+  [ -n "$status" ] || status=000
+
+  case "$status" in
+    302 | 303)
+      authorize_url="${probe#* }"
+      break
+      ;;
+  esac
+
   echo "  attempt $attempt/$ATTEMPTS: /auth/login returned $status, retrying in ${DELAY}s"
   sleep "$DELAY"
 done

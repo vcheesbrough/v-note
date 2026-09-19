@@ -254,6 +254,10 @@ steps:
         branch: master
     depends_on:
       - auto-deploy-dev
+      # Also the smoke check: a release tag is a claim that this commit is good,
+      # and a build the pipeline has just proved nobody can log in to is not. #372
+      # would otherwise have been tagged as a release while login was down.
+      - smoke-oidc-login-auto-dev
     pull: true
     image: *version-plugin
     settings:

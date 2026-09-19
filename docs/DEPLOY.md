@@ -194,6 +194,23 @@ deploy — see [DEV.md](DEV.md) for running both locally.
 **This is a blueprint-authoring trap, not a one-off:** any new Authentik
 provider added here needs its `grant_types` spelled out.
 
+**Recovering an environment after the fix lands.** Correcting the blueprint does
+not correct the live provider — the blueprint has to be *applied*, and the two
+environments are applied by different triggers:
+
+| Environment | Applied by | When |
+| --- | --- | --- |
+| dev | `apply-authentik-blueprint-auto-dev` | automatically, on every push to `master` |
+| **prod** | `apply-authentik-blueprint-prod` | **only by a manual `prod` deployment** |
+
+So merging to `master` restores dev on its own, and **prod stays broken until
+someone runs a prod deployment**. `smoke-oidc-login-prod` verifies that
+deployment before it is called done. Confirm either environment by hand with:
+
+```bash
+V_NOTE_HOST=v-notes.desync.link ./scripts/smoke-oidc-login.sh
+```
+
 ### Migrating an environment to the unified client (#274)
 
 The blueprint **renames** the provider (`v-note-browser-{env}` → `v-note-{env}`),

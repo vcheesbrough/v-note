@@ -9,6 +9,7 @@ use base64::Engine;
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use tracing::Instrument as _;
 
 use crate::AppState;
@@ -124,6 +125,26 @@ struct TokenResponse {
     access_token: String,
 }
 
+/// Cap an IdP-supplied string before it reaches the logs.
+///
+/// Both `error` and `error_description` arrive on `/auth/callback`, which is
+/// unauthenticated — the state check only proves the caller owns *its own*
+/// cookie, which any caller can arrange. So these are attacker-controlled
+/// values of unbounded length, and logging them verbatim lets one request write
+/// an arbitrary amount into the log pipeline. Real IdP values are short; a
+/// truncated one is still enough to diagnose with.
+///
+/// Truncation is on `char_indices`, not a byte slice: a byte slice can land
+/// mid-codepoint and panic, which would turn a log line into a 500.
+fn truncate_for_log(value: &str) -> Cow<'_, str> {
+    const MAX_CHARS: usize = 200;
+
+    match value.char_indices().nth(MAX_CHARS) {
+        None => Cow::Borrowed(value),
+        Some((cutoff, _)) => Cow::Owned(format!("{}…", &value[..cutoff])),
+    }
+}
+
 #[tracing::instrument(skip_all)]
 pub async fn callback(
     State(state): State<AppState>,
@@ -154,14 +175,18 @@ pub async fn callback(
     // From here the caller has proven it owns this flow, so ending it is safe.
     if let Some(error) = &params.error {
         tracing::warn!(
-            error = %error,
-            error_description = params.error_description.as_deref().unwrap_or("<none>"),
+            error = %truncate_for_log(error),
+            error_description = %truncate_for_log(
+                params.error_description.as_deref().unwrap_or("<none>")
+            ),
             "auth callback received error",
         );
+        // Truncated here too: the body reflects the caller's own value back, and
+        // an unbounded one turns a diagnostic message into a payload carrier.
         return abort_flow(
             jar,
             StatusCode::FORBIDDEN,
-            format!("authentication denied: {error}"),
+            format!("authentication denied: {}", truncate_for_log(error)),
         );
     }
 
@@ -331,4 +356,56 @@ fn escape_js_string(value: &str) -> String {
         .replace('\r', "\\r")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_for_log;
+
+    #[test]
+    fn short_values_are_passed_through_unchanged() {
+        let value = "The request is otherwise malformed";
+        assert_eq!(truncate_for_log(value), value);
+    }
+
+    #[test]
+    fn long_values_are_capped() {
+        // Unbounded here means one request can write as much as it likes into
+        // the log pipeline; /auth/callback is unauthenticated.
+        let value = "a".repeat(10_000);
+        let truncated = truncate_for_log(&value);
+
+        assert_eq!(
+            truncated.chars().count(),
+            201,
+            "200 chars plus the ellipsis"
+        );
+        assert!(truncated.ends_with('…'));
+    }
+
+    /// A byte-slice truncation would panic here instead of logging: the cut at
+    /// 200 bytes lands inside a multi-byte character. A panic in the log line
+    /// would turn a diagnosable 403 into a 500.
+    #[test]
+    fn truncation_never_splits_a_multi_byte_character() {
+        for filler in ["é", "→", "😀"] {
+            let value = filler.repeat(500);
+            let truncated = truncate_for_log(&value);
+
+            assert_eq!(truncated.chars().count(), 201, "filler {filler}");
+            assert!(
+                truncated
+                    .trim_end_matches('…')
+                    .chars()
+                    .all(|c| value.contains(c)),
+                "filler {filler} was corrupted",
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_exactly_at_the_cap_is_not_truncated() {
+        let value = "x".repeat(200);
+        assert_eq!(truncate_for_log(&value), value);
+    }
 }
