@@ -182,9 +182,14 @@ steps:
     environment: *deploy-dev-environment
     commands: *deploy-commands
 
+  # `branch: master` follows auto-deploy-dev: Woodpecker prunes steps whose
+  # `when` does not match, so a dependent left on plain `event: push` would
+  # reference a step that no longer exists on a feature branch and fail the
+  # whole config as invalid.
   tag-release-auto-dev:
     when:
       - event: push
+        branch: master
     depends_on:
       - auto-deploy-dev
     pull: true
@@ -197,10 +202,11 @@ steps:
 
   # Publishes deploy/grafana/v-note-overview.json to Grafana (Applications / v-note)
   # over the HTTP API — the dashboard counterpart of apply-authentik-blueprint.
-  # Every push, on any branch, right after auto-deploy-dev: the dashboard tracks
-  # whatever is deployed to dev, so a branch's panels go live with the metrics they
-  # chart and can be checked before merge. The last push wins, as it does for dev
-  # itself, and the version message names the branch. Never from deploy-prod, which
+  # Every push to master, right after auto-deploy-dev: the dashboard tracks
+  # whatever is deployed to dev. It was previously published from any branch, but
+  # dev itself is now master-only (#274 — a branch push must not touch shared
+  # infrastructure), so a branch's dashboard would chart metrics from a build that
+  # was never deployed. The last push wins, and the version message names the branch. Never from deploy-prod, which
   # could roll the dashboard back to an older release. It does not gate
   # tag-release-auto-dev. grafana_api_token is the shared woodpecker-ci
   # service-account token (/woodpecker/shared, Edit on the Applications folder).
@@ -210,6 +216,7 @@ steps:
   publish-grafana-dashboard:
     when:
       - event: push
+        branch: master
     depends_on:
       - auto-deploy-dev
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
