@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 test('spa loads and renders metadata', async ({ page, request }) => {
   await page.goto('/');
@@ -36,6 +36,65 @@ for (const viewport of [
     await expect(downloadLink).toHaveAttribute('download', `v-note-${release}-dev-debug.apk`);
     await expect(downloadLink).toHaveAttribute('href', `/dl/apk?release=${release}`);
   });
+}
+
+// #355: `<details>` opens itself but never closes itself. Each of these is a
+// separate route back to a closed menu, so each is asserted on its own.
+test.describe('spa top bar menu dismissal', () => {
+  test('clicking away from the menu closes it', async ({ page }) => {
+    const panel = await openMenu(page);
+
+    // The brand sits in the same bar but outside the disclosure — the nearest
+    // thing to "clicked next to the menu" a user would do.
+    await page.getByRole('heading', { name: 'v-note' }).click();
+
+    await expect(panel).toBeHidden();
+  });
+
+  test('clicking a menu item closes it', async ({ page }) => {
+    // The apk item downloads rather than navigating, so nothing but our own
+    // handler can close the menu behind it. The transfer itself is not what is
+    // under test — `android-apk.spec.ts` covers that — so drop it and keep the
+    // click, which is what the handler hangs off.
+    await page.route('**/dl/apk*', (route) => route.abort());
+    const panel = await openMenu(page);
+
+    await page.getByRole('link', { name: 'Download Android app (.apk)' }).click();
+
+    await expect(panel).toBeHidden();
+  });
+
+  test('Escape closes the menu', async ({ page }) => {
+    const panel = await openMenu(page);
+
+    await page.keyboard.press('Escape');
+
+    await expect(panel).toBeHidden();
+  });
+
+  test('clicking inside the panel leaves it open', async ({ page }) => {
+    const panel = await openMenu(page);
+
+    await page.locator('.menu-identity').click();
+
+    await expect(panel).toBeVisible();
+  });
+});
+
+async function openMenu(page: Page) {
+  await page.goto('/', { waitUntil: 'load' });
+
+  const menuButton = page.locator('summary[aria-label="Open main menu"]');
+  await expect(menuButton).toBeVisible({ timeout: 15_000 });
+
+  await menuButton.click();
+
+  const panel = page.locator('.app-menu-panel');
+  await expect(panel).toBeVisible();
+  // These tests act on the signed-in panel, and waiting for an item only it
+  // carries also settles the `/api/me` round trip behind it.
+  await expect(page.getByRole('link', { name: 'Sign out' })).toBeVisible({ timeout: 15_000 });
+  return panel;
 }
 
 test('signed out shows the library with no pages and a sign-in control', async ({ browser }) => {
