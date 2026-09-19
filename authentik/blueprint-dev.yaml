@@ -47,6 +47,14 @@ entries:
       name: v-note-dev
       client_id: v-note-dev
       client_type: public
+      # Must be declared explicitly. A blueprint-created provider defaults to an
+      # empty grant list, which makes Authentik reject every authorize request
+      # with `invalid_request` ("the request is otherwise malformed") — the login
+      # outage in #372. `refresh_token` is required because the Android client
+      # requests `offline_access` and refreshes (auth/AuthRepository.kt).
+      grant_types:
+        - authorization_code
+        - refresh_token
       redirect_uris:
         - url: "https://v-notes-dev.desync.link/auth/callback"
           matching_mode: strict

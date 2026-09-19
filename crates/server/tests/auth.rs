@@ -402,6 +402,171 @@ async fn callback_with_an_idp_error_and_matching_state_clears_the_flow() {
     assert_eq!(cookie_value(&response, "auth_pkce").as_deref(), Some(""));
 }
 
+/// Captures the fields of every `tracing` event emitted while `run` executes.
+///
+/// The callback's IdP-error branch has no observable effect other than what it
+/// logs — same status, same cookies, same body whether or not the description is
+/// carried — so asserting the log line is the only way to cover it. Without this
+/// the obvious test passes on a build that never reads `error_description` at
+/// all, which is exactly the trap the first version of it fell into.
+fn capture_log_fields<Fut>(run: Fut) -> Vec<(String, String)>
+where
+    Fut: Future<Output = ()>,
+{
+    use std::sync::{Arc as StdArc, Mutex};
+    use tracing_subscriber::layer::{Context, SubscriberExt as _};
+
+    #[derive(Clone)]
+    struct Capture(StdArc<Mutex<Vec<(String, String)>>>);
+
+    impl tracing::field::Visit for Capture {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            event.record(&mut self.clone());
+        }
+    }
+
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(Capture(StdArc::clone(&captured)));
+
+    // The subscriber is thread-local, so the whole future is driven to completion
+    // *inside* the guard by a current-thread runtime. Installing it in an async
+    // test instead would drop the guard at the first await and capture nothing.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || runtime.block_on(run));
+
+    captured.lock().expect("capture lock").clone()
+}
+
+/// The #372 callback verbatim, asserting the field that was actually added.
+///
+/// Authentik reported a provider it would not accept as a bare
+/// `error=invalid_request` and put the only diagnostic detail in
+/// `error_description` — which the callback parsed past and dropped, so the logs
+/// named the symptom and never the cause. Nothing user-visible changed when that
+/// field was captured, so this reads the emitted log event rather than the
+/// response: an assertion on status, cookies and body alone passes on a build
+/// that still discards the description.
+#[test]
+fn callback_logs_the_idp_error_description() {
+    let fields = capture_log_fields(async {
+        let auth = Arc::new(test_auth_config());
+        let jwks = Arc::new(test_jwks_cache());
+        let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/auth/callback?state=the-state&error=invalid_request\
+                         &error_description=The%20request%20is%20otherwise%20malformed",
+                    )
+                    .header("cookie", "auth_state=the-state; auth_pkce=the-verifier")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(cookie_value(&response, "auth_state").as_deref(), Some(""));
+        assert_eq!(cookie_value(&response, "auth_pkce").as_deref(), Some(""));
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "authentication denied: invalid_request",
+        );
+    });
+
+    let value = |name: &str| {
+        fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+    };
+
+    assert_eq!(value("error").as_deref(), Some("invalid_request"));
+    assert_eq!(
+        value("error_description").as_deref(),
+        Some("The request is otherwise malformed"),
+        "the IdP's reason must reach the log: {fields:?}",
+    );
+}
+
+/// The same branch with an oversized description: one unauthenticated request
+/// must not be able to write an arbitrary amount into the log pipeline, and the
+/// reflected body must not become a payload carrier either.
+#[test]
+fn callback_truncates_an_oversized_idp_error() {
+    let long_error = "e".repeat(5_000);
+    let long_description = "d".repeat(5_000);
+    let uri = format!(
+        "/auth/callback?state=the-state&error={long_error}&error_description={long_description}"
+    );
+
+    let fields = capture_log_fields(async move {
+        let auth = Arc::new(test_auth_config());
+        let jwks = Arc::new(test_jwks_cache());
+        let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header("cookie", "auth_state=the-state; auth_pkce=the-verifier")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(
+            body.chars().count() < 300,
+            "the reflected body must be capped, got {} chars",
+            body.chars().count(),
+        );
+    });
+
+    for name in ["error", "error_description"] {
+        let value = fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("{name} should be logged: {fields:?}"));
+
+        assert_eq!(value.chars().count(), 201, "{name} should be capped");
+        assert!(value.ends_with('…'), "{name} should be marked as truncated");
+    }
+}
+
 /// A state mismatch must still be caught first — the verifier is not a
 /// substitute for CSRF protection on the callback.
 #[tokio::test]

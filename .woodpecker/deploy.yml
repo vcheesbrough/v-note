@@ -201,6 +201,49 @@ steps:
     environment: *deploy-dev-environment
     commands: *deploy-commands
 
+  # The gate #372 was missing. Everything upstream of this step passed while login
+  # was down in both environments: the blueprint applied, the app was healthy, and
+  # e2e was green against a mock IdP with no client registry. This is the only
+  # step that asks the *real* Authentik whether it will accept our authorize
+  # request. It runs after the deploy so it exercises the provider and the app
+  # that were just published together.
+  #
+  # curl is deliberately unpinned, as in publish-grafana-dashboard: the base image
+  # is digest-pinned, and Alpine drops superseded versions from a stable branch.
+  smoke-oidc-login-auto-dev:
+    when:
+      - event: push
+        branch: master
+    depends_on:
+      - auto-deploy-dev
+    image: &smoke-image alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    environment: &smoke-dev-environment
+      V_NOTE_HOST: v-notes-dev.desync.link
+    commands: &smoke-commands
+      - apk add --no-cache curl bash
+      - ./scripts/smoke-oidc-login.sh
+
+  smoke-oidc-login-dev:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - deploy-dev
+    image: *smoke-image
+    environment: *smoke-dev-environment
+    commands: *smoke-commands
+
+  smoke-oidc-login-prod:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - deploy-prod
+    image: *smoke-image
+    environment:
+      V_NOTE_HOST: v-notes.desync.link
+    commands: *smoke-commands
+
   # `branch: master` follows auto-deploy-dev: Woodpecker prunes steps whose
   # `when` does not match, so a dependent left on plain `event: push` would
   # reference a step that no longer exists on a feature branch and fail the
@@ -211,6 +254,10 @@ steps:
         branch: master
     depends_on:
       - auto-deploy-dev
+      # Also the smoke check: a release tag is a claim that this commit is good,
+      # and a build the pipeline has just proved nobody can log in to is not. #372
+      # would otherwise have been tagged as a release while login was down.
+      - smoke-oidc-login-auto-dev
     pull: true
     image: *version-plugin
     settings:
