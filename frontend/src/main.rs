@@ -59,6 +59,7 @@ fn apk_download_url() -> String {
 #[component]
 fn MainMenu(me: RwSignal<Session>) -> impl IntoView {
     let menu: NodeRef<html::Details> = NodeRef::new();
+    let summary: NodeRef<html::Summary> = NodeRef::new();
     let close = move || {
         if let Some(menu) = menu.get_untracked() {
             menu.set_open(false);
@@ -86,8 +87,24 @@ fn MainMenu(me: RwSignal<Session>) -> impl IntoView {
 
     Effect::new(move |_| {
         let keydown = window_event_listener(ev::keydown, move |event| {
-            if event.key() == "Escape" {
-                close();
+            if event.key() != "Escape" {
+                return;
+            }
+            let Some(menu) = menu.get_untracked() else {
+                return;
+            };
+            // Only an open menu answers Escape, or every Escape in the library
+            // would pull focus to the hamburger.
+            if !menu.open() {
+                return;
+            }
+            menu.set_open(false);
+            // A keyboard dismissal hands focus back to the control that owns
+            // the panel instead of letting it fall to `body`, which would send
+            // the next Tab back to the top of the document. Click-away must not
+            // do this: there the focus belongs wherever the user clicked.
+            if let Some(summary) = summary.get_untracked() {
+                let _ = summary.focus();
             }
         });
         on_cleanup(move || keydown.remove());
@@ -95,7 +112,7 @@ fn MainMenu(me: RwSignal<Session>) -> impl IntoView {
 
     view! {
         <details class="app-menu" node_ref=menu>
-            <summary aria-label="Open main menu"><span aria-hidden="true">"☰"</span></summary>
+            <summary node_ref=summary aria-label="Open main menu"><span aria-hidden="true">"☰"</span></summary>
             <div class="app-menu-panel">
                 {move || match me.get() {
                     Some(Ok(profile)) => view! {

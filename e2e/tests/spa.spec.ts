@@ -52,24 +52,33 @@ test.describe('spa top bar menu dismissal', () => {
   });
 
   test('clicking a menu item closes it', async ({ page }) => {
-    // The apk item downloads rather than navigating, so nothing but our own
-    // handler can close the menu behind it. The transfer itself is not what is
-    // under test — `android-apk.spec.ts` covers that — so drop it and keep the
-    // click, which is what the handler hangs off.
-    await page.route('**/dl/apk*', (route) => route.abort());
     const panel = await openMenu(page);
 
+    // `close()` hides the anchor while the click is still being dispatched, so
+    // assert the save actually starts as well as that the menu goes away — a
+    // fix that dismissed the menu and swallowed the download would otherwise
+    // look green. What `app` returns here is the SPA index, not a real apk
+    // (`android-apk.spec.ts` covers the route itself, on its own host); the
+    // `download` attribute makes the browser save it either way, which is the
+    // behaviour under test.
+    const download = page.waitForEvent('download');
     await page.getByRole('link', { name: 'Download Android app (.apk)' }).click();
 
     await expect(panel).toBeHidden();
+    expect((await download).suggestedFilename()).toMatch(/^v-note-.+\.apk$/);
   });
 
-  test('Escape closes the menu', async ({ page }) => {
+  test('Escape closes the menu and returns focus to the summary', async ({ page }) => {
     const panel = await openMenu(page);
+    // Where a keyboard user would be standing when they hit Escape.
+    await page.getByRole('link', { name: 'Sign out' }).focus();
 
     await page.keyboard.press('Escape');
 
     await expect(panel).toBeHidden();
+    // Without this the blurred link drops focus to `body` and the next Tab
+    // restarts from the top of the document.
+    await expect(page.locator('summary[aria-label="Open main menu"]')).toBeFocused();
   });
 
   test('clicking inside the panel leaves it open', async ({ page }) => {
@@ -117,6 +126,15 @@ test('signed out shows the library with no pages and a sign-in control', async (
       page.locator('.bar-right').getByRole('link', { name: 'Sign in' }),
     ).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.page-tile')).toHaveCount(0);
+
+    // The signed-out panel renders its own apk item, so its `close()` is a
+    // second call site rather than the one the dismissal tests above cover.
+    await page.route('**/dl/apk*', (route) => route.abort());
+    await page.locator('summary[aria-label="Open main menu"]').click();
+    const panel = page.locator('.app-menu-panel');
+    await expect(panel).toBeVisible();
+    await page.getByRole('link', { name: 'Download Android app (.apk)' }).click();
+    await expect(panel).toBeHidden();
   } finally {
     await context.close();
   }
