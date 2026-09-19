@@ -3,10 +3,13 @@ use protocol::{
     visit_paper_marks,
 };
 use sqlx::PgPool;
+use std::sync::OnceLock;
 use std::time::Instant;
 use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkiaStroke, Transform,
+    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PremultipliedColorU8,
+    Stroke as SkiaStroke, Transform,
 };
+use tokio::sync::Semaphore;
 
 use tracing::Instrument as _;
 
@@ -16,10 +19,27 @@ use crate::observability::{db_query_span, metered};
 const WIDTH: u32 = 240;
 const HEIGHT: u32 = 160;
 const PADDING: f32 = 12.0;
-// Preview-only width floor so heavily scaled-down ink stays visible without
-// turning into hairlines. Was 20.0, which on a full page of handwriting (small
-// scale, so the floor dominates every stroke) merged all ink into blobs.
-const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 4.0;
+/// Ink and paper are rasterized at `SUPERSAMPLE`× the delivered size and
+/// box-filtered back down. Only the draw transform carries the factor — every
+/// scale, offset and device-space floor below stays in delivered-image pixels.
+///
+/// This is what lets the width floor be one real pixel: at 3× a floored stroke
+/// is three subpixels wide, so it downsamples to a solid line wherever it falls
+/// between pixel centres, instead of the two half-coverage grey pixels
+/// `tiny_skia`'s antialiasing would leave at 1×.
+const SUPERSAMPLE: u32 = 3;
+// Preview-only width floor, in delivered-image pixels — the resolution limit of
+// the image itself rather than a tunable. Was 20.0 (a full page of handwriting
+// merged into blobs), then 4.0, which still flattened every pen under 28 world
+// units at a dense page's fitted scale onto one identical line. Supersampling
+// keeps a 1px line legible, so relative pen weight now survives for any stroke
+// wider than a pixel.
+const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 1.0;
+/// Ceiling on rasterizations in flight. A burst of commits queues one job per
+/// revision, and each holds a supersampled pixmap (~1.4 MB) plus a CPU-bound
+/// render, so they are bounded rather than left to the blocking pool's 512
+/// threads. A permit, not a queue: no persistence, no retry, no lease.
+const MAX_CONCURRENT_RENDERS: usize = 4;
 
 pub fn recover_pending(state: AppState) {
     let pool = state.db.clone();
@@ -122,6 +142,17 @@ pub fn thumbnail_url(page_id: &str, source_seq: u64) -> String {
     format!("/api/pages/{page_id}/thumbnails/{source_seq}")
 }
 
+/// Process-wide bound on concurrent rasterizations, sized to the machine but
+/// capped: past a handful of renders the work is CPU-bound anyway, and the
+/// point is to stop a commit burst holding N pixmaps at once.
+fn render_permits() -> &'static Semaphore {
+    static PERMITS: OnceLock<Semaphore> = OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let parallelism = std::thread::available_parallelism().map_or(1, |count| count.get());
+        Semaphore::new(parallelism.clamp(1, MAX_CONCURRENT_RENDERS))
+    })
+}
+
 async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), String> {
     // Thumbnails are immutable per revision, so the paper comes from the *job
     // row* — the paper in force when this revision was minted — never from
@@ -167,8 +198,19 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
         .flat_map(|batch| batch.0)
         .filter(|stroke| !tombstones.contains(&stroke.id))
         .collect();
-    let png = tracing::info_span!("thumbnail.render", strokes = strokes.len())
-        .in_scope(|| render(paper, &strokes))?;
+    // Rasterization is synchronous and CPU-bound, so it runs on the blocking
+    // pool rather than on the runtime worker this task was spawned onto. The
+    // span is entered *inside* the closure — entering it here would time the
+    // handoff, not the render, and leave `thumbnail.render` at zero in Tempo.
+    let span = tracing::info_span!("thumbnail.render", strokes = strokes.len());
+    let permit = render_permits()
+        .acquire()
+        .await
+        .map_err(|error| error.to_string())?;
+    let png = tokio::task::spawn_blocking(move || span.in_scope(|| render(paper, &strokes)))
+        .await
+        .map_err(|error| error.to_string())??;
+    drop(permit);
     let png_bytes = png.len();
     sqlx::query(
         "UPDATE page_thumbnails SET status = 'available', png = $3 WHERE page_id = $1 AND source_seq = $2",
@@ -194,7 +236,8 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         .filter(|stroke| !stroke.points.is_empty() && stroke.validate().is_ok())
         .flat_map(|stroke| stroke.points.iter())
         .collect();
-    let mut pixmap = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
+    let mut pixmap = Pixmap::new(WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE)
+        .ok_or("could not allocate thumbnail")?;
     pixmap.fill(Color::WHITE);
     if points.is_empty() {
         // With no drawable points the bounds fold below yields ±INFINITY and the
@@ -203,7 +246,11 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         // too and would walk an infinite viewport — an all-erased page is a job
         // `persist_tombstones` really creates. A blank page has no ink to anchor
         // paper to, and the card forbids paper-only thumbnails, so return white.
-        return pixmap.encode_png().map_err(|error| error.to_string());
+        // Allocated at the delivered size directly: an all-white surface has
+        // nothing for the box filter to average.
+        let mut blank = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
+        blank.fill(Color::WHITE);
+        return blank.encode_png().map_err(|error| error.to_string());
     }
     let (min_x, max_x, min_y, max_y) = points.iter().fold(
         (
@@ -259,7 +306,7 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         let blue = u8::from_str_radix(&color[5..7], 16).map_err(|error| error.to_string())?;
         let mut paint = Paint::default();
         paint.set_color_rgba8(red, green, blue, 0xff);
-        let transform = Transform::from_scale(scale, scale).post_translate(offset_x, offset_y);
+        let transform = draw_transform(scale, offset_x, offset_y);
 
         // Pressure-modulated (v2) strokes render as per-segment variable-width
         // ribbons; v1 keeps the single constant-width path below byte-identical.
@@ -299,7 +346,60 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
             pixmap.stroke_path(&path, &paint, &pen, transform, None);
         }
     }
-    pixmap.encode_png().map_err(|error| error.to_string())
+    downsample(&pixmap)?
+        .encode_png()
+        .map_err(|error| error.to_string())
+}
+
+/// World → supersampled-device transform. `scale` and the offsets stay in
+/// delivered-image pixels throughout `render`, and the factor is applied last,
+/// so a world width `w` lands at `w * scale * SUPERSAMPLE` subpixels — exactly
+/// `w * scale` delivered pixels once [`downsample`] has run. Every device-space
+/// floor in this module therefore keeps meaning delivered pixels.
+fn draw_transform(scale: f32, offset_x: f32, offset_y: f32) -> Transform {
+    let factor = SUPERSAMPLE as f32;
+    Transform::from_scale(scale, scale)
+        .post_translate(offset_x, offset_y)
+        .post_scale(factor, factor)
+}
+
+/// Box-filter the supersampled surface down to `WIDTH`×`HEIGHT`, averaging each
+/// `SUPERSAMPLE`×`SUPERSAMPLE` block.
+///
+/// An exact box filter rather than `Pattern` with `FilterQuality::Bilinear`:
+/// bilinear samples 2×2 regardless of the reduction, so a third of the
+/// subpixels would never be read and thin ink would alias back out. Averaging
+/// premultiplied bytes is the correct filter for compositing, and since the
+/// surface starts as an opaque white fill every alpha is 255 — so this is also
+/// a plain mean of the sRGB channels.
+fn downsample(source: &Pixmap) -> Result<Pixmap, String> {
+    let mut target = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
+    let factor = SUPERSAMPLE as usize;
+    let source_width = (WIDTH * SUPERSAMPLE) as usize;
+    let samples = SUPERSAMPLE * SUPERSAMPLE;
+    let source_pixels = source.pixels();
+    let target_pixels = target.pixels_mut();
+    for y in 0..HEIGHT as usize {
+        for x in 0..WIDTH as usize {
+            let (mut red, mut green, mut blue, mut alpha) = (0u32, 0u32, 0u32, 0u32);
+            for row in 0..factor {
+                let start = (y * factor + row) * source_width + x * factor;
+                for pixel in &source_pixels[start..start + factor] {
+                    red += u32::from(pixel.red());
+                    green += u32::from(pixel.green());
+                    blue += u32::from(pixel.blue());
+                    alpha += u32::from(pixel.alpha());
+                }
+            }
+            // Round to nearest so a fully covered block is not walked one step
+            // toward white by integer truncation.
+            let mean = |sum: u32| ((sum + samples / 2) / samples) as u8;
+            target_pixels[y * WIDTH as usize + x] =
+                PremultipliedColorU8::from_rgba(mean(red), mean(green), mean(blue), mean(alpha))
+                    .ok_or("downsampled pixel is not premultiplied")?;
+        }
+    }
+    Ok(target)
 }
 
 /// Lay the faint paper grain over the whole pixmap, under both the rules and
@@ -321,9 +421,15 @@ fn draw_paper_texture(pixmap: &mut Pixmap, paper: Paper) {
     let height = pixmap.height() as usize;
     let pixels = pixmap.pixels_mut();
 
+    // Tiled against *delivered* pixels, not the supersampled surface it is
+    // painted on: indexing raw coordinates would make the grain SUPERSAMPLE×
+    // finer than the live canvases once the surface is downsampled. Each grain
+    // cell is a SUPERSAMPLE×SUPERSAMPLE block, so it averages back to exactly
+    // one delivered pixel at its own alpha.
+    let cell = SUPERSAMPLE as usize;
     for y in 0..height {
         for x in 0..width {
-            let alpha = tile[(y % size) * size + (x % size)];
+            let alpha = tile[((y / cell) % size) * size + ((x / cell) % size)];
             if alpha == 0 {
                 continue;
             }
@@ -375,7 +481,7 @@ fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offs
         to_world(HEIGHT as f32, offset_y),
         scale as f64,
     );
-    let transform = Transform::from_scale(scale, scale).post_translate(offset_x, offset_y);
+    let transform = draw_transform(scale, offset_x, offset_y);
 
     // Only two (colour, width) pairs exist across every mark, so build them once
     // rather than reallocating a Paint and a Stroke for each line.

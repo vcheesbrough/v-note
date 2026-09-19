@@ -299,6 +299,143 @@ fn dense_page_short_strokes_stay_lines_not_circles() {
     );
 }
 
+/// A v1 pen of a given world width, as its own horizontal line on a page whose
+/// fitted scale is small enough that the old 4px floor swallowed both pens.
+fn pen_line(id: &str, width: f64, x_from: f64, x_to: f64, y: f64) -> Stroke {
+    let mut style = StrokeStyle::default_solid_round();
+    style.parameters.width = width;
+    Stroke {
+        id: id.to_string(),
+        style,
+        points: vec![
+            StrokePoint {
+                x: x_from,
+                y,
+                t: 0,
+                pressure: None,
+            },
+            StrokePoint {
+                x: x_to,
+                y,
+                t: 8,
+                pressure: None,
+            },
+        ],
+    }
+}
+
+/// A single-point v1 dot, used to fix the page bounds (and so the fitted
+/// scale) without drawing through the region a pen line is measured in.
+fn anchor_dot(id: &str, x: f64, y: f64) -> Stroke {
+    Stroke {
+        id: id.to_string(),
+        style: StrokeStyle::default_solid_round(),
+        points: vec![StrokePoint {
+            x,
+            y,
+            t: 0,
+            pressure: None,
+        }],
+    }
+}
+
+/// A page spanning 1500×1000 world units fits at scale ≈ 0.136, where a 1-unit
+/// pen is 0.14 device px and a 32-unit pen is 4.35. Under the old 4px floor the
+/// thin pen was lifted to 4.0 and the thick one drew at 4.35 — a 0.35px
+/// difference, which is why a mixed-weight page looked uniform. Each pen gets
+/// its own x range so a sampled column crosses exactly one of them.
+fn mixed_weight_page() -> Vec<Stroke> {
+    vec![
+        anchor_dot("anchor_origin", 0.0, 0.0),
+        anchor_dot("anchor_far", 1500.0, 1000.0),
+        pen_line("thin", 1.0, 100.0, 600.0, 400.0),
+        pen_line("thick", 32.0, 900.0, 1400.0, 700.0),
+    ]
+}
+
+/// The card's headline: at a dense page's fitted scale, a thin pen and a thick
+/// pen must render at visibly different widths instead of collapsing onto the
+/// floor. Fails on the 4px-floor renderer, where both measure the same.
+#[test]
+fn mixed_pen_weights_stay_distinguishable_at_preview_scale() {
+    let pixmap = rendered(Paper::None, &mixed_weight_page());
+    // Columns inside each line's own x range: world 350 and 1150 mapped
+    // through the same fitted transform `render` derives (scale ≈ 0.136,
+    // offsets 18 and 12).
+    let thin = column_thickness(&pixmap, 66);
+    let thick = column_thickness(&pixmap, 174);
+    assert!(thin > 0, "the thin pen should render at all");
+    assert!(
+        thick >= thin + 2,
+        "thick pen must read as heavier than the thin one: thin={thin}px thick={thick}px"
+    );
+}
+
+/// The floor is now one delivered pixel, which is only legible because the ink
+/// is rasterized supersampled and averaged down. Rasterized at 1× the same
+/// stroke would land as two half-coverage pixels — the "faint wash" artefact
+/// iteration 21 had to fix once already — so this pins the coverage, not just
+/// the presence, of a floored stroke.
+#[test]
+fn floored_stroke_renders_as_solid_ink_not_a_wash() {
+    let pixmap = rendered(Paper::None, &mixed_weight_page());
+    let mut darkest_green = 255u8;
+    let mut thickest = 0;
+    for x in 40..100 {
+        let thickness = column_thickness(&pixmap, x);
+        if thickness == 0 {
+            continue;
+        }
+        thickest = thickest.max(thickness);
+        for y in 0..HEIGHT {
+            let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+            if pixel.green() > pixel.red() && pixel.green() > pixel.blue() {
+                darkest_green = darkest_green.min(pixel.green());
+            }
+        }
+    }
+    // Canonical ink (#006400) has green=100; the same threshold the dense-page
+    // regression uses for "not a faint wash".
+    assert!(
+        darkest_green <= 150,
+        "a floored stroke should reach near-full ink opacity (darkest green = {darkest_green})"
+    );
+    assert!(
+        thickest <= 3,
+        "a floored stroke should stay about a pixel wide, not spread (thickest = {thickest}px)"
+    );
+}
+
+/// Supersampling must not shrink the paper grain: each grain cell is painted as
+/// a `SUPERSAMPLE`-square block, so the delivered image keeps the tile's own
+/// period — the constant on-screen size `draw_paper_texture` promises.
+#[test]
+fn grain_period_survives_the_downsample() {
+    let mut pixmap =
+        Pixmap::new(WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE).expect("pixmap should allocate");
+    pixmap.fill(Color::WHITE);
+    draw_paper_texture(&mut pixmap, Paper::RuledNarrow);
+    let delivered = downsample(&pixmap).expect("downsample should allocate");
+
+    let period = protocol::PAPER_TEXTURE_TILE_SIZE as u32;
+    let mut grained = 0;
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH - period {
+            let here = delivered.pixel(x, y).expect("pixel should exist");
+            let next = delivered.pixel(x + period, y).expect("pixel should exist");
+            assert_eq!(
+                (here.red(), here.green(), here.blue()),
+                (next.red(), next.green(), next.blue()),
+                "grain period changed at ({x}, {y})"
+            );
+            if here.red() != 255 {
+                grained += 1;
+            }
+        }
+    }
+    assert!(grained > 500, "grain should reach the delivered image");
+}
+
 /// At full pressure a v2 stroke reaches the same nib width as the constant v1
 /// pen — the pressure model only *narrows* below the preset width.
 #[test]
@@ -590,19 +727,16 @@ fn margin_reaching_page() -> Vec<Stroke> {
 /// Rule/grid pixels blend toward white, which preserves their `b > g > r`
 /// channel ordering — and that ordering is disjoint from the green-dominant
 /// ink classifier.
-fn is_rule_pixel(pixel: tiny_skia::PremultipliedColorU8) -> bool {
+fn is_rule_pixel(pixel: PremultipliedColorU8) -> bool {
     pixel.blue() > pixel.green() && pixel.green() > pixel.red()
 }
 
 /// Margin pixels blend toward white preserving `r > g` and `r > b`.
-fn is_margin_pixel(pixel: tiny_skia::PremultipliedColorU8) -> bool {
+fn is_margin_pixel(pixel: PremultipliedColorU8) -> bool {
     pixel.red() > pixel.green() && pixel.red() > pixel.blue()
 }
 
-fn count_pixels(
-    pixmap: &Pixmap,
-    predicate: impl Fn(tiny_skia::PremultipliedColorU8) -> bool,
-) -> u32 {
+fn count_pixels(pixmap: &Pixmap, predicate: impl Fn(PremultipliedColorU8) -> bool) -> u32 {
     let mut count = 0;
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -680,14 +814,16 @@ fn every_paper_draws_and_only_margin_papers_paint_a_margin() {
 #[test]
 fn texture_covers_the_surface_without_tinting_it() {
     // Exercised in isolation, so antialiased rule edges cannot be mistaken
-    // for grain.
-    let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("pixmap should allocate");
+    // for grain — and on a supersampled surface, which is the only size
+    // `render` ever paints the grain onto.
+    let mut pixmap =
+        Pixmap::new(WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE).expect("pixmap should allocate");
     pixmap.fill(Color::WHITE);
     draw_paper_texture(&mut pixmap, Paper::RuledNarrow);
 
     let mut grain = 0;
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
+    for y in 0..HEIGHT * SUPERSAMPLE {
+        for x in 0..WIDTH * SUPERSAMPLE {
             let pixel = pixmap.pixel(x, y).expect("pixel should exist");
             let (red, green, blue) = (pixel.red(), pixel.green(), pixel.blue());
             if (red, green, blue) == (255, 255, 255) {
@@ -709,11 +845,12 @@ fn texture_covers_the_surface_without_tinting_it() {
     );
 
     // A blank page is left completely untouched.
-    let mut blank = Pixmap::new(WIDTH, HEIGHT).expect("pixmap should allocate");
+    let mut blank =
+        Pixmap::new(WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE).expect("pixmap should allocate");
     blank.fill(Color::WHITE);
     draw_paper_texture(&mut blank, Paper::None);
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
+    for y in 0..HEIGHT * SUPERSAMPLE {
+        for x in 0..WIDTH * SUPERSAMPLE {
             let pixel = blank.pixel(x, y).expect("pixel should exist");
             assert_eq!(
                 (pixel.red(), pixel.green(), pixel.blue()),
