@@ -52,6 +52,19 @@ fn clear_transient_auth_cookie(name: &'static str) -> Cookie<'static> {
         .build()
 }
 
+/// Clear both transient cookies. An abandoned flow must not leave a replayable
+/// `state`/`code_verifier` pair sitting in the browser for the rest of the
+/// 300 s window — a failed callback ends the flow, so it ends the cookies too.
+fn clear_flow_cookies(jar: CookieJar) -> CookieJar {
+    jar.add(clear_transient_auth_cookie(STATE_COOKIE))
+        .add(clear_transient_auth_cookie(PKCE_COOKIE))
+}
+
+/// Abandon the login flow: clear its cookies and answer with `status`.
+fn abort_flow(jar: CookieJar, status: StatusCode, message: impl Into<String>) -> Response {
+    (status, clear_flow_cookies(jar), message.into()).into_response()
+}
+
 #[tracing::instrument(skip_all)]
 pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     let auth = &state.auth;
@@ -115,21 +128,21 @@ pub async fn callback(
 
     if let Some(error) = &params.error {
         tracing::warn!(error = %error, "auth callback received error");
-        return (
+        return abort_flow(
+            jar,
             StatusCode::FORBIDDEN,
             format!("authentication denied: {error}"),
-        )
-            .into_response();
+        );
     }
 
     let cookie_state = jar
         .get(STATE_COOKIE)
         .map(|cookie| cookie.value().to_string());
     let Some(cookie_state) = cookie_state else {
-        return (StatusCode::BAD_REQUEST, "missing state cookie").into_response();
+        return abort_flow(jar, StatusCode::BAD_REQUEST, "missing state cookie");
     };
     if cookie_state != params.state {
-        return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
+        return abort_flow(jar, StatusCode::BAD_REQUEST, "state mismatch");
     }
 
     // The PKCE verifier is mandatory: without it the exchange would fall back to
@@ -144,11 +157,11 @@ pub async fn callback(
         // from a generic 400: during rollout it is the signal that a browser is
         // finishing a flow it started against the pre-PKCE build.
         tracing::warn!("auth callback without a PKCE verifier cookie");
-        return (StatusCode::BAD_REQUEST, "missing PKCE verifier cookie").into_response();
+        return abort_flow(jar, StatusCode::BAD_REQUEST, "missing PKCE verifier cookie");
     };
 
     let Some(code) = params.code else {
-        return (StatusCode::BAD_REQUEST, "missing code").into_response();
+        return abort_flow(jar, StatusCode::BAD_REQUEST, "missing code");
     };
 
     let http = reqwest::Client::new();
@@ -174,17 +187,17 @@ pub async fn callback(
                 Ok(token) => token,
                 Err(error) => {
                     tracing::error!(error = %error, "failed to parse token response");
-                    return (StatusCode::BAD_GATEWAY, "token parse failed").into_response();
+                    return abort_flow(jar, StatusCode::BAD_GATEWAY, "token parse failed");
                 }
             },
             Err(error) => {
                 tracing::error!(error = %error, "token endpoint returned error");
-                return (StatusCode::BAD_GATEWAY, "token exchange failed").into_response();
+                return abort_flow(jar, StatusCode::BAD_GATEWAY, "token exchange failed");
             }
         },
         Err(error) => {
             tracing::error!(error = %error, "token endpoint unreachable");
-            return (StatusCode::BAD_GATEWAY, "token endpoint unreachable").into_response();
+            return abort_flow(jar, StatusCode::BAD_GATEWAY, "token endpoint unreachable");
         }
     };
 
@@ -198,7 +211,7 @@ pub async fn callback(
             crate::auth::TokenValidationError::Invalid(reason) => reason,
         };
         tracing::warn!(reason = message, "issued access token failed validation");
-        return (StatusCode::FORBIDDEN, "issued token failed validation").into_response();
+        return abort_flow(jar, StatusCode::FORBIDDEN, "issued token failed validation");
     }
 
     let session = Cookie::build((AUTH_COOKIE, token_response.access_token))
@@ -208,12 +221,7 @@ pub async fn callback(
         .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(AUTH_COOKIE_MAX_AGE_SECS))
         .build();
-    let jar = jar
-        .add(session)
-        .add(clear_transient_auth_cookie(STATE_COOKIE))
-        .add(clear_transient_auth_cookie(PKCE_COOKIE));
-
-    (jar, Redirect::to("/")).into_response()
+    (clear_flow_cookies(jar).add(session), Redirect::to("/")).into_response()
 }
 
 #[tracing::instrument(skip_all)]

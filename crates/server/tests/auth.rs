@@ -3,7 +3,7 @@ mod common;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use base64::Engine;
-use server::auth::{JwksCache, validate_jwt};
+use server::auth::{AuthConfig, JwksCache, validate_jwt};
 use server::build_router;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -369,4 +369,123 @@ async fn callback_state_mismatch_is_still_rejected_with_a_verifier_present() {
         String::from_utf8(body.to_vec()).expect("body should be UTF-8"),
         "state mismatch"
     );
+}
+
+/// A one-shot stub token endpoint. Returns its bound URL and a handle that
+/// yields the exact form body the server POSTed.
+///
+/// The e2e flow runs against `navikt/mock-oauth2-server`, which is not
+/// contracted to enforce the challenge↔verifier binding — so it would stay green
+/// even if the server posted the wrong value, or none. This asserts the wire
+/// bytes directly.
+async fn stub_token_endpoint(
+    response_body: String,
+) -> (String, tokio::sync::oneshot::Receiver<String>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("stub token endpoint should bind");
+    let addr = listener.local_addr().expect("stub should have an address");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("stub should accept");
+
+        // Read headers, then exactly Content-Length bytes of body.
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        let body = loop {
+            let read = socket.read(&mut buf).await.expect("stub should read");
+            if read == 0 {
+                break String::new();
+            }
+            raw.extend_from_slice(&buf[..read]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            let Some(header_end) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let length: usize = text[..header_end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().ok())?
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            if raw.len() - body_start >= length {
+                break text[body_start..body_start + length].to_string();
+            }
+        };
+        let _ = tx.send(body);
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+    });
+
+    (format!("http://{addr}/token"), rx)
+}
+
+#[tokio::test]
+async fn callback_exchanges_the_code_with_the_verifier_and_no_client_secret() {
+    let verifier = "test-code-verifier-0123456789012345678901234";
+    let config = test_auth_config();
+
+    let access_token = sign_test_token(SignedTokenClaims {
+        sub: "browser-user".to_string(),
+        iss: config.issuer_url.clone(),
+        exp: one_hour_from_now(),
+        scope: config.required_scope.clone(),
+        aud: config.client_id.clone(),
+    });
+    let (token_url, body_rx) =
+        stub_token_endpoint(format!(r#"{{"access_token":"{access_token}"}}"#)).await;
+
+    let auth = Arc::new(AuthConfig {
+        token_endpoint: token_url,
+        ..config
+    });
+    let jwks = Arc::new(test_jwks_cache());
+    let app = build_router("test-version".to_string(), auth, jwks, unreachable_pool());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/callback?code=the-code&state=the-state")
+                .header(
+                    "cookie",
+                    format!("auth_state=the-state; auth_pkce={verifier}"),
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    // The exchange succeeded and the session was established.
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let session = cookie_value(&response, "auth").expect("session cookie must be set");
+    assert_eq!(session, access_token);
+
+    // The verifier cookie is consumed, not left replayable.
+    assert_eq!(cookie_value(&response, "auth_pkce").as_deref(), Some(""));
+
+    let body = body_rx.await.expect("stub should have captured a body");
+    assert!(
+        body.contains(&format!("code_verifier={verifier}")),
+        "the exchange must post the verifier from the cookie, got: {body}"
+    );
+    assert!(
+        !body.contains("client_secret"),
+        "a public client must never post a secret, got: {body}"
+    );
+    assert!(body.contains("grant_type=authorization_code"), "{body}");
+    assert!(body.contains("code=the-code"), "{body}");
 }

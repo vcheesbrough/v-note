@@ -94,9 +94,16 @@ steps:
 
   # The push gates (checks, web, android) are enforced by the workflow-level
   # depends_on above, not by step dependencies.
+  # `branch: master` is a blast-radius guard, not a convenience. This applies the
+  # blueprint to the **shared** Authentik at auth.desync.link, and the blueprint
+  # declares the **prod** objects as well as dev — so without this a push to any
+  # feature branch rewrites prod's OIDC provider. #274 proved it: the branch push
+  # that introduced the unified providers deleted the live confidential providers
+  # for both environments before the PR was even reviewed.
   apply-authentik-blueprint-auto-dev:
     when:
       - event: push
+        branch: master
     depends_on:
       - verify-release-images
     pull: true
@@ -160,9 +167,13 @@ steps:
     commands: &deploy-commands
       - ./scripts/deploy-v-note.sh
 
+  # Also `branch: master`: dev and the blueprint have to move together, and the
+  # blueprint is master-only above. A branch build deployed to dev against a
+  # master-era Authentik would fail exactly the way #274 did.
   auto-deploy-dev:
     when:
       - event: push
+        branch: master
     depends_on:
       - compute-version
       - apply-authentik-blueprint-auto-dev

@@ -6,8 +6,8 @@
 #          (match the from_secret names in .woodpecker/deploy.yml)
 #
 # The access URL is a long-lived credential granting read access to the whole
-# /v-note/<env>/server subtree — including database/password and
-# database/password. It is therefore read from STDIN and piped onward to bao via
+# /v-note/<env>/server subtree — including database/password. It is therefore
+# read from STDIN and piped onward to bao via
 # its `key=-` stdin form, never as an argument — so it lands in neither this
 # script's argv, nor bao's (/proc/<pid>/cmdline), nor shell history.
 #

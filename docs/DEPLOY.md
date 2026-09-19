@@ -139,6 +139,47 @@ resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
 | `v_note_dev_metrics_addr` | **Alias** of `/v-note/dev/server/observability/metrics-addr` — see below |
 | `v_note_prod_metrics_addr` | **Alias** of `/v-note/prod/server/observability/metrics-addr` |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
+
+### Retiring the OIDC client secret (#274)
+
+The unified client is **public + PKCE**, so no client secret is used anywhere.
+Removing the *references* does not remove the *values* — the old secret still
+exists in three places and should be deleted once the migration is confirmed:
+
+1. Woodpecker secrets `v_note_dev_oidc_client_secret` and
+   `v_note_prod_oidc_client_secret` (no longer read by any step).
+2. OpenBao `secret/v-note-stack/env` → key `OIDC_CLIENT_SECRET`.
+3. sovereign-config leaves `/v-note/{dev,prod}/server/oidc/client-secret`.
+
+Keep them until prod is running the unified client: they are what a rollback to
+the pre-#274 image would need, since that image refuses to start without a
+non-empty `oidc/client-secret`. The sovereign-config leaves for
+`oidc/android/client-id` and `oidc/android/issuer-url` are likewise inert and
+can go at the same time.
+
+### Migrating an environment to the unified client (#274)
+
+The blueprint **renames** the provider (`v-note-browser-{env}` → `v-note-{env}`),
+which changes the `client_id` the server must send **and** the `aud` on every
+token. The server reads that from sovereign-config, so applying the blueprint
+without updating the leaf breaks login in that environment:
+
+```
+/v-note/<env>/server/oidc/client-id   v-note-browser-<env>  →  v-note-<env>
+```
+
+`issuer-url` and `end-session-url` already point at the **application** slug
+(`/application/o/v-note-<env>/`), which is unchanged, so they need no edit.
+
+**Order matters:** update the leaf, then apply the blueprint, then recreate the
+app container (config is read once at startup — `deploy-v-note.sh` force-recreates,
+so a redeploy is sufficient). Applying the blueprint first leaves the environment
+unable to authenticate until the leaf catches up.
+
+> `apply-authentik-blueprint-auto-dev` is restricted to `branch: master`. It
+> applies to the **shared** Authentik and the blueprint declares the **prod**
+> objects too, so an unrestricted push would let any feature branch rewrite
+> prod's provider.
 | Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
 
 Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
