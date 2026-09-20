@@ -257,9 +257,9 @@ fn apply_defaults(
         ("android.assetlinks-json", ""),
         // Feature flag (#323). On by default; see `RealtimeConfig`.
         ("realtime.coalesce-replay", "true"),
-        // Feature flag (#342). Off here, but the dev and prod sovereign leaves
-        // are both `"true"` — this is the no-leaf fallback, not what a
-        // deployed server does. See `RealtimeConfig`.
+        // Feature flag (#342). Off here, but the deployed sovereign leaf is
+        // `"true"` — this is the no-leaf fallback, not what a deployed server
+        // does. See `RealtimeConfig`.
         ("realtime.compression", "false"),
     ];
     let mut builder = builder;
@@ -484,10 +484,10 @@ pub struct RealtimeConfig {
 
     /// Offer RFC 7692 `permessage-deflate` on both realtime channels (#342).
     ///
-    /// **Off by default here, but the sovereign leaves for dev and prod are
-    /// both `"true"`** — so this default is what a bare `cargo run` or a test
-    /// gets, not what a deployed server does. Do not read it as "compression is
-    /// off in production".
+    /// **Off by default here, but the deployed sovereign leaf is `"true"`** —
+    /// so this default is what a bare `cargo run` or a test gets, not what a
+    /// deployed server does. Do not read it as "compression is off in a
+    /// deployed environment".
     ///
     /// Unlike `coalesce_replay` this does not change the wire *shape* —
     /// compression is negotiated per connection, so a client that does not

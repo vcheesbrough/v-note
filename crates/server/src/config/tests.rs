@@ -475,7 +475,7 @@ fn realtime_coalesce_replay_can_be_turned_off_from_a_text_leaf() {
 }
 
 /// The real leaf, as written to sovereign-config at
-/// `/v-note/{dev,prod}/server/realtime/coalesce-replay`, is read from the
+/// `/v-note/<env>/server/realtime/coalesce-replay`, is read from the
 /// sovereign layer — in both settings.
 #[test]
 fn realtime_flag_is_read_from_the_sovereign_layer() {
@@ -530,7 +530,8 @@ fn realtime_non_boolean_flag_fails_to_deserialize() {
 }
 
 /// The mirror image of `coalesce-replay` (#342): compression ships **off**, so
-/// the stack swap reaches prod inert and an operator has to ask for it.
+/// the stack swap reaches a deployed environment inert and an operator has to
+/// ask for it.
 #[test]
 fn realtime_compression_defaults_to_off() {
     let realtime: RealtimeConfig =
@@ -553,7 +554,7 @@ fn realtime_compression_can_be_turned_on_from_a_text_leaf() {
     assert!(realtime.compression);
 }
 
-/// The real leaf at `/v-note/{dev,prod}/server/realtime/compression`, read from
+/// The real leaf at `/v-note/<env>/server/realtime/compression`, read from
 /// the sovereign layer in both settings.
 #[test]
 fn realtime_compression_is_read_from_the_sovereign_layer() {

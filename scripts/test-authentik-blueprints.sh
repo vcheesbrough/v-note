@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# Validate authentik/blueprint-{dev,prod}.yaml without an Authentik instance.
+# Validate authentik/blueprint-<env>.yaml without an Authentik instance.
 #
-# Why this exists: #274 split one dev+prod blueprint into two per-environment
-# files so no dev deploy can reach prod's Authentik objects. That split also cost
-# the prod file its only regular exercise — before, every dev deploy parsed the
-# prod entries too. `blueprint-prod.yaml` is now applied *only* by a manual prod
-# deployment, so a typo in it would surface at the worst possible moment.
+# Why this exists — and it is the same reason as scripts/test-grafana-dashboard.sh:
+# a repo-owned artifact that CI applies to shared infrastructure deserves a check
+# that runs *without* that infrastructure. The blueprint deletes and recreates
+# live credentials on every deploy; the only other thing that reads it is the
+# apply itself, by which point login is already broken for everyone.
 #
-# So this enforces, on every push, what the split relies on:
-#   1. both files parse (including the `!Find` tags Authentik blueprints use);
-#   2. neither file mentions the other environment — the whole point of the split;
-#   3. the two files stay structurally identical, which the "keep them in step"
-#      comment otherwise asserts on the honour system;
-#   4. each file carries its own `instance_name`-worthy identity and the entries
-#      the migration depends on (unified public provider, retired objects);
-#   5. the provider declares the grants it needs. Authentik defaults a
+# So this enforces, on every push:
+#   1. the file parses (including the `!Find` tags Authentik blueprints use);
+#   2. it never names another environment — the per-environment split (#274) is
+#      what keeps one environment's deploy off another's objects, and this is
+#      what stops foreign content drifting back in;
+#   3. it carries its own `instance_name`-worthy identity and the entries the
+#      migration depends on (unified public provider, retired objects);
+#   4. the provider declares the grants it needs. Authentik defaults a
 #      blueprint-created provider to *no* grants, which rejects every authorize
-#      request — #372 shipped exactly that and took login down in both
-#      environments.
+#      request — #372 shipped exactly that and took dev login down while every
+#      check that existed at the time stayed green.
 #
-# Mirrors scripts/test-grafana-dashboard.sh: a repo-owned artifact applied by CI
-# to shared infrastructure deserves a check that runs without that infrastructure.
+# Dev is the only environment today (#392); #388 adds prod as a second file and
+# every check below applies to it unchanged.
 
 set -euo pipefail
 
@@ -37,8 +37,11 @@ class BlueprintLoader(yaml.SafeLoader):
 
 BlueprintLoader.add_multi_constructor("!", lambda loader, suffix, node: None)
 
-FILES = {env: f"authentik/blueprint-{env}.yaml" for env in ("dev", "prod")}
-OTHER = {"dev": "prod", "prod": "dev"}
+ENVIRONMENTS = ("dev",)
+FILES = {env: f"authentik/blueprint-{env}.yaml" for env in ENVIRONMENTS}
+# Environment names a blueprint must never mention — including ones that do not
+# exist yet (#388), so prod content cannot creep into the dev file.
+FOREIGN = {env: [other for other in ("dev", "prod") if other != env] for env in ENVIRONMENTS}
 
 failures = []
 loaded = {}
@@ -52,7 +55,7 @@ def check(condition, message):
         failures.append(message)
 
 
-print("==> both blueprints parse")
+print("==> every blueprint parses")
 for env, path in FILES.items():
     try:
         with open(path) as handle:
@@ -64,46 +67,20 @@ for env, path in FILES.items():
 if failures:
     sys.exit(1)
 
-print("==> no blueprint references the other environment")
+print("==> no blueprint references another environment")
 for env, path in FILES.items():
     with open(path) as handle:
         # Ignore comments: they legitimately explain why the split exists.
         body = "\n".join(
             line for line in handle.read().splitlines() if not line.lstrip().startswith("#")
         )
-    check(
-        OTHER[env] not in body,
-        f"{path} never mentions '{OTHER[env]}' outside comments",
-    )
-
-print("==> the two files stay structurally identical")
-
-
-def shape(doc, env):
-    """Entry identities with the environment name factored out."""
-    out = []
-    for entry in doc["entries"]:
-        ident = ",".join(
-            f"{k}={v}".replace(env, "<env>") for k, v in sorted(entry["identifiers"].items())
+    for foreign in FOREIGN[env]:
+        check(
+            foreign not in body,
+            f"{path} never mentions '{foreign}' outside comments",
         )
-        out.append(f"{entry.get('state', 'present')} {entry['model']} {ident}")
-    return out
 
-
-dev_shape, prod_shape = shape(loaded["dev"], "dev"), shape(loaded["prod"], "prod")
-check(
-    dev_shape == prod_shape,
-    "dev and prod declare the same entries in the same order",
-)
-if dev_shape != prod_shape:
-    only_dev = [line for line in dev_shape if line not in prod_shape]
-    only_prod = [line for line in prod_shape if line not in dev_shape]
-    for line in only_dev:
-        print(f"         dev only:  {line}")
-    for line in only_prod:
-        print(f"         prod only: {line}")
-
-print("==> the #274 migration entries are present in both")
+print("==> the #274 migration entries are present")
 for env, doc in loaded.items():
     entries = doc["entries"]
 

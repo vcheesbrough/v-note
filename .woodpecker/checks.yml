@@ -48,24 +48,24 @@ steps:
 
   # deploy-v-note.sh takes no arguments: every environment-specific value is a
   # parameter set by the deploy steps in deploy.yml, so a missing one is not a
-  # crash but a silently wrong deploy (prod labelled env=dev, a parallel compose
-  # project, an app with no runtime config). The deploy steps only ever exercise
-  # the happy path, so the guards get their own test. Runs on the docker CLI image
-  # for the compose plugin — `compose config` resolves the model client-side, so
-  # this needs no docker socket.
+  # crash but a silently wrong deploy (a container mislabelled with the wrong env,
+  # a parallel compose project, an app with no runtime config). The deploy steps
+  # only ever exercise the happy path, so the guards get their own test. Runs on
+  # the docker CLI image for the compose plugin — `compose config` resolves the
+  # model client-side, so this needs no docker socket.
   deploy-script-validation:
     depends_on: []
     image: *docker-image
     commands:
       - ./scripts/test-deploy-v-note.sh
 
-  # The blueprints are applied by CI to the shared Authentik, and since #274 split
-  # them per environment the prod file is exercised only by a manual prod deploy —
-  # so a typo in it would surface at the worst possible moment. Validates both
-  # without an Authentik instance: they parse, neither mentions the other
-  # environment, they stay structurally identical, and the migration's own
-  # invariants (one public provider, no secret, both redirect URIs, retirements
-  # ordered last) hold. Its own step for the same reason as the Grafana one.
+  # The blueprint is applied by CI to the shared Authentik, so a typo in it takes
+  # down login for everyone and is found by the next person trying to sign in.
+  # A repo-owned artifact CI applies to shared infrastructure deserves a check
+  # that runs without that infrastructure: this validates the file parses, never
+  # names another environment, and holds its own invariants (one public provider,
+  # no secret, both redirect URIs, the #372 grant_types gate, retirements ordered
+  # last). Its own step for the same reason as the Grafana one.
   authentik-blueprint-validation:
     depends_on: []
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d

@@ -88,12 +88,25 @@ Post-MVP backlog and full card map: [v-notes board](https://bored.desync.link/bo
   - **SPA** (browser, PKCE exchanged **server-side**): requests **`openid profile email`** + env access scope — **no `offline_access`**. Stores the **access token only** in an **httpOnly `Secure` `SameSite=Lax` cookie**; **ignores refresh_token**. Session cookie **max-age 24h**; **JWT `exp` is authoritative**. User re-authenticates when access expires (~1h) via redirect to login. The PKCE **`code_verifier`** rides a short-lived `/auth`-scoped httpOnly cookie for the round trip.
   - **Dev and prod** use the **same numeric lifetimes** (separate providers per env; not shorter dev tokens).
 - **Authentik logout / revoke UX (MVP, chosen, bored-aligned):** **SPA:** `GET /auth/logout` clears session cookie, then redirects to env **`OIDC_END_SESSION_URL`**. **Android:** **Sign out** wipes **Keystore** tokens locally; optionally open **Chrome Custom Tab** to the same **end-session** URL. **No** separate token-revocation API in MVP — rely on **local wipe + RP-initiated logout**. **Post-MVP:** back-channel logout / refresh revocation if ops require instant kill.
-- **Deployments / CI-dev access (MVP, chosen):** **Two environments—dev and prod**—mirroring **[bored](/home/vincent/dev/bored)** on the same **mini** host. **Woodpecker** CI: push builds + e2e on every commit; after green push e2e, the same tested image set automatically deploys to **dev**. Manual deployment (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`) remains available, applies **Authentik blueprint** before roll-out, and runs **`docker compose`** against the host docker socket (no SSH/jump box). **Prod** deploys only from **`master`** and is manual-only; **dev** may deploy from feature branches. **Separate hostnames, containers, DB volumes, OIDC clients, and scopes per env** (see table below). **CI/dev access:** developers and CI hit **dev** at **`https://v-notes-dev.desync.link`** over the same **NetBird/LAN path outside the app** as prod—no always-on mesh requirement beyond normal ops, **no jump box**. Android dev builds and local agents target **dev**; Tab/Note 9 **prod** builds target **`v-notes.desync.link`**.
+- **Deployments / CI-dev access (MVP, chosen):** **Two environments—dev and prod**—mirroring **[bored](/home/vincent/dev/bored)** on the same **mini** host. **Woodpecker** CI: push builds + e2e on every commit; after green push e2e, the same tested image set automatically deploys to **dev**. Manual deployment (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`) remains available, applies **Authentik blueprint** before roll-out, and runs **`docker compose`** against the host docker socket (no SSH/jump box). **Prod** deploys only from **`master`** and is manual-only; **dev** may deploy from feature branches. **Separate hostnames, containers, DB volumes, OIDC clients, and scopes per env** (see table below). **CI/dev access:** developers and CI hit **dev** at **`https://v-notes-dev.desync.link`** over the same **NetBird/LAN path outside the app** as prod—no always-on mesh requirement beyond normal ops, **no jump box**. Android dev builds and local agents target **dev**; Tab/Note 9 **prod** builds target **`v-notes.desync.link`**. **(#392: prod is specified here but not built — dev is the only deploy target and the only accepted `CI_PIPELINE_DEPLOY_TARGET` until #388 creates prod. The decision itself stands; see the note under the table.)**
 
 | Env | URL | Container (example) | DB volume (example) | OIDC scope (example) |
 | --- | --- | --- | --- | --- |
 | **dev** | `https://v-notes-dev.desync.link` | `v-note-dev` | `v-note-dev-db` | `v-note:dev:access` |
-| **prod** | `https://v-notes.desync.link` | `v-note` | `v-note-prod-db` | `v-note:prod:access` |
+| **prod** *(specified, not built)* | `https://v-notes.desync.link` | `v-note` | `v-note-prod-db` | `v-note:prod:access` |
+
+> **Status of prod — specified but not built.** Nothing has ever been deployed to
+> prod. Its pipeline steps, Authentik blueprint, secrets, Android flavor and App
+> Links file were **removed in #392** because they were unexercised configuration
+> that still had to be kept correct on every devops change; **#388** creates them
+> for the MVP release. **The decisions in this section are unchanged and still the
+> plan** — two deployments, per-env hostnames, containers, DB volumes, OIDC
+> clients and scopes. What #392 removed were the concrete instances, not the
+> design: the seams they plug into (parameterised `deploy-v-note.sh`, the
+> `authentik/blueprint-<env>.yaml` convention, `env` as a label dimension, the
+> `<env>` positional in `render-assetlinks-json.sh`) were all deliberately kept.
+> **Everywhere below that describes prod, read it as a specification #388 will
+> implement, not as something that exists today.**
 
 **Shared infra (both envs):** **Traefik on mini** (`proxy-backend`, `certresolver=myresolver`), **Authentik** at **`https://auth.desync.link`**, image registry **`registry.desync.link`**. Dev images tagged **`MAJOR.MINOR.PATCH-<sha>`** (pre-MVP: **`0.N.P-<sha>`**); prod **`MAJOR.MINOR.PATCH`** + git release tag on prod deploy — first prod MVP tag **`v1.0.0`** at **#151** (see **Versioning**). **Post-MVP:** no third "staging" env unless ops explicitly add one (**#168**).
 
@@ -291,7 +304,7 @@ See **[`docs/DEPLOY.md`](DEPLOY.md)** — Woodpecker auto-dev deploy after green
 ### Android distribution (MVP)
 
 - **Sideload** to Tab S8 Ultra / Note 9 — no Play Store in MVP.
-- **`dev`** flavor → **`v-notes-dev.desync.link`**; **`prod`** flavor → **`v-notes.desync.link`**.
+- **`dev`** flavor → **`v-notes-dev.desync.link`**; **`prod`** flavor → **`v-notes.desync.link`**. **(#392: only the `dev` and `devLocal` flavors exist in `android/app/build.gradle.kts` today; the `prod` flavor is specified here and re-added by #388, which needs the release keystore from #178.)**
 - APK served at **`https://{env-host}/dl/apk`** after each `deploy-dev` / `deploy-prod`. The env hostname is the discriminator — no env suffix in the path. The SPA links to it.
 - **Release keystore** lives outside repo (OpenBao / operator machine); **debug** keystore for dev/CI only.
 - CI builds **`devDebug`** nginx image (`registry.desync.link/v-note-android:{release}`); **`prodRelease`** signing wired before prod device rollout (**#152** or first prod deploy).

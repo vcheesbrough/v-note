@@ -57,7 +57,7 @@ system below.
 ### Runtime configuration (`VNOTE__*`)
 
 Since iteration 19 the server's runtime config lives in **sovereign-config**
-(`/v-note/{dev,prod}/server`), loaded as six independent groups —
+(`/v-note/<env>/server`), loaded as six independent groups —
 `database`, `oidc`, `observability`, `android`, `realtime`, `server`. **The server
 refuses to start (non-zero exit, redacted error) if any value is missing or
 invalid.**
@@ -99,7 +99,7 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__OIDC__AUTHORIZE-URL` | optional | browser-facing `/authorize` when it differs from discovery |
 | `VNOTE__OIDC__CLIENT-ID` | **required** | the single public client shared by the SPA and Android (#274) |
 | `VNOTE__OIDC__REDIRECT-URI` | **required** | e.g. `https://v-notes-dev.desync.link/auth/callback` |
-| `VNOTE__OIDC__REQUIRED-SCOPE` | **required** | `v-note:dev:access` or `v-note:prod:access` |
+| `VNOTE__OIDC__REQUIRED-SCOPE` | **required** | the deployed environment's scope, e.g. `v-note:dev:access` |
 | `VNOTE__OIDC__END-SESSION-URL` | optional | RP-initiated logout redirect |
 | `VNOTE__OBSERVABILITY__ENVIRONMENT` | **required** | OTEL `deployment.environment` (`dev` \| `production`) |
 | `VNOTE__OBSERVABILITY__OTLP-ENDPOINT` | unset | when set, exports OTLP traces to Alloy, e.g. `http://monitor-alloy:4317` |
@@ -109,7 +109,7 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__OBSERVABILITY__METRICS-ADDR` | `0.0.0.0:9090` | internal Prometheus listener; `disabled`/blank turns it off |
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
 | `VNOTE__REALTIME__COALESCE-REPLAY` | `true` | **Feature flag (#323).** Answer a `subscribe` with one coalesced `page-replay` frame. Set `false` to restore the pre-#323 shape (a `stroke-batch` per stored batch, then `synced`) without rebuilding — see below. A non-boolean value **fails startup** rather than reading as `false` |
-| `VNOTE__REALTIME__COMPRESSION` | `false` code default, but **`true` in dev and prod** | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. The code default is off; the sovereign leaves are **on** — see below. A non-boolean value **fails startup** rather than reading as `false` |
+| `VNOTE__REALTIME__COMPRESSION` | `false` code default, but **`true` in every deployed environment** | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. The code default is off; the sovereign leaves are **on** — see below. A non-boolean value **fails startup** rather than reading as `false` |
 | `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
 | `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
 | `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
@@ -121,12 +121,11 @@ understands the per-message form, so this flag can be flipped on a running
 deployment without a client update. Turning it **off** is also what lets the
 server serve a **protocol 5** client again.
 
-The leaf exists in sovereign-config for both environments, so flipping it needs
-no deploy and no code change:
+The leaf exists in sovereign-config for every deployed environment, so flipping
+it needs no deploy and no code change:
 
 ```
-/v-note/dev/server/realtime/coalesce-replay  = "true"
-/v-note/prod/server/realtime/coalesce-replay = "true"
+/v-note/dev/server/realtime/coalesce-replay = "true"
 ```
 
 ```bash
@@ -163,13 +162,12 @@ The code default is `false`, but **both sovereign leaves are set `"true"`**, so 
 deployed server has compression **on** unless something overrides it:
 
 ```
-/v-note/dev/server/realtime/compression  = "true"
-/v-note/prod/server/realtime/compression = "true"
+/v-note/dev/server/realtime/compression = "true"
 ```
 
 That is worth reading twice when reasoning about an environment: the `false` in
 `apply_defaults` is only what applies when the leaf is absent — a bare
-`cargo run` or a test. It is not what dev or prod does.
+`cargo run` or a test. It is not what a deployed server does.
 
 One consequence for #342's own A/B: the sovereign layer no longer gives an
 **uncompressed** dev baseline. Take the "before" half from the `master` image or
@@ -248,7 +246,9 @@ Repo stays in **WSL**; `scripts/android-env.sh` finds Studio’s JDK/SDK under `
 | --- | --- | --- |
 | **`dev`** | `https://v-notes-dev.desync.link` | Phone/tablet on LAN/mesh — no local server needed |
 | **`devLocal`** | `http://127.0.0.1:8080` | Laptop emulator/USB with `adb reverse` |
-| **`prod`** | `https://v-notes.desync.link` | Deployed prod stack only |
+
+Dev is the only deployed environment (**#392**); **#388** adds a release flavor
+alongside the release keystore from **#178**.
 
 `dev` and `devLocal` share the same package ID (`link.desync.vnote.dev`) and Authentik OIDC config — installing one replaces the other.
 

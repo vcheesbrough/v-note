@@ -11,7 +11,8 @@
 | Env | URL | Compose project (example) | DB volume (example) | OIDC scope |
 | --- | --- | --- | --- | --- |
 | **dev** | `https://v-notes-dev.desync.link` | `v-note-dev` | `v-note-dev-db` | `v-note:dev:access` |
-| **prod** | `https://v-notes.desync.link` | `v-note` | `v-note-prod-db` | `v-note:prod:access` |
+
+**Dev is the only environment.** A production environment is specified in [`PLAN.md`](PLAN.md) but not built; **#392** removed the unexercised prod configuration and **#388** creates it for the MVP release.
 
 **Shared:** Traefik on **mini**, Authentik at **`https://auth.desync.link`**, registry **`registry.desync.link`**.
 
@@ -19,23 +20,23 @@
 
 ## Woodpecker deploy pipeline
 
-Pushes **to `master`** automatically deploy **dev** once every push workflow passes; a feature-branch push builds and tests only, and touches neither dev nor Authentik (#274). Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** or **`prod`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
+Pushes **to `master`** automatically deploy **dev** once every push workflow passes; a feature-branch push builds and tests only, and touches neither dev nor Authentik (#274). Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
 
-1. **validate-deployment** — manual deployment target is `dev` or `prod`; **prod only from `master`**
+1. **validate-deployment** — manual deployment target must be `dev`, the only environment that exists; the error names **#388**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
-3. **apply-authentik-blueprint-{dev,prod}** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 so a dev deploy cannot reach prod's provider)
+3. **apply-authentik-blueprint-dev** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
 4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
-5. **tag-release** — after a successful dev/prod deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
+5. **tag-release** — after a successful deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 6. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
-Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced. Prod remains manual-only and is never deployed from a push event.
+Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced.
 
 Because workflows share nothing, `deploy.yml` computes the release tag again. The first push step, **verify-release-images**, pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — so a tag pushed by another pipeline in between can never roll out someone else's images.
 
 ### The deploy script takes no arguments
 
 `scripts/deploy-v-note.sh` has **one entry point and no modes**. It does not know
-that dev and prod exist: every environment-specific value is a parameter set by
+which environments exist: every environment-specific value is a parameter set by
 the calling step in [`.woodpecker/deploy.yml`](../.woodpecker/deploy.yml), where
 the dev block is defined once and reused by `auto-deploy-dev` via a YAML anchor.
 Adding an environment means adding a step, not editing the script.
@@ -53,7 +54,7 @@ Adding an environment means adding a step, not editing the script.
 
 All of these are required. The script explicitly checks only the four whose
 absence would otherwise be **silent** — `APP_ENV` (compose falls back to `dev`,
-so a prod deploy would label itself `env=dev`), `COMPOSE_PROJECT_NAME` (compose
+so any other environment would mislabel itself `env=dev`), `COMPOSE_PROJECT_NAME` (compose
 falls back to the compose file's directory name, deploying into a parallel
 project), `SOVEREIGN_CONFIG_ACCESS_URL_FILE` (compose accepts a blank secret and
 the app starts with no runtime config), and `V_NOTE_IMAGE_REPOS` (the pull loop
@@ -133,13 +134,13 @@ resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
 | Woodpecker secret key | Used for |
 | --- | --- |
 | `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
-| `v_note_prod_postgres_password` | Postgres `POSTGRES_PASSWORD` (prod deploy) |
 | `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
-| `v_note_prod_sovereign_access_url` | Access URL for the `/v-note/prod/server` sovereign-config subtree |
 | `v_note_dev_metrics_addr` | **Alias** of `/v-note/dev/server/observability/metrics-addr` — see below |
-| `v_note_prod_metrics_addr` | **Alias** of `/v-note/prod/server/observability/metrics-addr` |
 | Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
-| Android signing (prod) | Secret release keystore — **outside repo**, blocker tracked in **#178** (must precede any prod Android release) |
+
+One `v_note_<env>_*` trio per deployed environment, and dev is the only one —
+**#388** adds the next set. Android **release** signing needs a secret keystore
+held **outside the repo**; that is tracked in **#178** and blocks #388.
 
 Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
 `/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
@@ -149,18 +150,23 @@ Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
 
 The unified client is **public + PKCE**, so no client secret is used anywhere.
 Removing the *references* does not remove the *values* — the old secret still
-exists in three places and should be deleted once the migration is confirmed:
+exists in three places:
 
-1. Woodpecker secrets `v_note_dev_oidc_client_secret` and
-   `v_note_prod_oidc_client_secret` (no longer read by any step).
+1. Woodpecker secret `v_note_dev_oidc_client_secret` (no longer read by any step).
 2. OpenBao `secret/v-note-stack/env` → key `OIDC_CLIENT_SECRET`.
-3. sovereign-config leaves `/v-note/{dev,prod}/server/oidc/client-secret`.
+3. sovereign-config leaf `/v-note/dev/server/oidc/client-secret`.
 
-Keep them until prod is running the unified client: they are what a rollback to
-the pre-#274 image would need, since that image refuses to start without a
-non-empty `oidc/client-secret`. The sovereign-config leaves for
-`oidc/android/client-id` and `oidc/android/issuer-url` are likewise inert and
-can go at the same time.
+Keep them for now: they are what a rollback to the pre-#274 image would need,
+since that image refuses to start without a non-empty `oidc/client-secret`.
+
+**Deleting them is tracked as [#394](https://bored.desync.link/boards/v-notes?card=394)**, with a
+trigger that can actually fire: *delete once no deployable image still requires the
+`oidc/client-secret` leaf* — i.e. once the oldest image an operator would roll
+back to post-dates #274, or those images have been pruned from the registry.
+The previous condition ("keep them until prod is running the unified client")
+became unfireable when **#392** removed prod, which is why it was replaced
+rather than reworded. The sovereign-config leaves for `oidc/android/client-id`
+and `oidc/android/issuer-url` are likewise inert and go at the same time.
 
 ### Grant types are not optional in a blueprint (#372)
 
@@ -174,8 +180,8 @@ error=invalid_request&error_description=The request is otherwise malformed
 ```
 
 which the server renders as `authentication denied: invalid_request` — a blank
-page with one line of text. #274 created both providers this way, and login was
-down in dev and prod until #372. So both blueprints declare:
+page with one line of text. #274 created the provider this way, and dev login was
+down until #372. So the blueprint declares:
 
 ```yaml
 grant_types:
@@ -195,20 +201,19 @@ deploy — see [DEV.md](DEV.md) for running both locally.
 provider added here needs its `grant_types` spelled out.
 
 **Recovering an environment after the fix lands.** Correcting the blueprint does
-not correct the live provider — the blueprint has to be *applied*, and the two
-environments are applied by different triggers:
+not correct the live provider — the blueprint has to be *applied*:
 
 | Environment | Applied by | When |
 | --- | --- | --- |
-| dev | `apply-authentik-blueprint-auto-dev` | automatically, on every push to `master` |
-| **prod** | `apply-authentik-blueprint-prod` | **only by a manual `prod` deployment** |
+| dev | `apply-authentik-blueprint-auto-dev` | automatically, on every push, from any branch |
 
-So merging to `master` restores dev on its own, and **prod stays broken until
-someone runs a prod deployment**. `smoke-oidc-login-prod` verifies that
-deployment before it is called done. Confirm either environment by hand with:
+So pushing the fix restores dev on its own, and `smoke-oidc-login-auto-dev`
+verifies it on the same pipeline. An environment applied only by a *manual*
+deployment (as #388's will be) stays broken until someone runs one. Confirm an
+environment by hand with:
 
 ```bash
-V_NOTE_HOST=v-notes.desync.link ./scripts/smoke-oidc-login.sh
+V_NOTE_HOST=v-notes-dev.desync.link ./scripts/smoke-oidc-login.sh
 ```
 
 ### Migrating an environment to the unified client (#274)
@@ -231,11 +236,11 @@ so a redeploy is sufficient). Applying the blueprint first leaves the environmen
 unable to authenticate until the leaf catches up.
 
 > **Blast radius.** The blueprint is split per environment
-> (`authentik/blueprint-{dev,prod}.yaml`) and each pipeline step applies only its
-> own target's file, so no dev deploy can reach prod's provider. That split is the
-> guard, and it exists because a single dev+prod file, applied from a
-> feature-branch push, deleted the live providers for **both** environments during
-> #274.
+> (`authentik/blueprint-<env>.yaml`, one `instance_name` per file) and each
+> pipeline step applies only its own target's file, so no environment's deploy can
+> reach another's provider. That split is the guard, and it exists because a single
+> combined file, applied from a feature-branch push, deleted the live providers for
+> **every** environment during #274.
 >
 > The push-path apply runs on **every branch**, because dev is the pre-merge
 > environment: a branch that changes the provider has to be able to apply it, or
@@ -247,14 +252,24 @@ unable to authenticate until the leaf catches up.
 >
 > **Operator step, once — tracked as [#367](https://bored.desync.link/boards/v-notes?card=367), sequenced after #274 deploys.**
 > The pre-split blueprint instance is still registered in Authentik under
-> `instance_name: v-note`, holding the *combined* dev+prod content. Authentik
+> `instance_name: v-note`, holding the *combined* pre-split content. Authentik
 > re-applies registered instances on its own schedule, so **until it is deleted the
 > split above is enforced in the pipeline but not in the live system** — the
-> combined content keeps being reasserted over both environments. Delete it only
-> after a deploy has created `v-note-dev` and `v-note-prod`, then confirm both
-> environments' authorize endpoints still return 302.
+> combined content keeps being reasserted. Delete it only after a deploy has
+> created `v-note-dev`, then confirm the authorize endpoint still returns 302.
+>
+> **#392 leftover — live objects with no file describing them.** That combined
+> content also declared the prod objects: the `v-note-prod` OAuth2 provider and
+> `v-note (prod)` application, the `v-note-prod-users` group and its bindings,
+> and the `v-note:prod:access` scope mapping. `authentik/blueprint-prod.yaml` is
+> gone from the repo, so **nothing here describes them any more, but they are
+> still live and still reasserted** until the `v-note` instance is deleted.
+> Deleting that instance is what removes them, and it must be deleted *before*
+> the objects themselves or a re-apply resurrects them. Tracked as Part B of
+> [#392](https://bored.desync.link/boards/v-notes?card=392); #388 recreates them
+> from a fresh `blueprint-prod.yaml`.
 
-**The two `*_metrics_addr` entries are aliases, not copies.** `AddValuePath`
+**The `*_metrics_addr` entry is an alias, not a copy.** `AddValuePath`
 exposes one stored value at several canonical paths, so the pipeline and the app
 read the *same* leaf: the app resolves `observability/metrics-addr` through its
 own sovereign-config client, and `deploy-v-note.sh` reads the alias to derive the
@@ -265,9 +280,9 @@ Create them with:
 ```bash
 sovereign-config alias add /v-note/dev/server/observability/metrics-addr \
   /woodpecker/repos/vcheesbrough/v-note/v_note_dev_metrics_addr
-sovereign-config alias add /v-note/prod/server/observability/metrics-addr \
-  /woodpecker/repos/vcheesbrough/v-note/v_note_prod_metrics_addr
 ```
+
+One alias per deployed environment; dev is the only one today.
 
 This aliases *into* `/woodpecker/...`, the opposite direction to the broker
 README's advice. That advice is about repository-independent values whose natural
@@ -276,7 +291,7 @@ alias points the other way. Aliasing widens read access — every v-note pipelin
 can read it — which is immaterial here because it is a plain leaf, not a secret.
 
 App Links JSON is **not** in this list: since iteration 19 it lives in sovereign-config
-at `android/assetlinks-json`. The former `v_note_{dev,prod}_assetlinks_json` keys have
+at `android/assetlinks-json`. The former `v_note_<env>_assetlinks_json` keys have
 been deleted — rotating a signing certificate means rewriting that leaf (see
 [Set App Links JSON](#set-app-links-json) below), not patching a CI secret.
 
@@ -298,18 +313,18 @@ Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merge
 ## Runtime config (sovereign-config)
 
 Since iteration 19 the app's runtime configuration lives in **sovereign-config**
-under `/v-note/dev/server` and `/v-note/prod/server`, not in compose
+under `/v-note/<env>/server` — today only `/v-note/dev/server` — not in compose
 env vars. The server loads four independent groups — `database`, `oidc`,
 `observability`, `android` — and **refuses to start (non-zero exit, redacted
 error) if any value is missing or invalid**.
 
 The deploy step exposes the per-env access URL (Woodpecker secret
-`v_note_{dev,prod}_sovereign_access_url`) as the `SOVEREIGN_CONFIG_ACCESS_URL_FILE`
+`v_note_<env>_sovereign_access_url`) as the `SOVEREIGN_CONFIG_ACCESS_URL_FILE`
 env var; compose sources a docker secret of the same name straight from it and
 mounts it at `/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE`, which the container's
 `SOVEREIGN_CONFIG_ACCESS_URL_FILE` points at. **The URL is itself a secret and
-selects the environment** — dev vs prod is decided by which URL is injected, not by
-a config flag.
+selects the environment** — which environment's config the server reads is decided
+by which URL is injected, not by a config flag.
 
 ### Creating / rotating an access URL (operator)
 
@@ -324,7 +339,6 @@ subtree, secret leaves included — treat it like a password.
    ```bash
    export BAO_ADDR=https://secrets.desync.link BAO_TOKEN=<write token>
    ./scripts/store-sovereign-access-url.sh dev    # paste URL, Ctrl-D
-   ./scripts/store-sovereign-access-url.sh prod
    ```
 3. Redeploy. To rotate, `rotate_connection` and repeat — no app change needed.
 
@@ -346,13 +360,13 @@ in `crates/server/Cargo.toml` and rebuild.
 
 | Variable (example) | Purpose |
 | --- | --- |
-| `V_NOTE_HOST` | `v-notes.desync.link` vs `v-notes-dev.desync.link` — **compose-level only**, for the Traefik router rules; the container is not given it |
-| `V_NOTE_CONTAINER_NAME` | `v-note` vs `v-note-dev` |
-| `DB_VOLUME` | `v-note-prod-db` vs `v-note-dev-db` |
+| `V_NOTE_HOST` | `v-notes-dev.desync.link` — **compose-level only**, for the Traefik router rules; the container is not given it |
+| `V_NOTE_CONTAINER_NAME` | `v-note-dev` |
+| `DB_VOLUME` | `v-note-dev-db` |
 | `APP_ENV` | compose-level only — the `observability.env` discovery label |
 | `APP_VERSION` | compose-level only — the `observability.release` discovery label (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
 | `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
-| `V_NOTE_METRICS_ADDR` | compose-level only — `host:port` or `disabled`, supplied by the `v_note_{dev,prod}_metrics_addr` broker alias of `observability/metrics-addr`. `deploy-v-note.sh` derives `observability.metrics.port` and `observability.metrics.scrape` from it, so the listener and the thing scraping it read one value. **Required** — a missing value fails the deploy rather than defaulting |
+| `V_NOTE_METRICS_ADDR` | compose-level only — `host:port` or `disabled`, supplied by the `v_note_<env>_metrics_addr` broker alias of `observability/metrics-addr`. `deploy-v-note.sh` derives `observability.metrics.port` and `observability.metrics.scrape` from it, so the listener and the thing scraping it read one value. **Required** — a missing value fails the deploy rather than defaulting |
 
 The **container's only environment variable is `SOVEREIGN_CONFIG_ACCESS_URL_FILE`.**
 Everything else (database, OIDC, OTLP, metrics address, App Links JSON) comes
@@ -373,15 +387,16 @@ and e2e supply them via `VNOTE__*` (mock OIDC).
 
 App Links JSON lives at the `android/assetlinks-json` leaf in sovereign-config and
 is rendered from the signing certificate fingerprint — see [Set App Links JSON](#set-app-links-json)
-above. Example shape: `deploy/assetlinks.{dev,prod}.json` (documentation only — do
-not commit real fingerprints).
+above. Example shape: `deploy/assetlinks.dev.json` and
+`deploy/assetlinks.example.json` (documentation only — do not commit real
+fingerprints).
 
 ## Observability
 
 v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 
 - **Metrics:** the app serves Prometheus text on internal port `9090` at `/metrics`. Alloy discovers it through Docker labels on the `v-note` service: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.metrics.scheme=http`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
-- **Traces:** the `observability` config group sets `otlp-endpoint=http://monitor-alloy:4317`, `otlp-protocol=grpc`, and `service-name=v-note` in both env subtrees; `observability/environment` supplies the OTEL `deployment.environment` attribute (`dev` / `production`). Every `http.request` span adopts the W3C `traceparent` Traefik forwards, so a request's trace starts at Traefik's edge span and drills down into v-note. WebSocket connection spans nest under their upgrade request; each inbound page message is its own trace, linked to its connection span. A broadcast carries its publisher's trace context, so each socket's send of a fanned-out message is a `realtime.fanout.deliver` span (`channel`, `message_type`, `bytes`, plus `session_id` on the page channel) inside the publisher's trace — a `commit-batch` trace shows the delivery to every sibling session — and linked to the receiving connection. Every Postgres round trip — each query, and each transaction's `BEGIN`/`COMMIT` — is a `db.query` span carrying `db.operation` and `db.query_name` (the call site, never SQL text or values), plus the size of the result: `db.response.returned_rows`, `db.response.bytes` and `db.response.max_row_bytes` (Postgres wire bytes of the returned column values, in total and for the widest row), and `db.response.affected_rows` for writes. Every span also carries the OpenTelemetry `code.file.path` / `code.module.name` / `code.line.number` the tracing layer derives from where the span was opened; `db_query_span!` is a macro so that those name the query's own call site rather than `observability.rs` (#343). Thumbnail jobs run detached, so each is its own `thumbnail.generate` trace (with `db.query` and `thumbnail.render` children) linked to the request that queued it.
+- **Traces:** the `observability` config group sets `otlp-endpoint=http://monitor-alloy:4317`, `otlp-protocol=grpc`, and `service-name=v-note` in each deployed environment's subtree; `observability/environment` supplies the OTEL `deployment.environment` attribute (`dev` / `production`). Every `http.request` span adopts the W3C `traceparent` Traefik forwards, so a request's trace starts at Traefik's edge span and drills down into v-note. WebSocket connection spans nest under their upgrade request; each inbound page message is its own trace, linked to its connection span. A broadcast carries its publisher's trace context, so each socket's send of a fanned-out message is a `realtime.fanout.deliver` span (`channel`, `message_type`, `bytes`, plus `session_id` on the page channel) inside the publisher's trace — a `commit-batch` trace shows the delivery to every sibling session — and linked to the receiving connection. Every Postgres round trip — each query, and each transaction's `BEGIN`/`COMMIT` — is a `db.query` span carrying `db.operation` and `db.query_name` (the call site, never SQL text or values), plus the size of the result: `db.response.returned_rows`, `db.response.bytes` and `db.response.max_row_bytes` (Postgres wire bytes of the returned column values, in total and for the widest row), and `db.response.affected_rows` for writes. Every span also carries the OpenTelemetry `code.file.path` / `code.module.name` / `code.line.number` the tracing layer derives from where the span was opened; `db_query_span!` is a macro so that those name the query's own call site rather than `observability.rs` (#343). Thumbnail jobs run detached, so each is its own `thumbnail.generate` trace (with `db.query` and `thumbnail.render` children) linked to the request that queued it.
 - **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
 - **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
@@ -405,8 +420,8 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 
 **`v-note — overview`** (uid **`v-note-overview`**) lives in Grafana under **Applications / v-note** (folder uid `v-note`). Its source of truth is [`deploy/grafana/v-note-overview.json`](../deploy/grafana/v-note-overview.json): application dashboards ship in the application repo, in the same PR as the metrics they chart.
 
-- **One dashboard, both environments:** an `env` variable (`label_values(v_note_realtime_active_connections, env)`) filters every query. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
-- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every push, on any branch**, after `auto-deploy-dev`, so the dashboard always matches what is deployed to dev — a branch's panels go live with the metrics they chart and can be checked before merge. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself. `deploy-prod` never publishes, because it could roll the dashboard back to an older release.
+- **One dashboard per environment:** an `env` variable — a **constant** pinned to `dev`, `hide: 2` — filters every query. It was a `label_values(v_note_realtime_active_connections, env)` query until **#392**: that would have silently widened to any new `env` series the moment one appeared, so it is pinned while dev is the only deployment. **#388** copies this dashboard under a new uid and changes the constant; every panel keeps `env="$env"`, so nothing else moves. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
+- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every push, on any branch**, after `auto-deploy-dev`, so the dashboard always matches what is deployed to dev — a branch's panels go live with the metrics they chart and can be checked before merge. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself.
 - **UI edits are overwritten** on the next push to `master` that deploys dev. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
 - **Offline validation:** [`scripts/test-grafana-dashboard.sh`](../scripts/test-grafana-dashboard.sh), run in the `checks` step `grafana-dashboard-validation`, checks that the JSON parses, keeps its uid, has no committed id, filters every query by `env`, references no unbounded id, and charts only metrics `observability.rs` registers. It also checks the publish script's `--dry-run` payload, its input guards, and its live path against a stub `curl` (2xx passes; non-2xx and transport failures fail without leaking the token).
 - **Pre-merge check:** since #274 a branch push publishes **nothing** — the dashboard follows `master` only, in step with dev. Validate a dashboard change offline with the `--dry-run` below and the `checks` step above, then check the panels under Applications / v-note after the merge lands on dev, and record that in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.
@@ -415,7 +430,7 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 
 Operator task. Since iteration 19 this lives in sovereign-config
 at the `android/assetlinks-json` leaf, not in OpenBao — render it and write it to
-both env subtrees:
+each deployed environment's subtree:
 
 ```bash
 # Dev — fingerprint of the committed keystore android/app/debug.keystore (all builds
@@ -423,27 +438,30 @@ both env subtrees:
 #   3A:49:7C:AE:57:AD:FF:E4:D0:C8:3B:D2:D0:98:2C:C2:98:CB:1D:B6:3F:70:68:5A:57:13:07:96:CC:9C:62:3A
 ./scripts/render-assetlinks-json.sh dev "$(./scripts/android-dev-debug-fingerprint.sh)" \
   | sovereign-config put /v-note/dev/server/android/assetlinks-json
-
-# Prod — release keystore SHA-256 (keytool -list -v …), when prod Android ships:
-./scripts/render-assetlinks-json.sh prod 'AA:BB:CC:...' \
-  | sovereign-config put /v-note/prod/server/android/assetlinks-json
 ```
+
+A second environment (#388) adds an arm to `render-assetlinks-json.sh` and a leaf
+under its own subtree; it needs the release keystore from **#178** first, because
+the fingerprint here must match the certificate the APK is signed with.
 
 The value is non-secret (it is served publicly at `/.well-known/assetlinks.json`),
 so it is a plain `put`, not `secret put`. The server validates it parses as JSON at
 startup and refuses to start otherwise.
 
-Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keystore), `--docker` only for the CI image keystore, or `keytool -list -v` on a release keystore (prod).
+Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keystore), `--docker` only for the CI image keystore, or `keytool -list -v` on a release keystore (**#178**).
 
 ---
 
 ## Image tags
 
-| Phase | Dev | Prod |
-| --- | --- | --- |
-| Pre-MVP | `0.N.P-<sha>` | — (no prod MVP until **#151**) |
-| MVP **1.0.0** | `1.0.0-<sha>` | `1.0.0` + git tag **`v1.0.0`** |
-| Post-MVP | `1.N.P-<sha>` | `1.N.P` |
+| Phase | Dev |
+| --- | --- |
+| Pre-MVP | `0.N.P-<sha>` |
+| MVP **1.0.0** | `1.0.0-<sha>` + git tag **`v1.0.0`** |
+| Post-MVP | `1.N.P-<sha>` |
+
+Dev is the only environment that is deployed today; **#388** defines the release
+environment's tags when it creates it.
 
 **Tag source:** Woodpecker **`compute-version`** → **`.release-tag`** (plain semver `MAJOR.MINOR.PATCH`, e.g. `0.3.0`).
 
@@ -536,7 +554,10 @@ Clients send **`X-V-Note-Client-Release`** / **`X-V-Note-Client-Protocol`**; **`
 
 ## Rollback
 
-Redeploy a **previous image tag** via Woodpecker manual deploy with pinned version env (detail in **#152** runbook). **Also reinstall the matching Android APK.**
+**Dev only** — dev is the only deploy target (#392), so this is the only
+environment there is to roll back. Redeploy a **previous image tag** via
+Woodpecker manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev`) with pinned version env
+(detail in **#152** runbook). **Also reinstall the matching Android APK.**
 
 ---
 

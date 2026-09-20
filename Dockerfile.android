@@ -45,7 +45,7 @@ RUN --mount=type=cache,id=v-note-gradle-user,target=/root/.gradle,sharing=locked
         :app:ktlintCheck :app:detekt :app:lintDevDebug \
         :app:assembleDevDebug \
         :app:assembleDevDebugAndroidTest \
-        :app:testDevDebugUnitTest :app:testDevLocalDebugUnitTest :app:testProdDebugUnitTest \
+        :app:testDevDebugUnitTest :app:testDevLocalDebugUnitTest \
         :buildSrc:test
 
 FROM ${BUILD_BOX_IMAGE_NAME}@${BUILD_BOX_IMAGE_DIGEST} AS instrumented

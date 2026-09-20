@@ -95,39 +95,14 @@ android {
                 "\"openid profile email offline_access v-note:dev:access\"",
             )
         }
-        create("prod") {
-            dimension = "env"
-            manifestPlaceholders["appLinkHost"] = "v-notes.desync.link"
-            buildConfigField("String", "BASE_URL", "\"https://v-notes.desync.link\"")
-            buildConfigField(
-                "String",
-                "OIDC_ISSUER_URL",
-                "\"https://auth.desync.link/application/o/v-note-prod/\"",
-            )
-            buildConfigField("String", "OIDC_CLIENT_ID", "\"v-note-prod\"")
-            buildConfigField(
-                "String",
-                "OIDC_REDIRECT_URI",
-                "\"https://v-notes.desync.link/auth/mobile/callback\"",
-            )
-            buildConfigField(
-                "String",
-                "OIDC_END_SESSION_URL",
-                "\"https://auth.desync.link/application/o/v-note-prod/end-session/\"",
-            )
-            buildConfigField(
-                "String",
-                "OIDC_SCOPES",
-                "\"openid profile email offline_access v-note:prod:access\"",
-            )
-        }
     }
 
     signingConfigs {
         // Shared, non-secret debug keystore committed at android/app/debug.keystore so every
         // build (CI, docker, Android Studio) signs with the same certificate. Required for
         // in-place upgrades and a stable App Links fingerprint. A secret release keystore
-        // replaces this before any prod release (see backlog).
+        // replaces this before any release build reaches a user's device — tracked in #178,
+        // which is a hard blocker for #388.
         getByName("debug") {
             storeFile = file("debug.keystore")
             storePassword = "android"

@@ -2,14 +2,16 @@
 #   Push:       after checks, web and android all pass → verify-release-images →
 #               apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
 #               ∥ publish-grafana-dashboard
-#   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint-<target>
-#               → deploy-dev | deploy-prod → tag-release-*
+#   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint-dev
+#               → deploy-dev → smoke-oidc-login-dev, tag-release-dev
+# Dev is the only deploy target (#392); a production environment is deferred to
+# #388, which re-adds the steps for it.
 # The push path runs on every branch: dev is the pre-merge environment, so a
 # branch deploys there to be tested before it is merged, and the last push wins.
 # It applies a blueprint and deploys dev, both shared infrastructure — the guard
-# is that blueprints are split per environment, so no step on this path can reach
-# prod's Authentik objects, and smoke-oidc-login-auto-dev fails the branch that
-# breaks dev login rather than leaving it to be discovered.
+# is that blueprints are split per environment (one file, one `instance_name`),
+# and that smoke-oidc-login-auto-dev fails the branch that breaks dev login
+# rather than leaving it to be discovered.
 # See checks.yml for why the push pipeline is split into workflows.
 
 when:
@@ -45,13 +47,10 @@ steps:
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
     commands:
       - |
-        if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
-          echo "ERROR: deploy target must be 'dev' or 'prod' (got: '$$CI_PIPELINE_DEPLOY_TARGET')"
-          exit 1
-        fi
-      - |
-        if [ "$$CI_PIPELINE_DEPLOY_TARGET" = "prod" ] && [ "$$CI_COMMIT_BRANCH" != "master" ]; then
-          echo "ERROR: prod can only be deployed from master (current branch: '$$CI_COMMIT_BRANCH')"
+        if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ]; then
+          echo "ERROR: deploy target must be 'dev' (got: '$$CI_PIPELINE_DEPLOY_TARGET')"
+          echo "       dev is the only environment that exists; a production"
+          echo "       environment is deferred to #388, which re-adds its target."
           exit 1
         fi
 
@@ -82,9 +81,10 @@ steps:
         done
 
   # One step per target, each applying only that environment's blueprint (#274).
-  # A single step applying a dev+prod file meant a manual **dev** deployment from
-  # a feature branch rewrote **prod**'s OIDC provider — `validate-deployment` only
-  # restricts the prod *target* to master, not the blueprint's reach.
+  # A single file covering every environment meant a manual deployment from a
+  # feature branch rewrote another environment's OIDC provider: restricting a
+  # *target* does not restrict a blueprint's reach. Dev is the only target today
+  # (#392), and the per-env split is what keeps #388's prod file off dev.
   apply-authentik-blueprint-dev:
     when:
       - event: deployment
@@ -105,22 +105,6 @@ steps:
       # No `vars`: #274 made the provider public (PKCE), so the blueprint no
       # longer interpolates a client secret.
 
-  apply-authentik-blueprint-prod:
-    when:
-      - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    depends_on:
-      - validate-deployment
-    pull: true
-    image: *authentik-plugin
-    settings:
-      api_url: https://auth.desync.link
-      api_token:
-        from_secret: authentik_api_token
-      file: authentik/blueprint-prod.yaml
-      instance_name: v-note-prod
-      timeout_seconds: 900
-
   # The push gates (checks, web, android) are enforced by the workflow-level
   # depends_on above, not by step dependencies.
   # Every push, on any branch. Dev is the pre-merge environment: a branch that
@@ -129,7 +113,8 @@ steps:
   # place. #274 restricted this to `master` after its own branch push deleted the
   # live providers for both environments, but that guard cost the whole
   # branch-deploy workflow to buy protection the per-env split already provides:
-  # this applies `blueprint-dev.yaml` only, so it cannot reach prod's objects.
+  # this applies `blueprint-dev.yaml` only, so it cannot reach another
+  # environment's objects.
   # What remains is that an unreviewed branch can break *dev* login for everyone
   # until it is fixed, reverted, or master is re-pushed — accepted deliberately,
   # and now caught immediately by smoke-oidc-login-auto-dev below, which did not
@@ -154,8 +139,10 @@ steps:
     image: *docker-image
     volumes: *docker-socket
     # The whole dev environment, defined once and reused by auto-deploy-dev.
-    # deploy-v-note.sh takes no arguments and knows nothing about dev vs prod —
-    # every environment-specific value is right here.
+    # deploy-v-note.sh takes no arguments and knows nothing about which
+    # environment it is deploying — every environment-specific value is right
+    # here, which is what makes a second environment (#388) a new block, not a
+    # script change.
     environment: &deploy-dev-environment
       REGISTRY_USER:
         from_secret: zot_ci_user
@@ -242,17 +229,6 @@ steps:
     environment: *smoke-dev-environment
     commands: *smoke-commands
 
-  smoke-oidc-login-prod:
-    when:
-      - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    depends_on:
-      - deploy-prod
-    image: *smoke-image
-    environment:
-      V_NOTE_HOST: v-notes.desync.link
-    commands: *smoke-commands
-
   # Follows auto-deploy-dev, as every step in this chain must: Woodpecker prunes
   # steps whose `when` does not match, so a dependent gated more loosely than the
   # step it depends on would reference a step that no longer exists and fail the
@@ -279,8 +255,7 @@ steps:
   # Every push, on any branch, right after auto-deploy-dev: the dashboard tracks
   # whatever is deployed to dev, so a branch's panels go live with the metrics
   # they chart and can be checked before merge. The last push wins, as it does for
-  # dev itself, and the version message names the branch. Never from deploy-prod,
-  # which could roll the dashboard back to an older release. It does not gate
+  # dev itself, and the version message names the branch. It does not gate
   # tag-release-auto-dev. grafana_api_token is the shared woodpecker-ci
   # service-account token (/woodpecker/shared, Edit on the Applications folder).
   # curl/jq are deliberately unpinned: the base image is digest-pinned, and Alpine
@@ -301,39 +276,6 @@ steps:
       - apk add --no-cache curl jq
       - GRAFANA_MESSAGE_PREFIX="v-note $$CI_COMMIT_BRANCH" RELEASE_TAG="$$(cat .release-tag)" COMMIT_SHA="$$CI_COMMIT_SHA" ./scripts/publish-grafana-dashboard.sh deploy/grafana/v-note-overview.json
 
-  deploy-prod:
-    when:
-      - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    depends_on:
-      - validate-deployment
-      - compute-version
-      - apply-authentik-blueprint-prod
-    image: *docker-image
-    volumes: *docker-socket
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-      POSTGRES_PASSWORD:
-        from_secret: v_note_prod_postgres_password
-      # Unlocks the /v-note/prod/server sovereign-config subtree.
-      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
-        from_secret: v_note_prod_sovereign_access_url
-      # Alias of /v-note/prod/server/observability/metrics-addr — see deploy-dev.
-      V_NOTE_METRICS_ADDR:
-        from_secret: v_note_prod_metrics_addr
-      # No android-apk overlay on prod: the APK delivery image is dev-only.
-      COMPOSE_PROJECT_NAME: v-note
-      COMPOSE_FILE: deploy/docker-compose.yml
-      V_NOTE_IMAGE_REPOS: registry.desync.link/v-note
-      V_NOTE_HOST: v-notes.desync.link
-      V_NOTE_CONTAINER_NAME: v-note
-      DB_VOLUME: v-note-prod-db
-      APP_ENV: production
-    commands: *deploy-commands
-
   tag-release-dev:
     when:
       - event: deployment
@@ -342,18 +284,8 @@ steps:
       - deploy-dev
     pull: true
     image: *version-plugin
-    settings: &push-tag-settings
+    settings:
       mode: push-tag
       major_minor_source: cargo
       github_token:
         from_secret: github_token
-
-  tag-release-prod:
-    when:
-      - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    depends_on:
-      - deploy-prod
-    pull: true
-    image: *version-plugin
-    settings: *push-tag-settings

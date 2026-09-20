@@ -2,7 +2,7 @@
 # Store a sovereign-config access URL as the Woodpecker deploy secret for one env.
 #
 # KV path: secret/woodpecker/repos/vcheesbrough/v-note
-# Keys:    v_note_dev_sovereign_access_url / v_note_prod_sovereign_access_url
+# Keys:    v_note_<env>_sovereign_access_url — today only v_note_dev_...
 #          (match the from_secret names in .woodpecker/deploy.yml)
 #
 # The access URL is a long-lived credential granting read access to the whole
@@ -12,26 +12,26 @@
 # script's argv, nor bao's (/proc/<pid>/cmdline), nor shell history.
 #
 # Get a URL by creating a managed connection (sovereign-config MCP or web UI):
-#   create_connection root=/v-note/dev/server  permissions=["read"]
-#   create_connection root=/v-note/prod/server permissions=["read"]
+#   create_connection root=/v-note/dev/server permissions=["read"]
 # The URL is shown once at creation — pipe it straight into this script.
 #
 # Usage:
 #   export BAO_ADDR=https://secrets.desync.link
 #   export BAO_TOKEN=<token that can write the KV path>
-#   ./scripts/store-sovereign-access-url.sh dev     # then paste the URL + Ctrl-D
-#   pbpaste | ./scripts/store-sovereign-access-url.sh prod   # or pipe it in
+#   ./scripts/store-sovereign-access-url.sh dev            # paste the URL + Ctrl-D
+#   pbpaste | ./scripts/store-sovereign-access-url.sh dev   # or pipe it in
 #
 # Idempotent: patches only the one key for the given env.
 
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 dev|prod   (access URL on stdin)" >&2
+  echo "Usage: $0 dev   (access URL on stdin)" >&2
+  echo "  dev is the only environment; a second one arrives with #388." >&2
 }
 
 target="${1:-}"
-if [ "$target" != "dev" ] && [ "$target" != "prod" ]; then
+if [ "$target" != "dev" ]; then
   usage
   exit 1
 fi
@@ -72,8 +72,8 @@ echo "==> Storing $KEY (${#url} chars) at $KV_PATH"
 # duration of the call. `printf '%s'` adds no trailing newline, so the stored value
 # is byte-exact regardless of whether bao trims one.
 # Always `patch`, never `put`. KV-v2 `put` REPLACES the whole data map, and this
-# path is shared with five other secrets (both postgres passwords and both OIDC
-# client secrets), so a `put` here would delete them. Deciding between the two by
+# path is shared with the repo's other Woodpecker secrets, so a `put` here would
+# delete them. Deciding between the two by
 # probing with `kv get` is not safe either: a write-only token — which is exactly
 # what the usage above asks for — cannot read, so the probe fails and the
 # destructive branch is taken by an operator following the runbook correctly.
@@ -88,4 +88,4 @@ if ! printf '%s' "$url" | bao kv patch "$KV_PATH" "$KEY=-" >/dev/null; then
   exit 1
 fi
 
-echo "==> Done. Redeploy $target from Woodpecker when both envs are stored."
+echo "==> Done. Redeploy $target from Woodpecker to pick up the new URL."
