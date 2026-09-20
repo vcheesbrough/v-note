@@ -74,6 +74,162 @@ services:
       # from the same constant the binary uses and cannot go stale. Join with
       # `… * on(instance) group_left(protocol) v_note_build_info` to filter.
 
+  # Read-only SQL console (#299). Off unless COMPOSE_PROFILES names `sqltool`,
+  # which the dev deploy step sets and nothing else does.
+  #
+  # No `build:`, and pinned by digest exactly as postgres is — this is a
+  # third-party image reached over the network, and a floating tag would let a
+  # rebuild change what has database access.
+  sqltool:
+    profiles: [sqltool]
+    image: sosedoff/pgweb@sha256:a5256d416e2e8b92d69a4459058e3eca33a9f075d8325491644411d0bc3bd70b
+    restart: unless-stopped
+    environment:
+      # 🚫 No `:-` default anywhere in this block. The obvious convenience —
+      # falling back to POSTGRES_PASSWORD — hands the console the application's
+      # **superuser** credentials, which turns pgweb's "read-only" mode into
+      # arbitrary host-file read (see the migration's header). There is no
+      # degraded mode.
+      #
+      # ⚠️ And no `:?` guard either, which is NOT an oversight — do not "fix" it.
+      # Compose interpolates the whole file *before* it filters by profile, so a
+      # `:?` here fails `docker compose config` even when this service is
+      # switched off, breaking every deploy that does not run the console (and
+      # local compose, and the test harness). Verified against this compose
+      # version. The guard lives in deploy-v-note.sh instead, where it can be
+      # conditional on the profile actually being active — same loud failure,
+      # applied only when it means something.
+      PGWEB_DATABASE_URL: postgres://v_note_pgweb:${PGWEB_DB_PASSWORD}@postgres:5432/v_note?sslmode=disable
+      PGWEB_URL_PREFIX: dbconsole
+      # Locks the session to the connection string above. Verified on the #299
+      # spike: POST /api/connect and /api/disconnect both return
+      # `{"error":"Session is locked"}`, so there is no browser path from the
+      # console to another role or database.
+      PGWEB_LOCK_SESSION: "1"
+      # Deliberately NOT set: PGWEB_SESSIONS re-opens the connection screen,
+      # which is the one thing that would undo the lock above.
+      #
+      # The basic-auth backstop. authentik is the identity gate (see the routers
+      # below); this is what keeps the console closed at the *application* layer
+      # if the outpost is down, the provider is misconfigured, or the profile is
+      # ever enabled somewhere no auth is attached. Traefik injects the matching
+      # header after authentik approves, so nobody is prompted for it.
+      # Guarded in deploy-v-note.sh, not here — see the note above.
+      PGWEB_AUTH_USER: ${PGWEB_AUTH_USER}
+      PGWEB_AUTH_PASS: ${PGWEB_AUTH_PASS}
+    # Only these six have PGWEB_* env vars (confirmed against `pgweb --help` for
+    # this digest); everything else has to be a flag.
+    command:
+      - --bind=0.0.0.0
+      - --listen=8081
+      - --readonly
+      - --skip-open
+      - --log-format=json
+      # Logs X-Forwarded-User when present. The mini-config authentik middleware
+      # forwards X-authentik-username and not that header, so this currently
+      # records nothing — it is set so that identity appears here the day the
+      # middleware does forward it, rather than being a change nobody remembers.
+      - --log-forwarded-user
+      - --metrics
+      - --metrics-addr=0.0.0.0:9191
+      - --metrics-path=/metrics
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - v-note-net
+      - proxy-backend
+    # Asserts liveness *and* that the basic-auth gate is on, in one probe: an
+    # unauthenticated request must be refused. If auth were ever accidentally
+    # disabled this goes green->red rather than silently serving the console.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/dbconsole/api/info | grep -q 401"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    labels:
+      - traefik.enable=true
+
+      # --- router 1: the console itself ---------------------------------
+      # Traefik's default priority is rule length, so `Host(…) && PathPrefix(…)`
+      # already outranks the app's bare `Host(…)`. Set explicitly anyway: the
+      # app serving the console's URL instead is a silent failure, not a loud one.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.entrypoints=websecure
+      # V_NOTE_HOST carries its `:?` on the app service, which is not profiled and
+      # so always fires — no need to repeat it here (and see the env note above
+      # for why repeating it would be actively wrong).
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.rule=Host(`${V_NOTE_HOST}`) && PathPrefix(`/dbconsole`)
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.priority=100
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.tls=true
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.tls.certresolver=myresolver
+      # Middlewares are per router — `lan-vpn-only@docker` does NOT carry over
+      # from the app's router and has to be repeated. Order matters: a denied
+      # forward-auth short-circuits the chain, so the credential injector below
+      # only ever runs on a request authentik has already approved.
+      #
+      # `security-headers@docker` is deliberately absent: its CSP has no
+      # `unsafe-eval` and pgweb bundles the Ace editor. Add it once the UI is
+      # confirmed to survive it.
+      #
+      # `rate-limit@docker` IS carried, and matters more here than on the app
+      # router: /dbconsole/api/query runs arbitrary SQL whose only cost control
+      # is this role's 30s statement_timeout, so a loop of 30-second seq scans
+      # is a self-inflicted DoS on the application's own database — from an
+      # already-authenticated session.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.middlewares=lan-vpn-only@docker,rate-limit@docker,authentik@docker,${V_NOTE_CONTAINER_NAME}-sqltool-auth@docker
+      - traefik.http.services.${V_NOTE_CONTAINER_NAME}-sqltool.loadbalancer.server.port=8081
+
+      # --- router 2: the forward-auth callback --------------------------
+      # Load-bearing, and the least obvious thing in this file.
+      #
+      # authentik builds its callback from the provider's *hostname* and
+      # discards any path — probed on #299: an externalHost of
+      # `https://<host>/dbconsole` still emits
+      # `https://<host>/outpost.goauthentik.io/callback`. That URL does not start
+      # with /dbconsole, so without this router it matches the **app's** router,
+      # which has no authentik middleware; the SPA's catch-all serves index.html,
+      # the session cookie is never set, and login loops forever.
+      #
+      # Every mini-config service protected this way (glances, woodpecker, the
+      # Traefik dashboard) is a bare `Host(…)` router, which catches the callback
+      # by accident. A path-scoped console has to catch it on purpose.
+      #
+      # The backend is irrelevant — `authentik@docker` intercepts these requests
+      # and answers them itself, so nothing is ever proxied to pgweb. It points
+      # at this service only because a Traefik router needs one.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool-callback.entrypoints=websecure
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool-callback.rule=Host(`${V_NOTE_HOST}`) && PathPrefix(`/outpost.goauthentik.io`)
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool-callback.priority=100
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool-callback.tls=true
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool-callback.tls.certresolver=myresolver
+      # No credential injector here: this router never reaches pgweb.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool-callback.middlewares=lan-vpn-only@docker,authentik@docker
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool-callback.service=${V_NOTE_CONTAINER_NAME}-sqltool
+
+      # --- the credential injector --------------------------------------
+      # Satisfies pgweb's own basic auth on behalf of an already-authenticated
+      # user, so the backstop costs nobody a second password prompt.
+      # `customRequestHeaders` *overwrites*, so a client that sends its own
+      # Authorization header has it replaced rather than honoured — there is no
+      # bypass surface here.
+      #
+      # Derived by deploy-v-note.sh from PGWEB_AUTH_USER/PGWEB_AUTH_PASS above,
+      # so the header and the credential pgweb checks cannot drift apart.
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-sqltool-auth.headers.customrequestheaders.Authorization=Basic ${PGWEB_AUTH_B64}
+
+      # Scraped by Alloy exactly as the app is. Charted nowhere: the dashboard
+      # validator (scripts/test-grafana-dashboard.sh) rejects any charted
+      # `v_note_*` metric not registered in observability.rs, and pgweb's metric
+      # names are not v-note's.
+      - observability.metrics.scrape=true
+      - observability.metrics.port=9191
+      - observability.metrics.path=/metrics
+      - observability.metrics.scheme=http
+      - observability.service=v-note-sql-console
+      - observability.env=${APP_ENV:-dev}
+      - observability.release=${APP_VERSION:-unknown}
+
 secrets:
   # Sourced straight from /v-note/devops/<env>/compose/SOVEREIGN_CONFIG_ACCESS_URL_FILE,
   # which `sovereign-config render` puts in the deploy step's environment (#391). Compose

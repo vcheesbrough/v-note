@@ -37,6 +37,12 @@ set -eu
 # Optional:
 #   V_NOTE_IMAGE_TAG                   overrides the tag in .release-tag
 #   DOCKER_NETWORK                     compose network name (default v-note-net)
+#   COMPOSE_PROFILES                   naming `sqltool` enables the SQL console (#299)
+# Required only when COMPOSE_PROFILES names `sqltool`:
+#   PGWEB_DB_PASSWORD                  password for the read-only v_note_pgweb role
+#   PGWEB_AUTH_USER / PGWEB_AUTH_PASS  the console's basic-auth backstop; this
+#                                      script derives PGWEB_AUTH_B64 from them for
+#                                      the Traefik header that satisfies it
 
 HEALTH_TIMEOUT_SECONDS=120
 
@@ -157,6 +163,52 @@ for name in APP_ENV COMPOSE_PROJECT_NAME SOVEREIGN_CONFIG_ACCESS_URL_FILE V_NOTE
   require_env "$name"
 done
 
+# --- SQL console (#299) -----------------------------------------------------
+#
+# Active only when COMPOSE_PROFILES names `sqltool`. Everything in this block is
+# conditional on that, because the console is an opt-in extra and an environment
+# that does not run it must not need its credentials.
+#
+# The guards are HERE rather than as `:?` in deploy/docker-compose.yml on
+# purpose: compose interpolates the whole file before filtering by profile, so a
+# `:?` on a profiled service fires even when that service is switched off, which
+# would make these credentials mandatory for every deploy. This is the same
+# loud failure, scoped to when it actually means something.
+#
+# What must never happen is a *fallback*. `${PGWEB_DB_PASSWORD:-$POSTGRES_PASSWORD}`
+# or any equivalent silently connects the console as the application's superuser,
+# and pgweb's read-only mode does not stop a superuser reading host files
+# through `pg_read_file`. Missing means fail, never substitute.
+# Matched the way compose matches it: an exact name in a comma-separated list,
+# not a substring. `nosqltool` or `sqltool-preview` would otherwise take this
+# branch, demand three credentials, and then run `up -d … sqltool` for a service
+# compose never activated — failing a deploy that had nothing to do with the
+# console. This variable is a documented operator knob, so it is worth parsing
+# it correctly rather than approximately.
+case ",${COMPOSE_PROFILES:-}," in
+  *,sqltool,*)
+    SQLTOOL_ENABLED=1
+    for name in PGWEB_DB_PASSWORD PGWEB_AUTH_USER PGWEB_AUTH_PASS; do
+      require_env "$name"
+    done
+    # One credential, two consumers — pgweb checks it and Traefik injects it —
+    # so it is derived here rather than stored twice. Exactly the reasoning
+    # behind the metrics-label derivation below.
+    PGWEB_AUTH_B64=$(printf '%s:%s' "$PGWEB_AUTH_USER" "$PGWEB_AUTH_PASS" | base64 | tr -d '\n')
+    export PGWEB_AUTH_B64
+    ;;
+  *)
+    SQLTOOL_ENABLED=0
+    # Compose still interpolates the profiled service, so these must resolve to
+    # *something*. Empty is correct: the service is not created, and an empty
+    # value is what an unset variable would produce anyway.
+    export PGWEB_DB_PASSWORD="${PGWEB_DB_PASSWORD:-}"
+    export PGWEB_AUTH_USER="${PGWEB_AUTH_USER:-}"
+    export PGWEB_AUTH_PASS="${PGWEB_AUTH_PASS:-}"
+    export PGWEB_AUTH_B64=""
+    ;;
+esac
+
 # Alloy's scrape-discovery labels are derived from the metrics listener address,
 # so the listener and the thing scraping it cannot disagree — previously the
 # labels hardcoded `scrape=true` and port 9090 while `observability/metrics-addr`
@@ -226,3 +278,55 @@ docker compose up -d
 docker compose up -d --force-recreate --no-deps v-note
 
 wait_for_health "$V_NOTE_CONTAINER_NAME"
+
+# --- SQL console provisioning (#299) ----------------------------------------
+#
+# Deliberately after the health gate: the migration that creates `v_note_pgweb`
+# and its grants runs at app startup, so the role does not exist until the app
+# is up. Only the password is set here — the role, its grants and its per-role
+# settings (read-only, timeouts, statement logging) are all in the migration, so
+# they reach every environment including the e2e stack rather than only the ones
+# this script deploys.
+#
+# Idempotent: re-setting the same password on every deploy is a no-op, and it is
+# what makes rotating the credential a matter of changing the stored leaf rather
+# than a manual visit to the database.
+if [ "$SQLTOOL_ENABLED" = "1" ]; then
+  echo "==> provisioning the v_note_pgweb login"
+  # The password travels as an env var on the exec rather than inside the SQL
+  # text, and psql's \getenv keeps it out of the statement this script writes.
+  # PGPASSWORD is read from the postgres container's own environment, so the
+  # app's credential is never handled out here at all.
+  #
+  # Nothing in this block may echo: these values do not come from `from_secret`
+  # since #391, so Woodpecker does not mask them in the step log.
+  docker compose exec -T \
+    -e PGWEB_NEW_PASSWORD="$PGWEB_DB_PASSWORD" \
+    postgres \
+    sh -ec 'PGPASSWORD="$POSTGRES_PASSWORD" psql -v ON_ERROR_STOP=1 -q \
+      -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'\''SQL'\''
+\getenv pgweb_pw PGWEB_NEW_PASSWORD
+ALTER ROLE v_note_pgweb WITH LOGIN PASSWORD :'\''pgweb_pw'\'';
+SQL'
+
+  # The console came up before the role could log in, so it has been failing its
+  # connection since `up`. Recreate it now that the credential works — the same
+  # reasoning as the app recreate above, for the same reason (nothing in the
+  # compose model changed, so `up -d` alone would be a no-op).
+  echo "==> recreating the SQL console against the provisioned role"
+  docker compose up -d --force-recreate --no-deps sqltool
+else
+  # Turning the toggle off has to actually turn it off, and nothing else here
+  # does that. `docker compose up -d` leaves a running container for a service
+  # that has dropped out of the active profile, and — verified against this
+  # compose version — `--remove-orphans` does NOT reap it either: a profiled
+  # service is still *defined* in the file, so compose does not consider it an
+  # orphan. Without this line the console would keep serving after being
+  # switched off, which is the failure mode that matters most for this service.
+  #
+  # `--profile sqltool` is required to address a service outside the active
+  # profile at all. `rm -sf` stops and removes, and exits 0 when there is
+  # nothing to remove, so this is a no-op on every deploy that never had one.
+  echo "==> ensuring the SQL console is not running"
+  docker compose --profile sqltool rm -sf sqltool
+fi

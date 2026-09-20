@@ -41,6 +41,9 @@ echo "$*" >> "$DOCKER_CALLS"
 if [ "$1" = "compose" ] && [ "$2" = "up" ]; then
   echo "metrics scrape=$V_NOTE_METRICS_SCRAPE port=$V_NOTE_METRICS_PORT" >> "$DOCKER_CALLS"
   echo "tag=$V_NOTE_IMAGE_TAG version=$APP_VERSION" >> "$DOCKER_CALLS"
+  # #299: the Traefik header the script derives, so the test can assert it
+  # matches the credential pgweb is configured to check.
+  echo "pgweb-auth-b64=${PGWEB_AUTH_B64:-}" >> "$DOCKER_CALLS"
 fi
 # The health gate reads the container's own state, so the stub has to answer
 # `docker inspect` — a stub that just exits 0 would return an empty status and
@@ -240,6 +243,89 @@ assert_gate_fails "an exited container fails the deploy" \
 # status to wait for, so say so instead of polling until the deadline.
 assert_gate_fails "an image with no healthcheck fails the deploy" \
   "STUB_HEALTH_SEQUENCE=running:none" "has no healthcheck"
+
+echo "==> the SQL console is off unless COMPOSE_PROFILES asks for it (#299)"
+# The base environment has no COMPOSE_PROFILES, which is the "no console" case
+# every environment that does not want one is in. The console's credentials must
+# not be required there — and the disable path must actively run, because
+# `docker compose up -d` leaves a running container for a service that dropped
+# out of the profile, and `--remove-orphans` does not reap it either (a profiled
+# service is still *defined*, so compose does not consider it an orphan).
+assert_succeeds "no profile deploys without any PGWEB_* value" "true"
+assert_recorded "the console is explicitly torn down when the profile is off" \
+  "compose --profile sqltool rm -sf sqltool"
+if grep -qF 'compose up -d --force-recreate --no-deps sqltool' "$CALLS"; then
+  fail "the console was recreated even though the profile is off"
+else
+  pass "no console is created when the profile is off"
+fi
+
+echo "==> with the profile on, every console credential is required"
+# 🚫 The failure this guards against is not a crash, it is a *fallback*. A
+# `${PGWEB_DB_PASSWORD:-$POSTGRES_PASSWORD}` written to be helpful connects the
+# console as the application's superuser, and pgweb's read-only mode does not
+# stop a superuser reading host files through pg_read_file. Missing must mean
+# fail, never substitute.
+#
+# The guards live in this script rather than as compose `:?` because compose
+# interpolates the whole file before filtering by profile, so a `:?` on a
+# profiled service fires even when the console is switched off.
+# `export`, not plain assignment: these names are not in base_env, and the
+# script under test is a child process, so an unexported variable would leave
+# every case below silently exercising the profile-off path instead.
+sqltool_env="export COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=dbpw PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=authpw"
+for name in PGWEB_DB_PASSWORD PGWEB_AUTH_USER PGWEB_AUTH_PASS; do
+  assert_fails_untouched "$name unset with the profile on" \
+    "$sqltool_env; unset $name" "ERROR: $name is required"
+  assert_fails_untouched "$name blank with the profile on" \
+    "$sqltool_env; $name=''" "ERROR: $name is required"
+done
+
+# The console must never be handed the app's credential, whatever else is set.
+assert_fails_untouched "POSTGRES_PASSWORD is not a fallback for PGWEB_DB_PASSWORD" \
+  "$sqltool_env; unset PGWEB_DB_PASSWORD; POSTGRES_PASSWORD=superuser-pw" \
+  "ERROR: PGWEB_DB_PASSWORD is required"
+
+echo "==> with the profile on, the console is provisioned and recreated"
+assert_succeeds "a fully-specified console deploys" "$sqltool_env"
+assert_recorded "the read-only role's login is provisioned after the health gate" \
+  "compose exec -T -e PGWEB_NEW_PASSWORD=dbpw postgres"
+assert_recorded "the console is recreated once the credential works" \
+  "compose up -d --force-recreate --no-deps sqltool"
+if grep -qF 'compose --profile sqltool rm -sf sqltool' "$CALLS"; then
+  fail "the console was torn down even though the profile is on"
+else
+  pass "the console is not torn down when the profile is on"
+fi
+
+# One credential, two consumers: pgweb checks it and Traefik injects it. Derived
+# rather than stored twice so they cannot drift apart.
+expected_b64=$(printf '%s:%s' console authpw | base64 | tr -d '\n')
+assert_recorded "the Traefik header is derived from the same user/pass pgweb checks" \
+  "pgweb-auth-b64=$expected_b64"
+
+echo "==> COMPOSE_PROFILES is matched as compose matches it, not as a substring"
+# A near-miss name must NOT enable the console: taking that branch would demand
+# three credentials and then recreate a service compose has not activated,
+# failing a deploy that had nothing to do with the console.
+assert_succeeds "a near-miss profile name does not enable the console" \
+  "export COMPOSE_PROFILES=nosqltool"
+assert_recorded "a near-miss name still runs the teardown" \
+  "compose --profile sqltool rm -sf sqltool"
+
+assert_succeeds "a profile name with a suffix does not enable the console" \
+  "export COMPOSE_PROFILES=sqltool-preview"
+if grep -qF 'compose up -d --force-recreate --no-deps sqltool' "$CALLS"; then
+  fail "sqltool-preview enabled the console"
+else
+  pass "sqltool-preview does not enable the console"
+fi
+
+# ...and a real multi-profile list must still enable it.
+assert_succeeds "sqltool among several profiles enables the console" \
+  "$sqltool_env; export COMPOSE_PROFILES=other,sqltool,third"
+assert_recorded "a multi-profile list still provisions the role" \
+  "compose exec -T -e PGWEB_NEW_PASSWORD=dbpw postgres"
 
 echo "==> the script takes no arguments and ignores any"
 # Documented consequence of dropping the <env> positional: a stray argument is

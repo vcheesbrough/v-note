@@ -86,6 +86,24 @@ steps:
       - apk add --no-cache python3 bash curl
       - ./scripts/test-smoke-oidc-login.sh
 
+  # Same argument for the two scripts #299 added, both of which only ever run
+  # against live shared infrastructure:
+  #
+  # - smoke-sql-console.sh is the ONLY automated assertion that the SQL console
+  #   is not publicly readable. No CI stack can make it (e2e has no Traefik and
+  #   no Authentik), so a guard that silently passes would leave the database
+  #   exposed with every check green.
+  # - attach-sqltool-outpost.sh does a read-modify-write on the *shared* embedded
+  #   outpost, whose provider list also holds every other service Authentik
+  #   protects on this LAN. A bug that writes a short list detaches all of them.
+  sql-console-script-validation:
+    depends_on: []
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    commands:
+      - apk add --no-cache python3 bash curl jq
+      - ./scripts/test-smoke-sql-console.sh
+      - ./scripts/test-attach-sqltool-outpost.sh
+
   # deploy.yml publishes the Grafana dashboard on every push to master once dev is
   # deployed, so a broken one would otherwise land straight on the shared dashboard. This
   # validates deploy/grafana/v-note-overview.json and the publish script's payload

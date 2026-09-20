@@ -98,6 +98,81 @@ entries:
       group: !Find [authentik_core.group, [name, v-note-dev-users]]
 
   # -------------------------------------------------------------------------
+  # SQL console (#299) — a *separate* application with its own provider and its
+  # own group, so that "can use v-note" and "can read every row of everyone's
+  # notes" stay different facts. Nothing above is affected.
+  #
+  # Note #214 §3's "admins must be in both groups" does NOT apply here: that
+  # described an admin surface inside the v-note application, where the
+  # v-note-dev-users binding was evaluated first. This is its own application
+  # with its own binding, so membership of v-note-dev-admins alone is enough.
+  # -------------------------------------------------------------------------
+
+  - model: authentik_core.group
+    state: present
+    identifiers:
+      name: v-note-dev-admins
+    attrs:
+      name: v-note-dev-admins
+
+  # The first proxy provider declared by a blueprint in either repo — every one
+  # of the eleven live ones was made by hand in the UI. If this entry does not
+  # apply cleanly, that is why.
+  #
+  # `external_host` is the bare host, NOT the /dbconsole URL. Probed on #299:
+  # authentik discards any path when it builds the callback URI and emits
+  # `https://<host>/outpost.goauthentik.io/callback` regardless, so writing the
+  # path here would only mislead the next reader. What makes the path scoping
+  # work is the pair of Traefik routers in deploy/docker-compose.yml — one for
+  # /dbconsole and one for that callback.
+  - model: authentik_providers_proxy.proxyprovider
+    state: present
+    identifiers:
+      name: v-note-sql-console-dev
+    attrs:
+      name: v-note-sql-console-dev
+      external_host: "https://v-notes-dev.desync.link"
+      mode: forward_single
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+
+  - model: authentik_core.application
+    state: present
+    identifiers:
+      slug: v-note-sql-console-dev
+    attrs:
+      name: v-note SQL console (dev)
+      slug: v-note-sql-console-dev
+      provider: !Find [authentik_providers_proxy.proxyprovider, [name, v-note-sql-console-dev]]
+
+  - model: authentik_policies.policybinding
+    state: present
+    identifiers:
+      order: 0
+      target: !Find [authentik_core.application, [slug, v-note-sql-console-dev]]
+      group: !Find [authentik_core.group, [name, v-note-dev-admins]]
+    attrs:
+      order: 0
+      enabled: true
+      negate: false
+      timeout: 30
+      target: !Find [authentik_core.application, [slug, v-note-sql-console-dev]]
+      group: !Find [authentik_core.group, [name, v-note-dev-admins]]
+
+  # 🚫 There is deliberately NO `authentik_outposts.outpost` entry here, and
+  # adding one would be a LAN-wide outage waiting to happen.
+  #
+  # A proxy provider does nothing until it is attached to the shared "authentik
+  # Embedded Outpost", whose `providers` list also holds the eleven providers
+  # that protect glances, woodpecker, the Traefik dashboard and the rest. A
+  # blueprint sets a list wholesale, so declaring that object here would drop
+  # every one of them — and this file is applied on *every branch push*
+  # (.woodpecker/deploy.yml), not just master.
+  #
+  # The attachment is an append-only read-modify-write instead, done by the
+  # attach-sqltool-outpost step in .woodpecker/deploy.yml.
+
+  # -------------------------------------------------------------------------
   # Retired by #274: the separate Android application and the old confidential
   # browser provider. Ordered after the entries above so the application is
   # already repointed at the unified provider before these are deleted.
