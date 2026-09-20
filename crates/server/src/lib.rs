@@ -17,11 +17,15 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{AuthConfig, JwksCache, auth_middleware};
-use crate::config::{AndroidConfig, DatabaseConfig, OidcConfig, RealtimeConfig, ServerConfig};
+use crate::config::{
+    AndroidConfig, ClientTelemetryConfig, ClientTelemetryUpstreams, DatabaseConfig, OidcConfig,
+    RealtimeConfig, ServerConfig,
+};
 use crate::observability::request_observability_middleware;
 use crate::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
+use crate::routes::telemetry::ClientTelemetryIngress;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,6 +44,10 @@ pub struct AppState {
     /// realtime upgrades. Read once per upgrade, so flipping it only affects
     /// connections opened afterwards.
     pub realtime_compression: bool,
+    /// The `/otlp` client telemetry ingress (#354). `None` **is** the kill
+    /// switch (`client-telemetry.enabled`): with no upstreams there is nothing
+    /// to forward to, and every `/otlp` request is a 404.
+    pub client_telemetry: Option<Arc<ClientTelemetryIngress>>,
 }
 
 /// The build version: the release tag baked in at compile time (`V_NOTE_RELEASE`,
@@ -108,6 +116,7 @@ pub async fn build_app_router(
     android: &AndroidConfig,
     server: &ServerConfig,
     realtime: &RealtimeConfig,
+    client_telemetry: &ClientTelemetryConfig,
 ) -> Result<Router, StartupError> {
     let auth = Arc::new(
         AuthConfig::from_oidc(oidc)
@@ -135,12 +144,35 @@ pub async fn build_app_router(
         assetlinks_json: android.assetlinks_json().map(Arc::from),
         coalesce_replay: realtime.coalesce_replay,
         realtime_compression: realtime.compression,
+        client_telemetry: client_telemetry_ingress(client_telemetry.upstreams()),
     };
     // Startup work, not router construction: resume thumbnail jobs a restart
     // interrupted. Kept out of `router` so tests, whose pool never connects,
     // build routers without launching a recovery query.
     thumbnails::recover_pending(state.clone());
     Ok(router(state, server.static_dir.clone()))
+}
+
+/// Logged once, at `info`, because whether ingest is on is exactly what someone
+/// reading a quiet startup log after flipping the switch wants to confirm — the
+/// config is snapshotted at startup, so the switch only takes on a restart.
+fn client_telemetry_ingress(
+    upstreams: Option<ClientTelemetryUpstreams>,
+) -> Option<Arc<ClientTelemetryIngress>> {
+    match upstreams {
+        Some(upstreams) => {
+            tracing::info!(
+                spa_endpoint = %upstreams.spa,
+                android_endpoint = %upstreams.android,
+                "client telemetry ingress enabled"
+            );
+            Some(Arc::new(ClientTelemetryIngress::new(upstreams)))
+        }
+        None => {
+            tracing::info!("client telemetry ingress disabled; /otlp answers 404");
+            None
+        }
+    }
 }
 
 fn database_connect_options(database: &DatabaseConfig) -> PgConnectOptions {
@@ -161,6 +193,20 @@ pub fn build_router(
     jwks_cache: Arc<JwksCache>,
     db: PgPool,
 ) -> Router {
+    build_router_with_client_telemetry(app_version, auth, jwks_cache, db, None)
+}
+
+/// As [`build_router`], with the `/otlp` ingress pointed at `upstreams` — or
+/// switched off, which is what [`build_router`] gets. A sibling rather than a
+/// fifth parameter so the tests that have nothing to do with telemetry do not
+/// each have to say so.
+pub fn build_router_with_client_telemetry(
+    app_version: String,
+    auth: Arc<AuthConfig>,
+    jwks_cache: Arc<JwksCache>,
+    db: PgPool,
+    upstreams: Option<ClientTelemetryUpstreams>,
+) -> Router {
     router(
         AppState {
             app_version,
@@ -171,6 +217,8 @@ pub fn build_router(
             assetlinks_json: None,
             coalesce_replay: RealtimeConfig::default().coalesce_replay,
             realtime_compression: RealtimeConfig::default().compression,
+            client_telemetry: upstreams
+                .map(|upstreams| Arc::new(ClientTelemetryIngress::new(upstreams))),
         },
         None,
     )
@@ -196,6 +244,24 @@ fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         ))
         .with_state(state.clone());
 
+    // Layers run outermost-first and the last one added is outermost, so the
+    // kill switch is consulted *before* authentication. See `enabled_gate` for
+    // why that order is load-bearing. The fallback keeps every other path under
+    // `/otlp` away from the SPA's catch-all below, which would answer a stray
+    // `GET /otlp/...` with `200 index.html`.
+    let client_telemetry = Router::new()
+        .route("/{client}/v1/{signal}", post(routes::telemetry::ingest))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::telemetry::enabled_gate,
+        ))
+        .fallback(routes::telemetry::not_found)
+        .with_state(state.clone());
+
     let mut router = Router::new()
         .route("/health", get(health))
         .route(
@@ -212,6 +278,7 @@ fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
                 .with_state(state.clone()),
         )
         .nest("/api", public_api.merge(protected_api))
+        .nest("/otlp", client_telemetry)
         .route(
             "/api/realtime",
             get(realtime_socket).with_state(state.clone()),
@@ -281,6 +348,7 @@ impl AppState {
             assetlinks_json: None,
             coalesce_replay: RealtimeConfig::default().coalesce_replay,
             realtime_compression: RealtimeConfig::default().compression,
+            client_telemetry: None,
         }
     }
 }

@@ -239,6 +239,24 @@ case "$V_NOTE_METRICS_ADDR" in
     ;;
 esac
 
+# --- client telemetry sidecar (#354) ----------------------------------------
+#
+# The sidecar's Alloy config reaches its container as a compose `configs:` entry
+# sourced from this variable, not as a bind mount: this script runs inside a CI
+# container against the host's docker socket, so a bind-mount path would be
+# resolved on the host, where this checkout does not exist.
+#
+# Read here rather than passed in by the pipeline step so that there is nothing
+# for a caller to forget — the file is in the repo, next to the compose file that
+# consumes it, and is the same for every environment.
+#
+# Assigned and exported on separate lines deliberately. `export X="$(cat f)"`
+# returns export's status, not cat's, so a missing file would slip past `set -e`
+# and hand compose an empty string — which it accepts, producing a sidecar that
+# starts, reports ready and accepts nothing.
+CLIENT_TELEMETRY_ALLOY_CONFIG=$(cat deploy/alloy/client-telemetry.alloy)
+export CLIENT_TELEMETRY_ALLOY_CONFIG
+
 # The remaining parameters are enforced by compose's own `:?` guards, which would
 # otherwise not fire until `up` — after a registry login and a pull. Resolving the
 # model first is client-side only (no daemon, no network), so every parameter is

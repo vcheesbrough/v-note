@@ -67,6 +67,7 @@ pub struct Metrics {
     http: HttpMetrics,
     auth_failures_total: IntCounterVec,
     page_mutations_total: IntCounterVec,
+    client_telemetry_requests_total: IntCounterVec,
     thumbnails: ThumbnailMetrics,
     realtime: RealtimeMetrics,
     _build_info: IntGauge,
@@ -298,6 +299,17 @@ impl Metrics {
             )
             .expect("page mutation counter should build"),
         );
+        let client_telemetry_requests_total = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    "v_note_client_telemetry_requests_total",
+                    "Client telemetry exports reaching the /otlp ingress, by client kind, signal and outcome",
+                ),
+                &["client", "signal", "outcome"],
+            )
+            .expect("client telemetry counter should build"),
+        );
         let thumbnails = ThumbnailMetrics::new(&registry);
         let realtime = RealtimeMetrics::new(&registry);
         let build_info = IntGauge::with_opts(
@@ -314,6 +326,7 @@ impl Metrics {
             http,
             auth_failures_total,
             page_mutations_total,
+            client_telemetry_requests_total,
             thumbnails,
             realtime,
             _build_info: build_info,
@@ -322,6 +335,20 @@ impl Metrics {
 
     pub fn record_auth_failure(&self, reason: &'static str) {
         self.auth_failures_total.with_label_values(&[reason]).inc();
+    }
+
+    /// All three labels are `&'static str` on purpose: the ingress passes values
+    /// it has already matched against a closed set, never a path segment, so a
+    /// caller cannot mint a time series by requesting `/otlp/<anything>/…`.
+    pub fn record_client_telemetry(
+        &self,
+        client: &'static str,
+        signal: &'static str,
+        outcome: &'static str,
+    ) {
+        self.client_telemetry_requests_total
+            .with_label_values(&[client, signal, outcome])
+            .inc();
     }
 
     pub fn record_page_mutation(&self, operation: &'static str, result: &'static str) {
@@ -931,6 +958,15 @@ fn normalized_route(path: &str) -> String {
     }
     if path.starts_with("/.well-known/") {
         return "/.well-known/*".to_string();
+    }
+    // One bucket for the whole client telemetry ingress (#354), never one per
+    // `{client}`/`{signal}`: those segments are caller-supplied, and the route
+    // 404s an unknown one only *after* this label has been taken. The per-client
+    // breakdown is `v_note_client_telemetry_requests_total`, labelled from
+    // validated values. Without this the ingress would land in `/static/*` and
+    // skew the static-asset latency series.
+    if path == "/otlp" || path.starts_with("/otlp/") {
+        return "/otlp/*".to_string();
     }
     "/static/*".to_string()
 }

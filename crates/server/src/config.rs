@@ -8,8 +8,9 @@
 //!   3. environment overrides under the `VNOTE__` prefix with a `__` nesting separator.
 //!
 //! Each top-level group is its own self-contained DTO deserialized from its own
-//! sub-branch (`database`, `oidc`, `observability`, `android`) — there is no
-//! umbrella config struct. Every leaf in sovereign-config is text; rich field
+//! sub-branch (`database`, `oidc`, `observability`, `android`, `realtime`,
+//! `client-telemetry`, `server`) — there is no umbrella config struct. Every
+//! leaf in sovereign-config is text; rich field
 //! types (`u16`, `SocketAddr`, `url::Url`, …) fold presence + coercion checks into
 //! deserialization, and each DTO additionally implements [`ValidatedConfig`] for the
 //! residual checks the type system can't express. All groups are loaded through the
@@ -261,6 +262,9 @@ fn apply_defaults(
         // `"true"` — this is the no-leaf fallback, not what a deployed server
         // does. See `RealtimeConfig`.
         ("realtime.compression", "false"),
+        // Kill switch (#354). Off unless an environment turns it on, and present
+        // so the `client-telemetry` sub-branch always exists.
+        ("client-telemetry.enabled", "false"),
     ];
     let mut builder = builder;
     for (key, value) in defaults {
@@ -525,6 +529,93 @@ impl ValidatedConfig for RealtimeConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         // A `bool` field already makes every illegal state unrepresentable:
         // a leaf that is not a recognised boolean fails coercion in `load_group`.
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// client-telemetry
+// ---------------------------------------------------------------------------
+
+/// The authenticated `/otlp` ingress for client telemetry (#354).
+///
+/// Its own group rather than three more leaves on `observability`: that group
+/// belongs to the server's *own* tracing and is consumed by `init_tracing`
+/// before the router exists. This one configures a route.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClientTelemetryConfig {
+    /// The kill switch. **Off by default**: with it off every `/otlp` request is
+    /// a 404, whatever else is set, so ingest can be stopped from sovereign-config
+    /// without touching the sidecar, Traefik or the clients.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base URL of the sidecar's `spa` OTLP receiver, e.g.
+    /// `http://v-note-dev-alloy:4318`. The signal path is appended to it.
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub spa_endpoint: Option<Url>,
+    /// As `spa_endpoint`, for the `android` receiver. Two leaves rather than one
+    /// host and a port table in code, so that the receivers' port layout lives
+    /// in deploy config beside the `.alloy` file and the server knows none of it.
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub android_endpoint: Option<Url>,
+}
+
+/// Where each client kind's exports are forwarded. Only obtainable from an
+/// enabled, validated [`ClientTelemetryConfig`], so "enabled with nowhere to
+/// send" is not a state the ingress ever has to handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientTelemetryUpstreams {
+    pub spa: Url,
+    pub android: Url,
+}
+
+impl ClientTelemetryConfig {
+    /// The upstreams when ingest is on, else `None`.
+    pub fn upstreams(&self) -> Option<ClientTelemetryUpstreams> {
+        if !self.enabled {
+            return None;
+        }
+        // validate() guarantees both are present when enabled.
+        Some(ClientTelemetryUpstreams {
+            spa: self.spa_endpoint.clone()?,
+            android: self.android_endpoint.clone()?,
+        })
+    }
+}
+
+impl ValidatedConfig for ClientTelemetryConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        // Checked whether or not ingest is enabled: a malformed endpoint sitting
+        // behind a disabled switch is a startup failure waiting for the day
+        // someone flips it, which is the worst moment to discover it.
+        for (path, endpoint) in [
+            ("client-telemetry.spa-endpoint", &self.spa_endpoint),
+            ("client-telemetry.android-endpoint", &self.android_endpoint),
+        ] {
+            let Some(endpoint) = endpoint else {
+                if self.enabled {
+                    return Err(ConfigError::invalid(
+                        path,
+                        "required when `client-telemetry.enabled` is true",
+                    ));
+                }
+                continue;
+            };
+            if !matches!(endpoint.scheme(), "http" | "https") {
+                return Err(ConfigError::invalid(path, "must be an http(s) URL"));
+            }
+            // The ingress appends `v1/<signal>` with `Url::join`, which *replaces*
+            // the last path segment of a base that lacks a trailing slash. A bare
+            // origin is the one shape where that cannot go wrong, and it is all an
+            // OTLP receiver on its default paths needs.
+            if endpoint.path() != "/" || endpoint.query().is_some() {
+                return Err(ConfigError::invalid(
+                    path,
+                    "must be a bare origin (`http://host:port`) with no path or query",
+                ));
+            }
+        }
         Ok(())
     }
 }
