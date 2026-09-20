@@ -1,17 +1,15 @@
 #!/bin/sh
 # Exercise install-sovereign-config-cli.sh without touching the network.
 #
-# The script decides which binary the deploy step will run, from a JSON document
-# it fetches at deploy time. Everything interesting is in that decision — picking
-# the *cli* installer out of a directory that also publishes the *mcp* one with a
-# near-identical name, and refusing to install anything when the download is
-# wrong. The pipeline's own deploy step only ever exercises the happy path, and
-# only against whatever the server happens to be serving that day, so none of the
-# refusals are covered there.
+# The script puts a binary on PATH that the deploy then runs with the database
+# password and both access URLs in its environment, so what it refuses to install
+# matters more than what it installs. The pipeline's own deploy step only ever
+# exercises the happy path, against whatever the server is serving that day, so
+# none of the refusals are covered there.
 #
-# A stub `wget` on PATH serves a fixture directory, which keeps the real parsing,
-# checksum and install logic under test while the transport is faked — the same
-# shape as the `docker` stub in test-deploy-v-note.sh.
+# A stub `wget` on PATH serves a fixture directory, which keeps the real checksum
+# and install logic under test while the transport is faked — the same shape as
+# the `docker` stub in test-deploy-v-note.sh.
 #
 # POSIX sh, not bash: this runs in the `docker:27-cli` CI image (see
 # .woodpecker/checks.yml, deploy-script-validation), which ships no bash.
@@ -25,6 +23,12 @@ trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
 pass() { echo "  ok   — $1"; }
 fail() { echo "  FAIL — $1" >&2; FAILURES=$((FAILURES + 1)); }
+
+# The pinned constants are the contract; read them from the script so the cases
+# below cannot drift from it, and so a bump has to be deliberate in one place.
+CLI_VERSION="$(sed -n 's/^CLI_VERSION="\(.*\)"$/\1/p' "$SCRIPT")"
+CLI_SHA256="$(sed -n 's/^CLI_SHA256="\(.*\)"$/\1/p' "$SCRIPT")"
+CLI="install-sovereign-config-cli-${CLI_VERSION}-x86_64-linux.sh"
 
 # --- stub wget -------------------------------------------------------------
 # Mirrors the busybox invocation the script uses (`wget -q -T 30 -O dest url`)
@@ -49,31 +53,21 @@ STUB
 chmod +x "$WORK/bin/wget"
 
 # --- fixtures --------------------------------------------------------------
-# A fake self-extracting installer. The real one installs a 3MB static binary;
-# all this test needs is something that honours SOVEREIGN_CONFIG_BIN and records
-# which installer ran, so the "picked the cli, not the mcp" assertion has teeth.
-make_installer() { # <fixture-dir> <installer-name>
+# A fake self-extracting installer. The real one carries a 3MB static binary;
+# these cases only need something that honours SOVEREIGN_CONFIG_BIN. `payload`
+# decides what the installed `sovereign-config` does when run.
+make_installer() { # <fixture-dir> <installer-name> <payload>
   cat > "$1/$2" <<INSTALLER
 #!/bin/sh
 set -eu
-echo "$2" > "\$INSTALL_MARKER"
 mkdir -p "\$SOVEREIGN_CONFIG_BIN"
 cat > "\$SOVEREIGN_CONFIG_BIN/sovereign-config" <<'BIN'
 #!/bin/sh
-echo "sovereign-config 9.9.9-test"
+$3
 BIN
 chmod +x "\$SOVEREIGN_CONFIG_BIN/sovereign-config"
 INSTALLER
-  # The real server publishes "<digest>  <release filename>"; the script reads
-  # field 1 only, because it saves the download under a local name of its own.
-  printf '%s  %s\n' "$(sha256sum "$1/$2" | awk '{print $1}')" "$2" > "$1/$2.sha256"
 }
-
-CLI=install-sovereign-config-cli-2.26.2-x86_64-linux.sh
-MCP=install-sovereign-config-mcp-2.26.2-x86_64-linux.sh
-
-# The live manifest's exact shape, as served today (single line, no whitespace).
-manifest_entry() { printf '{"file":"%s","checksum":"%s.sha256","size":3107915}' "$1" "$1"; }
 
 # --- harness ---------------------------------------------------------------
 # Each case gets a fresh fixture dir and a fresh, empty install dir, so
@@ -83,130 +77,133 @@ new_case() {
   CASE=$((CASE + 1))
   FIXTURES="$WORK/fixtures-$CASE"
   BINDIR="$WORK/bindir-$CASE"
-  MARKER="$WORK/marker-$CASE"
   mkdir -p "$FIXTURES" "$BINDIR"
 }
 
 # Runs the script with the stub on PATH and the install dir *also* on PATH, so
 # the script's own "is it on PATH afterwards" check is exercised rather than
-# sidestepped. Output is captured; cases assert on the exit status.
+# sidestepped.
 run_install() {
   (
     export PATH="$WORK/bin:$BINDIR:$PATH"
     export WGET_FIXTURES="$FIXTURES"
     export SOVEREIGN_CONFIG_BIN="$BINDIR"
     export SOVEREIGN_CONFIG_DIST_URL="https://example.invalid/dist"
-    export INSTALL_MARKER="$MARKER"
     "$SCRIPT"
   ) > "$WORK/out-$CASE" 2>&1
 }
 
 installed() { [ -x "$BINDIR/sovereign-config" ]; }
 
+# Rewrites a fixture's digest into the script's pinned value, so the happy-path
+# cases stay green across a deliberate version/digest bump.
+pin_to_fixture() {
+  sed -i "s/^CLI_SHA256=\".*\"\$/CLI_SHA256=\"$(sha256sum "$1" | awk '{print $1}')\"/" "$2"
+}
+
 # --- cases -----------------------------------------------------------------
 echo "install-sovereign-config-cli.sh"
 
-# 1. The whole point: two installers published side by side, same prefix, same
-#    suffix, and only the cli one is ours.
+# The pin is the whole design (#391): it is what stops the deploy silently
+# tracking the server. Assert it is a real version and a real digest, not a
+# placeholder someone left behind.
 new_case
-make_installer "$FIXTURES" "$CLI"
-make_installer "$FIXTURES" "$MCP"
-printf '{"installers":[%s,%s]}' "$(manifest_entry "$CLI")" "$(manifest_entry "$MCP")" \
-  > "$FIXTURES/manifest.json"
-if run_install; then
-  if ! installed; then
-    fail "two-installer manifest: exited 0 but installed nothing"
-  elif [ "$(cat "$MARKER")" != "$CLI" ]; then
-    fail "two-installer manifest: ran $(cat "$MARKER"), expected $CLI"
-  elif ! grep -q '9.9.9-test' "$WORK/out-$CASE"; then
-    fail "two-installer manifest: did not log the installed version"
-  else
-    pass "picks the cli installer out of a cli+mcp manifest and logs its version"
-  fi
+if ! echo "$CLI_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  fail "CLI_VERSION is not a semver: '$CLI_VERSION'"
+elif ! echo "$CLI_SHA256" | grep -qE '^[0-9a-f]{64}$'; then
+  fail "CLI_SHA256 is not a sha256 digest: '$CLI_SHA256'"
 else
-  fail "two-installer manifest: exited non-zero ($(tail -1 "$WORK/out-$CASE"))"
+  pass "the CLI version and digest are both pinned to concrete values"
 fi
 
-# 2. A truncated or mangled download is the failure this checksum exists for.
+# The happy path, with the pinned digest honoured.
 new_case
-make_installer "$FIXTURES" "$CLI"
-printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" "$CLI" \
-  > "$FIXTURES/$CLI.sha256"
-printf '{"installers":[%s]}' "$(manifest_entry "$CLI")" > "$FIXTURES/manifest.json"
-if run_install; then
-  fail "checksum mismatch: exited 0"
-elif installed; then
-  fail "checksum mismatch: installed anyway"
+make_installer "$FIXTURES" "$CLI" 'echo "sovereign-config 9.9.9-test"'
+SCRIPT_COPY="$WORK/script-$CASE.sh"
+cp "$SCRIPT" "$SCRIPT_COPY"
+pin_to_fixture "$FIXTURES/$CLI" "$SCRIPT_COPY"
+( export PATH="$WORK/bin:$BINDIR:$PATH" WGET_FIXTURES="$FIXTURES" \
+    SOVEREIGN_CONFIG_BIN="$BINDIR" SOVEREIGN_CONFIG_DIST_URL="https://example.invalid/dist"
+  sh "$SCRIPT_COPY" ) > "$WORK/out-$CASE" 2>&1 && ok=1 || ok=0
+if [ "$ok" -ne 1 ]; then
+  fail "happy path: exited non-zero ($(tail -1 "$WORK/out-$CASE"))"
+elif ! installed; then
+  fail "happy path: exited 0 but installed nothing"
+elif ! grep -q '9.9.9-test' "$WORK/out-$CASE"; then
+  fail "happy path: did not log the installed version"
 else
-  pass "checksum mismatch fails and installs nothing"
+  pass "installs the pinned installer and logs the version it got"
 fi
 
-# 3. The server has stopped publishing a cli installer (or only the mcp one is
-#    there). Fail loudly rather than fall back to the wrong binary.
+# The digest is the trust anchor. A file that is not the pinned one — a tampered
+# or truncated download — must not be installed.
 new_case
-make_installer "$FIXTURES" "$MCP"
-printf '{"installers":[%s]}' "$(manifest_entry "$MCP")" > "$FIXTURES/manifest.json"
+make_installer "$FIXTURES" "$CLI" 'echo "sovereign-config 9.9.9-test"'
 if run_install; then
-  fail "mcp-only manifest: exited 0"
+  fail "digest mismatch: exited 0"
 elif installed; then
-  fail "mcp-only manifest: installed the mcp binary"
+  fail "digest mismatch: installed anyway"
+elif ! grep -q 'checksum mismatch' "$WORK/out-$CASE"; then
+  fail "digest mismatch: failed for the wrong reason ($(tail -1 "$WORK/out-$CASE"))"
 else
-  pass "a manifest with no cli entry fails and installs nothing"
+  pass "an installer that does not match the pinned digest is refused"
 fi
 
-# 4. Server down / DNS gone / 404 — the deploy must not continue without a CLI.
+# What a server upgrade past the pin looks like: the pinned filename is gone.
+# Must fail loudly, and say what to do about it.
 new_case
 if run_install; then
-  fail "unreachable manifest: exited 0"
+  fail "pinned installer missing: exited 0"
 elif installed; then
-  fail "unreachable manifest: installed something"
+  fail "pinned installer missing: installed something"
+elif ! grep -q 'bump CLI_VERSION and CLI_SHA256' "$WORK/out-$CASE"; then
+  fail "pinned installer missing: error does not say how to fix it"
 else
-  pass "an unreachable manifest fails and installs nothing"
+  pass "a 404 on the pinned installer fails with the bump instruction"
 fi
 
-# 5. The installer exists but its checksum file does not.
+# `command -v` only proves a file exists. A binary that installs but cannot run
+# — noexec mount, wrong architecture — must not be reported as success, or the
+# deploy dies later at `render` pointing at the wrong step.
 new_case
-make_installer "$FIXTURES" "$CLI"
-rm -f "$FIXTURES/$CLI.sha256"
-printf '{"installers":[%s]}' "$(manifest_entry "$CLI")" > "$FIXTURES/manifest.json"
-if run_install; then
-  fail "missing checksum file: exited 0"
-elif installed; then
-  fail "missing checksum file: installed anyway"
+make_installer "$FIXTURES" "$CLI" 'exit 1'
+SCRIPT_COPY="$WORK/script-$CASE.sh"
+cp "$SCRIPT" "$SCRIPT_COPY"
+pin_to_fixture "$FIXTURES/$CLI" "$SCRIPT_COPY"
+( export PATH="$WORK/bin:$BINDIR:$PATH" WGET_FIXTURES="$FIXTURES" \
+    SOVEREIGN_CONFIG_BIN="$BINDIR" SOVEREIGN_CONFIG_DIST_URL="https://example.invalid/dist"
+  sh "$SCRIPT_COPY" ) > "$WORK/out-$CASE" 2>&1 && ok=1 || ok=0
+if [ "$ok" -eq 1 ]; then
+  fail "unrunnable binary: exited 0"
+elif ! grep -q 'does not run' "$WORK/out-$CASE"; then
+  fail "unrunnable binary: failed for the wrong reason ($(tail -1 "$WORK/out-$CASE"))"
 else
-  pass "a missing checksum file fails and installs nothing"
+  pass "an installed binary that cannot execute fails the step"
 fi
 
-# 6. Both names are pasted into a URL and used as local filenames, and both come
-#    from the network. A manifest that names a path must not be followed.
+# The other half of "do not report success without proving it": an installer that
+# exits 0 having installed nothing at all. `command -v` is the only thing between
+# that and a green step, and every other fixture here writes the binary, so
+# without this case that branch is never taken.
 new_case
-make_installer "$FIXTURES" "$CLI"
-printf '{"installers":[{"file":"install-sovereign-config-cli-../../etc/x-x86_64-linux.sh","checksum":"x.sha256","size":1}]}' \
-  > "$FIXTURES/manifest.json"
-if run_install; then
-  fail "path in manifest: exited 0"
+cat > "$FIXTURES/$CLI" <<'INSTALLER'
+#!/bin/sh
+exit 0
+INSTALLER
+SCRIPT_COPY="$WORK/script-$CASE.sh"
+cp "$SCRIPT" "$SCRIPT_COPY"
+pin_to_fixture "$FIXTURES/$CLI" "$SCRIPT_COPY"
+( export PATH="$WORK/bin:$BINDIR:$PATH" WGET_FIXTURES="$FIXTURES" \
+    SOVEREIGN_CONFIG_BIN="$BINDIR" SOVEREIGN_CONFIG_DIST_URL="https://example.invalid/dist"
+  sh "$SCRIPT_COPY" ) > "$WORK/out-$CASE" 2>&1 && ok=1 || ok=0
+if [ "$ok" -eq 1 ]; then
+  fail "installer installed nothing: exited 0"
 elif installed; then
-  fail "path in manifest: installed anyway"
-elif ! grep -q 'names a path' "$WORK/out-$CASE"; then
-  fail "path in manifest: failed for the wrong reason ($(tail -1 "$WORK/out-$CASE"))"
+  fail "installer installed nothing: but a binary appeared"
+elif ! grep -q 'not on PATH after install' "$WORK/out-$CASE"; then
+  fail "installer installed nothing: failed for the wrong reason ($(tail -1 "$WORK/out-$CASE"))"
 else
-  pass "a manifest naming a path rather than a filename is refused"
-fi
-
-# 7. Two cli installers means the server changed its publishing contract; picking
-#    one at random is how a deploy silently downgrades.
-new_case
-make_installer "$FIXTURES" "$CLI"
-OLD=install-sovereign-config-cli-2.25.0-x86_64-linux.sh
-make_installer "$FIXTURES" "$OLD"
-printf '{"installers":[%s,%s]}' "$(manifest_entry "$CLI")" "$(manifest_entry "$OLD")" \
-  > "$FIXTURES/manifest.json"
-if run_install; then
-  fail "two cli installers: exited 0"
-elif installed; then
-  fail "two cli installers: installed anyway"
-else
-  pass "two cli installers are refused rather than guessed between"
+  pass "an installer that exits 0 without installing anything fails the step"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then

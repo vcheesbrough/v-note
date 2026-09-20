@@ -149,6 +149,34 @@ with a `-` or a leading digit is refused. It **fails closed**: an unreadable
 layer, or one that contributes no values at all, means the deploy script never
 runs.
 
+#### The CLI is pinned
+
+There is no CLI container image — the server publishes a self-extracting
+installer under `/dist`, and `scripts/install-sovereign-config-cli.sh` pins both
+the version and the digest it must hash to:
+
+```sh
+CLI_VERSION="2.26.2"
+CLI_SHA256="b05aab9cbca4952bcaea4f2213241b468987b50fb98a26373c881cad485869d8"
+```
+
+This is the same bargain as the `@sha256:` pins on every CI image and Woodpecker
+plugin here, spelled for a file. The digest lives in git rather than being read
+from the `.sha256` the server publishes beside the installer, because a checksum
+handed over with the file it describes attests nothing.
+
+**When the server is upgraded, the pinned installer 404s and the deploy fails**
+with a message naming both constants. That is deliberate: bump them together as
+a commit, having checked the new CLI. An unpinned installer that tracked
+whatever the server currently publishes would instead change the deploy's
+behaviour silently.
+
+This is the **second** pin kept in lockstep with the running server — the other
+is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
+[Runtime config](#runtime-config-sovereign-config)). Both move when the server
+does; neither is enforced automatically, so check the live version
+(sovereign-config MCP `status`) before relocking either.
+
 | `/v-note/devops/dev/compose/…` | Kind | Notes |
 | --- | --- | --- |
 | `POSTGRES_PASSWORD` | secret | **alias** of `/v-note/dev/server/database/password` |

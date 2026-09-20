@@ -162,13 +162,23 @@ steps:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
-      # Environment *identity* stays in git (#391). These are coupled to other
-      # in-repo facts — the blueprint's redirect URIs, the smoke step's host, the
-      # Android flavour hosts — so moving a copy into the store would open a new
-      # drift pair rather than close one. DB_VOLUME and COMPOSE_PROJECT_NAME also
-      # fail silently when wrong (an empty database, an orphaned project), and an
-      # unreviewed store edit is no way to change them; COMPOSE_FILE and
-      # V_NOTE_IMAGE_REPOS describe the repo and must version with it.
+      # Environment *identity* is written here rather than stored (#391). These
+      # are coupled to other in-repo facts — the blueprint's redirect URIs, the
+      # smoke step's host, the Android flavour hosts — so moving a copy into the
+      # store would open a new drift pair rather than close one, and COMPOSE_FILE
+      # and V_NOTE_IMAGE_REPOS describe the repo and must version with it.
+      #
+      # Being written here does NOT make them immutable from the store.
+      # `render` layers the subtree's values *over* the inherited environment, so
+      # a leaf added to /v-note/devops/dev/compose under any name below wins over
+      # the literal here — silently, since the step logs none of them. Write
+      # access to /v-note/devops is therefore equivalent to commit access for
+      # these values, including V_NOTE_IMAGE_REPOS, which decides which images
+      # get pulled and run. That is a deliberate trade (the same subtree already
+      # holds the database password and the app's access URL, so anyone who can
+      # write there can redirect the deploy regardless), but it is a property to
+      # know about rather than assume away: if it ever needs to stop being true,
+      # move these after the `--` so `env` applies them on top of the render.
       # Read by `docker compose` itself, so the script needs no -p/-f flags.
       COMPOSE_PROJECT_NAME: v-note-dev
       COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.android-apk.yml
