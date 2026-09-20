@@ -181,6 +181,92 @@ services:
     networks:
       - e2e-net
 
+  # SQL console (#299). Deliberately NOT behind a compose profile here, unlike
+  # deploy/docker-compose.yml: there the profile is the deploy-time toggle, and
+  # here there is nothing to toggle — the console is part of what this stack
+  # exists to test, and profiling it would mean threading COMPOSE_PROFILES
+  # through every documented e2e invocation to no benefit. The toggle itself is
+  # covered by scripts/test-deploy-v-note.sh.
+  #
+  # This stack has no Traefik and no Authentik, so it cannot test the network
+  # boundary (that is scripts/smoke-sql-console.sh, post-deploy). What it tests
+  # is the boundary that lives in the database, which is the one the #299 spike
+  # found was load-bearing: pgweb's "read-only" mode against a superuser is
+  # arbitrary host-file read, so the privilege separation has to be real.
+  sqltool-provision:
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    environment:
+      PGPASSWORD: test-password
+      # Matches the value in sqltool's connection string below. A test-only
+      # credential on a throwaway database, so it is literal here — the deployed
+      # stack takes it from sovereign-config.
+      PGWEB_NEW_PASSWORD: pgweb-test-password
+    # The role is created by the migration, which the *app* runs at startup, so
+    # this waits for that specific migration rather than for the app's health —
+    # same pattern as legacy-migration-fixture above. Only the password is set
+    # here, exactly as deploy-v-note.sh does it in a real environment.
+    command:
+      - sh
+      - -ec
+      - |
+        until psql -h postgres -U v_note -d v_note -tAc "SELECT COALESCE((SELECT success FROM _sqlx_migrations WHERE version = 20260920140000), false)" | grep -q t; do sleep 1; done
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note <<'SQL'
+        \getenv pgweb_pw PGWEB_NEW_PASSWORD
+        ALTER ROLE v_note_pgweb WITH LOGIN PASSWORD :'pgweb_pw';
+        SQL
+        # Created as v_note *after* the migration ran its GRANTs, so the console
+        # can only read it if ALTER DEFAULT PRIVILEGES took. That is the
+        # difference between "this role was granted the tables that existed in
+        # September" and "this role can read what later migrations add" — and
+        # the second one is the claim the card makes. Asserting it against an
+        # existing table would prove nothing, since the blanket
+        # GRANT ... ON ALL TABLES already covers those.
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note \
+          -c "CREATE TABLE IF NOT EXISTS e2e_default_privileges_probe (i int)"
+        touch /tmp/provisioned
+        exec tail -f /dev/null
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/provisioned"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      app:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - e2e-net
+
+  sqltool:
+    image: sosedoff/pgweb@sha256:a5256d416e2e8b92d69a4459058e3eca33a9f075d8325491644411d0bc3bd70b
+    environment:
+      # Same shape as the deployed service: the read-only role, never v_note.
+      PGWEB_DATABASE_URL: postgres://v_note_pgweb:pgweb-test-password@postgres:5432/v_note?sslmode=disable
+      PGWEB_URL_PREFIX: dbconsole
+      PGWEB_LOCK_SESSION: "1"
+      # Basic auth stays ON here too, so the spec exercises the same service
+      # configuration that ships. In the deployment Traefik injects this header
+      # after Authentik approves; here the spec sends it itself.
+      PGWEB_AUTH_USER: console
+      PGWEB_AUTH_PASS: console-test-password
+    command:
+      - --bind=0.0.0.0
+      - --listen=8081
+      - --readonly
+      - --skip-open
+      - --log-format=json
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/dbconsole/api/info | grep -q 401"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+    depends_on:
+      sqltool-provision:
+        condition: service_healthy
+    networks:
+      - e2e-net
+
   playwright:
     image: v-note-e2e-playwright:${OCI_IMAGE_VERSION:-local}
     build:
@@ -213,6 +299,12 @@ services:
       # Mock-IdP-only: mints test tokens via client_credentials. The app is public (#274).
       MOCK_OIDC_CLIENT_SECRET: test-secret
       REQUIRED_SCOPE: v-note:test:access
+      # #299 — the console's API, and the credential Traefik would inject in a
+      # real deployment. Absent means the sql-console spec skips, so the suite
+      # still runs against a stack without the console.
+      SQL_CONSOLE_URL: http://sqltool:8081/dbconsole
+      SQL_CONSOLE_AUTH_USER: console
+      SQL_CONSOLE_AUTH_PASS: console-test-password
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
@@ -221,6 +313,8 @@ services:
       mock-oidc:
         condition: service_started
       legacy-migration-fixture:
+        condition: service_healthy
+      sqltool:
         condition: service_healthy
     networks:
       - e2e-net

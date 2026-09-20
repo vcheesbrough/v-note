@@ -494,6 +494,9 @@ in `crates/server/Cargo.toml` and rebuild.
 | `APP_VERSION` | compose-level only — the `observability.release` discovery label (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
 | `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
 | `V_NOTE_METRICS_ADDR` | compose-level only — `host:port` or `disabled`, rendered from `/v-note/devops/<env>/compose/V_NOTE_METRICS_ADDR`, an alias of `observability/metrics-addr`. `deploy-v-note.sh` derives `observability.metrics.port` and `observability.metrics.scrape` from it, so the listener and the thing scraping it read one value. **Required** — a missing value fails the deploy rather than defaulting |
+| `COMPOSE_PROFILES` | `sqltool` enables the [SQL console](#sql-console-dbconsole); omit it and no console container is created. Read by `docker compose` itself |
+| `PGWEB_DB_PASSWORD` | the `v_note_pgweb` role's password. **Required only when the `sqltool` profile is active**, and there is deliberately no fallback — see the console section |
+| `PGWEB_AUTH_USER` / `PGWEB_AUTH_PASS` | the console's basic-auth backstop. `deploy-v-note.sh` derives `PGWEB_AUTH_B64` from them for the Traefik header that satisfies it, so the two cannot drift apart |
 
 The **container's only environment variable is `SOVEREIGN_CONFIG_ACCESS_URL_FILE`.**
 Everything else (database, OIDC, OTLP, metrics address, App Links JSON) comes
@@ -720,7 +723,151 @@ The `dev` flavor connects to `https://v-notes-dev.desync.link` — no `adb rever
 
 ---
 
+## SQL console (`/dbconsole`)
+
+A read-only Postgres console (`pgweb`) served from the **same host as the app**,
+at `https://v-notes-dev.desync.link/dbconsole/`. It exists so a number on a
+dashboard or in a trace can be checked against the rows that produced it without
+shelling into the host.
+
+### Who can reach it
+
+Two independent gates, both of which must pass:
+
+1. **Authentik forward auth** — the identity gate. Access is restricted to the
+   **`v-note-dev-admins`** group, via the console's own Authentik application
+   (`v-note-sql-console-dev`). This is a *different* group from
+   `v-note-dev-users`: "can use v-note" and "can read every row of everyone's
+   notes" are deliberately not the same permission.
+2. **pgweb's own basic auth** — the backstop. Traefik injects the credential
+   *after* Authentik approves, so nobody is ever prompted for it. It exists so
+   the console stays closed if the outpost is down, the provider is
+   misconfigured, or the profile is enabled somewhere no auth is attached.
+
+**To grant someone access:** add them to `v-note-dev-admins` in the Authentik UI.
+That is the only manual step — the group itself is created by the blueprint.
+
+### Enabling and disabling
+
+The toggle is the `sqltool` **compose profile**, set in `.woodpecker/deploy.yml`:
+
+```yaml
+COMPOSE_PROFILES: sqltool
+```
+
+Remove it and redeploy to turn the console off. `deploy-v-note.sh` then runs
+`docker compose --profile sqltool rm -sf sqltool` explicitly — note that
+**`docker compose up -d --remove-orphans` does NOT stop it**, because a profiled
+service is still *defined* in the file and compose does not treat it as an
+orphan. Without that explicit teardown the console would keep serving after
+being switched off.
+
+### Why three Traefik routers
+
+The least obvious part of `deploy/docker-compose.yml`, and the thing to read
+before changing any of it.
+
+Authentik builds its forward-auth callback from the provider's **hostname** and
+**discards any path** — a provider whose external host is
+`https://<host>/dbconsole` still sends users back to
+`https://<host>/outpost.goauthentik.io/callback`. That path does not start with
+`/dbconsole`, so without a router for it the callback matches the **app's**
+router, which has no Authentik middleware; the SPA's catch-all serves
+`index.html`, the session cookie is never set, and login loops forever.
+
+Every other service protected this way on this LAN is a bare `Host(…)` router,
+which catches the callback by accident. A path-scoped console has to catch it on
+purpose. Hence:
+
+| Router | Rule | Purpose |
+| --- | --- | --- |
+| app | `Host(…)` | unchanged |
+| `…-sqltool` | `Host(…) && PathPrefix(/dbconsole)` | the console |
+| `…-sqltool-callback` | `Host(…) && PathPrefix(/outpost.goauthentik.io)` | the callback; the middleware answers it, nothing is proxied |
+
+A **dedicated subdomain** would avoid all of this, and is the shape every other
+protected service uses — it was rejected because `desync.link` has no wildcard
+DNS record, so it would need a manual Route53 entry.
+
+### The provider must be attached to the outpost
+
+A proxy provider does nothing until an outpost serves it; the forward-auth
+endpoint answers **404** for a host no attached provider claims, and
+`/dbconsole` is then unreachable.
+
+This is **not** done by the blueprint, and must never be. The embedded outpost is
+**shared** — its provider list also carries the providers protecting glances,
+woodpecker, uptime-kuma and the Traefik dashboard — and a blueprint writes a list
+wholesale rather than appending, so an outpost entry in
+`authentik/blueprint-dev.yaml` would detach all of them. That file is applied on
+**every branch push**, not just master.
+
+`scripts/attach-sqltool-outpost.sh` does an append-only read-modify-write
+instead, runs on every deploy, is idempotent, and refuses to write a list that
+lost an entry.
+
+### What read-only does and does not prevent
+
+The console connects as **`v_note_pgweb`**, a dedicated non-superuser role
+created by `crates/server/migrations/20260920140000_pgweb_readonly_role.sql`.
+That role, not pgweb's `--readonly` flag, is the actual boundary:
+
+- pgweb's `--readonly` is a **keyword filter over the submitted text** plus a
+  read-only transaction. Neither has anything to say about a `SELECT`.
+- Pointed at the *application's* user — which the postgres image creates as a
+  **superuser** — that "read-only" console returns the contents of `/etc/passwd`
+  via `pg_read_file`. This was measured, not theorised.
+- 🚫 So **never** give the console `POSTGRES_PASSWORD`, and never add a fallback
+  like `${PGWEB_DB_PASSWORD:-$POSTGRES_PASSWORD}`. If the password is missing the
+  deploy **must** fail; there is no degraded mode. `scripts/test-deploy-v-note.sh`
+  asserts this.
+
+The role also carries `default_transaction_read_only`, a 30s `statement_timeout`,
+and `log_statement = 'all'` — all role-scoped, so the application is unaffected.
+
+### Audit trail
+
+**There is no per-user attribution.** `--log-forwarded-user` reads
+`X-Forwarded-User`, and the Authentik middleware forwards `X-authentik-username`
+instead; the basic-auth credential is shared. What you get:
+
+- **what ran** — `log_statement = 'all'` on `v_note_pgweb`, in the postgres
+  container log. This is the real record.
+- **that access was gated** — the Traefik access log, plus the fact that
+  Authentik approved it.
+
+Do not treat this as an audit trail that names people.
+
+### Break-glass
+
+The console is a convenience, not the only way in. For anything it refuses —
+including every write — use psql on the host directly:
+
+```sh
+docker compose exec postgres psql -U v_note -d v_note
+```
+
+### Rotating the credentials
+
+Both live in sovereign-config under `/v-note/devops/dev/compose`:
+
+| Leaf | What |
+| --- | --- |
+| `PGWEB_DB_PASSWORD` | the `v_note_pgweb` database password |
+| `PGWEB_AUTH_USER` / `PGWEB_AUTH_PASS` | the basic-auth backstop |
+
+Change the leaf and redeploy. `deploy-v-note.sh` re-applies the database
+password with an idempotent `ALTER ROLE` on every deploy, so rotation needs no
+manual visit to the database.
+
+---
+
 ## Post-deploy smoke
 
 - **#145:** pipeline structure only; optional manual curl
 - **#152:** automated live smoke (TLS, Authentik, realtime, CSP)
+- **#299:** `scripts/smoke-sql-console.sh` — the only automated assertion that
+  the SQL console is not publicly readable, that its callback router exists, and
+  that gating it did not break SPA login on the same host. No CI stack can make
+  these claims (e2e has neither Traefik nor Authentik), so it gates the release
+  tag alongside the OIDC smoke check.

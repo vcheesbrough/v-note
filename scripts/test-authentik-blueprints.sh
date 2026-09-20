@@ -146,6 +146,68 @@ for env, doc in loaded.items():
         f"{env}: every `absent` entry is ordered after the `present` ones",
     )
 
+print("==> the #299 SQL console entries are present and safely scoped")
+for env, doc in loaded.items():
+    entries = doc["entries"]
+
+    # The check that matters most in this file. The embedded outpost's
+    # `providers` list is shared with every other service authentik protects on
+    # this LAN, and a blueprint sets a list wholesale rather than appending — so
+    # an outpost entry here would detach all of them. This file is applied on
+    # every branch push, so it would not even wait for a merge.
+    check(
+        not any("outpost" in e["model"] for e in entries),
+        f"{env}: declares no outpost entry (the shared provider list must not be rewritten)",
+    )
+
+    proxies = [
+        e for e in entries if e["model"].endswith("proxyprovider") and e.get("state") != "absent"
+    ]
+    check(len(proxies) == 1, f"{env}: exactly one live proxy provider")
+    if proxies:
+        attrs = proxies[0]["attrs"]
+        check(
+            attrs.get("mode") == "forward_single",
+            f"{env}: console provider is forward_single",
+        )
+        # authentik discards any path when building the callback URI, so a path
+        # here would be silently ignored — and would tell the next reader that
+        # the path scoping lives in authentik when it actually lives in the
+        # Traefik routers.
+        host = attrs.get("external_host", "")
+        check(
+            host.startswith("https://") and host.count("/") == 2,
+            f"{env}: console external_host is a bare https host with no path (got {host!r})",
+        )
+
+    admins = f"v-note-{env}-admins"
+    groups = {
+        e["identifiers"].get("name")
+        for e in entries
+        if e["model"].endswith("group") and e.get("state") != "absent"
+    }
+    check(admins in groups, f"{env}: {admins} group is declared")
+
+    # The console must be gated by the admins group, never by the ordinary user
+    # group: "can use v-note" and "can read every row of everyone's notes" are
+    # different facts and collapsing them is invisible until it matters.
+    #
+    # `!Find` tags load as None, so a binding's target and group cannot be
+    # inspected from the parsed document. Assert the shape that is visible —
+    # one binding per application — and pair it with a raw-text check that the
+    # admins group is what the console binding names.
+    bindings = [e for e in entries if e["model"].endswith("policybinding")]
+    check(
+        len(bindings) == 2,
+        f"{env}: exactly two policy bindings — the app's and the console's",
+    )
+    with open(FILES[env]) as handle:
+        raw = handle.read()
+    check(
+        f"[authentik_core.group, [name, {admins}]]" in raw,
+        f"{env}: a binding resolves the {admins} group",
+    )
+
 if failures:
     print(f"\nauthentik blueprint validation FAILED ({len(failures)} check(s))")
     sys.exit(1)

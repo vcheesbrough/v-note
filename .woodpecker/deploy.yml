@@ -128,6 +128,36 @@ steps:
     image: *authentik-plugin
     settings: *authentik-dev-settings
 
+  # The SQL console's proxy provider is created by the blueprint above, but a
+  # provider does nothing until an outpost serves it — the forward-auth endpoint
+  # answers 404 for a host no attached provider claims, and /dbconsole would be
+  # permanently unreachable.
+  #
+  # This is NOT a blueprint entry, deliberately and permanently: the embedded
+  # outpost is shared, its provider list also carries the eleven providers
+  # protecting glances, woodpecker and the rest, and a blueprint writes a list
+  # wholesale rather than appending. See the script's header and the 🚫 note in
+  # authentik/blueprint-dev.yaml. The script appends, verifies, and refuses to
+  # write a list that lost an entry.
+  #
+  # curl/jq unpinned as in publish-grafana-dashboard: the base image is
+  # digest-pinned and Alpine drops superseded versions from a stable branch.
+  attach-sqltool-outpost-dev:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - apply-authentik-blueprint-dev
+    image: &sqltool-attach-image alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    environment: &attach-sqltool-environment
+      AUTHENTIK_URL: https://auth.desync.link
+      AUTHENTIK_TOKEN:
+        from_secret: authentik_api_token
+      PROVIDER_NAME: v-note-sql-console-dev
+    commands: &attach-sqltool-commands
+      - apk add --no-cache curl jq bash
+      - ./scripts/attach-sqltool-outpost.sh
+
   deploy-dev:
     when:
       - event: deployment
@@ -136,6 +166,7 @@ steps:
       - validate-deployment
       - compute-version
       - apply-authentik-blueprint-dev
+      - attach-sqltool-outpost-dev
     image: *docker-image
     volumes: *docker-socket
     # The whole dev environment, defined once and reused by auto-deploy-dev.
@@ -186,6 +217,13 @@ steps:
       V_NOTE_HOST: v-notes-dev.desync.link
       V_NOTE_CONTAINER_NAME: v-note-dev
       DB_VOLUME: v-note-dev-db
+      # Enables the read-only SQL console (#299). Read by `docker compose`
+      # itself, like COMPOSE_FILE above, so deploy-v-note.sh needs no flag —
+      # and omitting it is how an environment opts out. Its credentials
+      # (PGWEB_DB_PASSWORD, PGWEB_AUTH_USER, PGWEB_AUTH_PASS) are rendered from
+      # /v-note/devops/dev/compose like POSTGRES_PASSWORD, and deploy-v-note.sh
+      # requires them only when this profile is active.
+      COMPOSE_PROFILES: sqltool
     # POSTGRES_PASSWORD, SOVEREIGN_CONFIG_ACCESS_URL_FILE, V_NOTE_METRICS_ADDR and
     # APP_ENV are deliberately absent above: `render` reads them out of
     # /v-note/devops/dev/compose and puts them in deploy-v-note.sh's environment
@@ -213,12 +251,22 @@ steps:
   # applied on any branch above. Deploying a branch build against a master-era
   # Authentik is exactly the failure #274 hit, so the two must not be gated
   # differently.
+  attach-sqltool-outpost-auto-dev:
+    when:
+      - event: push
+    depends_on:
+      - apply-authentik-blueprint-auto-dev
+    image: *sqltool-attach-image
+    environment: *attach-sqltool-environment
+    commands: *attach-sqltool-commands
+
   auto-deploy-dev:
     when:
       - event: push
     depends_on:
       - compute-version
       - apply-authentik-blueprint-auto-dev
+      - attach-sqltool-outpost-auto-dev
     image: *docker-image
     volumes: *docker-socket
     environment: *deploy-dev-environment
@@ -259,6 +307,34 @@ steps:
     environment: *smoke-dev-environment
     commands: *smoke-commands
 
+  # The only automated assertion that the SQL console is not publicly readable.
+  # No CI stack can make it: e2e/docker-compose.test.yml has neither Traefik nor
+  # Authentik, so the e2e suite proves the *database* boundary (read-only role,
+  # no superuser, locked session) while this proves the *network* one. It also
+  # checks that gating /dbconsole did not break SPA login on the same host,
+  # which is the interaction #299 was least sure about.
+  smoke-sql-console-auto-dev:
+    when:
+      - event: push
+    depends_on:
+      - auto-deploy-dev
+    image: *smoke-image
+    environment: &smoke-sql-console-environment
+      V_NOTE_HOST: v-notes-dev.desync.link
+    commands: &smoke-sql-console-commands
+      - apk add --no-cache curl bash
+      - ./scripts/smoke-sql-console.sh
+
+  smoke-sql-console-dev:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - deploy-dev
+    image: *smoke-image
+    environment: *smoke-sql-console-environment
+    commands: *smoke-sql-console-commands
+
   # Follows auto-deploy-dev, as every step in this chain must: Woodpecker prunes
   # steps whose `when` does not match, so a dependent gated more loosely than the
   # step it depends on would reference a step that no longer exists and fail the
@@ -272,6 +348,10 @@ steps:
       # and a build the pipeline has just proved nobody can log in to is not. #372
       # would otherwise have been tagged as a release while login was down.
       - smoke-oidc-login-auto-dev
+      # Same reasoning for the console (#299): a commit that leaves the database
+      # readable by anyone who can reach the host is not a release, and this is
+      # the only step that can tell.
+      - smoke-sql-console-auto-dev
     pull: true
     image: *version-plugin
     settings:
