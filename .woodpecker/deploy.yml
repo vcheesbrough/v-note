@@ -4,9 +4,12 @@
 #               ∥ publish-grafana-dashboard
 #   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint-<target>
 #               → deploy-dev | deploy-prod → tag-release-*
-# The push path runs on `master` only: it applies a blueprint and deploys dev,
-# both shared infrastructure (#274). Blueprints are split per environment so no
-# step can reach another environment's Authentik objects.
+# The push path runs on every branch: dev is the pre-merge environment, so a
+# branch deploys there to be tested before it is merged, and the last push wins.
+# It applies a blueprint and deploys dev, both shared infrastructure — the guard
+# is that blueprints are split per environment, so no step on this path can reach
+# prod's Authentik objects, and smoke-oidc-login-auto-dev fails the branch that
+# breaks dev login rather than leaving it to be discovered.
 # See checks.yml for why the push pipeline is split into workflows.
 
 when:
@@ -120,17 +123,20 @@ steps:
 
   # The push gates (checks, web, android) are enforced by the workflow-level
   # depends_on above, not by step dependencies.
-  # `branch: master` is a blast-radius guard, not a convenience — and it is still
-  # needed now that this applies only `blueprint-dev.yaml`. The per-env split stops
-  # a dev apply reaching *prod*; this stops an *unreviewed* branch redefining dev's
-  # own provider on the shared Authentik, which would break dev login for everyone
-  # until the branch was fixed or reverted. #274 proved both halves: that branch
-  # push deleted the live providers for both environments before review, and left
-  # dev unable to authenticate.
+  # Every push, on any branch. Dev is the pre-merge environment: a branch that
+  # changes the provider has to be able to apply it, or auth work cannot be
+  # tested until after it merges — which is how #372 reached master in the first
+  # place. #274 restricted this to `master` after its own branch push deleted the
+  # live providers for both environments, but that guard cost the whole
+  # branch-deploy workflow to buy protection the per-env split already provides:
+  # this applies `blueprint-dev.yaml` only, so it cannot reach prod's objects.
+  # What remains is that an unreviewed branch can break *dev* login for everyone
+  # until it is fixed, reverted, or master is re-pushed — accepted deliberately,
+  # and now caught immediately by smoke-oidc-login-auto-dev below, which did not
+  # exist when #274 made this call. Dev is shared and last-push-wins.
   apply-authentik-blueprint-auto-dev:
     when:
       - event: push
-        branch: master
     depends_on:
       - verify-release-images
     pull: true
@@ -186,13 +192,13 @@ steps:
     commands: &deploy-commands
       - ./scripts/deploy-v-note.sh
 
-  # Also `branch: master`: dev and the blueprint have to move together, and the
-  # blueprint is master-only above. A branch build deployed to dev against a
-  # master-era Authentik would fail exactly the way #274 did.
+  # Also every push: dev and the blueprint move together, and the blueprint is
+  # applied on any branch above. Deploying a branch build against a master-era
+  # Authentik is exactly the failure #274 hit, so the two must not be gated
+  # differently.
   auto-deploy-dev:
     when:
       - event: push
-        branch: master
     depends_on:
       - compute-version
       - apply-authentik-blueprint-auto-dev
@@ -210,10 +216,13 @@ steps:
   #
   # curl is deliberately unpinned, as in publish-grafana-dashboard: the base image
   # is digest-pinned, and Alpine drops superseded versions from a stable branch.
+  # On every branch, not just master: this is what makes branch deploys to a
+  # shared dev safe to allow. A branch that breaks dev login turns its own
+  # pipeline red at the push that did it, rather than being discovered by the
+  # next person to log in.
   smoke-oidc-login-auto-dev:
     when:
       - event: push
-        branch: master
     depends_on:
       - auto-deploy-dev
     image: &smoke-image alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
@@ -244,14 +253,13 @@ steps:
       V_NOTE_HOST: v-notes.desync.link
     commands: *smoke-commands
 
-  # `branch: master` follows auto-deploy-dev: Woodpecker prunes steps whose
-  # `when` does not match, so a dependent left on plain `event: push` would
-  # reference a step that no longer exists on a feature branch and fail the
-  # whole config as invalid.
+  # Follows auto-deploy-dev, as every step in this chain must: Woodpecker prunes
+  # steps whose `when` does not match, so a dependent gated more loosely than the
+  # step it depends on would reference a step that no longer exists and fail the
+  # whole config as invalid. The push path is therefore gated as one unit.
   tag-release-auto-dev:
     when:
       - event: push
-        branch: master
     depends_on:
       - auto-deploy-dev
       # Also the smoke check: a release tag is a claim that this commit is good,
@@ -268,13 +276,11 @@ steps:
 
   # Publishes deploy/grafana/v-note-overview.json to Grafana (Applications / v-note)
   # over the HTTP API — the dashboard counterpart of apply-authentik-blueprint.
-  # Every push to master, right after auto-deploy-dev: the dashboard tracks
-  # whatever is deployed to dev. It was previously published from any branch, but
-  # dev itself is now master-only (#274 — a branch push must not touch shared
-  # infrastructure), so a branch's dashboard would chart metrics from a build that
-  # was never deployed. The last push wins, and the version message names the
-  # branch. Never from deploy-prod, which
-  # could roll the dashboard back to an older release. It does not gate
+  # Every push, on any branch, right after auto-deploy-dev: the dashboard tracks
+  # whatever is deployed to dev, so a branch's panels go live with the metrics
+  # they chart and can be checked before merge. The last push wins, as it does for
+  # dev itself, and the version message names the branch. Never from deploy-prod,
+  # which could roll the dashboard back to an older release. It does not gate
   # tag-release-auto-dev. grafana_api_token is the shared woodpecker-ci
   # service-account token (/woodpecker/shared, Edit on the Applications folder).
   # curl/jq are deliberately unpinned: the base image is digest-pinned, and Alpine
@@ -283,7 +289,6 @@ steps:
   publish-grafana-dashboard:
     when:
       - event: push
-        branch: master
     depends_on:
       - auto-deploy-dev
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
