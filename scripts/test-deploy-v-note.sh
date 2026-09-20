@@ -304,6 +304,29 @@ expected_b64=$(printf '%s:%s' console authpw | base64 | tr -d '\n')
 assert_recorded "the Traefik header is derived from the same user/pass pgweb checks" \
   "pgweb-auth-b64=$expected_b64"
 
+echo "==> COMPOSE_PROFILES is matched as compose matches it, not as a substring"
+# A near-miss name must NOT enable the console: taking that branch would demand
+# three credentials and then recreate a service compose has not activated,
+# failing a deploy that had nothing to do with the console.
+assert_succeeds "a near-miss profile name does not enable the console" \
+  "export COMPOSE_PROFILES=nosqltool"
+assert_recorded "a near-miss name still runs the teardown" \
+  "compose --profile sqltool rm -sf sqltool"
+
+assert_succeeds "a profile name with a suffix does not enable the console" \
+  "export COMPOSE_PROFILES=sqltool-preview"
+if grep -qF 'compose up -d --force-recreate --no-deps sqltool' "$CALLS"; then
+  fail "sqltool-preview enabled the console"
+else
+  pass "sqltool-preview does not enable the console"
+fi
+
+# ...and a real multi-profile list must still enable it.
+assert_succeeds "sqltool among several profiles enables the console" \
+  "$sqltool_env; export COMPOSE_PROFILES=other,sqltool,third"
+assert_recorded "a multi-profile list still provisions the role" \
+  "compose exec -T -e PGWEB_NEW_PASSWORD=dbpw postgres"
+
 echo "==> the script takes no arguments and ignores any"
 # Documented consequence of dropping the <env> positional: a stray argument is
 # not an error, it is ignored, and the environment block decides the target.

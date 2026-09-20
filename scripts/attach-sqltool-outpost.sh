@@ -85,16 +85,27 @@ if printf '%s' "$before" | jq -e --argjson pk "$provider_pk" 'index($pk) != null
   exit 0
 fi
 
-after=$(printf '%s' "$before" | jq -c --argjson pk "$provider_pk" '. + [$pk]')
+# Re-read immediately before the write rather than reusing `$before` from the
+# lookup above. The PATCH sends the whole list, and this step runs on **every
+# branch push**, so two overlapping pipelines can both read the same list and
+# have the second clobber what the first added.
+#
+# ⚠️ This NARROWS that window; it does not close it. The endpoint offers no
+# compare-and-swap, so an interleaving between this read and the PATCH below is
+# still possible. The post-write verification is what actually catches the
+# damage — and it is deliberately the only claim made here.
+current=$(
+  api GET "/outposts/instances/?name__iexact=$(urlencode "$OUTPOST_NAME")" |
+    jq -c '.results[0].providers // []'
+)
+after=$(printf '%s' "$current" | jq -c --argjson pk "$provider_pk" '. + [$pk]')
 
-# Belt and braces on the one operation that could take down every protected
-# service on the LAN: the list being written must be a strict superset of the
-# list that was read. If a concurrent push changed it underneath us, or a jq
-# expression above ever regresses, this refuses rather than shrinking it.
-if ! printf '%s' "$after" | jq -e --argjson before "$before" \
-  '($before - .) == []' >/dev/null; then
+# Checked against the list just read, not against the one `$after` was derived
+# from — comparing a list to its own superset proves nothing.
+if ! printf '%s' "$after" | jq -e --argjson current "$current" \
+  '($current - .) == []' >/dev/null; then
   echo "ERROR: refusing to write a provider list that drops existing entries" >&2
-  echo "       before=${before}" >&2
+  echo "       current=${current}" >&2
   echo "       after=${after}" >&2
   exit 1
 fi
@@ -112,6 +123,19 @@ verified=$(
 if ! printf '%s' "$verified" | jq -e --argjson pk "$provider_pk" 'index($pk) != null' >/dev/null; then
   echo "ERROR: provider ${provider_pk} is still not attached after the patch" >&2
   echo "       outpost now serves: ${verified}" >&2
+  exit 1
+fi
+
+# The assertion this whole script is about, and the one the check above does NOT
+# make: every provider attached before is still attached. "Our provider is
+# present" says nothing about the eleven protecting glances, woodpecker,
+# uptime-kuma and the Traefik dashboard — a write that added ours and dropped
+# all of theirs satisfies it completely.
+if ! printf '%s' "$verified" | jq -e --argjson current "$current" \
+  '($current - .) == []' >/dev/null; then
+  echo "ERROR: the outpost lost providers it had before this patch" >&2
+  echo "       before=${current}" >&2
+  echo "       now=${verified}" >&2
   exit 1
 fi
 

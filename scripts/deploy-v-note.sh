@@ -179,8 +179,14 @@ done
 # or any equivalent silently connects the console as the application's superuser,
 # and pgweb's read-only mode does not stop a superuser reading host files
 # through `pg_read_file`. Missing means fail, never substitute.
-case "${COMPOSE_PROFILES:-}" in
-  *sqltool*)
+# Matched the way compose matches it: an exact name in a comma-separated list,
+# not a substring. `nosqltool` or `sqltool-preview` would otherwise take this
+# branch, demand three credentials, and then run `up -d … sqltool` for a service
+# compose never activated — failing a deploy that had nothing to do with the
+# console. This variable is a documented operator knob, so it is worth parsing
+# it correctly rather than approximately.
+case ",${COMPOSE_PROFILES:-}," in
+  *,sqltool,*)
     SQLTOOL_ENABLED=1
     for name in PGWEB_DB_PASSWORD PGWEB_AUTH_USER PGWEB_AUTH_PASS; do
       require_env "$name"

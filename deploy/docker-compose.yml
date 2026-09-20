@@ -171,7 +171,13 @@ services:
       # `security-headers@docker` is deliberately absent: its CSP has no
       # `unsafe-eval` and pgweb bundles the Ace editor. Add it once the UI is
       # confirmed to survive it.
-      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.middlewares=lan-vpn-only@docker,authentik@docker,${V_NOTE_CONTAINER_NAME}-sqltool-auth@docker
+      #
+      # `rate-limit@docker` IS carried, and matters more here than on the app
+      # router: /dbconsole/api/query runs arbitrary SQL whose only cost control
+      # is this role's 30s statement_timeout, so a loop of 30-second seq scans
+      # is a self-inflicted DoS on the application's own database — from an
+      # already-authenticated session.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-sqltool.middlewares=lan-vpn-only@docker,rate-limit@docker,authentik@docker,${V_NOTE_CONTAINER_NAME}-sqltool-auth@docker
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}-sqltool.loadbalancer.server.port=8081
 
       # --- router 2: the forward-auth callback --------------------------

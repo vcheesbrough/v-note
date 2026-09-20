@@ -21,7 +21,22 @@ const CONSOLE_URL = process.env.SQL_CONSOLE_URL;
 const AUTH_USER = process.env.SQL_CONSOLE_AUTH_USER;
 const AUTH_PASS = process.env.SQL_CONSOLE_AUTH_PASS;
 
-test.skip(!CONSOLE_URL, 'SQL_CONSOLE_URL is unset — stack has no SQL console');
+/**
+ * Loud rather than skipped, deliberately.
+ *
+ * `e2e/docker-compose.test.yml` runs `sqltool` unconditionally and `playwright`
+ * hard-depends on it being healthy, so these variables are never legitimately
+ * unset in the stack this suite runs against. A `test.skip` would therefore buy
+ * nothing, while turning a typo in one compose env var into eight green skips —
+ * silently retiring the only automated proof that the `pg_read_file` finding
+ * has not regressed.
+ */
+if (!CONSOLE_URL || !AUTH_USER || !AUTH_PASS) {
+  throw new Error(
+    'SQL_CONSOLE_URL / SQL_CONSOLE_AUTH_USER / SQL_CONSOLE_AUTH_PASS are unset — ' +
+      'the console is part of e2e/docker-compose.test.yml, so this is a broken stack, not an opt-out',
+  );
+}
 
 /**
  * In a real deployment Traefik adds this header after Authentik has approved

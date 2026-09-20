@@ -223,7 +223,13 @@ steps:
       # (PGWEB_DB_PASSWORD, PGWEB_AUTH_USER, PGWEB_AUTH_PASS) are rendered from
       # /v-note/devops/dev/compose like POSTGRES_PASSWORD, and deploy-v-note.sh
       # requires them only when this profile is active.
-      COMPOSE_PROFILES: sqltool
+      #
+      # Anchored because smoke-sql-console-auto-dev reads the same value: with
+      # the console off, /dbconsole falls through to the app's router and the
+      # SPA catch-all answers 200, which that check would (correctly, given what
+      # it can see) call "publicly readable" — failing every push and blocking
+      # tag-release-auto-dev forever. One edit turns both off together.
+      COMPOSE_PROFILES: &dev-compose-profiles sqltool
     # POSTGRES_PASSWORD, SOVEREIGN_CONFIG_ACCESS_URL_FILE, V_NOTE_METRICS_ADDR and
     # APP_ENV are deliberately absent above: `render` reads them out of
     # /v-note/devops/dev/compose and puts them in deploy-v-note.sh's environment
@@ -321,6 +327,9 @@ steps:
     image: *smoke-image
     environment: &smoke-sql-console-environment
       V_NOTE_HOST: v-notes-dev.desync.link
+      # Same value as the deploy step's, by anchor — the check skips itself when
+      # the console is not deployed.
+      COMPOSE_PROFILES: *dev-compose-profiles
     commands: &smoke-sql-console-commands
       - apk add --no-cache curl bash
       - ./scripts/smoke-sql-console.sh

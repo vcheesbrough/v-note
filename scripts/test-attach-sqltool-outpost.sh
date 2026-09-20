@@ -88,6 +88,15 @@ class Handler(BaseHTTPRequestHandler):
             elif current == "lying-patch":
                 # The PATCH is accepted but the read-back still lacks it.
                 pass
+            elif current == "dropped-others":
+                # The failure every comment in this repo is about: our provider
+                # attached, everyone else's gone. Returned only once the PATCH
+                # has happened, so the pre-write read still sees a full list.
+                try:
+                    open(f"{WORK}/patched")
+                    providers = [NEW_PK]
+                except FileNotFoundError:
+                    pass
             else:
                 # After a successful patch the read-back reflects it.
                 try:
@@ -173,6 +182,17 @@ echo "==> a PATCH that did not take is caught by the read-back"
 run_mode lying-patch
 check "$([ "$RC" -ne 0 ] && echo ok)" "exits non-zero (rc=$RC)"
 check "$(grep -q 'still not attached' "$WORK/out" && echo ok)" "says the provider is still not attached"
+
+echo "==> a PATCH that attached ours and dropped everyone else's is caught"
+# The case that actually matters, and the one a read-back asserting only
+# "our provider is present" passes with a cheerful count. Without this mode
+# nothing here exercises "the list came back short" at all.
+run_mode dropped-others
+check "$([ "$RC" -ne 0 ] && echo ok)" "exits non-zero (rc=$RC)"
+check "$(grep -q 'lost providers it had before' "$WORK/out" && echo ok)" \
+  "says the outpost lost providers"
+check "$(grep -q 'before=\[1,5,7,9\]' "$WORK/out" && echo ok)" \
+  "prints the list it had before, so it can be restored"
 
 if [ "$failures" -gt 0 ]; then
   echo

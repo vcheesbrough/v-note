@@ -53,10 +53,18 @@ GRANT USAGE ON SCHEMA public TO v_note_pgweb;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO v_note_pgweb;
 
 -- Covers tables that *future* migrations create, so this is a one-off rather
--- than a chore every later migration has to remember. Scoped `FOR ROLE v_note`
--- because default privileges attach to the creating role, and every migration
--- runs as that role. Per-database (pg_default_acl), so no cross-database race.
-ALTER DEFAULT PRIVILEGES FOR ROLE v_note IN SCHEMA public
+-- than a chore every later migration has to remember. Per-database
+-- (pg_default_acl), so no cross-database race.
+--
+-- `CURRENT_USER` rather than a literal `v_note`, for the same reason the
+-- database name above is read back: the owning role is compose input
+-- (`POSTGRES_USER`), not a constant. It also fails more gracefully — a wrong
+-- database name would silently grant nothing, whereas a wrong role name raises
+-- `role "…" does not exist`, failing the migration and so app startup in every
+-- environment, including a local Postgres running under someone's own login.
+-- Default privileges attach to the creating role, and every migration runs as
+-- exactly this one, so `CURRENT_USER` *is* the property the grant depends on.
+ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public
   GRANT SELECT ON TABLES TO v_note_pgweb;
 
 -- The per-role settings, applied `IN DATABASE` rather than cluster-wide.

@@ -112,8 +112,9 @@ run_mode() {
   V_NOTE_HOST="127.0.0.1:${PORT}" \
   SMOKE_SCHEME=http \
   SMOKE_IDP_HOST=stub-idp.invalid \
-  SMOKE_ATTEMPTS=1 \
+  SMOKE_ATTEMPTS="${ATTEMPTS_OVERRIDE:-1}" \
   SMOKE_DELAY=0 \
+  COMPOSE_PROFILES="${PROFILES_OVERRIDE-sqltool}" \
     ./scripts/smoke-sql-console.sh >"$WORK/out" 2>&1
   RC=$?
   set -e
@@ -144,6 +145,35 @@ expect_fail backstop "no identity gate"
 expect_fail wrong-idp "redirected somewhere other than"
 expect_fail no-callback "callback router is missing"
 expect_fail app-broken "SPA no longer serves"
+
+echo "==> with the console disabled, the check skips rather than failing"
+# The trap this closes: with the profile off, /dbconsole falls through to the
+# app's router and the SPA catch-all answers 200. Without the skip, this check
+# reads that as "publicly readable", fails every push, and blocks
+# tag-release-auto-dev forever — so the documented disable path would have
+# bricked releases. `exposed` is the stub mode that serves 200 on /dbconsole,
+# which is exactly what the SPA catch-all looks like from out here.
+PROFILES_OVERRIDE="" run_mode exposed
+check "$([ "$RC" -eq 0 ] && echo ok)" "no profile → exits 0 instead of failing (rc=$RC)"
+check "$(grep -q 'nothing to check' "$WORK/out" && echo ok)" "no profile → says why it skipped"
+
+PROFILES_OVERRIDE="other-profile" run_mode exposed
+check "$([ "$RC" -eq 0 ] && echo ok)" "an unrelated profile also skips (rc=$RC)"
+
+# ...but the skip must not swallow a real exposure when the console IS deployed.
+run_mode exposed
+check "$([ "$RC" -ne 0 ] && echo ok)" "with the profile on, an exposed console still fails (rc=$RC)"
+
+echo "==> a 404 is retried, not treated as a verdict"
+# The deploy attaches the provider to the embedded outpost moments before this
+# runs, and the outpost converges asynchronously — forward auth answers 404
+# until it does. Observed on the first real deploy: 404 at 29s, correct 302
+# shortly after. Failing on the first 404 made CI red for a converging state.
+ATTEMPTS_OVERRIDE=3 run_mode unattached
+check "$(grep -c 'retrying' "$WORK/out" | grep -qv '^0$' && echo ok)" \
+  "404 is retried rather than failing immediately"
+# A 404 that never clears is still a failure: the console genuinely never works.
+check "$([ "$RC" -ne 0 ] && echo ok)" "a 404 that survives every attempt still fails (rc=$RC)"
 
 if [ "$failures" -gt 0 ]; then
   echo

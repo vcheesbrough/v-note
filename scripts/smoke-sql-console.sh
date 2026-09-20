@@ -28,6 +28,27 @@
 set -euo pipefail
 
 HOST="${V_NOTE_HOST:?V_NOTE_HOST must be set (e.g. v-notes-dev.desync.link)}"
+
+# Nothing to check when the console is not deployed — and checking anyway would
+# be actively harmful. With the profile off, /dbconsole stops matching the
+# console router and falls through to the app's `Host(…)` router, where the
+# SPA's catch-all serves index.html with a 200. This check reads a 200 as
+# "publicly readable" and fails, which would then block tag-release-auto-dev on
+# every subsequent push — so documenting "remove COMPOSE_PROFILES to disable the
+# console" would have bricked releases.
+#
+# The value is shared with the deploy step through a YAML anchor in
+# .woodpecker/deploy.yml, so enabling and disabling stays a single edit.
+# Exact comma-separated match, as compose does it and as deploy-v-note.sh does
+# it — the two must agree about whether the console is deployed, or this check
+# runs against a stack that has none (or skips one that does).
+case ",${COMPOSE_PROFILES:-}," in
+  *,sqltool,*) ;;
+  *)
+    echo "==> COMPOSE_PROFILES does not enable the SQL console — nothing to check"
+    exit 0
+    ;;
+esac
 ATTEMPTS="${SMOKE_ATTEMPTS:-10}"
 DELAY="${SMOKE_DELAY:-6}"
 # scripts/test-smoke-sql-console.sh overrides these to drive the check against a
@@ -44,6 +65,13 @@ fail() {
 # to accept connections, so a first probe can legitimately fail to connect.
 # Status and Location are read together: asking twice would let the two answers
 # disagree. `|| true` keeps a refused connection from killing the loop.
+#
+# 404 is retried, and that is not cosmetic. The deploy attaches the proxy
+# provider to the embedded outpost moments earlier, and the outpost picks that
+# change up asynchronously — until it does, forward auth answers 404 for this
+# host. Observed on the first real deploy: 404 at 29s, correct 302 shortly
+# after. A 404 that survives every attempt still fails, because a permanently
+# unattached provider means the console never works.
 status=000
 location=""
 for attempt in $(seq 1 "$ATTEMPTS"); do
@@ -54,7 +82,7 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   location="${probe#* }"
 
   case "$status" in
-    000 | 502 | 503 | 504) ;;
+    000 | 404 | 502 | 503 | 504) ;;
     *) break ;;
   esac
 
