@@ -146,27 +146,37 @@ Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
 `/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
 — **no `.env` on the host**.
 
-### Retiring the OIDC client secret (#274)
+### The OIDC client secret is gone (#274, retired in #394)
 
 The unified client is **public + PKCE**, so no client secret is used anywhere.
-Removing the *references* does not remove the *values* — the old secret still
-exists in three places:
+#274 removed the *references*; **#394 removed most of the *values***:
 
-1. Woodpecker secret `v_note_dev_oidc_client_secret` (no longer read by any step).
-2. OpenBao `secret/v-note-stack/env` → key `OIDC_CLIENT_SECRET`.
-3. sovereign-config leaf `/v-note/dev/server/oidc/client-secret`.
+| Was | Where | Status |
+| --- | --- | --- |
+| `v_note_dev_oidc_client_secret` | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) | deleted |
+| `oidc/client-secret` | sovereign-config `/v-note/dev/server/` | deleted |
+| `oidc/android/client-id`, `oidc/android/issuer-url` | sovereign-config `/v-note/dev/server/` — named the `v-note-android-dev` client that #274 retired | deleted |
+| `OIDC_CLIENT_SECRET` | OpenBao `secret/v-note-stack/env` | **still present** — deletion needs a `BAO_TOKEN`; tracked on **#394** |
 
-Keep them for now: they are what a rollback to the pre-#274 image would need,
-since that image refuses to start without a non-empty `oidc/client-secret`.
+The OpenBao copy is inert (`scripts/fetch-compose-env.sh` requires only
+`POSTGRES_PASSWORD`, so nothing reads it) but it is a **live stored credential**.
+Do not treat this section as saying every copy is gone until that row says
+`deleted`.
 
-**Deleting them is tracked as [#394](https://bored.desync.link/boards/v-notes?card=394)**, with a
-trigger that can actually fire: *delete once no deployable image still requires the
-`oidc/client-secret` leaf* — i.e. once the oldest image an operator would roll
-back to post-dates #274, or those images have been pruned from the registry.
-The previous condition ("keep them until prod is running the unified client")
-became unfireable when **#392** removed prod, which is why it was replaced
-rather than reworded. The sovereign-config leaves for `oidc/android/client-id`
-and `oidc/android/issuer-url` are likewise inert and go at the same time.
+`OidcConfig` has no `client_secret` or `android` field, and
+`scripts/fetch-compose-env.sh` requires only `POSTGRES_PASSWORD`, so nothing
+reads any of them. `crates/server/src/config/tests.rs` keeps
+`oidc_ignores_retired_android_subtree` and `oidc_ignores_retired_client_secret`
+so that a stale leaf reappearing in a subtree still cannot fail a load.
+
+> **Rollback depth is bounded by #274, not by these values.** A pre-#274 image
+> refuses to start without a non-empty `oidc/client-secret` — but it also
+> authenticates as a *confidential* client, and the live provider has been
+> `client_type: public` with no secret since #274. Keeping the leaf would have
+> let such an image boot without letting anyone log in, so it protected nothing:
+> the rollback it appeared to guard had already been broken by the Authentik-side
+> change. That is why #394 deleted the values rather than waiting for the
+> registry to age out images that cannot work anyway.
 
 ### Grant types are not optional in a blueprint (#372)
 
@@ -558,6 +568,17 @@ Clients send **`X-V-Note-Client-Release`** / **`X-V-Note-Client-Protocol`**; **`
 environment there is to roll back. Redeploy a **previous image tag** via
 Woodpecker manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev`) with pinned version env
 (detail in **#152** runbook). **Also reinstall the matching Android APK.**
+
+**Floor: `0.45.0` — do not roll back past it.** Pre-#274 images do not work
+against the current Authentik provider and config (#394); treat them as
+unusable rather than as rollback depth.
+
+`registry.desync.link` still carries tags back to `0.28.1` for both `v-note` and
+`v-note-android`, so the floor is a **convention, not an enforced limit**.
+Pruning those tags is not done: the `ci` registry account has push/pull but no
+delete permission (every `DELETE /v2/<repo>/manifests/<digest>` returns `403`),
+so it needs a Zot credential with delete rights or a `storage.retention` rule in
+`mini-config`.
 
 ---
 
