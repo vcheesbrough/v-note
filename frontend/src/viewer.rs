@@ -499,7 +499,7 @@ mod tests {
     fn a_replay_frames_tombstones_remove_its_own_strokes() {
         let stroke = |id: &str| protocol::Stroke {
             id: id.to_string(),
-            style: protocol::StrokeStyle::default_solid_round(),
+            style: protocol::StrokeStyle::default_solid_round_pressure(),
             points: Vec::new(),
         };
         let mut items = vec![

@@ -538,7 +538,7 @@ function sampleViewerStrokes(id = `stroke-${crypto.randomUUID()}`) {
       id,
       style: {
         tool_kind: 'solid_round',
-        style_version: 1,
+        style_version: 2,
         parameters: { color: '#006400', width: 20.0, cap_style: 'round', join_style: 'round' },
       },
       points: [

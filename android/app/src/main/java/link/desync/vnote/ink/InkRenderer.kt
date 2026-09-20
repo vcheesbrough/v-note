@@ -3,14 +3,11 @@ package link.desync.vnote.ink
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
 import link.desync.vnote.model.StrokeStyle
 import kotlin.math.sqrt
-import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 
 /**
  * One stroke's rendered shape, in **world space**.
@@ -26,13 +23,7 @@ internal sealed interface InkGeometry {
         val radius: Float,
     ) : InkGeometry
 
-    /** Constant-width (v1) ink: one round-capped, round-joined polyline. */
-    data class Polyline(
-        val path: Path,
-        val width: Float,
-    ) : InkGeometry
-
-    /** Pressure-modulated (v2) ink: one filled variable-width ribbon. */
+    /** Every multi-point stroke: one filled variable-width ribbon. */
     data class Ribbon(
         val path: Path,
     ) : InkGeometry
@@ -42,8 +33,12 @@ internal sealed interface InkGeometry {
  * Build the world-space geometry for [points] under [style], or null when there
  * is nothing to draw.
  *
- * The branches and their arithmetic are the pre-cache renderer's, unchanged, so
- * the rasterized result stays identical to the SPA and thumbnails.
+ * There is no separate uniform-width path. A stroke whose points carry no
+ * pressure — the shape ink migrated up from the retired `solid_round` v1 style
+ * has — takes the ribbon at a constant full-width nib like everything else. The
+ * ribbon is a filled shape, so such ink draws with butt ends and un-rounded
+ * joins rather than the round caps v1's stroked polyline gave it; that is the
+ * accepted cost of having one render path and no v1 special-casing left.
  */
 internal fun buildInkGeometry(
     points: List<StrokePoint>,
@@ -58,18 +53,9 @@ internal fun buildInkGeometry(
             radius = (style.renderedWidth(points[0].pressure) / 2.0).toFloat(),
         )
     }
-    // Constant-width (v1) ink: a single round-capped polyline. Byte-identical to
-    // the pre-pressure renderer.
-    if (!style.isPressureSensitive) {
-        return InkGeometry.Polyline(
-            path = polylinePath(points),
-            width = style.parameters.width.toFloat(),
-        )
-    }
     // A tap/dot commits (near-)coincident points; the ribbon would collapse to a
     // zero-area sliver and vanish. If the stroke's extent is smaller than its own
-    // nib, render a dot at the largest pressure width (v1 drew these via round
-    // caps).
+    // nib, render a dot at the largest pressure width.
     val minX = points.minOf { it.x }
     val maxX = points.maxOf { it.x }
     val minY = points.minOf { it.y }
@@ -81,7 +67,7 @@ internal fun buildInkGeometry(
             radius = (maxWidth / 2.0).toFloat(),
         )
     }
-    // Pressure-modulated (v2) ink: one filled variable-width ribbon, drawn in a
+    // Pressure-varying ink: one filled variable-width ribbon, drawn in a
     // single call. Per-segment stroking was O(points) draw calls per stroke,
     // re-run for every committed stroke every frame — the source of the
     // multi-stroke latency. A single fill restores ~constant-width cost.
@@ -99,17 +85,6 @@ internal fun DrawScope.drawInkGeometry(
                 radius = geometry.radius,
                 center = geometry.center,
             )
-        is InkGeometry.Polyline ->
-            drawPath(
-                path = geometry.path,
-                color = color,
-                style =
-                    DrawStroke(
-                        width = geometry.width,
-                        cap = StrokeCap.Round,
-                        join = StrokeJoin.Round,
-                    ),
-            )
         is InkGeometry.Ribbon -> drawPath(path = geometry.path, color = color)
     }
 }
@@ -121,15 +96,6 @@ internal fun DrawScope.drawInk(
     color: Color,
 ) {
     buildInkGeometry(points, style)?.let { drawInkGeometry(it, color) }
-}
-
-private fun polylinePath(points: List<StrokePoint>): Path {
-    val path = Path()
-    path.moveTo(points[0].x.toFloat(), points[0].y.toFloat())
-    for (index in 1 until points.size) {
-        path.lineTo(points[index].x.toFloat(), points[index].y.toFloat())
-    }
-    return path
 }
 
 // One filled polygon approximating a variable-width stroke: walk the left offset
@@ -275,10 +241,10 @@ internal class StrokeGeometryCache(
 }
 
 // The live stroke is deliberately rebuilt in full on every frame rather than
-// extended in place. Appending to a retained path only helps constant-width
-// (v1) ink, and the shipped pen is pressure-sensitive (v2, see
-// `DrawingToolPreferences.load`), whose ribbon cannot be extended at all — a new
-// sample changes the previous vertex's averaged normal. So an incremental
-// builder would be dead code for every stroke a user actually draws, while the
-// live layer already bounds the cost at one stroke per frame instead of the
-// page's. Revisit only if a device trace shows a long v2 stroke missing frames.
+// extended in place. Appending to a retained path only helps uniform-width ink,
+// and a stylus gesture records real pressure, so it draws the ribbon — which
+// cannot be extended at all, since a new sample changes the previous vertex's
+// averaged normal. So an incremental builder would be dead code for every stroke
+// a user actually draws, while the live layer already bounds the cost at one
+// stroke per frame instead of the page's. Revisit only if a device trace shows a
+// long stroke missing frames.

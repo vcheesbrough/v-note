@@ -282,25 +282,12 @@ fn draw_stroke(
 ) {
     pen.color(context, &stroke.style.parameters.color);
 
-    // Pressure-modulated (v2) strokes replay as variable-width runs; v1 keeps
-    // the single constant-width path below byte-identical.
-    if stroke.style.is_pressure_sensitive() {
-        draw_pressure_stroke(context, pen, stroke, offset_x, offset_y, scale);
-        return;
-    }
-
-    context.begin_path();
-    pen.width(
-        context,
-        (stroke.style.parameters.width * scale).max(MIN_RENDERED_STROKE_WIDTH),
-    );
-    if let Some(first) = stroke.points.first() {
-        context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
-        for point in stroke.points.iter().skip(1) {
-            context.line_to(point.x * scale + offset_x, point.y * scale + offset_y);
-        }
-    }
-    context.stroke();
+    // One replay path for every stroke, with no uniform-width special case left
+    // anywhere. Ink migrated up from the retired v1 style carries no pressure,
+    // so all of its segments share the full-width nib and the run-grouping
+    // below collapses it to a single polyline — the same one draw call the old
+    // constant-width path made.
+    draw_pressure_stroke(context, pen, stroke, offset_x, offset_y, scale);
 }
 
 /// Each segment's on-screen width: the mean of its endpoints' pressure widths
@@ -317,7 +304,7 @@ fn pressure_segment_widths(stroke: &Stroke, scale: f64) -> impl Iterator<Item = 
     })
 }
 
-/// Replay one v2 stroke as runs of consecutive segments sharing a width, one
+/// Replay one stroke as runs of consecutive segments sharing a width, one
 /// round-joined polyline per run.
 ///
 /// With round caps and joins a polyline covers exactly the union of its
@@ -394,6 +381,39 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// A stroke whose points carry no pressure at all — the shape every stroke
+    /// migrated up from the retired v1 style has. It must collapse to a single
+    /// uniform-width run, so `draw_pressure_stroke` emits one round-joined
+    /// polyline: the same one draw call the deleted constant-width path made.
+    #[test]
+    fn pressureless_stroke_is_one_uniform_run() {
+        let mut style = protocol::StrokeStyle::default_solid_round_pressure();
+        style.parameters.width = 4.0;
+        let stroke = Stroke {
+            id: "migrated".to_string(),
+            style,
+            points: [(0.0, 0.0), (10.0, 0.0), (20.0, 5.0), (40.0, 5.0)]
+                .iter()
+                .map(|&(x, y)| protocol::StrokePoint {
+                    x,
+                    y,
+                    t: 0,
+                    pressure: None,
+                })
+                .collect(),
+        };
+        let scale = 2.0;
+        let widths: Vec<f64> = pressure_segment_widths(&stroke, scale).collect();
+        assert_eq!(widths.len(), 3, "one width per segment");
+        assert!(
+            widths.iter().all(|&width| width == widths[0]),
+            "a pressure-free stroke must not vary in width: {widths:?}"
+        );
+        // Full preset width, unchanged by the 0.125 snap (4.0 * 2.0 = 8.0 is
+        // already on a step) and well clear of the floor.
+        assert_eq!(widths[0], 4.0 * scale);
     }
 
     /// A stroke is culled only when its padded bounds miss the viewport; one

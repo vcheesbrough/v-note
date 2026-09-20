@@ -45,13 +45,13 @@ const SUPERSAMPLE: u32 = 2;
 // weight now survives for every stroke wider than that — and what falls under
 // it degrades into proportional partial coverage rather than being clamped.
 //
-// For a pressure-modulated (v2) stroke this floors the stroke's *full-pressure*
-// width, not each segment — `render_pressure_stroke` applies it as one
-// per-stroke boost. Lighter segments therefore land proportionally *below* one
-// delivered pixel and render as partial coverage, which is deliberate: flooring
-// every segment would flatten pressure variation again, the very failure this
-// constant was lowered to fix. `pressure_variation_survives_at_dense_scale`
-// pins where that leaves a real Android stroke.
+// This floors the stroke's *full-pressure* width, not each segment —
+// `render_stroke` applies it as one per-stroke boost. Lighter segments then
+// land proportionally *below* one delivered pixel and render as partial
+// coverage, which is deliberate: flooring every segment would flatten pressure
+// variation again, the very failure this constant was lowered to fix.
+// `pressure_variation_survives_at_dense_scale` pins where that leaves a real
+// Android stroke.
 const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 1.0;
 /// Ceiling on thumbnail jobs past their fetch, in flight at once. A burst of
 /// commits queues one job per revision, each of which loads the page's whole
@@ -326,7 +326,21 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
     // before every stroke, so it can never overpaint ink.
     draw_paper(&mut pixmap, paper, scale, offset_x, offset_y);
     for stroke in strokes {
-        if stroke.validate().is_err() || stroke.points.is_empty() {
+        if stroke.points.is_empty() {
+            continue;
+        }
+        // The one place a stored stroke the protocol no longer accepts becomes
+        // observable. Nothing validates on the replay path, so such a stroke
+        // still draws on the page while quietly vanishing from the preview and
+        // shifting its fitted bounds. Warn rather than skip in silence — after
+        // the iteration-48 migration this should never fire, and if it does the
+        // page needs looking at. `page_id` comes from the enclosing job span.
+        if let Err(reason) = stroke.validate() {
+            tracing::warn!(
+                stroke_id = %stroke.id,
+                %reason,
+                "skipping invalid stroke while rendering thumbnail"
+            );
             continue;
         }
         let color = &stroke.style.parameters.color;
@@ -337,43 +351,13 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         paint.set_color_rgba8(red, green, blue, 0xff);
         let transform = draw_transform(scale, offset_x, offset_y);
 
-        // Pressure-modulated (v2) strokes render as per-segment variable-width
-        // ribbons; v1 keeps the single constant-width path below byte-identical.
-        if stroke.style.is_pressure_sensitive() {
-            render_pressure_stroke(&mut pixmap, stroke, &paint, transform, scale);
-            continue;
-        }
-
-        // `stroke_path`/`fill_path` apply `transform` to width the same as to
-        // geometry (confirmed empirically: a world-space width scales with the
-        // transform's scale factor), so the floor must be expressed in world
-        // units — dividing the device-space floor by `scale` — rather than
-        // pre-multiplying by `scale` and letting the transform scale it again.
-        let width_world =
-            (stroke.style.parameters.width as f32).max(MIN_THUMBNAIL_STROKE_WIDTH / scale);
-        let pen = SkiaStroke {
-            width: width_world,
-            line_cap: LineCap::Round,
-            line_join: LineJoin::Round,
-            ..Default::default()
-        };
-        if stroke.points.len() == 1 {
-            let point = &stroke.points[0];
-            if let Some(dot) =
-                PathBuilder::from_circle(point.x as f32, point.y as f32, width_world / 2.0)
-            {
-                pixmap.fill_path(&dot, &paint, FillRule::Winding, transform, None);
-            }
-            continue;
-        }
-        let mut path = PathBuilder::new();
-        path.move_to(stroke.points[0].x as f32, stroke.points[0].y as f32);
-        for point in stroke.points.iter().skip(1) {
-            path.line_to(point.x as f32, point.y as f32);
-        }
-        if let Some(path) = path.finish() {
-            pixmap.stroke_path(&path, &paint, &pen, transform, None);
-        }
+        // Every stroke is pressure-modulated now, so there is a single render
+        // path — as on the SPA and Android, neither of which kept a
+        // uniform-width path either. Ink migrated up from the retired v1 style
+        // carries no pressure and so takes a full-width nib through this same
+        // code, including the dot heuristic, which is what keeps the preview
+        // agreeing with the page.
+        render_stroke(&mut pixmap, stroke, &paint, transform, scale);
     }
     downsample(&pixmap)?
         .encode_png()
@@ -562,13 +546,14 @@ fn draw_paper(pixmap: &mut Pixmap, paper: Paper, scale: f32, offset_x: f32, offs
     });
 }
 
-/// Rasterize one pressure-sensitive (`solid_round` v2) stroke as a chain of
-/// round-capped segments, each drawn at the mean of its endpoints' pressure
-/// widths. Round caps overlap consecutive segments so joins stay continuous.
-/// The full-width preview floor ([`MIN_THUMBNAIL_STROKE_WIDTH`]) is applied as a
-/// single per-stroke boost, so at full pressure the thickest part matches the v1
-/// ceiling while lighter pressure narrows proportionally.
-fn render_pressure_stroke(
+/// Rasterize one `solid_round` stroke as a chain of round-capped segments, each
+/// drawn at the mean of its endpoints' pressure widths. Round caps overlap
+/// consecutive segments so joins stay continuous. The full-width preview floor
+/// ([`MIN_THUMBNAIL_STROKE_WIDTH`]) is applied as a single per-stroke boost, so
+/// at full pressure the thickest part reaches the preset while lighter pressure
+/// narrows proportionally. Points carrying no pressure render at full width, so
+/// a stroke with none at all is a uniform nib end to end.
+fn render_stroke(
     pixmap: &mut Pixmap,
     stroke: &Stroke,
     paint: &Paint,

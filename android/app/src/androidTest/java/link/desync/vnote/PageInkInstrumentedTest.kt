@@ -44,7 +44,7 @@ private val seedStrokeMessage =
         "id": "seed-stroke",
         "style": {
           "tool_kind": "solid_round",
-          "style_version": 1,
+          "style_version": 2,
           "parameters": {
             "color": "#006400",
             "width": 4.0,
@@ -650,7 +650,7 @@ class PageInkInstrumentedTest {
           "id": "replay-stroke-$index",
           "style": {
             "tool_kind": "solid_round",
-            "style_version": 1,
+            "style_version": 2,
             "parameters": {
               "color": "#006400",
               "width": 4.0,

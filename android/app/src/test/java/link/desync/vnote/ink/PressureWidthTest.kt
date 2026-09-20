@@ -5,9 +5,7 @@ import link.desync.vnote.model.SOLID_ROUND_PRESSURE_STYLE_VERSION
 import link.desync.vnote.model.SolidRoundParameters
 import link.desync.vnote.model.StrokeStyle
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -15,49 +13,55 @@ import org.junit.Test
  * `protocol::StrokeStyle::rendered_width` and the server's validation posture.
  */
 class PressureWidthTest {
-    private val v2 =
+    private val style =
         StrokeStyle(
             styleVersion = SOLID_ROUND_PRESSURE_STYLE_VERSION,
             parameters = SolidRoundParameters(width = 4.0),
         )
-    private val v1 = StrokeStyle(parameters = SolidRoundParameters(width = 4.0))
 
     @Test
-    fun v2RenderedWidthFollowsSharedCurve() {
-        assertTrue(v2.isPressureSensitive)
-        assertEquals(4.0, v2.renderedWidth(1.0), 1e-9)
-        assertEquals(4.0, v2.renderedWidth(null), 1e-9) // absent pressure = full width
-        assertEquals(MIN_PRESSURE_WIDTH, v2.renderedWidth(0.0), 1e-9) // absolute floor
+    fun renderedWidthFollowsSharedCurve() {
+        assertEquals(4.0, style.renderedWidth(1.0), 1e-9)
+        assertEquals(4.0, style.renderedWidth(null), 1e-9) // absent pressure = full width
+        assertEquals(MIN_PRESSURE_WIDTH, style.renderedWidth(0.0), 1e-9) // absolute floor
         val mid = MIN_PRESSURE_WIDTH + (4.0 - MIN_PRESSURE_WIDTH) * 0.5
-        assertEquals(mid, v2.renderedWidth(0.5), 1e-9)
+        assertEquals(mid, style.renderedWidth(0.5), 1e-9)
         // Out-of-range pressure is clamped for rendering.
-        assertEquals(4.0, v2.renderedWidth(5.0), 1e-9)
-        assertEquals(MIN_PRESSURE_WIDTH, v2.renderedWidth(-1.0), 1e-9)
+        assertEquals(4.0, style.renderedWidth(5.0), 1e-9)
+        assertEquals(MIN_PRESSURE_WIDTH, style.renderedWidth(-1.0), 1e-9)
 
         // A wide pen still tapers to the same thin floor at light pressure.
-        val wide = v2.copy(parameters = v2.parameters.copy(width = 32.0))
+        val wide = style.copy(parameters = style.parameters.copy(width = 32.0))
         assertEquals(MIN_PRESSURE_WIDTH, wide.renderedWidth(0.0), 1e-9)
         assertEquals(32.0, wide.renderedWidth(1.0), 1e-9)
     }
 
+    /**
+     * Ink migrated up from the retired v1 style carries no pressure on any
+     * point, and must keep the constant full width v1's nib drew.
+     */
     @Test
-    fun v1IgnoresPressure() {
-        assertFalse(v1.isPressureSensitive)
-        assertEquals(4.0, v1.renderedWidth(0.0), 1e-9)
-        assertEquals(4.0, v1.renderedWidth(1.0), 1e-9)
-        assertEquals(4.0, v1.renderedWidth(null), 1e-9)
+    fun pressurelessInkKeepsConstantFullWidth() {
+        val widths = List(3) { style.renderedWidth(null) }
+        assertEquals(listOf(4.0, 4.0, 4.0), widths)
+    }
+
+    /** The default style is the only version the server accepts. */
+    @Test
+    fun defaultStyleIsThePressureVersion() {
+        assertEquals(SOLID_ROUND_PRESSURE_STYLE_VERSION, StrokeStyle().styleVersion)
     }
 
     @Test
-    fun normalizePressureClampsAndGatesOnStyle() {
-        // Not pressure-sensitive → always null (v1 points omit pressure).
-        assertNull(normalizePressure(0.5f, sensitive = false))
-        assertNull(normalizePressure(1f, sensitive = false))
-        // Sensitive → clamped into 0.0..1.0.
-        assertEquals(0.0, normalizePressure(-0.2f, sensitive = true)!!, 1e-6)
-        assertEquals(1.0, normalizePressure(2.5f, sensitive = true)!!, 1e-6)
-        assertEquals(0.5, normalizePressure(0.5f, sensitive = true)!!, 1e-6)
+    fun normalizePressureClampsAndGatesOnCapture() {
+        // Not capturing pressure → always null.
+        assertNull(normalizePressure(0.5f, capturesPressure = false))
+        assertNull(normalizePressure(1f, capturesPressure = false))
+        // Capturing → clamped into 0.0..1.0.
+        assertEquals(0.0, normalizePressure(-0.2f, capturesPressure = true)!!, 1e-6)
+        assertEquals(1.0, normalizePressure(2.5f, capturesPressure = true)!!, 1e-6)
+        assertEquals(0.5, normalizePressure(0.5f, capturesPressure = true)!!, 1e-6)
         // NaN collapses to zero, never reaching the wire as non-finite.
-        assertEquals(0.0, normalizePressure(Float.NaN, sensitive = true)!!, 1e-6)
+        assertEquals(0.0, normalizePressure(Float.NaN, capturesPressure = true)!!, 1e-6)
     }
 }

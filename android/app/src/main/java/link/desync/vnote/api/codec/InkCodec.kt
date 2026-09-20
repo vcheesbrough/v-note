@@ -93,8 +93,8 @@ internal fun encodeStroke(stroke: Stroke): JSONObject {
                 .put("x", point.x)
                 .put("y", point.y)
                 .put("t", point.t)
-        // Emit pressure only when present, so v1 strokes stay byte-identical
-        // on the wire (absent, never `null`).
+        // Emit pressure only when present — absent, never `null`, so a
+        // pressure-free stroke round-trips byte-identically.
         point.pressure?.let { pointJson.put("pressure", it) }
         pointsArray.put(pointJson)
     }

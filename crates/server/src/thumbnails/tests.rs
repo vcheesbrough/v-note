@@ -9,7 +9,7 @@ fn renders_png_with_canonical_ink_colour() {
         Paper::None,
         &[Stroke {
             id: "stroke_1".to_string(),
-            style: StrokeStyle::default_solid_round(),
+            style: StrokeStyle::default_solid_round_pressure(),
             points: vec![
                 StrokePoint {
                     x: 0.0,
@@ -37,7 +37,7 @@ fn renders_single_point_strokes_as_dots() {
         Paper::None,
         &[Stroke {
             id: "stroke_1".to_string(),
-            style: StrokeStyle::default_solid_round(),
+            style: StrokeStyle::default_solid_round_pressure(),
             points: vec![StrokePoint {
                 x: 50.0,
                 y: 50.0,
@@ -195,7 +195,7 @@ fn pressure_stroke_short_diagonal_matches_android_and_collapses_to_dot() {
             },
         ],
     };
-    render_pressure_stroke(
+    render_stroke(
         &mut pixmap,
         &stroke,
         &paint,
@@ -302,7 +302,7 @@ fn dense_page_short_strokes_stay_lines_not_circles() {
 /// A v1 pen of a given world width, as its own horizontal line on a page whose
 /// fitted scale is small enough that the old 4px floor swallowed both pens.
 fn pen_line(id: &str, width: f64, x_from: f64, x_to: f64, y: f64) -> Stroke {
-    let mut style = StrokeStyle::default_solid_round();
+    let mut style = StrokeStyle::default_solid_round_pressure();
     style.parameters.width = width;
     Stroke {
         id: id.to_string(),
@@ -329,7 +329,7 @@ fn pen_line(id: &str, width: f64, x_from: f64, x_to: f64, y: f64) -> Stroke {
 fn anchor_dot(id: &str, x: f64, y: f64) -> Stroke {
     Stroke {
         id: id.to_string(),
-        style: StrokeStyle::default_solid_round(),
+        style: StrokeStyle::default_solid_round_pressure(),
         points: vec![StrokePoint {
             x,
             y,
@@ -507,52 +507,36 @@ fn grain_period_survives_the_downsample() {
     assert!(grained > 500, "grain should reach the delivered image");
 }
 
-/// At full pressure a v2 stroke reaches the same nib width as the constant v1
-/// pen — the pressure model only *narrows* below the preset width.
+/// A point carrying no pressure rasterizes at the same nib width as one at full
+/// pressure — the pressure model only *narrows* below the preset. This is what
+/// made the v1 → v2 migration lossless: v1 ink has no pressure anywhere, so it
+/// still draws at the constant preset width its own nib had.
 #[test]
-fn full_pressure_matches_v1_width() {
-    let points = vec![StrokePoint {
-        x: 50.0,
-        y: 50.0,
-        t: 0,
-        pressure: Some(1.0),
-    }];
-    let v2 = render(
-        Paper::None,
-        &[Stroke {
-            id: "v2_full".to_string(),
-            style: StrokeStyle::default_solid_round_pressure(),
-            points: points.clone(),
-        }],
-    )
-    .expect("v2 thumbnail should render");
-    let v1 = render(
-        Paper::None,
-        &[Stroke {
-            id: "v1".to_string(),
-            style: StrokeStyle::default_solid_round(),
-            points: vec![StrokePoint {
-                x: 50.0,
-                y: 50.0,
-                t: 0,
-                pressure: None,
+fn pressureless_point_matches_full_pressure_width() {
+    let dot_span = |id: &str, pressure: Option<f64>| {
+        let bytes = render(
+            Paper::None,
+            &[Stroke {
+                id: id.to_string(),
+                style: StrokeStyle::default_solid_round_pressure(),
+                points: vec![StrokePoint {
+                    x: 50.0,
+                    y: 50.0,
+                    t: 0,
+                    pressure,
+                }],
             }],
-        }],
-    )
-    .expect("v1 thumbnail should render");
-    let v2_dot = {
-        let pm = Pixmap::decode_png(&v2).expect("decode");
+        )
+        .expect("thumbnail should render");
+        let pm = Pixmap::decode_png(&bytes).expect("decode");
         let (min_x, max_x, _, _) = ink_bounds(&pm);
         max_x - min_x + 1
     };
-    let v1_dot = {
-        let pm = Pixmap::decode_png(&v1).expect("decode");
-        let (min_x, max_x, _, _) = ink_bounds(&pm);
-        max_x - min_x + 1
-    };
+    let full = dot_span("full_pressure", Some(1.0));
+    let absent = dot_span("migrated", None);
     assert!(
-        v2_dot.abs_diff(v1_dot) <= 1,
-        "full-pressure v2 dot {v2_dot}px should match v1 dot {v1_dot}px"
+        full.abs_diff(absent) <= 1,
+        "full-pressure dot {full}px should match pressureless dot {absent}px"
     );
 }
 
@@ -562,7 +546,7 @@ fn full_pressure_matches_v1_width() {
 fn invalid_strokes_excluded_from_thumbnail_bounds() {
     let valid = Stroke {
         id: "valid".to_string(),
-        style: StrokeStyle::default_solid_round(),
+        style: StrokeStyle::default_solid_round_pressure(),
         points: vec![
             StrokePoint {
                 x: 0.0,
@@ -578,22 +562,27 @@ fn invalid_strokes_excluded_from_thumbnail_bounds() {
             },
         ],
     };
-    // v1 style carrying pressure => rejected by stroke.validate(), skipped.
+    // The retired v1 style version => rejected by stroke.validate(), skipped.
+    // Were it not skipped it would drag the fitted bounds out to x=5100 and
+    // shrink everything else to nothing.
     let far_invalid = Stroke {
         id: "far_invalid".to_string(),
-        style: StrokeStyle::default_solid_round(),
+        style: StrokeStyle {
+            style_version: 1,
+            ..StrokeStyle::default_solid_round_pressure()
+        },
         points: vec![
             StrokePoint {
                 x: 5000.0,
                 y: 5000.0,
                 t: 0,
-                pressure: Some(0.5),
+                pressure: None,
             },
             StrokePoint {
                 x: 5100.0,
                 y: 5100.0,
                 t: 5,
-                pressure: Some(0.5),
+                pressure: None,
             },
         ],
     };
@@ -611,34 +600,37 @@ fn invalid_strokes_excluded_from_thumbnail_bounds() {
     );
 }
 
-/// A v2 stroke carrying a stray v1-style bare point (no pressure) is still
-/// valid and renders (that point at full width); a v1 stroke with a stray
-/// pressure value is rejected and skipped.
+/// A stroke mixing pressured and bare points is valid and renders (the bare one
+/// at full width); a stroke on the retired v1 style version is rejected and
+/// skipped.
 #[test]
-fn rejects_pressure_on_v1_but_renders_mixed_v2() {
+fn rejects_the_retired_v1_style_but_renders_mixed_pressure() {
     let out = render(
         Paper::None,
         &[
             Stroke {
-                id: "v1_with_pressure".to_string(),
-                style: StrokeStyle::default_solid_round(),
+                id: "retired_v1".to_string(),
+                style: StrokeStyle {
+                    style_version: 1,
+                    ..StrokeStyle::default_solid_round_pressure()
+                },
                 points: vec![
                     StrokePoint {
                         x: 0.0,
                         y: 0.0,
                         t: 0,
-                        pressure: Some(0.5),
+                        pressure: None,
                     },
                     StrokePoint {
                         x: 40.0,
                         y: 40.0,
                         t: 5,
-                        pressure: Some(0.5),
+                        pressure: None,
                     },
                 ],
             },
             Stroke {
-                id: "v2_mixed".to_string(),
+                id: "mixed_pressure".to_string(),
                 style: StrokeStyle::default_solid_round_pressure(),
                 points: vec![
                     StrokePoint {
@@ -659,22 +651,23 @@ fn rejects_pressure_on_v1_but_renders_mixed_v2() {
     )
     .expect("thumbnail should render");
     assert_eq!(&out[..8], b"\x89PNG\r\n\x1a\n");
-    // The invalid v1-with-pressure stroke is skipped; the valid v2 stroke draws.
+    // The retired-v1 stroke is skipped; the valid mixed-pressure stroke draws.
     let pixmap = Pixmap::decode_png(&out).expect("decode");
     let (min_x, max_x, min_y, max_y) = ink_bounds(&pixmap);
     assert!(
         min_x <= max_x && min_y <= max_y,
-        "v2 stroke should be drawn"
+        "mixed-pressure stroke should be drawn"
     );
 }
 
-// A fixed v1 page (multi-point stroke + a dot) whose rasterization is pinned
-// as a golden so the untouched constant-width path can never silently drift.
-fn canonical_v1_page() -> Vec<Stroke> {
+// A fixed page of pressure-free ink (multi-point stroke + a dot) whose
+// rasterization is pinned as a golden. This is the shape all migrated v1 ink
+// has, so the golden is what stops that ink silently drifting.
+fn canonical_pressureless_page() -> Vec<Stroke> {
     vec![
         Stroke {
-            id: "v1_line".to_string(),
-            style: StrokeStyle::default_solid_round(),
+            id: "line".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
             points: vec![
                 StrokePoint {
                     x: 10.0,
@@ -697,8 +690,8 @@ fn canonical_v1_page() -> Vec<Stroke> {
             ],
         },
         Stroke {
-            id: "v1_dot".to_string(),
-            style: StrokeStyle::default_solid_round(),
+            id: "dot".to_string(),
+            style: StrokeStyle::default_solid_round_pressure(),
             points: vec![StrokePoint {
                 x: 180.0,
                 y: 110.0,
@@ -709,19 +702,20 @@ fn canonical_v1_page() -> Vec<Stroke> {
     ]
 }
 
-const V1_GOLDEN_PATH: &str = concat!(
+const PRESSURELESS_GOLDEN_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/testdata/v1_canonical_thumbnail.png"
+    "/testdata/pressureless_canonical_thumbnail.png"
 );
 
-/// v1 rasterization must stay byte-identical. Compares decoded RGBA pixels
-/// (robust to PNG encoder differences) against the committed golden.
+/// Pressure-free rasterization must stay byte-identical. Compares decoded RGBA
+/// pixels (robust to PNG encoder differences) against the committed golden.
 #[test]
-fn v1_thumbnail_matches_golden() {
-    let bytes = render(Paper::None, &canonical_v1_page()).expect("thumbnail should render");
+fn pressureless_thumbnail_matches_golden() {
+    let bytes =
+        render(Paper::None, &canonical_pressureless_page()).expect("thumbnail should render");
     let rendered = Pixmap::decode_png(&bytes).expect("rendered thumbnail should decode");
-    let golden_bytes = std::fs::read(V1_GOLDEN_PATH)
-        .expect("v1 golden present; regenerate with `--ignored regenerate_v1_golden`");
+    let golden_bytes = std::fs::read(PRESSURELESS_GOLDEN_PATH)
+        .expect("golden present; regenerate with `--ignored regenerate_pressureless_golden`");
     let golden = Pixmap::decode_png(&golden_bytes).expect("golden should decode");
     assert_eq!(
         (rendered.width(), rendered.height()),
@@ -730,18 +724,20 @@ fn v1_thumbnail_matches_golden() {
     assert_eq!(
         rendered.data(),
         golden.data(),
-        "v1 thumbnail rasterization drifted from the committed golden"
+        "pressure-free thumbnail rasterization drifted from the committed golden"
     );
 }
 
-/// Rewrites the committed v1 golden. Ignored by default; run with
-/// `cargo test -p server --lib regenerate_v1_golden -- --ignored` after an
-/// intentional v1 rendering change (review the image diff before committing).
+/// Rewrites the committed golden. Ignored by default; run with
+/// `cargo test -p server --lib regenerate_pressureless_golden -- --ignored`
+/// after an intentional rendering change (review the image diff before
+/// committing).
 #[test]
-#[ignore = "regenerates the committed v1 golden image"]
-fn regenerate_v1_golden() {
-    let bytes = render(Paper::None, &canonical_v1_page()).expect("thumbnail should render");
-    std::fs::write(V1_GOLDEN_PATH, bytes).expect("golden should be writable");
+#[ignore = "regenerates the committed pressure-free golden image"]
+fn regenerate_pressureless_golden() {
+    let bytes =
+        render(Paper::None, &canonical_pressureless_page()).expect("thumbnail should render");
+    std::fs::write(PRESSURELESS_GOLDEN_PATH, bytes).expect("golden should be writable");
 }
 
 // ---- Paper ----------------------------------------------------------
@@ -752,7 +748,7 @@ const RULED_GOLDEN_PATH: &str = concat!(
 );
 
 /// A page whose fitted viewport reaches past `MARGIN_X`, so the margin is
-/// actually in frame. `canonical_v1_page` spans only x 10..220 and fits to a
+/// actually in frame. `canonical_pressureless_page` spans only x 10..220 and fits to a
 /// viewport ending near x 232 — fine for the ink goldens it exists for, but
 /// with the margin now at 288 it would silently exercise none of the margin
 /// behaviour these tests are about.
@@ -760,7 +756,7 @@ fn margin_reaching_page() -> Vec<Stroke> {
     vec![
         Stroke {
             id: "wide_line".to_string(),
-            style: StrokeStyle::default_solid_round(),
+            style: StrokeStyle::default_solid_round_pressure(),
             points: vec![
                 StrokePoint {
                     x: 0.0,
@@ -784,7 +780,7 @@ fn margin_reaching_page() -> Vec<Stroke> {
         },
         Stroke {
             id: "wide_dot".to_string(),
-            style: StrokeStyle::default_solid_round(),
+            style: StrokeStyle::default_solid_round_pressure(),
             points: vec![StrokePoint {
                 x: 460.0,
                 y: 290.0,
@@ -960,8 +956,8 @@ fn texture_covers_the_surface_without_tinting_it() {
 #[test]
 fn paper_never_overpaints_ink() {
     const INK: (u8, u8, u8) = (0x00, 0x64, 0x00);
-    let blank = rendered(Paper::None, &canonical_v1_page());
-    let ruled = rendered(Paper::SquaredSmall, &canonical_v1_page());
+    let blank = rendered(Paper::None, &canonical_pressureless_page());
+    let ruled = rendered(Paper::SquaredSmall, &canonical_pressureless_page());
     let mut core_pixels = 0;
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -991,7 +987,7 @@ fn paper_never_overpaints_ink() {
 fn dense_scale_culls_paper_instead_of_aliasing() {
     let sprawling = vec![Stroke {
         id: "wide".to_string(),
-        style: StrokeStyle::default_solid_round(),
+        style: StrokeStyle::default_solid_round_pressure(),
         points: vec![
             StrokePoint {
                 x: 0.0,
@@ -1027,7 +1023,7 @@ fn dense_scale_culls_paper_instead_of_aliasing() {
 /// be a multi-px band instead of a hairline.
 #[test]
 fn paper_runs_stay_hairline_thin() {
-    let pixmap = rendered(Paper::RuledNarrow, &canonical_v1_page());
+    let pixmap = rendered(Paper::RuledNarrow, &canonical_pressureless_page());
     let mut widest = 0;
     for x in 0..WIDTH {
         let mut run = 0;
@@ -1056,7 +1052,7 @@ fn inkless_page_renders_blank_white_and_terminates() {
         Vec::new(),
         vec![Stroke {
             id: "empty".to_string(),
-            style: StrokeStyle::default_solid_round(),
+            style: StrokeStyle::default_solid_round_pressure(),
             points: Vec::new(),
         }],
     ] {

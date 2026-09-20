@@ -22,9 +22,16 @@ test.describe('ink page channel', () => {
     const [migrated] = replay(snapshot.messages).batches;
     expect(migrated, 'legacy batch loads through the v3 page channel').toBeTruthy();
     expect(migrated.strokes[0].id).toMatch(/^stroke_legacy_[0-9a-f]{32}$/);
+    // The fixture seeds this stroke as the retired constant-width v1 style; the
+    // iteration-48 migration lifts it to v2 in place. It must arrive as v2.
+    // Replay itself does not validate, so a missed stroke would still reach the
+    // SPA and draw — it is the thumbnail renderer that skips what no longer
+    // validates, so the page would keep its ink while losing it from the library
+    // preview. That skip now warns (see `thumbnails.rs`); this assertion is what
+    // stops it happening at all.
     expect(migrated.strokes[0].style).toEqual({
       tool_kind: 'solid_round',
-      style_version: 1,
+      style_version: 2,
       parameters: {
         color: '#006400',
         width: 4.0,
@@ -32,6 +39,12 @@ test.describe('ink page channel', () => {
         join_style: 'round',
       },
     });
+    // Lossless: geometry is untouched and no pressure was invented, so the nib
+    // stays at the constant full width v1 drew.
+    expect(migrated.strokes[0].points).toEqual([
+      { x: 40.0, y: 40.0, t: 0 },
+      { x: 360.0, y: 220.0, t: 12 },
+    ]);
 
     const openPage = page.getByRole('button', { name: 'Open Legacy protocol 2 page', exact: true });
     await expect(openPage).toBeVisible();
@@ -312,7 +325,7 @@ test.describe('ink page channel', () => {
 
     const penStyle = (width: number) => ({
       tool_kind: 'solid_round',
-      style_version: 1,
+      style_version: 2,
       parameters: { color: '#006400', width, cap_style: 'round', join_style: 'round' },
     });
     const anchors = [
@@ -999,15 +1012,19 @@ test.describe('ink page channel', () => {
     expect(high, `high-pressure third area (${high}px) must exceed low third (${low}px)`).toBeGreaterThan(low * 1.25);
   });
 
-  test('server rejects pressure on a v1 stroke and out-of-range v2 pressure', async ({ page, request }) => {
-    const pageId = await createPage(request, uniqueTitle('ink-pressure-reject'));
+  test('server rejects the retired v1 style and out-of-range pressure', async ({ page, request }) => {
+    const pageId = await createPage(request, uniqueTitle('ink-style-reject'));
     const ticket = await realtimeTicket(request);
-    const badV1 = {
+    // `solid_round` v1 — the retired constant-width style. Stored v1 ink was
+    // migrated up, so a v1 commit can now only come from a stale client, and
+    // the version number is never reused: accepting it would let new ink claim
+    // a meaning the discriminator no longer has.
+    const retiredV1 = {
       id: `stroke-${crypto.randomUUID()}`,
       style: { tool_kind: 'solid_round', style_version: 1, parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' } },
-      points: [{ x: 0.0, y: 0.0, t: 0, pressure: 0.5 }, { x: 10.0, y: 10.0, t: 5, pressure: 0.5 }],
+      points: [{ x: 0.0, y: 0.0, t: 0 }, { x: 10.0, y: 10.0, t: 5 }],
     };
-    const badV2 = {
+    const badPressure = {
       id: `stroke-${crypto.randomUUID()}`,
       style: { tool_kind: 'solid_round', style_version: 2, parameters: { color: '#006400', width: 4.0, cap_style: 'round', join_style: 'round' } },
       points: [{ x: 0.0, y: 0.0, t: 0, pressure: 1.5 }],
@@ -1017,15 +1034,15 @@ test.describe('ink page channel', () => {
       ticket,
       actions: [
         { delayMs: 50, message: { type: 'acquire-lease' } },
-        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'bad-v1-pressure', strokes: [badV1] } },
-        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'bad-v2-pressure', strokes: [badV2] } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'retired-v1-style', strokes: [retiredV1] } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'bad-pressure', strokes: [badPressure] } },
       ],
       settleMs: 400,
     });
     const errors = result.messages.filter((m) => m.type === 'error' && m.code === 'invalid_stroke_style');
-    expect(errors.length, 'both invalid-pressure commits are rejected').toBeGreaterThanOrEqual(2);
+    expect(errors.length, 'both invalid commits are rejected').toBeGreaterThanOrEqual(2);
     // Neither rejected batch is sequenced/persisted.
-    expect(result.messages.some((m) => m.type === 'stroke-batch' && (m.client_batch_id === 'bad-v1-pressure' || m.client_batch_id === 'bad-v2-pressure'))).toBeFalsy();
+    expect(result.messages.some((m) => m.type === 'stroke-batch' && (m.client_batch_id === 'retired-v1-style' || m.client_batch_id === 'bad-pressure'))).toBeFalsy();
   });
 
   test('blocks a second session from inking while the lease is held', async ({ page, request }) => {
@@ -1203,7 +1220,7 @@ function sampleStrokes(id = `stroke-${crypto.randomUUID()}`) {
       id,
       style: {
         tool_kind: 'solid_round',
-        style_version: 1,
+        style_version: 2,
         parameters: { color: '#006400', width: 2.0, cap_style: 'round', join_style: 'round' },
       },
       points: [
@@ -1242,7 +1259,7 @@ function sampleViewerStrokes(id = `stroke-${crypto.randomUUID()}`) {
       id,
       style: {
         tool_kind: 'solid_round',
-        style_version: 1,
+        style_version: 2,
         parameters: { color: '#006400', width: 20.0, cap_style: 'round', join_style: 'round' },
       },
       points: [

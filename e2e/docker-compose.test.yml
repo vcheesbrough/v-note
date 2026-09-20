@@ -130,6 +130,7 @@ services:
         COPY fixtures/legacy-stroke.sql /fixtures/legacy-stroke.sql
         COPY --from=server-migrations 20260716003000_backfill_legacy_strokes.sql /migrations/20260716003000_backfill_legacy_strokes.sql
         COPY --from=server-migrations 20260718011500_add_stroke_batch_revisions.sql /migrations/20260718011500_add_stroke_batch_revisions.sql
+        COPY --from=server-migrations 20260920120000_retire_v1_stroke_style.sql /migrations/20260920120000_retire_v1_stroke_style.sql
     environment:
       PGPASSWORD: test-password
     command:
@@ -151,6 +152,20 @@ services:
         second_revision="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT revision FROM stroke_batches WHERE page_id = 'page_legacy_v2'")"
         test "$$first_revision" = "1" && test "$$first_revision" = "$$second_revision"
         test "$$history_revisions" = "1,3"
+        legacy_versions="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT string_agg(DISTINCT stroke #>> '{style,style_version}', ',') FROM stroke_batches, jsonb_array_elements(strokes) AS s(stroke) WHERE page_id = 'page_legacy_v2'")"
+        test "$$legacy_versions" = "1"
+        # Pre-state is asserted only on page_legacy_v2: it is seeded `DO UPDATE
+        # SET strokes`, so it genuinely resets to the pre-style shape on every
+        # run. page_revision_history is `DO NOTHING` and would still be v2 from a
+        # previous run against a reused postgres volume — it stays in the
+        # post-migration checks below, which are before-vs-after and re-run safe.
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260920120000_retire_v1_stroke_style.sql
+        first_styles="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT string_agg(stroke #>> '{style,style_version}', ',' ORDER BY page_id, seq) FROM stroke_batches, jsonb_array_elements(strokes) AS s(stroke) WHERE page_id IN ('page_legacy_v2', 'page_revision_history')")"
+        psql -v ON_ERROR_STOP=1 -h postgres -U v_note -d v_note -f /migrations/20260920120000_retire_v1_stroke_style.sql
+        second_styles="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT string_agg(stroke #>> '{style,style_version}', ',' ORDER BY page_id, seq) FROM stroke_batches, jsonb_array_elements(strokes) AS s(stroke) WHERE page_id IN ('page_legacy_v2', 'page_revision_history')")"
+        test "$$first_styles" = "2,2,2" && test "$$first_styles" = "$$second_styles"
+        pressure_points="$$(psql -h postgres -U v_note -d v_note -tAc "SELECT count(*) FROM stroke_batches, jsonb_array_elements(strokes) AS s(stroke), jsonb_array_elements(s.stroke -> 'points') AS p(point) WHERE page_id IN ('page_legacy_v2', 'page_revision_history') AND point ? 'pressure'")"
+        test "$$pressure_points" = "0"
         touch /tmp/fixture-ready
         exec tail -f /dev/null
     healthcheck:

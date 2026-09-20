@@ -16,7 +16,7 @@
       "type": "number",
       "minimum": 0.0,
       "maximum": 1.0,
-      "description": "Normalised stylus pressure. Present only on pressure-sensitive (solid_round style_version 2) strokes; omitted on version 1. A version-2 point without it renders at full width."
+      "description": "Normalised stylus pressure. Optional on every point: one without it renders at full width, which is how ink migrated up from the retired style_version 1 keeps its original constant-width appearance."
     }
   }
 }
