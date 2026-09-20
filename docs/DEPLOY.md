@@ -149,15 +149,19 @@ Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
 ### The OIDC client secret is gone (#274, retired in #394)
 
 The unified client is **public + PKCE**, so no client secret is used anywhere.
-#274 removed the *references*; **#394 removed the *values***. Nothing named below
-exists any more:
+#274 removed the *references*; **#394 removed most of the *values***:
 
-| Was | Where |
-| --- | --- |
-| `v_note_dev_oidc_client_secret` | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) |
-| `OIDC_CLIENT_SECRET` | OpenBao `secret/v-note-stack/env` |
-| `oidc/client-secret` | sovereign-config `/v-note/dev/server/` |
-| `oidc/android/client-id`, `oidc/android/issuer-url` | sovereign-config `/v-note/dev/server/` — named the `v-note-android-dev` client that #274 retired |
+| Was | Where | Status |
+| --- | --- | --- |
+| `v_note_dev_oidc_client_secret` | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) | deleted |
+| `oidc/client-secret` | sovereign-config `/v-note/dev/server/` | deleted |
+| `oidc/android/client-id`, `oidc/android/issuer-url` | sovereign-config `/v-note/dev/server/` — named the `v-note-android-dev` client that #274 retired | deleted |
+| `OIDC_CLIENT_SECRET` | OpenBao `secret/v-note-stack/env` | **still present** — deletion needs a `BAO_TOKEN`; tracked on **#394** |
+
+The OpenBao copy is inert (`scripts/fetch-compose-env.sh` requires only
+`POSTGRES_PASSWORD`, so nothing reads it) but it is a **live stored credential**.
+Do not treat this section as saying every copy is gone until that row says
+`deleted`.
 
 `OidcConfig` has no `client_secret` or `android` field, and
 `scripts/fetch-compose-env.sh` requires only `POSTGRES_PASSWORD`, so nothing
@@ -565,17 +569,16 @@ environment there is to roll back. Redeploy a **previous image tag** via
 Woodpecker manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev`) with pinned version env
 (detail in **#152** runbook). **Also reinstall the matching Android APK.**
 
-**Floor: `0.45.0`.** Anything older is a *pre-#274* image that authenticates as a
-confidential OIDC client, which the live public + PKCE provider cannot serve — so
-it would deploy, pass its healthcheck, and then fail **every login**.
+**Floor: `0.45.0` — do not roll back past it.** Pre-#274 images do not work
+against the current Authentik provider and config (#394); treat them as
+unusable rather than as rollback depth.
 
 `registry.desync.link` still carries tags back to `0.28.1` for both `v-note` and
-`v-note-android`. **Do not treat their presence as rollback depth.** Pruning them
-is not done: the `ci` registry account has push/pull but no delete permission
-(every `DELETE /v2/<repo>/manifests/<digest>` returns `403`), so it needs either a
-Zot credential with delete rights or a `storage.retention` rule in `mini-config`.
-Until then the floor is a documented convention, not an enforced one. See
-[The OIDC client secret is gone](#the-oidc-client-secret-is-gone-274-retired-in-394).
+`v-note-android`, so the floor is a **convention, not an enforced limit**.
+Pruning those tags is not done: the `ci` registry account has push/pull but no
+delete permission (every `DELETE /v2/<repo>/manifests/<digest>` returns `403`),
+so it needs a Zot credential with delete rights or a `storage.retention` rule in
+`mini-config`.
 
 ---
 
