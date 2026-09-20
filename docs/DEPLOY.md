@@ -146,27 +146,33 @@ Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
 `/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
 — **no `.env` on the host**.
 
-### Retiring the OIDC client secret (#274)
+### The OIDC client secret is gone (#274, retired in #394)
 
 The unified client is **public + PKCE**, so no client secret is used anywhere.
-Removing the *references* does not remove the *values* — the old secret still
-exists in three places:
+#274 removed the *references*; **#394 removed the *values***. Nothing named below
+exists any more:
 
-1. Woodpecker secret `v_note_dev_oidc_client_secret` (no longer read by any step).
-2. OpenBao `secret/v-note-stack/env` → key `OIDC_CLIENT_SECRET`.
-3. sovereign-config leaf `/v-note/dev/server/oidc/client-secret`.
+| Was | Where |
+| --- | --- |
+| `v_note_dev_oidc_client_secret` | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) |
+| `OIDC_CLIENT_SECRET` | OpenBao `secret/v-note-stack/env` |
+| `oidc/client-secret` | sovereign-config `/v-note/dev/server/` |
+| `oidc/android/client-id`, `oidc/android/issuer-url` | sovereign-config `/v-note/dev/server/` — named the `v-note-android-dev` client that #274 retired |
 
-Keep them for now: they are what a rollback to the pre-#274 image would need,
-since that image refuses to start without a non-empty `oidc/client-secret`.
+`OidcConfig` has no `client_secret` or `android` field, and
+`scripts/fetch-compose-env.sh` requires only `POSTGRES_PASSWORD`, so nothing
+reads any of them. `crates/server/src/config/tests.rs` keeps
+`oidc_ignores_retired_android_subtree` and `oidc_ignores_retired_client_secret`
+so that a stale leaf reappearing in a subtree still cannot fail a load.
 
-**Deleting them is tracked as [#394](https://bored.desync.link/boards/v-notes?card=394)**, with a
-trigger that can actually fire: *delete once no deployable image still requires the
-`oidc/client-secret` leaf* — i.e. once the oldest image an operator would roll
-back to post-dates #274, or those images have been pruned from the registry.
-The previous condition ("keep them until prod is running the unified client")
-became unfireable when **#392** removed prod, which is why it was replaced
-rather than reworded. The sovereign-config leaves for `oidc/android/client-id`
-and `oidc/android/issuer-url` are likewise inert and go at the same time.
+> **Rollback depth is bounded by #274, not by these values.** A pre-#274 image
+> refuses to start without a non-empty `oidc/client-secret` — but it also
+> authenticates as a *confidential* client, and the live provider has been
+> `client_type: public` with no secret since #274. Keeping the leaf would have
+> let such an image boot without letting anyone log in, so it protected nothing:
+> the rollback it appeared to guard had already been broken by the Authentik-side
+> change. That is why #394 deleted the values rather than waiting for the
+> registry to age out images that cannot work anyway.
 
 ### Grant types are not optional in a blueprint (#372)
 
@@ -558,6 +564,18 @@ Clients send **`X-V-Note-Client-Release`** / **`X-V-Note-Client-Protocol`**; **`
 environment there is to roll back. Redeploy a **previous image tag** via
 Woodpecker manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev`) with pinned version env
 (detail in **#152** runbook). **Also reinstall the matching Android APK.**
+
+**Floor: `0.45.0`.** Anything older is a *pre-#274* image that authenticates as a
+confidential OIDC client, which the live public + PKCE provider cannot serve — so
+it would deploy, pass its healthcheck, and then fail **every login**.
+
+`registry.desync.link` still carries tags back to `0.28.1` for both `v-note` and
+`v-note-android`. **Do not treat their presence as rollback depth.** Pruning them
+is not done: the `ci` registry account has push/pull but no delete permission
+(every `DELETE /v2/<repo>/manifests/<digest>` returns `403`), so it needs either a
+Zot credential with delete rights or a `storage.retention` rule in `mini-config`.
+Until then the floor is a documented convention, not an enforced one. See
+[The OIDC client secret is gone](#the-oidc-client-secret-is-gone-274-retired-in-394).
 
 ---
 
