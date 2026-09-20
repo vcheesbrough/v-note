@@ -847,6 +847,40 @@ including every write — use psql on the host directly:
 docker compose exec postgres psql -U v_note -d v_note
 ```
 
+### ⚠️ Editing a migration after you have pushed the branch
+
+Not console-specific, but #299 hit it and it will happen again.
+
+**A branch push deploys dev**, so the first push applies your new migration to
+the *real* dev database and records its checksum. Editing that file afterwards —
+even on an unmerged branch, even before review — makes the next deploy fail with:
+
+```
+Error: database migrations should apply:
+  migration <version> was previously applied but has been modified
+```
+
+The app then crash-loops (`Restarting (1)`) and the deploy's health gate fails.
+Nothing is wrong with the migration; the recorded checksum simply predates the
+edit.
+
+For a migration that has **never been on `master`**, clear the stale row and let
+the corrected version re-apply, rather than adding a second migration to correct
+one that never shipped:
+
+```sh
+ssh vincent@mini.home
+docker exec v-note-dev-postgres-1 psql -U v_note -d v_note \
+  -c "DELETE FROM _sqlx_migrations WHERE version = <version>"
+```
+
+The app is under `restart: unless-stopped`, so it re-applies and goes healthy on
+its own within a few seconds — no redeploy needed. Check with
+`docker ps --filter name=v-note-dev`.
+
+Once a migration **has** shipped to `master`, this is no longer an option: write
+a new migration instead.
+
 ### Rotating the credentials
 
 Both live in sovereign-config under `/v-note/devops/dev/compose`:
