@@ -25,8 +25,8 @@
         },
         "style_version": {
           "type": "integer",
-          "enum": [1, 2],
-          "description": "1 = constant-width nib, points MUST NOT carry pressure. 2 = pressure-modulated nib, points MAY carry pressure."
+          "const": 2,
+          "description": "2 = pressure-modulated nib; points MAY carry pressure. The only accepted version. 1 meant a constant-width nib on which pressure was forbidden; it was retired in iteration 48 and is permanently invalid, never reused."
         },
         "parameters": {
           "type": "object",
@@ -42,7 +42,7 @@
               "type": "number",
               "minimum": 1.0,
               "maximum": 32.0,
-              "description": "Nib diameter in world logical px (full-pressure diameter for style_version 2); 1.0..32.0 in 0.5 steps."
+              "description": "Nib diameter in world logical px (the full-pressure diameter); 1.0..32.0 in 0.5 steps."
             },
             "cap_style": { "type": "string", "const": "round" },
             "join_style": { "type": "string", "const": "round" }

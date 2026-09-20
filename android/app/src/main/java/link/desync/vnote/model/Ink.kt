@@ -5,9 +5,9 @@ import java.util.UUID
 // ---- Canonical ink (world-space strokes) ---------------------------------
 
 // A single stroke sample in world/document coordinates. `t` is milliseconds
-// relative to the start of the stroke. `pressure` is a normalised 0.0..1.0
-// value present only on pressure-sensitive (solid_round v2) strokes; v1 strokes
-// leave it null. A v2 point with null pressure renders at full width.
+// relative to the start of the stroke. `pressure` is an optional normalised
+// 0.0..1.0 value; a point with null pressure renders at full width, which is how
+// ink migrated up from the retired v1 style keeps its constant-width look.
 data class StrokePoint(
     val x: Double,
     val y: Double,
@@ -15,9 +15,10 @@ data class StrokePoint(
     val pressure: Double? = null,
 )
 
-// solid_round style discriminator versions, mirrored from `crates/protocol`.
+// solid_round style discriminator, mirrored from `crates/protocol`. Version 2
+// (pressure-modulated) is the only one the server accepts; version 1 was the
+// constant-width nib, retired in iteration 48, and the number is never reused.
 const val SOLID_ROUND_TOOL = "solid_round"
-const val SOLID_ROUND_STYLE_VERSION = 1
 const val SOLID_ROUND_PRESSURE_STYLE_VERSION = 2
 
 // Shared, cross-platform pressure→width curve constant (see
@@ -38,26 +39,19 @@ data class SolidRoundParameters(
 
 data class StrokeStyle(
     val toolKind: String = SOLID_ROUND_TOOL,
-    val styleVersion: Int = SOLID_ROUND_STYLE_VERSION,
+    val styleVersion: Int = SOLID_ROUND_PRESSURE_STYLE_VERSION,
     val parameters: SolidRoundParameters = SolidRoundParameters(),
 ) {
-    // True when this style modulates rendered width by per-point pressure.
-    val isPressureSensitive: Boolean
-        get() = toolKind == SOLID_ROUND_TOOL && styleVersion == SOLID_ROUND_PRESSURE_STYLE_VERSION
-
     // Rendered nib diameter for a point carrying the given optional pressure.
-    // Must stay identical to `protocol::StrokeStyle::rendered_width`. v1 is
-    // constant; v2 interpolates linearly from an absolute MIN_PRESSURE_WIDTH
-    // floor (capped at the preset) up to the preset, treating null as full width.
-    fun renderedWidth(pressure: Double?): Double =
-        if (isPressureSensitive) {
-            val p = (pressure ?: 1.0).coerceIn(0.0, 1.0)
-            val preset = parameters.width
-            val floor = minOf(MIN_PRESSURE_WIDTH, preset)
-            floor + (preset - floor) * p
-        } else {
-            parameters.width
-        }
+    // Must stay identical to `protocol::StrokeStyle::rendered_width`: linear
+    // interpolation from an absolute MIN_PRESSURE_WIDTH floor (capped at the
+    // preset) up to the preset, treating null as full width.
+    fun renderedWidth(pressure: Double?): Double {
+        val p = (pressure ?: 1.0).coerceIn(0.0, 1.0)
+        val preset = parameters.width
+        val floor = minOf(MIN_PRESSURE_WIDTH, preset)
+        return floor + (preset - floor) * p
+    }
 }
 
 data class Stroke(

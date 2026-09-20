@@ -700,7 +700,7 @@ class PageCanvasInputInstrumentedTest {
         id: String,
         y: Float,
     ): String =
-        """{"id":"$id","style":{"tool_kind":"solid_round","style_version":1,"parameters":{"color":"#006400","width":4.0,"cap_style":"round","join_style":"round"}},"points":[{"x":50.0,"y":$y,"t":0},{"x":1000.0,"y":$y,"t":10}]}"""
+        """{"id":"$id","style":{"tool_kind":"solid_round","style_version":2,"parameters":{"color":"#006400","width":4.0,"cap_style":"round","join_style":"round"}},"points":[{"x":50.0,"y":$y,"t":0},{"x":1000.0,"y":$y,"t":10}]}"""
 
     companion object {
         private const val FIRST_STROKE_Y = 200f

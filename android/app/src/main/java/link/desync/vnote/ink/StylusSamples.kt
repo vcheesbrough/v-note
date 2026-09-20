@@ -36,21 +36,22 @@ internal fun MotionEvent.historicalWorldPoint(
     )
 }
 
-// Normalise a raw stylus pressure sample for the wire: null when the active
-// style ignores pressure (v1), otherwise clamped to 0.0..1.0 (raw pressure can
-// exceed 1.0 on some devices, and NaN must never reach the contract).
+// Normalise a raw stylus pressure sample for the wire: null when this gesture is
+// not capturing pressure (no drawing style was captured at stylus-down),
+// otherwise clamped to 0.0..1.0 (raw pressure can exceed 1.0 on some devices,
+// and NaN must never reach the contract).
 internal fun normalizePressure(
     raw: Float,
-    sensitive: Boolean,
+    capturesPressure: Boolean,
 ): Double? {
-    if (!sensitive) return null
+    if (!capturesPressure) return null
     if (raw.isNaN()) return 0.0
     return raw.toDouble().coerceIn(0.0, 1.0)
 }
 
-internal fun MotionEvent.capturedPressure(sensitive: Boolean): Double? = normalizePressure(pressure, sensitive)
+internal fun MotionEvent.capturedPressure(capturesPressure: Boolean): Double? = normalizePressure(pressure, capturesPressure)
 
 internal fun MotionEvent.capturedHistoricalPressure(
     index: Int,
-    sensitive: Boolean,
-): Double? = normalizePressure(getHistoricalPressure(index), sensitive)
+    capturesPressure: Boolean,
+): Double? = normalizePressure(getHistoricalPressure(index), capturesPressure)

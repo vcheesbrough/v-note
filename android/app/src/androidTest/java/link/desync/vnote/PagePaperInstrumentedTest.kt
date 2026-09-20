@@ -433,7 +433,7 @@ class PagePaperInstrumentedTest {
 
     private val seedStrokeBatch =
         """{"type":"stroke-batch","seq":1,"client_batch_id":"seed","strokes":[""" +
-            """{"id":"seed-paper","style":{"tool_kind":"solid_round","style_version":1,""" +
+            """{"id":"seed-paper","style":{"tool_kind":"solid_round","style_version":2,""" +
             """"parameters":{"color":"#006400","width":4.0,"cap_style":"round","join_style":"round"}},""" +
             """"points":[{"x":50.0,"y":$SEED_STROKE_Y,"t":0},{"x":1000.0,"y":$SEED_STROKE_Y,"t":10}]}]}"""
 

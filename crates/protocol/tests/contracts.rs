@@ -105,7 +105,7 @@ fn page_replay_golden_geometry() {
     );
 }
 
-/// The v2 pressure fixture parses, carries per-point pressure, and validates —
+/// The pressure fixture parses, carries per-point pressure, and validates —
 /// while a point without pressure is allowed and renders at full width.
 #[test]
 fn deserializes_pressure_stroke_fixture() {
@@ -115,21 +115,17 @@ fn deserializes_pressure_stroke_fixture() {
         stroke.style.style_version,
         SOLID_ROUND_PRESSURE_STYLE_VERSION
     );
-    assert!(stroke.style.is_pressure_sensitive());
-    assert!(
-        stroke.validate().is_ok(),
-        "v2 stroke with pressure is valid"
-    );
+    assert!(stroke.validate().is_ok(), "stroke with pressure is valid");
     assert_eq!(stroke.points.len(), 4);
     assert_eq!(stroke.points[0].pressure, Some(0.0));
     assert_eq!(stroke.points[2].pressure, Some(1.0));
-    // A v2 point may omit pressure; it renders at full width.
+    // A point may omit pressure; it renders at full width.
     assert_eq!(stroke.points[3].pressure, None);
     let full = stroke.style.parameters.width;
     assert_eq!(stroke.style.rendered_width(stroke.points[3].pressure), full);
 }
 
-/// Round-trip a v2 stroke: `pressure` survives serialization and absent
+/// Round-trip a stroke: `pressure` survives serialization and absent
 /// pressure stays absent (never serialized as `null`).
 #[test]
 fn pressure_survives_round_trip() {
@@ -161,21 +157,25 @@ fn pressure_survives_round_trip() {
 }
 
 /// The shared pressure→width curve: full preset width at p=1, an absolute
-/// MIN_PRESSURE_WIDTH floor at p=0, linear between; v1 ignores pressure.
+/// MIN_PRESSURE_WIDTH floor at p=0, linear between.
 #[test]
 fn rendered_width_follows_shared_curve() {
-    let v2 = StrokeStyle::default_solid_round_pressure();
+    let style = StrokeStyle::default_solid_round_pressure();
     let w = DEFAULT_PEN_WIDTH; // 4.0
     let floor = MIN_PRESSURE_WIDTH; // 1.5, < 4.0
-    assert_eq!(v2.rendered_width(Some(1.0)), w);
-    assert_eq!(v2.rendered_width(None), w, "absent pressure = full width");
-    assert!((v2.rendered_width(Some(0.0)) - floor).abs() < 1e-9);
+    assert_eq!(style.rendered_width(Some(1.0)), w);
+    assert_eq!(
+        style.rendered_width(None),
+        w,
+        "absent pressure = full width"
+    );
+    assert!((style.rendered_width(Some(0.0)) - floor).abs() < 1e-9);
     let mid = floor + (w - floor) * 0.5;
-    assert!((v2.rendered_width(Some(0.5)) - mid).abs() < 1e-9);
+    assert!((style.rendered_width(Some(0.5)) - mid).abs() < 1e-9);
     // Out-of-range pressure is clamped for *rendering* (validation rejects it
     // on the wire, but a renderer must stay in bounds defensively).
-    assert_eq!(v2.rendered_width(Some(5.0)), w);
-    assert!((v2.rendered_width(Some(-1.0)) - floor).abs() < 1e-9);
+    assert_eq!(style.rendered_width(Some(5.0)), w);
+    assert!((style.rendered_width(Some(-1.0)) - floor).abs() < 1e-9);
 
     // The floor is absolute, so a wide pen tapers far below its preset width.
     let mut wide = StrokeStyle::default_solid_round_pressure();
@@ -188,14 +188,9 @@ fn rendered_width_follows_shared_curve() {
     thin.parameters.width = 1.0;
     assert_eq!(thin.rendered_width(Some(0.0)), 1.0);
     assert_eq!(thin.rendered_width(Some(1.0)), 1.0);
-
-    // v1 is constant regardless of pressure.
-    let v1 = StrokeStyle::default_solid_round();
-    assert_eq!(v1.rendered_width(Some(0.0)), w);
-    assert_eq!(v1.rendered_width(Some(1.0)), w);
 }
 
-/// Pressure is legal only on v2 styles, and only when finite and in `0..=1`.
+/// Pressure is legal on any valid stroke, but only when finite and in `0..=1`.
 #[test]
 fn stroke_validation_enforces_pressure_rules() {
     let point_with = |pressure: Option<f64>| StrokePoint {
@@ -205,23 +200,7 @@ fn stroke_validation_enforces_pressure_rules() {
         pressure,
     };
 
-    // v1 must not carry pressure.
-    let v1_with_pressure = Stroke {
-        id: "a".to_string(),
-        style: StrokeStyle::default_solid_round(),
-        points: vec![point_with(Some(0.5))],
-    };
-    assert!(v1_with_pressure.validate().is_err());
-
-    // v1 without pressure is fine.
-    let v1_clean = Stroke {
-        id: "b".to_string(),
-        style: StrokeStyle::default_solid_round(),
-        points: vec![point_with(None)],
-    };
-    assert!(v1_clean.validate().is_ok());
-
-    // v2 rejects out-of-range and non-finite pressure (reject, don't clamp).
+    // Out-of-range and non-finite pressure is rejected, never clamped.
     for bad in [1.5_f64, -0.1, f64::NAN, f64::INFINITY] {
         let stroke = Stroke {
             id: "c".to_string(),
@@ -234,7 +213,7 @@ fn stroke_validation_enforces_pressure_rules() {
         );
     }
 
-    // v2 accepts the closed interval and absent pressure.
+    // The closed interval and absent pressure are both accepted.
     for good in [Some(0.0), Some(1.0), Some(0.42), None] {
         let stroke = Stroke {
             id: "d".to_string(),
@@ -246,6 +225,51 @@ fn stroke_validation_enforces_pressure_rules() {
             "pressure {good:?} must be accepted"
         );
     }
+}
+
+/// `solid_round` v1 (the retired constant-width style) is permanently invalid.
+/// Stored v1 ink was migrated up to v2 in iteration 48, so a `1` can only now
+/// arrive from a stale client or a hand-rolled payload — and the number is never
+/// reused, so accepting it would silently reinterpret what it used to mean.
+#[test]
+fn style_version_one_is_rejected_forever() {
+    let mut retired = StrokeStyle::default_solid_round_pressure();
+    retired.style_version = 1;
+    assert_eq!(retired.validate(), Err("unsupported style"));
+
+    // …and it is rejected through the whole-stroke path too, not just the style.
+    let stroke = Stroke {
+        id: "legacy".to_string(),
+        style: retired,
+        points: vec![StrokePoint {
+            x: 0.0,
+            y: 0.0,
+            t: 0,
+            pressure: None,
+        }],
+    };
+    assert_eq!(stroke.validate(), Err("unsupported style"));
+
+    // A v1 payload as it was actually stored on the wire fails to validate
+    // after deserializing — the shape still parses, the style no longer passes.
+    let wire = r##"{"id":"legacy","style":{"tool_kind":"solid_round","style_version":1,
+        "parameters":{"color":"#006400","width":4.0,"cap_style":"round","join_style":"round"}},
+        "points":[{"x":40.0,"y":40.0,"t":0}]}"##;
+    let parsed: Stroke = serde_json::from_str(wire).expect("v1 shape still parses");
+    assert_eq!(parsed.validate(), Err("unsupported style"));
+}
+
+/// The migration that lifted v1 ink to v2 changed only the discriminator, and
+/// that is lossless because a pressure-less stroke renders at constant full
+/// width — exactly what v1's constant-width nib drew.
+#[test]
+fn migrated_v1_ink_keeps_its_constant_width() {
+    let style = StrokeStyle::default_solid_round_pressure();
+    let widths: Vec<f64> = [None, None, None]
+        .iter()
+        .map(|&pressure| style.rendered_width(pressure))
+        .collect();
+    assert_eq!(widths, vec![DEFAULT_PEN_WIDTH; 3]);
 }
 
 #[test]

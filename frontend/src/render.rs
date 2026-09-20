@@ -282,25 +282,11 @@ fn draw_stroke(
 ) {
     pen.color(context, &stroke.style.parameters.color);
 
-    // Pressure-modulated (v2) strokes replay as variable-width runs; v1 keeps
-    // the single constant-width path below byte-identical.
-    if stroke.style.is_pressure_sensitive() {
-        draw_pressure_stroke(context, pen, stroke, offset_x, offset_y, scale);
-        return;
-    }
-
-    context.begin_path();
-    pen.width(
-        context,
-        (stroke.style.parameters.width * scale).max(MIN_RENDERED_STROKE_WIDTH),
-    );
-    if let Some(first) = stroke.points.first() {
-        context.move_to(first.x * scale + offset_x, first.y * scale + offset_y);
-        for point in stroke.points.iter().skip(1) {
-            context.line_to(point.x * scale + offset_x, point.y * scale + offset_y);
-        }
-    }
-    context.stroke();
+    // One replay path for every stroke. Ink migrated up from the retired v1
+    // style carries no pressure, so all of its segments share the full-width
+    // nib and the run-grouping below collapses it to a single polyline — the
+    // same one draw call the old constant-width path made.
+    draw_pressure_stroke(context, pen, stroke, offset_x, offset_y, scale);
 }
 
 /// Each segment's on-screen width: the mean of its endpoints' pressure widths
@@ -317,7 +303,7 @@ fn pressure_segment_widths(stroke: &Stroke, scale: f64) -> impl Iterator<Item = 
     })
 }
 
-/// Replay one v2 stroke as runs of consecutive segments sharing a width, one
+/// Replay one stroke as runs of consecutive segments sharing a width, one
 /// round-joined polyline per run.
 ///
 /// With round caps and joins a polyline covers exactly the union of its

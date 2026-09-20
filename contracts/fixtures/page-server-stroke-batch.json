@@ -5,7 +5,7 @@
   "strokes": [
     {
       "id": "stroke_server_1",
-      "style": { "tool_kind": "solid_round", "style_version": 1, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
+      "style": { "tool_kind": "solid_round", "style_version": 2, "parameters": { "color": "#006400", "width": 4.0, "cap_style": "round", "join_style": "round" } },
       "points": [
         { "x": 10.0, "y": 20.0, "t": 0 },
         { "x": 30.0, "y": 25.0, "t": 16 }

@@ -175,12 +175,12 @@ internal fun InkCanvas(
                             liveStroke.clear()
                             liveEraserPath.clear()
                             erasedThisGesture.clear()
-                            val sensitive = capturedDrawingStyle?.isPressureSensitive == true
+                            val capturesPressure = capturedDrawingStyle != null
                             val point =
                                 event.toWorldPoint(
                                     viewport,
                                     stylusStartTime,
-                                    event.capturedPressure(sensitive),
+                                    event.capturedPressure(capturesPressure),
                                 )
                             if (activeStylusTool == CanvasTool.Drawing) {
                                 liveStroke.add(point)
@@ -203,7 +203,7 @@ internal fun InkCanvas(
                                 return@pointerInteropFilter false
                             }
                             if (activeStylusTool == CanvasTool.Drawing) {
-                                val sensitive = capturedDrawingStyle?.isPressureSensitive == true
+                                val capturesPressure = capturedDrawingStyle != null
                                 // Replay coalesced samples in order, then the
                                 // current one — preserving fast pressure changes.
                                 for (h in 0 until event.historySize) {
@@ -212,7 +212,7 @@ internal fun InkCanvas(
                                             h,
                                             viewport,
                                             stylusStartTime,
-                                            event.capturedHistoricalPressure(h, sensitive),
+                                            event.capturedHistoricalPressure(h, capturesPressure),
                                         ),
                                     )
                                 }
@@ -220,7 +220,7 @@ internal fun InkCanvas(
                                     event.toWorldPoint(
                                         viewport,
                                         stylusStartTime,
-                                        event.capturedPressure(sensitive),
+                                        event.capturedPressure(capturesPressure),
                                     ),
                                 )
                             } else {
@@ -237,12 +237,12 @@ internal fun InkCanvas(
                         }
                         MotionEvent.ACTION_UP -> {
                             val tool = activeStylusTool ?: return@pointerInteropFilter false
-                            val sensitive = capturedDrawingStyle?.isPressureSensitive == true
+                            val capturesPressure = capturedDrawingStyle != null
                             val point =
                                 event.toWorldPoint(
                                     viewport,
                                     stylusStartTime,
-                                    event.capturedPressure(sensitive),
+                                    event.capturedPressure(capturesPressure),
                                 )
                             if (tool == CanvasTool.Drawing) {
                                 liveStroke.add(point)
