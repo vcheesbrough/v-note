@@ -48,12 +48,11 @@ steps:
 
   # deploy-v-note.sh takes no arguments: every environment-specific value is a
   # parameter set by the deploy steps in deploy.yml, so a missing one is not a
-  # crash but a silently wrong deploy (a container mislabelled with the wrong
-  # env, a parallel compose project, an app with no runtime config). The deploy
-  # steps only ever exercise
-  # the happy path, so the guards get their own test. Runs on the docker CLI image
-  # for the compose plugin — `compose config` resolves the model client-side, so
-  # this needs no docker socket.
+  # crash but a silently wrong deploy (a container mislabelled with the wrong env,
+  # a parallel compose project, an app with no runtime config). The deploy steps
+  # only ever exercise the happy path, so the guards get their own test. Runs on
+  # the docker CLI image for the compose plugin — `compose config` resolves the
+  # model client-side, so this needs no docker socket.
   deploy-script-validation:
     depends_on: []
     image: *docker-image

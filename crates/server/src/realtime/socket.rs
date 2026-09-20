@@ -53,9 +53,8 @@ const MAX_INBOUND_MESSAGE_BYTES: usize = 1024 * 1024;
 ///   from the same page and a carried-over dictionary is most of the benefit.
 ///   It costs a per-connection zlib window, which is the number #342 requires
 ///   be measured before this flag goes on in a deployed environment. Turning it
-///   off would save
-///   little in `yawc` anyway: `no_context_takeover` *resets* the compressor
-///   between messages rather than freeing it.
+///   off would save little in `yawc` anyway: `no_context_takeover` *resets* the
+///   compressor between messages rather than freeing it.
 /// - **Level 6, not 9**, because #323 bought a 13% replay latency win that
 ///   compression trades CPU against, and level 9 on a multi-megabyte replay
 ///   frame is where that gets given back. Level 6 is the starting point the

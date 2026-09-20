@@ -158,9 +158,15 @@ exists in three places:
 
 Keep them for now: they are what a rollback to the pre-#274 image would need,
 since that image refuses to start without a non-empty `oidc/client-secret`.
-Deleting them is #274 follow-up work, deliberately left out of **#392**. The
-sovereign-config leaves for `oidc/android/client-id` and
-`oidc/android/issuer-url` are likewise inert and can go at the same time.
+
+**Deleting them is tracked as [#394](https://bored.desync.link/boards/v-notes?card=394)**, with a
+trigger that can actually fire: *delete once no deployable image still requires the
+`oidc/client-secret` leaf* — i.e. once the oldest image an operator would roll
+back to post-dates #274, or those images have been pruned from the registry.
+The previous condition ("keep them until prod is running the unified client")
+became unfireable when **#392** removed prod, which is why it was replaced
+rather than reworded. The sovereign-config leaves for `oidc/android/client-id`
+and `oidc/android/issuer-url` are likewise inert and go at the same time.
 
 ### Grant types are not optional in a blueprint (#372)
 
@@ -251,6 +257,17 @@ unable to authenticate until the leaf catches up.
 > split above is enforced in the pipeline but not in the live system** — the
 > combined content keeps being reasserted. Delete it only after a deploy has
 > created `v-note-dev`, then confirm the authorize endpoint still returns 302.
+>
+> **#392 leftover — live objects with no file describing them.** That combined
+> content also declared the prod objects: the `v-note-prod` OAuth2 provider and
+> `v-note (prod)` application, the `v-note-prod-users` group and its bindings,
+> and the `v-note:prod:access` scope mapping. `authentik/blueprint-prod.yaml` is
+> gone from the repo, so **nothing here describes them any more, but they are
+> still live and still reasserted** until the `v-note` instance is deleted.
+> Deleting that instance is what removes them, and it must be deleted *before*
+> the objects themselves or a re-apply resurrects them. Tracked as Part B of
+> [#392](https://bored.desync.link/boards/v-notes?card=392); #388 recreates them
+> from a fresh `blueprint-prod.yaml`.
 
 **The `*_metrics_addr` entry is an alias, not a copy.** `AddValuePath`
 exposes one stored value at several canonical paths, so the pipeline and the app
@@ -403,7 +420,7 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 
 **`v-note — overview`** (uid **`v-note-overview`**) lives in Grafana under **Applications / v-note** (folder uid `v-note`). Its source of truth is [`deploy/grafana/v-note-overview.json`](../deploy/grafana/v-note-overview.json): application dashboards ship in the application repo, in the same PR as the metrics they chart.
 
-- **One dashboard, both environments:** an `env` variable (`label_values(v_note_realtime_active_connections, env)`) filters every query. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
+- **One dashboard per environment:** an `env` variable — a **constant** pinned to `dev`, `hide: 2` — filters every query. It was a `label_values(v_note_realtime_active_connections, env)` query until **#392**: that would have silently widened to any new `env` series the moment one appeared, so it is pinned while dev is the only deployment. **#388** copies this dashboard under a new uid and changes the constant; every panel keeps `env="$env"`, so nothing else moves. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
 - **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every push, on any branch**, after `auto-deploy-dev`, so the dashboard always matches what is deployed to dev — a branch's panels go live with the metrics they chart and can be checked before merge. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself.
 - **UI edits are overwritten** on the next push to `master` that deploys dev. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
 - **Offline validation:** [`scripts/test-grafana-dashboard.sh`](../scripts/test-grafana-dashboard.sh), run in the `checks` step `grafana-dashboard-validation`, checks that the JSON parses, keeps its uid, has no committed id, filters every query by `env`, references no unbounded id, and charts only metrics `observability.rs` registers. It also checks the publish script's `--dry-run` payload, its input guards, and its live path against a stub `curl` (2xx passes; non-2xx and transport failures fail without leaking the token).

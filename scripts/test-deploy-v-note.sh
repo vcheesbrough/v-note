@@ -4,11 +4,10 @@
 # Iteration 22 made this load-bearing: the deploy script no longer knows which
 # environment it is deploying, so every environment-specific value arrives as a
 # parameter from the calling Woodpecker step. A missing one is not a crash but a
-# *silently wrong* deploy — a container labelled with the wrong env, a deploy into
-# a parallel compose project that orphans the real one, an app with no runtime
-# config. The guards
-# are the only thing standing in the way, and the pipeline's own deploy step only
-# ever exercises the happy path.
+# *silently wrong* deploy — a container labelled with the wrong env, a deploy
+# into a parallel compose project that orphans the real one, an app with no
+# runtime config. The guards are the only thing standing in the way, and the
+# pipeline's own deploy step only ever exercises the happy path.
 #
 # A stub `docker` on PATH records every invocation, so each case can assert not
 # just "failed" but "failed before touching anything".
