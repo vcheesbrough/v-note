@@ -140,26 +140,45 @@ steps:
     volumes: *docker-socket
     # The whole dev environment, defined once and reused by auto-deploy-dev.
     # deploy-v-note.sh takes no arguments and knows nothing about which
-    # environment it is deploying — every environment-specific value is right
-    # here, which is what makes a second environment (#388) a new block, not a
-    # script change.
+    # environment it is deploying — every environment-specific value reaches it
+    # from here, either literally or through the `render` layer below, which is
+    # what makes a second environment (#388) a new block, not a script change.
     environment: &deploy-dev-environment
+      # The CLI's own credential, and the only Woodpecker secret this deploy
+      # still owns: a read-only connection rooted at /v-note/devops. `render`
+      # reads the layer with it and then strips it from the child's environment,
+      # so deploy-v-note.sh never sees it.
+      #
+      # Not to be confused with SOVEREIGN_CONFIG_ACCESS_URL_FILE below, which is
+      # the *app's* credential for /v-note/dev/server and arrives as one of the
+      # rendered values. Two URLs, near-identical names, different subtrees.
+      SOVEREIGN_CONFIG_URL:
+        from_secret: v_note_devops_sovereign_access_url
+      # Shared infrastructure credentials — not v-note's to own, so they stay on
+      # the broker (#391). Every build and verify step needs them anyway, and
+      # aliasing them into /v-note/devops would only widen what the URL above can
+      # read.
       REGISTRY_USER:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
-      POSTGRES_PASSWORD:
-        from_secret: v_note_dev_postgres_password
-      # Unlocks the /v-note/dev/server sovereign-config subtree; the URL
-      # itself selects the environment.
-      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
-        from_secret: v_note_dev_sovereign_access_url
-      # Alias of /v-note/dev/server/observability/metrics-addr — the same stored
-      # value the app reads, exposed to the broker so the deploy can derive the
-      # Alloy scrape labels docker writes at container-create time. A plain
-      # value, not a secret; `from_secret` is Woodpecker's only broker channel.
-      V_NOTE_METRICS_ADDR:
-        from_secret: v_note_dev_metrics_addr
+      # Environment *identity* is written here rather than stored (#391). These
+      # are coupled to other in-repo facts — the blueprint's redirect URIs, the
+      # smoke step's host, the Android flavour hosts — so moving a copy into the
+      # store would open a new drift pair rather than close one, and COMPOSE_FILE
+      # and V_NOTE_IMAGE_REPOS describe the repo and must version with it.
+      #
+      # Being written here does NOT make them immutable from the store.
+      # `render` layers the subtree's values *over* the inherited environment, so
+      # a leaf added to /v-note/devops/dev/compose under any name below wins over
+      # the literal here — silently, since the step logs none of them. Write
+      # access to /v-note/devops is therefore equivalent to commit access for
+      # these values, including V_NOTE_IMAGE_REPOS, which decides which images
+      # get pulled and run. That is a deliberate trade (the same subtree already
+      # holds the database password and the app's access URL, so anyone who can
+      # write there can redirect the deploy regardless), but it is a property to
+      # know about rather than assume away: if it ever needs to stop being true,
+      # move these after the `--` so `env` applies them on top of the render.
       # Read by `docker compose` itself, so the script needs no -p/-f flags.
       COMPOSE_PROJECT_NAME: v-note-dev
       COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.android-apk.yml
@@ -167,17 +186,28 @@ steps:
       V_NOTE_HOST: v-notes-dev.desync.link
       V_NOTE_CONTAINER_NAME: v-note-dev
       DB_VOLUME: v-note-dev-db
-      # Canonical environment name, matching the sovereign-config
-      # `observability/environment` leaf the server uses for the OTEL
-      # `deployment.environment` trace attribute. Deliberately not the branch
-      # name: that split one deployment across two values, so traces said `dev`
-      # while the metrics/log discovery labels said e.g. `feat/foo` and no single
-      # environment filter matched all three signals. The build is already
-      # identified by `observability.release` and the image's
-      # `org.opencontainers.image.revision`.
-      APP_ENV: dev
+    # POSTGRES_PASSWORD, SOVEREIGN_CONFIG_ACCESS_URL_FILE, V_NOTE_METRICS_ADDR and
+    # APP_ENV are deliberately absent above: `render` reads them out of
+    # /v-note/devops/dev/compose and puts them in deploy-v-note.sh's environment
+    # (#391). Each is an *alias* of the very leaf the running server reads, so the
+    # deploy and the app cannot disagree about the database password, the metrics
+    # listener, or the environment label — which is exactly what a hand-kept
+    # broker copy could do. APP_ENV in particular stays the canonical `dev` and
+    # never the branch name: as a branch name it split one deployment across two
+    # values, traces saying `dev` while the discovery labels said `feat/foo`, with
+    # no single environment filter matching all three signals. The build is
+    # identified by `observability.release` and the image's
+    # `org.opencontainers.image.revision` instead.
+    #
+    # `render` fails closed — an unreadable layer, or one contributing no values,
+    # means deploy-v-note.sh never runs at all.
+    #
+    # Woodpecker masks `from_secret` values in step logs, and these four are no
+    # longer from_secret, so nothing here may echo them: `docker compose config`
+    # keeps its --quiet, and deploy-v-note.sh must never gain `set -x`.
     commands: &deploy-commands
-      - ./scripts/deploy-v-note.sh
+      - ./scripts/install-sovereign-config-cli.sh
+      - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
 
   # Also every push: dev and the blueprint move together, and the blueprint is
   # applied on any branch above. Deploying a branch build against a master-era

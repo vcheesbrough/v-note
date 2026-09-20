@@ -2,12 +2,13 @@
 # Seed or rotate v-note compose secrets in OpenBao (local compose + operator bootstrap).
 #
 # KV path: secret/v-note-stack/env
-# Woodpecker deploy uses separate keys under secret/woodpecker/repos/vcheesbrough/v-note
-# (v_note_dev_postgres_password, v_note_dev_sovereign_access_url — one pair per
-# deployed environment, and dev is the only one) — patch those with
-# `bao kv patch`, and see
-# scripts/store-sovereign-access-url.sh for the access URLs. App Links JSON now lives
-# in sovereign-config (android/assetlinks-json), not OpenBao — see docs/DEPLOY.md.
+#
+# This is the *local compose* path only. The deployed environments do not read
+# OpenBao at all: since #391 the deploy step reads its configuration from
+# sovereign-config with `sovereign-config render /v-note/devops/<env>/compose`,
+# and the one Woodpecker secret left is the read-only URL that unlocks it — see
+# docs/DEPLOY.md. App Links JSON likewise lives in sovereign-config
+# (android/assetlinks-json), not OpenBao.
 #
 # Usage:
 #   export BAO_ADDR=https://secrets.desync.link

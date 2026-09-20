@@ -6,6 +6,13 @@ set -eu
 # (.woodpecker/deploy.yml), so this script has no idea which environments exist
 # and no branch to keep in sync with them.
 #
+# Since #391 the parameters arrive from two places, and this script cannot tell
+# them apart — which is the point. The step sets the environment's identity
+# directly, and wraps this script in `sovereign-config render
+# /v-note/devops/<env>/compose`, which puts that layer's leaves in the
+# environment before exec'ing it. A missing value therefore fails the same way
+# whichever side it should have come from, and the guards below are unchanged.
+#
 # What stays here is the shell that is awkward to inline: the metrics-label
 # derivation (one value, two consumers, so it cannot be passed in pre-split
 # without reintroducing drift), the recreate step and its rationale, the health
@@ -16,7 +23,11 @@ set -eu
 #   REGISTRY_USER / REGISTRY_PASSWORD  registry.desync.link credentials
 #   POSTGRES_PASSWORD                  consumed directly by the postgres service
 #   SOVEREIGN_CONFIG_ACCESS_URL_FILE   unlocks the app's sovereign-config subtree;
-#                                      which URL is injected selects the environment
+#                                      which URL is injected selects the environment.
+#                                      Not SOVEREIGN_CONFIG_URL — that is the
+#                                      deploy step's own credential for the
+#                                      /v-note/devops layer, and `render` strips it
+#                                      before this script starts
 #   V_NOTE_METRICS_ADDR                `host:port` or `disabled`
 #   COMPOSE_PROJECT_NAME               compose project (read by docker compose itself)
 #   COMPOSE_FILE                       `:`-separated compose files (likewise)
@@ -139,8 +150,8 @@ require_env() {
 #                                     parallel project and orphaning the real one
 #   SOVEREIGN_CONFIG_ACCESS_URL_FILE  compose is happy with a blank secret; the
 #                                     app then starts with no runtime config at
-#                                     all, which is also what a broker secret
-#                                     that failed to resolve looks like
+#                                     all, which is also what a parameter that
+#                                     failed to resolve looks like
 #   V_NOTE_IMAGE_REPOS                the pull loop below just does nothing
 for name in APP_ENV COMPOSE_PROJECT_NAME SOVEREIGN_CONFIG_ACCESS_URL_FILE V_NOTE_IMAGE_REPOS; do
   require_env "$name"
@@ -153,16 +164,15 @@ done
 # metrics. Derived here rather than passed in pre-split precisely so there is one
 # value: two parameters could drift from each other and from the listener.
 #
-# This step cannot read sovereign-config itself (it runs in a docker CLI image and
-# the connection is gRPC), so the Woodpecker sovereign-config broker supplies it:
-# `v_note_<env>_metrics_addr` is an *alias* of
+# `sovereign-config render` supplies it (#391):
+# `/v-note/devops/<env>/compose/V_NOTE_METRICS_ADDR` is an *alias* of
 # `/v-note/<env>/server/observability/metrics-addr`, one stored value at two
 # canonical paths. The container is not given an env override — the app reads that
 # same leaf directly through its own sovereign-config client.
 case "$V_NOTE_METRICS_ADDR" in
   # The app also treats an empty metrics-addr as disabled, but an empty value
-  # here is indistinguishable from a secret that failed to resolve, so it falls
-  # through to the error below — spell it `disabled` in sovereign-config.
+  # here is indistinguishable from a parameter that failed to resolve, so it
+  # falls through to the error below — spell it `disabled` in sovereign-config.
   disabled)
     V_NOTE_METRICS_SCRAPE="false"
     V_NOTE_METRICS_PORT="9090"

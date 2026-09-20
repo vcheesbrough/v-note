@@ -180,7 +180,7 @@ echo "==> metrics-addr must be host:port or the literal 'disabled'"
 assert_fails_untouched "V_NOTE_METRICS_ADDR malformed" "V_NOTE_METRICS_ADDR=nonsense" \
   "must be host:port or 'disabled'"
 # Blank is rejected rather than treated as "disabled": it is indistinguishable
-# from a broker secret that failed to resolve.
+# from a parameter that failed to resolve.
 assert_fails_untouched "V_NOTE_METRICS_ADDR blank" "V_NOTE_METRICS_ADDR=''" \
   "must be host:port or 'disabled'"
 assert_fails_untouched "V_NOTE_METRICS_ADDR unset" "unset V_NOTE_METRICS_ADDR"
@@ -245,6 +245,30 @@ echo "==> the script takes no arguments and ignores any"
 # Documented consequence of dropping the <env> positional: a stray argument is
 # not an error, it is ignored, and the environment block decides the target.
 assert_succeeds "a stray argument is ignored" "set -- some-argument"
+
+echo "==> the script must not print its own environment (#391)"
+# Since #391 the deploy's configuration is rendered from sovereign-config rather
+# than brokered in, and Woodpecker masks only `from_secret` values — so
+# POSTGRES_PASSWORD and the app's access URL now reach this script *unmasked*.
+# A leaked credential in a CI log is not self-announcing and is not undone by
+# reverting the commit that leaked it, so the two ways this script could print
+# them are asserted here rather than left to a comment.
+#
+# These are source assertions, not behavioural ones: they are cheap, they run in
+# the same step as everything above, and the property they protect has no other
+# gate.
+if grep -q -- 'docker compose config --quiet' "$SCRIPT"; then
+  pass "compose config keeps --quiet (it would otherwise dump the resolved model)"
+else
+  fail "deploy-v-note.sh must keep 'docker compose config --quiet': POSTGRES_PASSWORD is no longer a masked Woodpecker secret (#391)"
+fi
+# `if ! grep`, not `grep && fail`: this file runs under `set -e`, so a compound
+# whose left side fails would exit the suite on the *passing* case.
+if ! grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*x' "$SCRIPT"; then
+  pass "the script does not trace its own execution"
+else
+  fail "deploy-v-note.sh must not run under 'set -x': its environment holds unmasked secrets (#391)"
+fi
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "deploy-v-note.sh: $FAILURES check(s) failed" >&2
