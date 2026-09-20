@@ -382,6 +382,39 @@ mod tests {
         }
     }
 
+    /// A stroke whose points carry no pressure at all — the shape every stroke
+    /// migrated up from the retired v1 style has. It must collapse to a single
+    /// uniform-width run, so `draw_pressure_stroke` emits one round-joined
+    /// polyline: the same one draw call the deleted constant-width path made.
+    #[test]
+    fn pressureless_stroke_is_one_uniform_run() {
+        let mut style = protocol::StrokeStyle::default_solid_round_pressure();
+        style.parameters.width = 4.0;
+        let stroke = Stroke {
+            id: "migrated".to_string(),
+            style,
+            points: [(0.0, 0.0), (10.0, 0.0), (20.0, 5.0), (40.0, 5.0)]
+                .iter()
+                .map(|&(x, y)| protocol::StrokePoint {
+                    x,
+                    y,
+                    t: 0,
+                    pressure: None,
+                })
+                .collect(),
+        };
+        let scale = 2.0;
+        let widths: Vec<f64> = pressure_segment_widths(&stroke, scale).collect();
+        assert_eq!(widths.len(), 3, "one width per segment");
+        assert!(
+            widths.iter().all(|&width| width == widths[0]),
+            "a pressure-free stroke must not vary in width: {widths:?}"
+        );
+        // Full preset width, unchanged by the 0.125 snap (4.0 * 2.0 = 8.0 is
+        // already on a step) and well clear of the floor.
+        assert_eq!(widths[0], 4.0 * scale);
+    }
+
     /// A stroke is culled only when its padded bounds miss the viewport; one
     /// whose centreline is just off screen but whose nib reaches in still draws.
     #[test]

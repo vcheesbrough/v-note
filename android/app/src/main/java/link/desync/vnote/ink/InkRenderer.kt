@@ -39,6 +39,25 @@ internal sealed interface InkGeometry {
 }
 
 /**
+ * True when [points] carry no pressure anywhere, so the stroke has a uniform
+ * nib and [buildInkGeometry] draws it as a round-capped [InkGeometry.Polyline]
+ * rather than a ribbon.
+ *
+ * The ribbon would buy nothing here and cost fidelity: it is a filled shape with
+ * butt ends and un-rounded joins, while the polyline is round-capped and
+ * round-joined. That matters for ink migrated up from the retired `solid_round`
+ * v1 style, which is pressure-free by construction and must keep looking exactly
+ * as it did — and it keeps Android agreeing with the SPA and the thumbnail
+ * renderer, both of which round-cap uniform-width ink. It is also the cheaper
+ * path. The test is on the points, not on the style version, because the style
+ * no longer distinguishes them.
+ *
+ * Split out from [buildInkGeometry] so this decision is unit-testable on the JVM
+ * without constructing a `Path`.
+ */
+internal fun usesUniformNib(points: List<StrokePoint>): Boolean = points.all { it.pressure == null }
+
+/**
  * Build the world-space geometry for [points] under [style], or null when there
  * is nothing to draw.
  *
@@ -58,15 +77,7 @@ internal fun buildInkGeometry(
             radius = (style.renderedWidth(points[0].pressure) / 2.0).toFloat(),
         )
     }
-    // A stroke whose points carry no pressure at all has a uniform nib, so the
-    // ribbon below would buy nothing and cost fidelity: a filled ribbon has butt
-    // ends and un-rounded joins, while this polyline is round-capped and
-    // round-joined. That matters for ink migrated up from the retired v1 style,
-    // which is pressure-free by construction and must keep looking exactly as it
-    // did — and it keeps Android agreeing with the SPA and the thumbnail
-    // renderer, both of which round-cap uniform-width ink. It is also the
-    // cheaper path. The test is on the points, not on the style version.
-    if (points.all { it.pressure == null }) {
+    if (usesUniformNib(points)) {
         return InkGeometry.Polyline(
             path = polylinePath(points),
             width = style.parameters.width.toFloat(),

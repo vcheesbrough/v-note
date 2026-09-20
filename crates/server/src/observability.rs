@@ -33,7 +33,7 @@ pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
 /// because both consumers want a `'static` label, so there is no compile-time
 /// link to the canonical constant — `protocol_version_label_matches_protocol`
 /// below is that link.
-const PROTOCOL_VERSION: &str = "6";
+const PROTOCOL_VERSION: &str = "7";
 
 /// Realtime frame and replay sizes: from a ~50 B `synced` up to a multi-MB
 /// replay. Since #323 a replay is a single frame, so the top buckets now

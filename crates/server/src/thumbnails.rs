@@ -46,11 +46,12 @@ const SUPERSAMPLE: u32 = 2;
 // it degrades into proportional partial coverage rather than being clamped.
 //
 // This floors the stroke's *full-pressure* width, not each segment —
-// `render_stroke` applies it as one per-stroke boost. Lighter segments therefore land proportionally *below* one
-// delivered pixel and render as partial coverage, which is deliberate: flooring
-// every segment would flatten pressure variation again, the very failure this
-// constant was lowered to fix. `pressure_variation_survives_at_dense_scale`
-// pins where that leaves a real Android stroke.
+// `render_stroke` applies it as one per-stroke boost. Lighter segments then
+// land proportionally *below* one delivered pixel and render as partial
+// coverage, which is deliberate: flooring every segment would flatten pressure
+// variation again, the very failure this constant was lowered to fix.
+// `pressure_variation_survives_at_dense_scale` pins where that leaves a real
+// Android stroke.
 const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 1.0;
 /// Ceiling on thumbnail jobs past their fetch, in flight at once. A burst of
 /// commits queues one job per revision, each of which loads the page's whole
@@ -325,7 +326,21 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
     // before every stroke, so it can never overpaint ink.
     draw_paper(&mut pixmap, paper, scale, offset_x, offset_y);
     for stroke in strokes {
-        if stroke.validate().is_err() || stroke.points.is_empty() {
+        if stroke.points.is_empty() {
+            continue;
+        }
+        // The one place a stored stroke the protocol no longer accepts becomes
+        // observable. Nothing validates on the replay path, so such a stroke
+        // still draws on the page while quietly vanishing from the preview and
+        // shifting its fitted bounds. Warn rather than skip in silence — after
+        // the iteration-48 migration this should never fire, and if it does the
+        // page needs looking at. `page_id` comes from the enclosing job span.
+        if let Err(reason) = stroke.validate() {
+            tracing::warn!(
+                stroke_id = %stroke.id,
+                %reason,
+                "skipping invalid stroke while rendering thumbnail"
+            );
             continue;
         }
         let color = &stroke.style.parameters.color;

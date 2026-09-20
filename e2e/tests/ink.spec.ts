@@ -23,8 +23,12 @@ test.describe('ink page channel', () => {
     expect(migrated, 'legacy batch loads through the v3 page channel').toBeTruthy();
     expect(migrated.strokes[0].id).toMatch(/^stroke_legacy_[0-9a-f]{32}$/);
     // The fixture seeds this stroke as the retired constant-width v1 style; the
-    // iteration-48 migration lifts it to v2 in place. It must arrive as v2, or
-    // validation would drop it and the page would replay empty.
+    // iteration-48 migration lifts it to v2 in place. It must arrive as v2.
+    // Replay itself does not validate, so a missed stroke would still reach the
+    // SPA and draw — it is the thumbnail renderer that skips what no longer
+    // validates, so the page would keep its ink while losing it from the library
+    // preview. That skip now warns (see `thumbnails.rs`); this assertion is what
+    // stops it happening at all.
     expect(migrated.strokes[0].style).toEqual({
       tool_kind: 'solid_round',
       style_version: 2,

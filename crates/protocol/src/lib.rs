@@ -14,7 +14,7 @@ pub use paper::{
     paper_marks, paper_texture_alpha, paper_texture_tile, preview_viewport, visit_paper_marks,
 };
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// The request-correlation header. Clients send one per HTTP call and WSS
 /// handshake; the server echoes it on the response and stamps it on every log
