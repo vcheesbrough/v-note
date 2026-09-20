@@ -23,22 +23,44 @@ const PADDING: f32 = 12.0;
 /// box-filtered back down. Only the draw transform carries the factor — every
 /// scale, offset and device-space floor below stays in delivered-image pixels.
 ///
-/// This is what lets the width floor be one real pixel: at 3× a floored stroke
-/// is three subpixels wide, so it downsamples to a solid line wherever it falls
-/// between pixel centres, instead of the two half-coverage grey pixels
-/// `tiny_skia`'s antialiasing would leave at 1×.
-const SUPERSAMPLE: u32 = 3;
+/// What this buys, measured rather than assumed: more accurate coverage at
+/// intermediate widths (a 1.63px pen reaches green 119 against 138 at 1×), and
+/// no double-blend darkening where a v2 stroke's round-capped segments overlap,
+/// which at 1× composites two antialiased edges source-over and darkens the
+/// join past its true coverage.
+///
+/// What it does **not** buy, despite being the obvious guess: rescuing a
+/// stroke at the width floor. `tiny_skia` already computes that coverage
+/// analytically, so a floored line lands identically at 1× and 2× — same ink
+/// mass, same darkest pixel. A sub-pixel line straddling a pixel boundary
+/// splits across two rows either way; supersampling cannot move geometry. The
+/// floor below is what makes thin ink legible; this only renders it more
+/// faithfully.
+const SUPERSAMPLE: u32 = 2;
 // Preview-only width floor, in delivered-image pixels — the resolution limit of
 // the image itself rather than a tunable. Was 20.0 (a full page of handwriting
 // merged into blobs), then 4.0, which still flattened every pen under 28 world
-// units at a dense page's fitted scale onto one identical line. Supersampling
-// keeps a 1px line legible, so relative pen weight now survives for any stroke
-// wider than a pixel.
+// units at a dense page's fitted scale onto one identical line. One delivered
+// pixel is the smallest width the image can represent at all, so relative pen
+// weight now survives for every stroke wider than that — and what falls under
+// it degrades into proportional partial coverage rather than being clamped.
+//
+// For a pressure-modulated (v2) stroke this floors the stroke's *full-pressure*
+// width, not each segment — `render_pressure_stroke` applies it as one
+// per-stroke boost. Lighter segments therefore land proportionally *below* one
+// delivered pixel and render as partial coverage, which is deliberate: flooring
+// every segment would flatten pressure variation again, the very failure this
+// constant was lowered to fix. `pressure_variation_survives_at_dense_scale`
+// pins where that leaves a real Android stroke.
 const MIN_THUMBNAIL_STROKE_WIDTH: f32 = 1.0;
-/// Ceiling on rasterizations in flight. A burst of commits queues one job per
-/// revision, and each holds a supersampled pixmap (~1.4 MB) plus a CPU-bound
-/// render, so they are bounded rather than left to the blocking pool's 512
-/// threads. A permit, not a queue: no persistence, no retry, no lease.
+/// Ceiling on thumbnail jobs past their fetch, in flight at once. A burst of
+/// commits queues one job per revision, each of which loads the page's whole
+/// stroke vector and then rasterizes it on the blocking pool; this caps how
+/// many do so together rather than leaving it to that pool's 512 threads.
+///
+/// It bounds the work, not the queue: `enqueue` still spawns one task per
+/// revision, so the number of jobs *waiting* is as unbounded as it is today. A
+/// permit, not a queue — no persistence, no retry, no lease.
 const MAX_CONCURRENT_RENDERS: usize = 4;
 
 pub fn recover_pending(state: AppState) {
@@ -154,6 +176,16 @@ fn render_permits() -> &'static Semaphore {
 }
 
 async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), String> {
+    // Taken before the queries below, not just around the render: the page's
+    // whole stroke vector is the larger and more variable allocation, so a
+    // permit held only over rasterization would leave every queued job holding
+    // one copy of its page's ink while it waited. Acquiring here bounds the
+    // fetch and the allocation with the render, and sheds database load under
+    // the same burst — at the cost of holding the permit across the queries.
+    let permit = render_permits()
+        .acquire()
+        .await
+        .map_err(|error| error.to_string())?;
     // Thumbnails are immutable per revision, so the paper comes from the *job
     // row* — the paper in force when this revision was minted — never from
     // `pages.paper`, which may already name a later choice. This is the only
@@ -203,10 +235,6 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     // span is entered *inside* the closure — entering it here would time the
     // handoff, not the render, and leave `thumbnail.render` at zero in Tempo.
     let span = tracing::info_span!("thumbnail.render", strokes = strokes.len());
-    let permit = render_permits()
-        .acquire()
-        .await
-        .map_err(|error| error.to_string())?;
     let png = tokio::task::spawn_blocking(move || span.in_scope(|| render(paper, &strokes)))
         .await
         .map_err(|error| error.to_string())??;
@@ -236,9 +264,6 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         .filter(|stroke| !stroke.points.is_empty() && stroke.validate().is_ok())
         .flat_map(|stroke| stroke.points.iter())
         .collect();
-    let mut pixmap = Pixmap::new(WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE)
-        .ok_or("could not allocate thumbnail")?;
-    pixmap.fill(Color::WHITE);
     if points.is_empty() {
         // With no drawable points the bounds fold below yields ±INFINITY and the
         // derived scale/offsets are garbage. That was harmless while only the
@@ -246,12 +271,16 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         // too and would walk an infinite viewport — an all-erased page is a job
         // `persist_tombstones` really creates. A blank page has no ink to anchor
         // paper to, and the card forbids paper-only thumbnails, so return white.
-        // Allocated at the delivered size directly: an all-white surface has
-        // nothing for the box filter to average.
+        // Returned before the supersampled surface is allocated, and at the
+        // delivered size: an all-white image has nothing for the box filter to
+        // average, so the larger surface would be filled only to be discarded.
         let mut blank = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
         blank.fill(Color::WHITE);
         return blank.encode_png().map_err(|error| error.to_string());
     }
+    let mut pixmap = Pixmap::new(WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE)
+        .ok_or("could not allocate thumbnail")?;
+    pixmap.fill(Color::WHITE);
     let (min_x, max_x, min_y, max_y) = points.iter().fold(
         (
             f64::INFINITY,
@@ -366,13 +395,23 @@ fn draw_transform(scale: f32, offset_x: f32, offset_y: f32) -> Transform {
 /// Box-filter the supersampled surface down to `WIDTH`×`HEIGHT`, averaging each
 /// `SUPERSAMPLE`×`SUPERSAMPLE` block.
 ///
-/// An exact box filter rather than `Pattern` with `FilterQuality::Bilinear`:
-/// bilinear samples 2×2 regardless of the reduction, so a third of the
-/// subpixels would never be read and thin ink would alias back out. Averaging
+/// Computed directly rather than through a `Pattern` shader with
+/// `FilterQuality::Bilinear`: the mean of the block is what a downsample should
+/// be, and stating it as arithmetic keeps it exact and independent of how a
+/// shader would place its samples — including if `SUPERSAMPLE` ever changes,
+/// where a fixed 2×2 bilinear tap would start missing subpixels. Averaging
 /// premultiplied bytes is the correct filter for compositing, and since the
 /// surface starts as an opaque white fill every alpha is 255 — so this is also
 /// a plain mean of the sRGB channels.
 fn downsample(source: &Pixmap) -> Result<Pixmap, String> {
+    // The row arithmetic below hard-codes the supersampled geometry, so an
+    // unexpected source would index past a row rather than fail: too small
+    // panics on the slice, too large reads the wrong rows and returns a
+    // scrambled image. Both reach the caller as an opaque `JoinError` from
+    // `spawn_blocking`, so state the contract the signature already implies.
+    if (source.width(), source.height()) != (WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE) {
+        return Err("downsample source is not the supersampled size".to_string());
+    }
     let mut target = Pixmap::new(WIDTH, HEIGHT).ok_or("could not allocate thumbnail")?;
     let factor = SUPERSAMPLE as usize;
     let source_width = (WIDTH * SUPERSAMPLE) as usize;

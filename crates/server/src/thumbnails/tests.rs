@@ -406,6 +406,77 @@ fn floored_stroke_renders_as_solid_ink_not_a_wash() {
     );
 }
 
+/// Darkest green channel seen in a device-x band, across the full height.
+fn darkest_green_in_band(pixmap: &Pixmap, from_x: u32, to_x: u32) -> u8 {
+    let mut darkest = 255u8;
+    for x in from_x..to_x {
+        for y in 0..HEIGHT {
+            let pixel = pixmap.pixel(x, y).expect("pixel should exist");
+            if pixel.green() > pixel.red() && pixel.green() > pixel.blue() {
+                darkest = darkest.min(pixel.green());
+            }
+        }
+    }
+    darkest
+}
+
+/// The v2 (pressure) counterpart to the wash test above, and the one the floor
+/// drop actually changed: Android's pen writes v2 by default, and
+/// `render_pressure_stroke` lifts a stroke's *full-pressure* width to the floor
+/// rather than each segment, so lighter pressure renders sub-pixel by design.
+///
+/// Pins both ends of that on a dense page (fitted scale ≈ 0.136, where a 4-unit
+/// pen is 0.54 device px and the floor is doing all the work): the full-pressure
+/// end stays meaningfully inked, and light pressure stays visibly lighter — the
+/// variation this card exists to preserve.
+///
+/// The absolute darkness of a floored stroke is deliberately bounded loosely.
+/// A 1px line centred on a pixel boundary splits its coverage across two rows
+/// whatever the supersample factor, so how dark it lands depends on sub-pixel
+/// phase, not on rendering quality; pinning it tightly would pin the fixture's
+/// geometry rather than the behaviour. The *difference* between the ends is the
+/// invariant worth holding.
+#[test]
+fn pressure_variation_survives_at_dense_scale() {
+    let samples = 41;
+    let ramp = Stroke {
+        id: "ramp".to_string(),
+        style: StrokeStyle::default_solid_round_pressure(),
+        points: (0..samples)
+            .map(|i| {
+                let fraction = i as f64 / (samples - 1) as f64;
+                StrokePoint {
+                    x: 200.0 + fraction * 1100.0,
+                    y: 500.0,
+                    t: i as i64,
+                    pressure: Some(fraction),
+                }
+            })
+            .collect(),
+    };
+    let pixmap = rendered(
+        Paper::None,
+        &[
+            anchor_dot("anchor_origin", 0.0, 0.0),
+            anchor_dot("anchor_far", 1500.0, 1000.0),
+            ramp,
+        ],
+    );
+
+    // Bands inside each end of the ramp, clear of both corner anchors.
+    let light = darkest_green_in_band(&pixmap, 40, 70);
+    let heavy = darkest_green_in_band(&pixmap, 170, 200);
+    // Canonical ink (#006400) is green=100 at full coverage, white is 255.
+    assert!(
+        heavy <= 190,
+        "the full-pressure end should stay meaningfully inked (darkest green = {heavy})"
+    );
+    assert!(
+        light >= heavy + 20,
+        "light pressure must stay visibly lighter than full pressure: light={light} heavy={heavy}"
+    );
+}
+
 /// Supersampling must not shrink the paper grain: each grain cell is painted as
 /// a `SUPERSAMPLE`-square block, so the delivered image keeps the tile's own
 /// period — the constant on-screen size `draw_paper_texture` promises.
