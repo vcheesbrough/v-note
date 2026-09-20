@@ -180,7 +180,7 @@ echo "==> metrics-addr must be host:port or the literal 'disabled'"
 assert_fails_untouched "V_NOTE_METRICS_ADDR malformed" "V_NOTE_METRICS_ADDR=nonsense" \
   "must be host:port or 'disabled'"
 # Blank is rejected rather than treated as "disabled": it is indistinguishable
-# from a broker secret that failed to resolve.
+# from a parameter that failed to resolve.
 assert_fails_untouched "V_NOTE_METRICS_ADDR blank" "V_NOTE_METRICS_ADDR=''" \
   "must be host:port or 'disabled'"
 assert_fails_untouched "V_NOTE_METRICS_ADDR unset" "unset V_NOTE_METRICS_ADDR"

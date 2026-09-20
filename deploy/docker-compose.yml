@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: v_note
       POSTGRES_USER: v_note
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, the v_note_<env>_postgres_password broker secret in CI)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, rendered from /v-note/devops/<env>/compose in CI)}
     volumes:
       - v-note-db:/var/lib/postgresql/data
     networks:
@@ -31,8 +31,9 @@ services:
     environment:
       # Runtime config (database / oidc / observability / android) comes from
       # sovereign-config, reached via the access-URL secret below — including
-      # `observability/metrics-addr`, which the deploy step reads through the
-      # Woodpecker broker to derive the Alloy scrape labels further down.
+      # `observability/metrics-addr`, which the deploy step reads through its own
+      # /v-note/devops/<env>/compose layer to derive the Alloy scrape labels
+      # further down.
       # Set to an empty value (docker-compose.local.yml) to disable the
       # sovereign-config layer and fall back to plain VNOTE__* env.
       # Points at the docker secret below; the provider reads the URL from that file.
@@ -74,8 +75,8 @@ services:
       # `… * on(instance) group_left(protocol) v_note_build_info` to filter.
 
 secrets:
-  # Sourced straight from the Woodpecker secret v_note_<env>_sovereign_access_url,
-  # exposed by the deploy step as the SOVEREIGN_CONFIG_ACCESS_URL_FILE env var. Compose
+  # Sourced straight from /v-note/devops/<env>/compose/SOVEREIGN_CONFIG_ACCESS_URL_FILE,
+  # which `sovereign-config render` puts in the deploy step's environment (#391). Compose
   # materialises it as a file mounted at /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE.
   # The connection URL is itself a secret and selects the env: which environment's
   # config the server reads is decided by *which* URL is injected, not by anything

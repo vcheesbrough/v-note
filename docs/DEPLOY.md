@@ -20,12 +20,12 @@
 
 ## Woodpecker deploy pipeline
 
-Pushes **to `master`** automatically deploy **dev** once every push workflow passes; a feature-branch push builds and tests only, and touches neither dev nor Authentik (#274). Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
+**Every push deploys dev, on any branch** — dev is the pre-merge environment, so a branch is deployed there to be tested before it merges, and the last push wins. (#274 restricted this to `master`; the per-environment blueprint split plus `smoke-oidc-login-auto-dev` replaced that guard — see the header comment in [`.woodpecker/deploy.yml`](../.woodpecker/deploy.yml).) Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
 
 1. **validate-deployment** — manual deployment target must be `dev`, the only environment that exists; the error names **#388**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint-dev** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
-4. **deploy** — `scripts/deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
+4. **deploy** — `scripts/install-sovereign-config-cli.sh` installs the CLI, then `sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **tag-release** — after a successful deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 6. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
@@ -41,16 +41,23 @@ the calling step in [`.woodpecker/deploy.yml`](../.woodpecker/deploy.yml), where
 the dev block is defined once and reused by `auto-deploy-dev` via a YAML anchor.
 Adding an environment means adding a step, not editing the script.
 
-| Parameter | Purpose |
-| --- | --- |
-| `REGISTRY_USER` / `REGISTRY_PASSWORD` | `registry.desync.link` credentials |
-| `POSTGRES_PASSWORD` | consumed directly by the `postgres` service |
-| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | unlocks the app's sovereign-config subtree; **which URL is injected selects the environment** |
-| `V_NOTE_METRICS_ADDR` | `host:port` or `disabled` — see the broker alias above |
-| `COMPOSE_PROJECT_NAME` | compose project; read by `docker compose` itself, so the script passes no `-p` |
-| `COMPOSE_FILE` | `:`-separated compose files; likewise no `-f` |
-| `V_NOTE_IMAGE_REPOS` | space-separated repos to pull at the release tag (dev adds `v-note-android`) |
-| `V_NOTE_HOST`, `V_NOTE_CONTAINER_NAME`, `DB_VOLUME`, `APP_ENV` | passed straight through to compose |
+The parameters reach it from two places, and the script cannot tell them apart —
+which is the point. **Step** values are written literally in `deploy.yml`;
+**rendered** values come out of `/v-note/devops/<env>/compose` via
+`sovereign-config render` (#391). A missing parameter fails the same way
+whichever side it should have come from.
+
+| Parameter | From | Purpose |
+| --- | --- | --- |
+| `REGISTRY_USER` / `REGISTRY_PASSWORD` | step | `registry.desync.link` credentials |
+| `POSTGRES_PASSWORD` | rendered | consumed directly by the `postgres` service |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | rendered | unlocks the app's sovereign-config subtree; **which URL is injected selects the environment** |
+| `V_NOTE_METRICS_ADDR` | rendered | `host:port` or `disabled` — see [the alias note](#aliases-not-copies) |
+| `APP_ENV` | rendered | the `observability.env` discovery label; the canonical environment name, never the branch |
+| `COMPOSE_PROJECT_NAME` | step | compose project; read by `docker compose` itself, so the script passes no `-p` |
+| `COMPOSE_FILE` | step | `:`-separated compose files; likewise no `-f` |
+| `V_NOTE_IMAGE_REPOS` | step | space-separated repos to pull at the release tag (dev adds `v-note-android`) |
+| `V_NOTE_HOST`, `V_NOTE_CONTAINER_NAME`, `DB_VOLUME` | step | passed straight through to compose |
 
 All of these are required. The script explicitly checks only the four whose
 absence would otherwise be **silent** — `APP_ENV` (compose falls back to `dev`,
@@ -120,31 +127,87 @@ export SOVEREIGN_CONFIG_ACCESS_URL_FILE=… V_NOTE_METRICS_ADDR=0.0.0.0:9090
 
 ## Secrets
 
-**Never commit values.** CI secrets come from sovereign-config through the
-Woodpecker broker; local compose secrets still come from OpenBao.
+**Never commit values.** The deploy reads its configuration from sovereign-config
+with the CLI; a small set of shared infrastructure credentials still arrives
+through the Woodpecker broker; local compose secrets still come from OpenBao.
 
-### Woodpecker mini deploy (sovereign-config broker)
+### The deploy renders its configuration (#391)
+
+The deploy step installs the sovereign-config CLI and wraps the deploy script in
+it:
+
+```yaml
+commands:
+  - ./scripts/install-sovereign-config-cli.sh
+  - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
+```
+
+`render` reads the layer's **direct children**, puts each one in the environment
+under **its leaf name exactly as stored**, and `exec`s the command. That is why
+these leaves are named `POSTGRES_PASSWORD` and not `postgres-password` — a leaf
+with a `-` or a leading digit is refused. It **fails closed**: an unreadable
+layer, or one that contributes no values at all, means the deploy script never
+runs.
+
+| `/v-note/devops/dev/compose/…` | Kind | Notes |
+| --- | --- | --- |
+| `POSTGRES_PASSWORD` | secret | **alias** of `/v-note/dev/server/database/password` |
+| `V_NOTE_METRICS_ADDR` | plain | **alias** of `/v-note/dev/server/observability/metrics-addr` |
+| `APP_ENV` | plain | **alias** of `/v-note/dev/server/observability/environment` |
+| `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | secret | the **app's** access URL for `/v-note/dev/server` |
+
+Every one of the first three is an **alias**, not a copy — one stored value at
+two canonical paths (see [the alias note](#aliases-not-copies) below), so the
+deploy and the running server cannot disagree about the database password, the
+metrics listener or the environment label.
+
+One `/v-note/devops/<env>/compose` layer per deployed environment; dev is the
+only one, and **#388** adds prod's.
+
+> **Two URLs, near-identical names.** `SOVEREIGN_CONFIG_URL` is the **CLI's**
+> credential — it unlocks `/v-note/devops`, and `render` strips it from the child
+> process's environment. `SOVEREIGN_CONFIG_ACCESS_URL_FILE` is the **app's**
+> credential — it unlocks `/v-note/dev/server`, and it is one of the rendered
+> values, passed through to compose. They are rotated separately; see
+> [Creating / rotating an access URL](#creating--rotating-an-access-url-operator).
+
+### What is left on the Woodpecker broker
 
 Mini points `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at the
 `sovereign-config-woodpecker-broker`, whose layers are
 `/woodpecker/shared,/woodpecker/repos/{repo.owner}/{repo.name}` — so a
-`from_secret: <name>` in any [`.woodpecker/`](../.woodpecker/) workflow
-resolves at `/woodpecker/repos/vcheesbrough/v-note/<name>`:
+`from_secret: <name>` in any [`.woodpecker/`](../.woodpecker/) workflow resolves
+at `/woodpecker/shared/<name>` or `/woodpecker/repos/vcheesbrough/v-note/<name>`.
 
-| Woodpecker secret key | Used for |
+v-note's **own** layer now holds exactly one leaf:
+
+| Repo secret key | Used for |
 | --- | --- |
-| `v_note_dev_postgres_password` | Postgres `POSTGRES_PASSWORD` (dev deploy) |
-| `v_note_dev_sovereign_access_url` | Access URL for the `/v-note/dev/server` sovereign-config subtree |
-| `v_note_dev_metrics_addr` | **Alias** of `/v-note/dev/server/observability/metrics-addr` — see below |
-| Android signing (dev) | Committed **non-secret** debug keystore `android/app/debug.keystore` (all builds share it → stable cert + App Links fingerprint) |
+| `v_note_devops_sovereign_access_url` | `SOVEREIGN_CONFIG_URL` — read-only connection **`v-note-devops`** rooted at `/v-note/devops`, the credential `render` uses above |
 
-One `v_note_<env>_*` trio per deployed environment, and dev is the only one —
-**#388** adds the next set. Android **release** signing needs a secret keystore
-held **outside the repo**; that is tracked in **#178** and blocks #388.
+The rest are **shared** infrastructure credentials on `/woodpecker/shared`, used
+by bored and sovereign-config too, and **not v-note's to move or remove**:
+`zot_ci_user` / `zot_ci_password` (registry), `github_token` (version compute and
+tag push), `authentik_api_token` (blueprint apply), `grafana_api_token` (dashboard
+publish). The build and verify steps need them through the broker regardless, so
+aliasing them into `/v-note/devops` would buy nothing and widen what the devops
+URL can read.
 
-Rotate by rewriting the leaf in sovereign-config (`put_secret` / the CLI) at
-`/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects these via Woodpecker
-— **no `.env` on the host**.
+Android signing (dev) needs no secret at all: the committed **non-secret** debug
+keystore `android/app/debug.keystore` is shared by every build, which is what
+makes the certificate and App Links fingerprint stable. Android **release**
+signing needs a secret keystore held **outside the repo**; that is tracked in
+**#178** and blocks #388.
+
+Rotate a broker leaf by rewriting it in sovereign-config (`put_secret`, or
+`sovereign-config set --secret <path>` with the value on stdin) at
+`/woodpecker/repos/vcheesbrough/v-note/<name>`. CI injects it via Woodpecker —
+**no `.env` on the host**.
+
+> **Log masking changes with this move.** Woodpecker masks `from_secret` values in
+> step logs. `POSTGRES_PASSWORD` and the app's access URL are no longer
+> `from_secret`, so they are **not masked**: `docker compose config` must keep its
+> `--quiet`, and `deploy-v-note.sh` must never gain `set -x`.
 
 ### The OIDC client secret is gone (#274, retired in #394)
 
@@ -153,7 +216,7 @@ The unified client is **public + PKCE**, so no client secret is used anywhere.
 
 | Was | Where | Status |
 | --- | --- | --- |
-| `v_note_dev_oidc_client_secret` | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) | deleted |
+| The dev OIDC client-secret broker leaf | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) | deleted |
 | `oidc/client-secret` | sovereign-config `/v-note/dev/server/` | deleted |
 | `oidc/android/client-id`, `oidc/android/issuer-url` | sovereign-config `/v-note/dev/server/` — named the `v-note-android-dev` client that #274 retired | deleted |
 | `OIDC_CLIENT_SECRET` | OpenBao `secret/v-note-stack/env` | **still present** — deletion needs a `BAO_TOKEN`; tracked on **#394** |
@@ -279,26 +342,34 @@ unable to authenticate until the leaf catches up.
 > [#392](https://bored.desync.link/boards/v-notes?card=392); #388 recreates them
 > from a fresh `blueprint-prod.yaml`.
 
-**The `*_metrics_addr` entry is an alias, not a copy.** `AddValuePath`
-exposes one stored value at several canonical paths, so the pipeline and the app
-read the *same* leaf: the app resolves `observability/metrics-addr` through its
-own sovereign-config client, and `deploy-v-note.sh` reads the alias to derive the
-Alloy `observability.metrics.port` / `.scrape` container labels, which docker
-writes at container-create time and nothing inside the container can influence.
-Create them with:
+<a id="aliases-not-copies"></a>
+
+**The `/v-note/devops/dev/compose` leaves are aliases, not copies.** `AddValuePath`
+exposes one stored value at several canonical paths, so the deploy and the app
+read the *same* leaf. The app resolves `database/password`,
+`observability/metrics-addr` and `observability/environment` through its own
+sovereign-config client; `render` hands the deploy step the same three values
+under the names compose and `deploy-v-note.sh` expect. `deploy-v-note.sh` uses
+`V_NOTE_METRICS_ADDR` to derive the Alloy `observability.metrics.port` /
+`.scrape` container labels, which docker writes at container-create time and
+nothing inside the container can influence. Create them with:
 
 ```bash
+sovereign-config alias add /v-note/dev/server/database/password \
+  /v-note/devops/dev/compose/POSTGRES_PASSWORD
 sovereign-config alias add /v-note/dev/server/observability/metrics-addr \
-  /woodpecker/repos/vcheesbrough/v-note/v_note_dev_metrics_addr
+  /v-note/devops/dev/compose/V_NOTE_METRICS_ADDR
+sovereign-config alias add /v-note/dev/server/observability/environment \
+  /v-note/devops/dev/compose/APP_ENV
 ```
 
-One alias per deployed environment; dev is the only one today.
+One set per deployed environment; dev is the only one today.
 
-This aliases *into* `/woodpecker/...`, the opposite direction to the broker
-README's advice. That advice is about repository-independent values whose natural
-home is the broker root; this value's canonical home is the app subtree, so the
-alias points the other way. Aliasing widens read access — every v-note pipeline
-can read it — which is immaterial here because it is a plain leaf, not a secret.
+The alias direction is deliberate: each value's canonical home is the **app**
+subtree, and `/v-note/devops` is the view the deploy pipeline is allowed to read.
+Aliasing widens read access — anything holding the devops URL can read these —
+which is why only values the deploy genuinely needs are exposed there, and why
+`APP_ENV` (a hand-kept copy until #391) was folded in rather than left to drift.
 
 App Links JSON is **not** in this list: since iteration 19 it lives in sovereign-config
 at `android/assetlinks-json`. The former `v_note_<env>_assetlinks_json` keys have
@@ -328,9 +399,10 @@ env vars. The server loads four independent groups — `database`, `oidc`,
 `observability`, `android` — and **refuses to start (non-zero exit, redacted
 error) if any value is missing or invalid**.
 
-The deploy step exposes the per-env access URL (Woodpecker secret
-`v_note_<env>_sovereign_access_url`) as the `SOVEREIGN_CONFIG_ACCESS_URL_FILE`
-env var; compose sources a docker secret of the same name straight from it and
+The deploy step gets the per-env access URL as the
+`SOVEREIGN_CONFIG_ACCESS_URL_FILE` env var — rendered from
+`/v-note/devops/<env>/compose/SOVEREIGN_CONFIG_ACCESS_URL_FILE`, not brokered in
+(#391); compose sources a docker secret of the same name straight from it and
 mounts it at `/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE`, which the container's
 `SOVEREIGN_CONFIG_ACCESS_URL_FILE` points at. **The URL is itself a secret and
 selects the environment** — which environment's config the server reads is decided
@@ -338,24 +410,41 @@ by which URL is injected, not by a config flag.
 
 ### Creating / rotating an access URL (operator)
 
-The access URL grants read access to the **whole** `/v-note/<env>/server`
-subtree, secret leaves included — treat it like a password.
+There are **two** URLs, and they are rotated independently. Both grant read
+access to a whole subtree, secret leaves included — treat each like a password,
+and never let one reach a command argument, a tool call or shell history.
 
-1. Create a managed connection (sovereign-config MCP or web UI), scoped and
-   read-only — the URL is displayed **once**:
-   `create_connection root=/v-note/dev/server permissions=["read"]`
-2. Pipe it straight into OpenBao without it touching a terminal argument or
-   shell history:
+**The app's URL** — connection `v-note-dev-server`, root `/v-note/dev/server`:
+
+1. Create or rotate the managed connection (web UI, or `rotate_connection`). The
+   URL is displayed **once**.
+2. Store it in the deploy's own layer, with the URL on **stdin** so it never
+   reaches argv or shell history:
    ```bash
-   export BAO_ADDR=https://secrets.desync.link BAO_TOKEN=<write token>
-   ./scripts/store-sovereign-access-url.sh dev    # paste URL, Ctrl-D
+   sovereign-config set --secret \
+     /v-note/devops/dev/compose/SOVEREIGN_CONFIG_ACCESS_URL_FILE
    ```
-3. Redeploy. To rotate, `rotate_connection` and repeat — no app change needed.
+3. Redeploy — the next `render` picks it up. No app change needed.
+
+**The CLI's URL** — connection `v-note-devops`, root `/v-note/devops`, `read`
+only. This is the one Woodpecker secret v-note still owns:
+
+1. Create or rotate the connection in the web UI.
+2. Store it at `/woodpecker/repos/vcheesbrough/v-note/v_note_devops_sovereign_access_url`
+   — paste into the UI, or `sovereign-config set --secret <that path>` with the
+   URL on stdin.
+3. Redeploy.
+
+Note the ordering trap: the app's URL lives *inside* the subtree the devops URL
+unlocks, so the devops URL must be valid before a deploy can read anything at
+all. `render` fails closed, so a bad devops URL stops the deploy rather than
+half-configuring it.
 
 The secret leaf (`database/password`) is stored with `put_secret` and revealed to
-the app at load. `POSTGRES_PASSWORD` **also** stays in
-OpenBao because the `postgres` service consumes it directly — the same value lives
-in two stores.
+the app at load. `POSTGRES_PASSWORD` is **the same stored value**, aliased into
+the deploy's layer — not a second copy, and no longer in OpenBao for deployed
+environments. Local compose still keeps its own `POSTGRES_PASSWORD` in OpenBao,
+because that is a different database.
 
 The provider is pinned to the running sovereign-config server's tag (**2.19.4**).
 Only the **protocol** is enforced: the provider **fails closed on protocol
@@ -376,7 +465,7 @@ in `crates/server/Cargo.toml` and rebuild.
 | `APP_ENV` | compose-level only — the `observability.env` discovery label |
 | `APP_VERSION` | compose-level only — the `observability.release` discovery label (the server's own `/api/meta` version is baked in at build via `V_NOTE_RELEASE`, not read here) |
 | `SOVEREIGN_CONFIG_ACCESS_URL_FILE` | in-container path to the access-URL secret; blank disables the sovereign layer |
-| `V_NOTE_METRICS_ADDR` | compose-level only — `host:port` or `disabled`, supplied by the `v_note_<env>_metrics_addr` broker alias of `observability/metrics-addr`. `deploy-v-note.sh` derives `observability.metrics.port` and `observability.metrics.scrape` from it, so the listener and the thing scraping it read one value. **Required** — a missing value fails the deploy rather than defaulting |
+| `V_NOTE_METRICS_ADDR` | compose-level only — `host:port` or `disabled`, rendered from `/v-note/devops/<env>/compose/V_NOTE_METRICS_ADDR`, an alias of `observability/metrics-addr`. `deploy-v-note.sh` derives `observability.metrics.port` and `observability.metrics.scrape` from it, so the listener and the thing scraping it read one value. **Required** — a missing value fails the deploy rather than defaulting |
 
 The **container's only environment variable is `SOVEREIGN_CONFIG_ACCESS_URL_FILE`.**
 Everything else (database, OIDC, OTLP, metrics address, App Links JSON) comes
@@ -447,7 +536,7 @@ each deployed environment's subtree:
 # sign with it, so this is fixed): SHA-256
 #   3A:49:7C:AE:57:AD:FF:E4:D0:C8:3B:D2:D0:98:2C:C2:98:CB:1D:B6:3F:70:68:5A:57:13:07:96:CC:9C:62:3A
 ./scripts/render-assetlinks-json.sh dev "$(./scripts/android-dev-debug-fingerprint.sh)" \
-  | sovereign-config put /v-note/dev/server/android/assetlinks-json
+  | sovereign-config set /v-note/dev/server/android/assetlinks-json
 ```
 
 A second environment (#388) adds an arm to `render-assetlinks-json.sh` and a leaf
@@ -455,7 +544,7 @@ under its own subtree; it needs the release keystore from **#178** first, becaus
 the fingerprint here must match the certificate the APK is signed with.
 
 The value is non-secret (it is served publicly at `/.well-known/assetlinks.json`),
-so it is a plain `put`, not `secret put`. The server validates it parses as JSON at
+so it is a plain `set`, not `set --secret`. The server validates it parses as JSON at
 startup and refuses to start otherwise.
 
 Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keystore), `--docker` only for the CI image keystore, or `keytool -list -v` on a release keystore (**#178**).
