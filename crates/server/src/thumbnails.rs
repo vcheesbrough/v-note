@@ -352,10 +352,11 @@ fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {
         let transform = draw_transform(scale, offset_x, offset_y);
 
         // Every stroke is pressure-modulated now, so there is a single render
-        // path. Ink migrated up from the retired v1 style carries no pressure
-        // and so takes a uniform full-width nib through the same code —
-        // geometrically what v1's constant-width path drew, and now sharing the
-        // dot heuristic that keeps the preview agreeing with Android.
+        // path — as on the SPA and Android, neither of which kept a
+        // uniform-width path either. Ink migrated up from the retired v1 style
+        // carries no pressure and so takes a full-width nib through this same
+        // code, including the dot heuristic, which is what keeps the preview
+        // agreeing with the page.
         render_stroke(&mut pixmap, stroke, &paint, transform, scale);
     }
     downsample(&pixmap)?

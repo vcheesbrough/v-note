@@ -282,10 +282,11 @@ fn draw_stroke(
 ) {
     pen.color(context, &stroke.style.parameters.color);
 
-    // One replay path for every stroke. Ink migrated up from the retired v1
-    // style carries no pressure, so all of its segments share the full-width
-    // nib and the run-grouping below collapses it to a single polyline — the
-    // same one draw call the old constant-width path made.
+    // One replay path for every stroke, with no uniform-width special case left
+    // anywhere. Ink migrated up from the retired v1 style carries no pressure,
+    // so all of its segments share the full-width nib and the run-grouping
+    // below collapses it to a single polyline — the same one draw call the old
+    // constant-width path made.
     draw_pressure_stroke(context, pen, stroke, offset_x, offset_y, scale);
 }
 

@@ -3,14 +3,11 @@ package link.desync.vnote.ink
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
 import link.desync.vnote.model.StrokeStyle
 import kotlin.math.sqrt
-import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 
 /**
  * One stroke's rendered shape, in **world space**.
@@ -26,43 +23,22 @@ internal sealed interface InkGeometry {
         val radius: Float,
     ) : InkGeometry
 
-    /** Uniform-width ink: one round-capped, round-joined polyline. */
-    data class Polyline(
-        val path: Path,
-        val width: Float,
-    ) : InkGeometry
-
-    /** Pressure-varying ink: one filled variable-width ribbon. */
+    /** Every multi-point stroke: one filled variable-width ribbon. */
     data class Ribbon(
         val path: Path,
     ) : InkGeometry
 }
 
 /**
- * True when [points] carry no pressure anywhere, so the stroke has a uniform
- * nib and [buildInkGeometry] draws it as a round-capped [InkGeometry.Polyline]
- * rather than a ribbon.
- *
- * The ribbon would buy nothing here and cost fidelity: it is a filled shape with
- * butt ends and un-rounded joins, while the polyline is round-capped and
- * round-joined. That matters for ink migrated up from the retired `solid_round`
- * v1 style, which is pressure-free by construction and must keep looking exactly
- * as it did — and it keeps Android agreeing with the SPA and the thumbnail
- * renderer, both of which round-cap uniform-width ink. It is also the cheaper
- * path. The test is on the points, not on the style version, because the style
- * no longer distinguishes them.
- *
- * Split out from [buildInkGeometry] so this decision is unit-testable on the JVM
- * without constructing a `Path`.
- */
-internal fun usesUniformNib(points: List<StrokePoint>): Boolean = points.all { it.pressure == null }
-
-/**
  * Build the world-space geometry for [points] under [style], or null when there
  * is nothing to draw.
  *
- * The branches and their arithmetic are the pre-cache renderer's, unchanged, so
- * the rasterized result stays identical to the SPA and thumbnails.
+ * There is no separate uniform-width path. A stroke whose points carry no
+ * pressure — the shape ink migrated up from the retired `solid_round` v1 style
+ * has — takes the ribbon at a constant full-width nib like everything else. The
+ * ribbon is a filled shape, so such ink draws with butt ends and un-rounded
+ * joins rather than the round caps v1's stroked polyline gave it; that is the
+ * accepted cost of having one render path and no v1 special-casing left.
  */
 internal fun buildInkGeometry(
     points: List<StrokePoint>,
@@ -75,12 +51,6 @@ internal fun buildInkGeometry(
         return InkGeometry.Dot(
             center = Offset(points[0].x.toFloat(), points[0].y.toFloat()),
             radius = (style.renderedWidth(points[0].pressure) / 2.0).toFloat(),
-        )
-    }
-    if (usesUniformNib(points)) {
-        return InkGeometry.Polyline(
-            path = polylinePath(points),
-            width = style.parameters.width.toFloat(),
         )
     }
     // A tap/dot commits (near-)coincident points; the ribbon would collapse to a
@@ -115,17 +85,6 @@ internal fun DrawScope.drawInkGeometry(
                 radius = geometry.radius,
                 center = geometry.center,
             )
-        is InkGeometry.Polyline ->
-            drawPath(
-                path = geometry.path,
-                color = color,
-                style =
-                    DrawStroke(
-                        width = geometry.width,
-                        cap = StrokeCap.Round,
-                        join = StrokeJoin.Round,
-                    ),
-            )
         is InkGeometry.Ribbon -> drawPath(path = geometry.path, color = color)
     }
 }
@@ -137,15 +96,6 @@ internal fun DrawScope.drawInk(
     color: Color,
 ) {
     buildInkGeometry(points, style)?.let { drawInkGeometry(it, color) }
-}
-
-private fun polylinePath(points: List<StrokePoint>): Path {
-    val path = Path()
-    path.moveTo(points[0].x.toFloat(), points[0].y.toFloat())
-    for (index in 1 until points.size) {
-        path.lineTo(points[index].x.toFloat(), points[index].y.toFloat())
-    }
-    return path
 }
 
 // One filled polygon approximating a variable-width stroke: walk the left offset
