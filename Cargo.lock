@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "console_error_panic_hook",
  "futures-util",
@@ -2753,7 +2753,7 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "protocol"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "jsonschema",
  "serde",
@@ -3457,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "axum 0.8.9",
  "axum-extra",

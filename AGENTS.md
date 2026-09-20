@@ -111,8 +111,12 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
   ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
-  auto-deploy-dev → tag, **`master` only** — it touches shared Authentik and dev)
-  runs only when all three succeed. **`ci-watch` must follow
+  auto-deploy-dev → smoke-oidc-login → tag) runs only when all three succeed.
+  **The deploy workflow runs on every branch, not just `master`** — dev is the
+  pre-merge environment, so every push deploys its build there and the last push
+  wins. It applies `blueprint-dev.yaml` to shared Authentik and redeploys dev, so
+  check a branch's pipeline side effects before pushing; prod is reachable only
+  from a `deployment` event on `master`. **`ci-watch` must follow
   every workflow of the pushed commit's pipeline to completion** — one green
   workflow while another is still running is not a result. Do not fold them back
   into one file: Woodpecker runs step `depends_on` as whole stages, so steps in one

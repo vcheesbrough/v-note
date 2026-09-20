@@ -295,6 +295,128 @@ test.describe('ink page channel', () => {
     });
   });
 
+  test('a thin pen and a thick pen stay visibly different at preview scale', async ({ page, request }) => {
+    // Coverage for #286 (iteration 47): the renderer used to floor every
+    // preview stroke at 4 device px, so on a page zoomed out far enough that
+    // both pens fell under the floor they drew as identical bars — a 1-unit
+    // pen and a 32-unit pen were indistinguishable in the library. Ink is now
+    // rasterized supersampled and averaged down, so the floor is one delivered
+    // pixel and relative pen weight survives.
+    //
+    // Two single-point anchors fix the fitted scale (≈0.136) without drawing
+    // through either pen's own column range, and each pen gets its own x band
+    // so a sampled column crosses exactly one of them.
+    const title = uniqueTitle('pen-weight');
+    const pageId = await createPage(request, title);
+    const ticket = await realtimeTicket(request);
+
+    const penStyle = (width: number) => ({
+      tool_kind: 'solid_round',
+      style_version: 1,
+      parameters: { color: '#006400', width, cap_style: 'round', join_style: 'round' },
+    });
+    const anchors = [
+      [0, 0],
+      [1500, 1000],
+    ].map(([x, y], index) => ({
+      id: `stroke-weight-anchor-${index}-${crypto.randomUUID()}`,
+      style: penStyle(1.0),
+      points: [{ x, y, t: 0 }],
+    }));
+    const pens = [
+      { id: 'thin', width: 1.0, xFrom: 100, xTo: 600, y: 400 },
+      { id: 'thick', width: 32.0, xFrom: 900, xTo: 1400, y: 700 },
+    ];
+    const lines = pens.map((pen) => ({
+      id: `stroke-${pen.id}-${crypto.randomUUID()}`,
+      style: penStyle(pen.width),
+      points: [
+        { x: pen.xFrom, y: pen.y, t: 0 },
+        { x: pen.xTo, y: pen.y, t: 8 },
+      ],
+    }));
+
+    await driveSocket(page, {
+      pageId,
+      ticket,
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        {
+          delayMs: 100,
+          message: { type: 'commit-batch', client_batch_id: 'pen-weight-1', strokes: [...anchors, ...lines] },
+        },
+      ],
+      settleMs: 500,
+    });
+
+    await expect
+      .poll(async () => {
+        const summary = (await (await request.get('/api/pages')).json()).pages.find(
+          (item: any) => item.id === pageId,
+        );
+        return summary?.thumbnail?.status;
+      })
+      .toBe('available');
+    const summary = (await (await request.get('/api/pages')).json()).pages.find(
+      (item: any) => item.id === pageId,
+    );
+    const image = await request.get(summary.thumbnail.url);
+    expect(image.status()).toBe(200);
+    const pngBase64 = (await image.body()).toString('base64');
+
+    // Mirrors render()'s fitted-scale/offset maths, as the dense-ink spec above does.
+    const THUMB_WIDTH = 240;
+    const THUMB_HEIGHT = 160;
+    const PADDING = 12;
+    const boundsW = 1500;
+    const boundsH = 1000;
+    const scale = Math.min((THUMB_WIDTH - PADDING * 2) / boundsW, (THUMB_HEIGHT - PADDING * 2) / boundsH);
+    const offsetX = (THUMB_WIDTH - boundsW * scale) / 2;
+    // Sample the middle of each pen's own x band.
+    const columns = pens.map((pen) => Math.round(((pen.xFrom + pen.xTo) / 2) * scale + offsetX));
+
+    // Vertical extent of green-dominant ink in each sampled column, decoded by
+    // the browser's own PNG decoder so the spec needs no extra npm dependency.
+    const thicknesses = await page.evaluate(
+      ({ base64, columns: sampled, height }) =>
+        new Promise<number[]>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d')!;
+            ctx.drawImage(img, 0, 0);
+            resolve(
+              sampled.map((x: number) => {
+                const { data } = ctx.getImageData(x, 0, 1, height);
+                let lo = height;
+                let hi = -1;
+                for (let y = 0; y < height; y++) {
+                  const [r, g, b] = [data[y * 4], data[y * 4 + 1], data[y * 4 + 2]];
+                  if (g > r && g > b) {
+                    lo = Math.min(lo, y);
+                    hi = Math.max(hi, y);
+                  }
+                }
+                return hi >= lo ? hi - lo + 1 : 0;
+              }),
+            );
+          };
+          img.onerror = () => reject(new Error('thumbnail PNG failed to decode'));
+          img.src = `data:image/png;base64,${base64}`;
+        }),
+      { base64: pngBase64, columns, height: THUMB_HEIGHT },
+    );
+
+    const [thin, thick] = thicknesses;
+    expect(thin, 'the thin pen should still render').toBeGreaterThan(0);
+    expect(
+      thick,
+      `the thick pen must read as heavier than the thin one (thin=${thin}px thick=${thick}px)`,
+    ).toBeGreaterThanOrEqual(thin + 2);
+  });
+
   test('commits a stroke batch and assigns a monotonic sequence', async ({ page, request }) => {
     const pageId = await createPage(request, uniqueTitle('ink-commit'));
     const ticket = await realtimeTicket(request);
