@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: v_note
       POSTGRES_USER: v_note
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, the v_note_{dev,prod}_postgres_password broker secret in CI)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (deploy/.env locally, the v_note_<env>_postgres_password broker secret in CI)}
     volumes:
       - v-note-db:/var/lib/postgresql/data
     networks:
@@ -74,11 +74,12 @@ services:
       # `… * on(instance) group_left(protocol) v_note_build_info` to filter.
 
 secrets:
-  # Sourced straight from the Woodpecker secret v_note_{dev,prod}_sovereign_access_url,
+  # Sourced straight from the Woodpecker secret v_note_<env>_sovereign_access_url,
   # exposed by the deploy step as the SOVEREIGN_CONFIG_ACCESS_URL_FILE env var. Compose
   # materialises it as a file mounted at /run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE.
-  # The connection URL is itself a secret and selects the env: dev vs prod is decided
-  # by *which* URL is injected. The local overlay drops this mount and blanks the env
+  # The connection URL is itself a secret and selects the env: which environment's
+  # config the server reads is decided by *which* URL is injected, not by anything
+  # in this file. The local overlay drops this mount and blanks the env
   # var to disable the sovereign layer entirely.
   SOVEREIGN_CONFIG_ACCESS_URL_FILE:
     environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE

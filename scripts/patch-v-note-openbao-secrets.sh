@@ -3,8 +3,9 @@
 #
 # KV path: secret/v-note-stack/env
 # Woodpecker deploy uses separate keys under secret/woodpecker/repos/vcheesbrough/v-note
-# (v_note_{dev,prod}_postgres_password, v_note_{dev,prod}_sovereign_access_url)
-# — patch those with `bao kv patch`, and see
+# (v_note_dev_postgres_password, v_note_dev_sovereign_access_url — one pair per
+# deployed environment, and dev is the only one) — patch those with
+# `bao kv patch`, and see
 # scripts/store-sovereign-access-url.sh for the access URLs. App Links JSON now lives
 # in sovereign-config (android/assetlinks-json), not OpenBao — see docs/DEPLOY.md.
 #

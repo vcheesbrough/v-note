@@ -3,8 +3,8 @@ set -eu
 
 # Deploy one v-note environment. Takes no arguments and ignores any: every
 # environment-specific value is a parameter supplied by the calling pipeline step
-# (.woodpecker/deploy.yml), so this script has no idea dev and prod exist and no
-# branch to keep in sync with them.
+# (.woodpecker/deploy.yml), so this script has no idea which environments exist
+# and no branch to keep in sync with them.
 #
 # What stays here is the shell that is awkward to inline: the metrics-label
 # derivation (one value, two consumers, so it cannot be passed in pre-split
@@ -132,8 +132,8 @@ require_env() {
 # the case below.
 #
 # These four are different — each has a default that is silently wrong:
-#   APP_ENV                           compose falls back to `dev`, so a prod
-#                                     deploy would label itself `env=dev`
+#   APP_ENV                           compose falls back to `dev`, so any other
+#                                     environment would mislabel itself `env=dev`
 #   COMPOSE_PROJECT_NAME              compose falls back to the compose file's
 #                                     directory name (`deploy`), deploying into a
 #                                     parallel project and orphaning the real one
@@ -155,8 +155,8 @@ done
 #
 # This step cannot read sovereign-config itself (it runs in a docker CLI image and
 # the connection is gRPC), so the Woodpecker sovereign-config broker supplies it:
-# `v_note_{dev,prod}_metrics_addr` is an *alias* of
-# `/v-note/{dev,prod}/server/observability/metrics-addr`, one stored value at two
+# `v_note_<env>_metrics_addr` is an *alias* of
+# `/v-note/<env>/server/observability/metrics-addr`, one stored value at two
 # canonical paths. The container is not given an env override — the app reads that
 # same leaf directly through its own sovereign-config client.
 case "$V_NOTE_METRICS_ADDR" in

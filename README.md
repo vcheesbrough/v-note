@@ -47,9 +47,9 @@ just e2e
 | `crates/server/` | Axum API (`/health`, `/api/meta`, `/api/me`, `/auth/*`) + static SPA |
 | `crates/protocol/` | Shared serde types + fixture tests |
 | `frontend/` | Leptos/Trunk WASM SPA placeholder |
-| `android/` | Kotlin/Compose capture shell (`dev` / `prod` flavors) |
+| `android/` | Kotlin/Compose capture shell (`dev` / `devLocal` flavors) |
 | `schemas/`, `contracts/fixtures/` | JSON Schema + golden fixtures |
-| `deploy/` | Compose (local + prod Traefik overlay) |
+| `deploy/` | Compose (local + deployed Traefik overlay) |
 | `e2e/` | Playwright harness |
 | `.woodpecker/` | Push CI workflows (`checks` ∥ `web` ∥ `android` → `deploy`) + PR review |
 

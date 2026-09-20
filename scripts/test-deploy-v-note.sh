@@ -1,11 +1,12 @@
 #!/bin/sh
 # Exercise deploy-v-note.sh's input validation without touching docker.
 #
-# Iteration 22 made this load-bearing: the deploy script no longer knows dev from
-# prod, so every environment-specific value arrives as a parameter from the
-# calling Woodpecker step. A missing one is not a crash but a *silently wrong*
-# deploy — a prod container labelled env=dev, a deploy into a parallel compose
-# project that orphans the real one, an app with no runtime config. The guards
+# Iteration 22 made this load-bearing: the deploy script no longer knows which
+# environment it is deploying, so every environment-specific value arrives as a
+# parameter from the calling Woodpecker step. A missing one is not a crash but a
+# *silently wrong* deploy — a container labelled with the wrong env, a deploy into
+# a parallel compose project that orphans the real one, an app with no runtime
+# config. The guards
 # are the only thing standing in the way, and the pipeline's own deploy step only
 # ever exercises the happy path.
 #
@@ -242,9 +243,9 @@ assert_gate_fails "an image with no healthcheck fails the deploy" \
   "STUB_HEALTH_SEQUENCE=running:none" "has no healthcheck"
 
 echo "==> the script takes no arguments and ignores any"
-# Documented consequence of dropping the dev|prod positional: a stray argument is
-# not an error, it is ignored, and the environment decides the target.
-assert_succeeds "a stray argument is ignored" "set -- prod"
+# Documented consequence of dropping the <env> positional: a stray argument is
+# not an error, it is ignored, and the environment block decides the target.
+assert_succeeds "a stray argument is ignored" "set -- some-argument"
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "deploy-v-note.sh: $FAILURES check(s) failed" >&2

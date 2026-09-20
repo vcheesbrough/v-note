@@ -23,7 +23,8 @@
 # server then renders as the bare `authentication denied: ...` page users saw.
 #
 # No credentials and no session: this deliberately stops at the login page rather
-# than authenticating, so it needs no test user and is safe to run against prod.
+# than authenticating, so it needs no test user and is safe to run against any
+# live environment.
 #
 # Usage: V_NOTE_HOST=v-notes-dev.desync.link ./scripts/smoke-oidc-login.sh
 

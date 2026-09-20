@@ -1,7 +1,7 @@
 {
   "uid": "v-note-overview",
   "title": "v-note — overview",
-  "description": "v-note realtime WebSocket, HTTP and thumbnail metrics, filtered by env. Source of truth: deploy/grafana/v-note-overview.json in the v-note repo, published by the publish-grafana-dashboard step on every push that deploys dev, from any branch (the last push wins; the version message names the branch). Edits made in the Grafana UI are overwritten by the next publish unless exported back into the repo.",
+  "description": "v-note realtime WebSocket, HTTP and thumbnail metrics for the dev environment. Every query filters on env=\"$env\", and $env is a constant pinned to 'dev' — dev is the only deployment today (#392), and a second environment (#388) gets its own copy of this dashboard with that constant changed. Source of truth: deploy/grafana/v-note-overview.json in the v-note repo, published by the publish-grafana-dashboard step on every push that deploys dev, from any branch (the last push wins; the version message names the branch). Edits made in the Grafana UI are overwritten by the next publish unless exported back into the repo.",
   "tags": [
     "v-note",
     "realtime"
@@ -48,27 +48,22 @@
       {
         "name": "env",
         "label": "env",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "PBFA97CFB590B2093"
-        },
-        "definition": "label_values(v_note_realtime_active_connections, env)",
-        "query": {
-          "qryType": 1,
-          "query": "label_values(v_note_realtime_active_connections, env)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 2,
-        "sort": 1,
-        "includeAll": false,
-        "multi": false,
+        "type": "constant",
+        "description": "Pinned to the one environment this dashboard charts. It was a label_values() query, which would have silently widened to any new env series; #392 pinned it while dev is the only deployment. #388 copies this dashboard under a new uid and changes this value — every panel keeps env=\"$env\" so nothing else moves.",
+        "query": "dev",
         "current": {
           "text": "dev",
           "value": "dev"
         },
-        "options": [],
-        "hide": 0
+        "options": [
+          {
+            "text": "dev",
+            "value": "dev",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 2
       }
     ]
   },

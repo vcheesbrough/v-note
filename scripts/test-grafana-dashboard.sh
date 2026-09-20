@@ -68,10 +68,16 @@ dash_check "no committed numeric id" '(.id // null) == null' '.id'
 dash_check "description says UI edits are overwritten" \
   '.description | type == "string" and test("overwritten")' '.description'
 
-dash_check "env template variable from label_values(v_note_realtime_active_connections, env)" \
+# Pinned, not discovered (#392). As a label_values() query this would widen to
+# whatever env series Prometheus happened to hold, so a second environment's
+# metrics could appear on the dev dashboard without anyone changing this file.
+# #388 copies the dashboard and changes the constant; the panels below stay put.
+dash_check "env template variable is a constant pinned to dev" \
   '[.templating.list[] | select(.name == "env")] | length == 1 and
-   (.[0].datasource.uid == "'"$PROMETHEUS_UID"'") and
-   ((.[0].query | if type == "object" then .query else . end) == "label_values(v_note_realtime_active_connections, env)")' \
+   (.[0].type == "constant") and
+   ((.[0].query | if type == "object" then .query else . end) == "dev") and
+   (.[0].current.value == "dev") and
+   (.[0].hide == 2)' \
   '[.templating.list[] | select(.name == "env")]'
 
 dash_check "panel ids are unique numbers" \

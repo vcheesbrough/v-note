@@ -1,11 +1,15 @@
-# **dev only.** Split per environment (#274) so applying a blueprint can never
-# reach the other environment's objects. The previous single file declared dev
-# *and* prod, so any step that applied it — including a manual **dev** deployment
-# from a feature branch — rewrote **prod**'s OIDC provider. Entries here delete
-# live credentials, so the blast radius is kept equal to the environment being
-# deployed.
+# **dev only.** The rule (#274): **one file per environment, one `instance_name`
+# per file** — `authentik/blueprint-<env>.yaml` applied by that environment's
+# own pipeline step. Two files sharing an instance name would each overwrite the
+# other's stored content on every apply, and a single file covering several
+# environments is worse still: the previous combined file meant a manual deploy
+# of one environment from a feature branch rewrote another's OIDC provider.
+# Entries here delete live credentials, so the blast radius is kept equal to the
+# environment being deployed.
 #
-# Both files are otherwise identical in shape; keep them in step.
+# Dev is currently the only environment (#392). A future `blueprint-prod.yaml`
+# (#388) is a new file with its own `instance_name`, and by that rule it cannot
+# reach anything declared here.
 version: 1
 metadata:
   name: v-note OIDC (dev)
