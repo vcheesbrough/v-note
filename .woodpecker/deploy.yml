@@ -249,8 +249,12 @@ steps:
     # Woodpecker masks `from_secret` values in step logs, and these four are no
     # longer from_secret, so nothing here may echo them: `docker compose config`
     # keeps its --quiet, and deploy-v-note.sh must never gain `set -x`.
+    #
+    # The `sovereign-config` CLI is NOT installed here. It is provided outside
+    # the pipeline, by the operator; this step assumes it is on PATH. The
+    # in-pipeline installer pinned a version the server later retired (its
+    # download 404'd and failed every deploy), and was removed on PR #55.
     commands: &deploy-commands
-      - ./scripts/install-sovereign-config-cli.sh
       - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
 
   # Also every push: dev and the blueprint move together, and the blueprint is

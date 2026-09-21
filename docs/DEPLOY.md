@@ -25,7 +25,7 @@
 1. **validate-deployment** — manual deployment target must be `dev`, the only environment that exists; the error names **#388**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint-dev** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
-4. **deploy** — `scripts/install-sovereign-config-cli.sh` installs the CLI, then `sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
+4. **deploy** — `sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **tag-release** — after a successful deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 6. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
@@ -133,12 +133,10 @@ through the Woodpecker broker; local compose secrets still come from OpenBao.
 
 ### The deploy renders its configuration (#391)
 
-The deploy step installs the sovereign-config CLI and wraps the deploy script in
-it:
+The deploy step wraps the deploy script in the sovereign-config CLI:
 
 ```yaml
 commands:
-  - ./scripts/install-sovereign-config-cli.sh
   - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
 ```
 
@@ -149,33 +147,22 @@ with a `-` or a leading digit is refused. It **fails closed**: an unreadable
 layer, or one that contributes no values at all, means the deploy script never
 runs.
 
-#### The CLI is pinned
+#### The CLI is provided by the operator
 
-There is no CLI container image — the server publishes a self-extracting
-installer under `/dist`, and `scripts/install-sovereign-config-cli.sh` pins both
-the version and the digest it must hash to:
+The pipeline does **not** install the CLI; the step assumes `sovereign-config` is
+already on its PATH, and the operator is responsible for putting it there. If it
+is missing, the step fails with `sovereign-config: not found` before anything is
+deployed.
 
-```sh
-CLI_VERSION="2.26.2"
-CLI_SHA256="b05aab9cbca4952bcaea4f2213241b468987b50fb98a26373c881cad485869d8"
-```
+Until PR #55 the step installed it from the server's `/dist` with a pinned version
+and digest (`scripts/install-sovereign-config-cli.sh`). That was removed when the
+server retired the pinned 2.26.2 installer: the download 404'd and every deploy
+failed, on every branch and on master.
 
-This is the same bargain as the `@sha256:` pins on every CI image and Woodpecker
-plugin here, spelled for a file. The digest lives in git rather than being read
-from the `.sha256` the server publishes beside the installer, because a checksum
-handed over with the file it describes attests nothing.
-
-**When the server is upgraded, the pinned installer 404s and the deploy fails**
-with a message naming both constants. That is deliberate: bump them together as
-a commit, having checked the new CLI. An unpinned installer that tracked
-whatever the server currently publishes would instead change the deploy's
-behaviour silently.
-
-This is the **second** pin kept in lockstep with the running server — the other
-is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
-[Runtime config](#runtime-config-sovereign-config)). Both move when the server
-does; neither is enforced automatically, so check the live version
-(sovereign-config MCP `status`) before relocking either.
+The CLI must still match the running server. The other client pinned to the
+server is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
+[Runtime config](#runtime-config-sovereign-config)); check the live version
+(sovereign-config MCP `status`) before relocking it.
 
 | `/v-note/devops/dev/compose/…` | Kind | Notes |
 | --- | --- | --- |
