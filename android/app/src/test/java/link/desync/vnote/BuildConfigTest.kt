@@ -16,4 +16,17 @@ class BuildConfigTest {
             }
         assertEquals("BASE_URL for flavor '${BuildConfig.FLAVOR}'", expected, BuildConfig.BASE_URL)
     }
+
+    // #406: `devLocal` talks to a laptop and must never export to the dev
+    // environment's collector — its telemetry is off, not redirected.
+    @Test
+    fun telemetryExportMatchesFlavor() {
+        val expected =
+            when (BuildConfig.FLAVOR) {
+                "dev" -> true
+                "devLocal" -> false
+                else -> error("Untested flavor: ${BuildConfig.FLAVOR}")
+            }
+        assertEquals("TELEMETRY_EXPORT for flavor '${BuildConfig.FLAVOR}'", expected, BuildConfig.TELEMETRY_EXPORT)
+    }
 }

@@ -66,6 +66,8 @@ android {
                 "OIDC_SCOPES",
                 "\"openid profile email offline_access v-note:dev:access\"",
             )
+            // Client telemetry (#406) to `{BASE_URL}/otlp/android`.
+            buildConfigField("boolean", "TELEMETRY_EXPORT", "true")
         }
         create("devLocal") {
             dimension = "env"
@@ -94,6 +96,9 @@ android {
                 "OIDC_SCOPES",
                 "\"openid profile email offline_access v-note:dev:access\"",
             )
+            // Off: a laptop server must never feed the dev environment's Tempo
+            // and Loki, and has no collector of its own to export to (#406).
+            buildConfigField("boolean", "TELEMETRY_EXPORT", "false")
         }
     }
 
@@ -187,6 +192,7 @@ dependencies {
     testImplementation("org.json:json:20260814")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.4.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

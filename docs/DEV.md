@@ -245,6 +245,31 @@ negative control, the image pin agreeing across files, and the properties that
 make it a security control (every statement block allow-lists before it sets;
 failed rewrites drop rather than forward; no metrics pipeline).
 
+#### Android client telemetry (#406)
+
+The app exports spans and logs the same way, to `{BASE_URL}/otlp/android/v1/…`
+with its bearer token (`android/app/src/main/java/link/desync/vnote/telemetry/`).
+It is per flavor: **`dev` exports** to the dev server it talks to; **`devLocal`
+never exports** (`BuildConfig.TELEMETRY_EXPORT = false`) — a laptop server must
+not feed the dev environment's Tempo and Loki. Logcat still shows every line,
+because all app logging goes through `AppLog`, which writes both.
+
+- **Traces:** one per screen (`app.launch`, `screen.library`, `screen.page`).
+  Every REST call and both WebSocket upgrades get an `http.client` span and a
+  `traceparent` (`TracingInterceptor`); `X-Request-Id` is unchanged. A stroke is
+  `ink.stroke` (pen down → server echo) over `ink.capture` and `ink.commit`.
+- **Logs:** `AppLog.d/i/w/e`, trace-correlated. An uncaught exception is an
+  `error` log with its stack trace, flushed before the process dies.
+- **Batching:** exports every **30 s** (not the SPA's 5 s — a cellular radio
+  stays in high power for seconds after each transfer), and on leaving the
+  foreground; gzipped; nothing sent while signed out; a 404 (kill switch off)
+  stops export for the process. No sampling.
+
+Nothing here can be seen end to end from CI (the emulators have no collector):
+`TelemetryInstrumentedTest` covers the header, the export request and its
+token. To see real output, run the `dev` flavor against dev and query Tempo for
+`service.name = v-note-android`.
+
 ---
 
 ## SPA
