@@ -43,6 +43,19 @@ fi
 if [ -n "$PASSWORD" ]; then
   SOURCE="kept from existing deploy/.env"
 else
+  # Kept per checkout, but the volume name is machine-wide: a second clone or
+  # worktree, or a deploy/.env deleted on its own, would otherwise generate a
+  # password the existing volume rejects with a bare auth failure. When docker
+  # is absent or unreachable there is nothing to check, and generation goes on.
+  DB_VOLUME=$(sed -n 's/^DB_VOLUME=//p' "$COMPOSE_ENV" | tail -n 1)
+  DB_VOLUME=${DB_VOLUME:-v-note-local-db}
+  if command -v docker >/dev/null 2>&1 \
+    && docker volume inspect "$DB_VOLUME" >/dev/null 2>&1; then
+    echo "ERROR: volume $DB_VOLUME exists but deploy/.env has no POSTGRES_PASSWORD." >&2
+    echo "Copy deploy/.env from the checkout that created the volume, or remove the" >&2
+    echo "volume to start the local database over: docker volume rm $DB_VOLUME" >&2
+    exit 1
+  fi
   # Hex, so the value needs no quoting in an env file or a connection string.
   PASSWORD=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
   if [ ${#PASSWORD} -ne 48 ]; then

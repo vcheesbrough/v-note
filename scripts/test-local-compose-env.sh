@@ -14,6 +14,26 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A stub `docker` on PATH answers `volume inspect` from STUB_VOLUMES, so the
+# volume guard is exercised both ways without depending on — or touching — the
+# volumes that really exist on the machine running this. Unset means none.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/docker" <<'STUB'
+#!/bin/sh
+echo "$*" >> "$DOCKER_CALLS"
+if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then
+  for v in ${STUB_VOLUMES:-}; do
+    [ "$v" = "$3" ] && exit 0
+  done
+fi
+exit 1
+STUB
+chmod +x "$WORK/bin/docker"
+PATH="$WORK/bin:$PATH"
+DOCKER_CALLS="$WORK/docker-calls"
+STUB_VOLUMES=""
+export PATH DOCKER_CALLS STUB_VOLUMES
+
 FAILURES=0
 fail() {
   echo "FAIL: $*"
@@ -135,6 +155,36 @@ if printf '%s' "$(password_in "$T/deploy/.env")" | grep -Eq '^[0-9a-f]{48}$'; th
   pass "an empty POSTGRES_PASSWORD is replaced with a generated one"
 else
   fail "an empty POSTGRES_PASSWORD was not replaced"
+fi
+
+# --- an existing volume blocks generation --------------------------------------
+# The volume name is machine-wide, so a second checkout (or a deploy/.env
+# deleted on its own) must not mint a password the volume will reject.
+VOLUME=$(sed -n 's/^DB_VOLUME=//p' "$ROOT/deploy/compose.env" | tail -n 1)
+T=$(new_tree volume-exists)
+: > "$DOCKER_CALLS"
+if STUB_VOLUMES="$VOLUME" "$T/scripts/local-compose-env.sh" >/dev/null 2>"$WORK/err"; then
+  fail "generated a password although volume $VOLUME exists"
+elif [ -e "$T/deploy/.env" ]; then
+  fail "refused over an existing volume but still wrote deploy/.env"
+elif ! grep -q "docker volume rm $VOLUME" "$WORK/err"; then
+  fail "refusal does not say how to start over: $(cat "$WORK/err")"
+else
+  pass "an existing volume with no deploy/.env refuses, and says how to recover"
+fi
+if grep -qx "volume inspect $VOLUME" "$DOCKER_CALLS"; then
+  pass "the guard checks the DB_VOLUME named in compose.env"
+else
+  fail "the guard did not inspect $VOLUME: $(cat "$DOCKER_CALLS")"
+fi
+
+T=$(new_tree volume-and-env)
+echo "POSTGRES_PASSWORD=owned-by-this-checkout" > "$T/deploy/.env"
+if STUB_VOLUMES="$VOLUME" "$T/scripts/local-compose-env.sh" >/dev/null \
+  && [ "$(password_in "$T/deploy/.env")" = "owned-by-this-checkout" ]; then
+  pass "an existing volume does not block a checkout that already has its password"
+else
+  fail "an existing volume blocked a checkout that already has its password"
 fi
 
 # --- missing compose.env fails without touching deploy/.env --------------------
