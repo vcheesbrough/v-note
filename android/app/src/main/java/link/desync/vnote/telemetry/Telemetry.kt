@@ -138,14 +138,18 @@ class TelemetryRuntime internal constructor(
         runCatching { scheduler?.execute(queue::exportOnce) }
     }
 
-    // Exports now and waits up to [timeoutMs]. Only for the crash handler — the
-    // process is about to die, and anything still queued dies with it. On its
+    // Sends [crash] now, by itself, and waits up to [timeoutMs]. Only for the
+    // crash handler: the process is about to die, so the record goes straight
+    // out rather than joining the queue — see [ExportQueue.exportCrash]. On its
     // own thread because the crashing thread may be the main thread, where
     // Android refuses network I/O outright.
-    fun flushBlocking(timeoutMs: Long = CRASH_FLUSH_TIMEOUT_MS) {
+    fun reportCrash(
+        crash: LogRecord,
+        timeoutMs: Long = CRASH_FLUSH_TIMEOUT_MS,
+    ) {
         val queue = queue ?: return
         runCatching {
-            val thread = Thread(queue::exportOnce, "vnote-telemetry-flush").apply { isDaemon = true }
+            val thread = Thread({ queue.exportCrash(crash) }, "vnote-telemetry-crash").apply { isDaemon = true }
             thread.start()
             thread.join(timeoutMs)
         }
@@ -193,6 +197,19 @@ private class ExportQueue(
                 }
                 if (outcome == ExportOutcome.SwitchedOff || outcome == ExportOutcome.Unavailable) return
             }
+        }
+    }
+
+    // The crash record, in a logs request of its own. Not the ordinary export:
+    // backoff protects a collector from a process that will keep sending, and
+    // this one is about to stop; and in the queue the crash would be the
+    // newest log, behind a traces request and up to a full batch of older
+    // lines. A server that has said "off", or no session, still wins. Not
+    // under the queue's lock, so an export already in flight cannot hold it up.
+    fun exportCrash(crash: LogRecord) {
+        runCatching {
+            if (isSwitchedOff || !transport.isReady()) return
+            policy.record(transport.send(Signal.Logs, logsRequest(listOf(crash))))
         }
     }
 
@@ -302,8 +319,6 @@ object Telemetry {
     ) = runtime.log(severity, message, context, attributes)
 
     fun flush() = runtime.flush()
-
-    fun flushBlocking(timeoutMs: Long = CRASH_FLUSH_TIMEOUT_MS) = runtime.flushBlocking(timeoutMs)
 }
 
 // Parses a `traceparent` header back into the span it names, so a log about a

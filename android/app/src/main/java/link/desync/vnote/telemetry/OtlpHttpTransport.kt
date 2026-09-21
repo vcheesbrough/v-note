@@ -12,6 +12,10 @@ import java.util.concurrent.TimeUnit
 
 private const val EXPORT_CALL_TIMEOUT_SECONDS = 10L
 
+// A token this close to expiry is treated as expired: it could lapse in flight,
+// or on a device clock a little behind the identity provider's.
+private const val EXPIRY_MARGIN_SECONDS = 30L
+
 // Sends OTLP/JSON to the app's own server: `POST {baseUrl}/otlp/android/v1/{signal}`,
 // with the same bearer token every API call carries. The server authenticates
 // it with the same `auth_middleware` and proxies the bytes, undecoded, to the
@@ -23,9 +27,17 @@ private const val EXPORT_CALL_TIMEOUT_SECONDS = 10L
 //
 // Its own OkHttp client, with no tracing interceptor: an export must never
 // produce a span, or every export would queue the next one.
+//
+// It never refreshes a token itself — the app's API calls do that — so an
+// expired one means "not ready": items stay queued until the app has a fresh
+// token, rather than being spent on a certain 401 that would also back off.
 internal class OtlpHttpTransport(
     baseUrl: String,
     private val accessToken: () -> String?,
+    // Epoch seconds, as `TokenStore` keeps it; null when unknown, which is
+    // treated as unexpired, as the app's own refresh check does.
+    private val accessTokenExpiry: () -> Long? = { null },
+    private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / MILLIS_PER_SECOND },
     private val http: OkHttpClient =
         OkHttpClient
             .Builder()
@@ -36,13 +48,13 @@ internal class OtlpHttpTransport(
     private val endpoint = "${baseUrl.trimEnd('/')}/otlp/android/v1"
     private val json = "application/json".toMediaType()
 
-    override fun isReady(): Boolean = !accessToken().isNullOrBlank()
+    override fun isReady(): Boolean = usableToken() != null
 
     override fun send(
         signal: Signal,
         body: String,
     ): ExportOutcome {
-        val token = accessToken() ?: return ExportOutcome.Unavailable
+        val token = usableToken() ?: return ExportOutcome.Unavailable
         val request =
             Request
                 .Builder()
@@ -56,6 +68,16 @@ internal class OtlpHttpTransport(
         } catch (_: IOException) {
             ExportOutcome.fromStatus(null)
         }
+    }
+
+    private fun usableToken(): String? {
+        val token = accessToken()?.takeIf { it.isNotBlank() } ?: return null
+        val expiry = accessTokenExpiry() ?: return token
+        return token.takeIf { expiry > nowEpochSeconds() + EXPIRY_MARGIN_SECONDS }
+    }
+
+    private companion object {
+        const val MILLIS_PER_SECOND = 1000L
     }
 }
 

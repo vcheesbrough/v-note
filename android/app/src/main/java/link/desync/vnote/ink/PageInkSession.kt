@@ -277,6 +277,11 @@ class PageInkSession(
         val deletedIds = locallyErasedIds + event.strokeIds
         confirmedStrokes.removeAll { it.id in deletedIds }
         pendingBatches.replaceAll { _, strokes -> strokes.filterNot { it.id in deletedIds } }
+        // A batch erased before its echo will never be confirmed: close its
+        // spans now, as what happened, rather than as "page closed" later.
+        pendingBatches.filterValues { it.isEmpty() }.keys.forEach { erased ->
+            strokeSpans.remove(erased)?.failed("erased")
+        }
         pendingBatches.entries.removeAll { (_, strokes) -> strokes.isEmpty() }
         publishUnlessReplaying()
     }

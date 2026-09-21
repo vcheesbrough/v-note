@@ -214,6 +214,37 @@ class TelemetryRuntimeTest {
         assertEquals(runtime.screen().traceId.hex, log.getString("traceId"))
     }
 
+    // The crash must go out even when the ordinary export would not send it:
+    // mid-backoff, behind a full log outbox, with traces queued ahead of it.
+    @Test
+    fun theCrashIsSentAloneAndAtOnceEvenInBackoffBehindAFullOutbox() {
+        transport.outcome = ExportOutcome.Unavailable
+        runtime.startScreen("screen.page")
+        runtime.exportNow()
+        assertEquals(1, transport.sent.size)
+        repeat(OUTBOX_CAPACITY) { runtime.log(Severity.Debug, "older") }
+        transport.sent.clear()
+
+        CrashHandler({ runtime }, null).uncaughtException(Thread.currentThread(), IllegalStateException("boom"))
+
+        val (signal, body) = transport.sent.single()
+        assertEquals(Signal.Logs, signal)
+        val record = body.logs().single()
+        assertEquals("uncaught exception", record.getJSONObject("body").getString("stringValue"))
+    }
+
+    @Test
+    fun theCrashIsNotSentOnceTheServerHasSwitchedTelemetryOff() {
+        transport.outcome = ExportOutcome.SwitchedOff
+        runtime.log(Severity.Info, "first")
+        runtime.exportNow()
+        transport.sent.clear()
+
+        CrashHandler({ runtime }, null).uncaughtException(Thread.currentThread(), IllegalStateException("boom"))
+
+        assertTrue(transport.sent.isEmpty())
+    }
+
     @Test
     fun crashHandlerStillDefersWhenTelemetryIsOff() {
         var delegated = false

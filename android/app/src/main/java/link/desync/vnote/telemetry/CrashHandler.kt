@@ -3,8 +3,8 @@ package link.desync.vnote.telemetry
 // Routes an uncaught exception to OTLP as an `error` log, correlated with the
 // screen it happened on, then hands it to whatever handler was installed before
 // — the platform's, which writes logcat and shows the crash dialog. The process
-// is dying, so the export is attempted synchronously, bounded by
-// [CRASH_FLUSH_TIMEOUT_MS].
+// is dying, so the record is sent at once and by itself, bounded by
+// [CRASH_FLUSH_TIMEOUT_MS] — see [TelemetryRuntime.reportCrash].
 //
 // The full exception message and stack trace are recorded. That is the one
 // deliberate exception to "never user content", as with the SPA's panic hook
@@ -19,14 +19,16 @@ internal class CrashHandler(
     ) {
         runCatching {
             val telemetry = runtime()
-            telemetry.log(
-                Severity.Error,
-                "uncaught exception",
-                telemetry.screen(),
-                listOf(Attribute("thread.name", thread.name)) +
-                    throwableAttributes(throwable, withStackTrace = true),
+            telemetry.reportCrash(
+                LogRecord(
+                    telemetry.now(),
+                    Severity.Error,
+                    "uncaught exception",
+                    listOf(Attribute("thread.name", thread.name)) +
+                        throwableAttributes(throwable, withStackTrace = true),
+                    telemetry.screen(),
+                ),
             )
-            telemetry.flushBlocking()
         }
         previous?.uncaughtException(thread, throwable)
     }

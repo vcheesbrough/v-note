@@ -35,13 +35,16 @@ fun Request.Builder.traced(
 //
 // Replaces nothing: `X-Request-Id` is still sent, and is still what a failure
 // message quotes.
-class TracingInterceptor : Interceptor {
+class TracingInterceptor(
+    private val runtime: () -> TelemetryRuntime = { Telemetry.runtime },
+) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val tag = request.tag(TraceTag::class.java)
+        val telemetry = runtime()
         val span =
-            Telemetry
-                .span("http.client", tag?.parent ?: Telemetry.screen(), SpanKind.Client)
+            telemetry
+                .span("http.client", tag?.parent ?: telemetry.screen(), SpanKind.Client)
                 .attr("http.request.method", request.method)
                 .attr("url.template", tag?.route ?: "unknown")
         val traced =

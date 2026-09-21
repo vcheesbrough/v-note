@@ -25,13 +25,24 @@ class VNoteApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // First, so a failure in anything below is itself reported.
+        CrashHandler.install()
         if (BuildConfig.TELEMETRY_EXPORT) {
-            val tokenStore = TokenStore(this)
+            // Built on first use — on the export thread, not here: it is
+            // Keystore work that would otherwise sit on the main thread inside
+            // the `app.start` span. A keystore that cannot be opened means "not
+            // signed in" to the exporter, never a crash at startup.
+            val tokenStore by lazy { runCatching { TokenStore(this) }.getOrNull() }
             Telemetry.install(
-                TelemetryRuntime(OtlpHttpTransport(BuildConfig.BASE_URL, accessToken = tokenStore::accessToken)),
+                TelemetryRuntime(
+                    OtlpHttpTransport(
+                        BuildConfig.BASE_URL,
+                        accessToken = { tokenStore?.accessToken() },
+                        accessTokenExpiry = { tokenStore?.accessTokenExpiryEpochSeconds() },
+                    ),
+                ),
             )
         }
-        CrashHandler.install()
         val root = Telemetry.startScreen("app.launch")
         launch =
             Telemetry
