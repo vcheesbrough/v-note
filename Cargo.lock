@@ -1011,6 +1011,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "protocol",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

@@ -100,9 +100,14 @@ dash_check "no datasource template variable" \
 dash_check "every Prometheus metric selector filters env=\"\$env\"" \
   'prom_exprs | length > 0 and all([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length > 0 and all(test("env=\"\\$env\"")))' \
   'prom_exprs | map(select([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length == 0 or any(test("env=\"\\$env\"") | not)))'
-dash_check "every Loki query filters env=\"\$env\"" \
-  'loki_exprs | all(test("env=\"\\$env\""))' \
-  'loki_exprs | map(select(test("env=\"\\$env\"") | not))'
+# Two spellings of the same scope. Docker-scraped streams carry `env` (from the
+# observability.env container label); OTLP-ingested ones — client telemetry,
+# #354 — carry `deployment_environment`, which Loki indexes from the resource
+# attribute the sidecar forces. Anchored so neither is satisfied by a longer
+# label that merely ends in the same letters.
+dash_check "every Loki query filters env=\"\$env\" (or deployment_environment for OTLP streams)" \
+  'loki_exprs | all(test("[{,[:space:]](env|deployment_environment)=\"\\$env\""))' \
+  'loki_exprs | map(select(test("[{,[:space:]](env|deployment_environment)=\"\\$env\"") | not))'
 
 # The whole document, not just exprs and legends: nothing on this dashboard has
 # any business naming a per-user, per-page or per-session id.
@@ -119,7 +124,7 @@ for metric in \
   v_note_http_requests_total v_note_http_request_duration_seconds_bucket \
   v_note_thumbnail_artifact_bytes_bucket v_note_thumbnail_generation_duration_seconds_bucket \
   v_note_thumbnail_generation_duration_seconds_count v_note_thumbnail_queue_depth \
-  v_note_thumbnail_recoveries_total; do
+  v_note_thumbnail_recoveries_total v_note_client_telemetry_requests_total; do
   dash_check "charts $metric" "prom_exprs | any(test(\"$metric\\\\b\"))"
 done
 dash_check "lagged and *_error results are called out" \

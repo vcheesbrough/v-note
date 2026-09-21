@@ -23,6 +23,7 @@ run-compose:
       --build-arg OCI_IMAGE_CREATED="$(git log -1 --format=%cI)" \
       .
     APP_VERSION="$(git describe --tags --always --dirty)" \
+    CLIENT_TELEMETRY_ALLOY_CONFIG="$(cat deploy/alloy/client-telemetry.alloy)" \
     docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml up
 
 # Host JDK + SDK (Android Studio). Builds devLocal (loopback). See docs/DEV.md → Android.

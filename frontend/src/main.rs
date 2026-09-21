@@ -12,6 +12,7 @@ mod library;
 mod realtime;
 mod render;
 mod route;
+mod telemetry;
 mod viewer;
 
 use leptos::prelude::*;
@@ -370,10 +371,31 @@ fn App() -> impl IntoView {
         }
     };
 
+    // One trace per screen. Driven off `selected_page` rather than off each
+    // navigation call site because every route change — a tile, the back arrow,
+    // a deep link, Back/Forward — ends here, so there is one place to get right.
+    Effect::new(move |_| match selected_page.get() {
+        Some(page) => telemetry::start_screen("screen.page", &format!("/p/{}", page.id)),
+        None => telemetry::start_screen("screen.library", "/"),
+    });
+
+    // Telemetry is batched, so a tab closed between ticks would lose whatever
+    // the last few seconds produced — which is exactly the window an error
+    // arrives in. `pagehide` rather than `unload`: it is the one the bfcache
+    // does not break, and it fires on mobile tab switches too.
+    Effect::new(move |_| {
+        let pagehide = window_event_listener(ev::pagehide, move |_| telemetry::flush());
+        on_cleanup(move || pagehide.remove());
+    });
+
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
             meta.set(Some(api::fetch_meta().await));
-            me.set(Some(api::fetch_me().await));
+            let profile = api::fetch_me().await;
+            // Exports authenticate with the session cookie, so nothing is sent
+            // until there is a session to send it with.
+            telemetry::set_session(profile.is_ok());
+            me.set(Some(profile));
         });
     });
 
@@ -409,6 +431,15 @@ fn App() -> impl IntoView {
             None if pages_loaded.get() => {
                 pending_page_id.set(None);
                 route::replace(&Route::Library);
+                // A deep link to a page this owner does not have. Not an error:
+                // a shared or stale URL is a thing users do, and the app handles
+                // it. Worth knowing about because a *rise* in it means links are
+                // breaking somewhere.
+                telemetry::log(
+                    telemetry::Severity::Info,
+                    "deep link named a page not in the library",
+                    vec![telemetry::attr("vnote.page_id", page_id.clone())],
+                );
                 route_notice.set(Some("That page is not in your library.".to_string()));
             }
             None => {}
@@ -474,6 +505,9 @@ fn App() -> impl IntoView {
 }
 
 fn main() {
-    console_error_panic_hook::set_once();
+    // Before anything else: the panic hook it installs covers mounting, and a
+    // span opened later needs the collector to already exist.
+    telemetry::init();
+    telemetry::install_panic_hook();
     mount_to_body(App);
 }

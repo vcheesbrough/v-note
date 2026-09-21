@@ -167,6 +167,14 @@ fn follow_page_channel(page_id: String, initial_paper: Paper, feed: PageFeed) {
         )
         .await
         {
+            // The page channel gave up rather than reconnecting: the viewer is
+            // now showing ink that will not update, and nothing on the server
+            // knows. This is the SPA half of #150's disconnect UX.
+            crate::telemetry::log(
+                crate::telemetry::Severity::Error,
+                "page channel disconnected; viewer is stale",
+                vec![crate::telemetry::attr("vnote.reason", error.clone())],
+            );
             feed.error.set(Some(error));
             feed.status.set("Disconnected".to_string());
         }
@@ -358,6 +366,17 @@ pub(crate) fn apply_page_event(
             viewer_status.set("Live".to_string());
         }
         PageServerMessage::Error { message, .. } => {
+            // The server's own words, which is the point — this is the one
+            // place a server-side page error becomes visible from the client
+            // side, and it already went through the server's own logging.
+            crate::telemetry::log(
+                crate::telemetry::Severity::Error,
+                "page channel reported an error",
+                vec![crate::telemetry::attr(
+                    "vnote.server_message",
+                    message.clone(),
+                )],
+            );
             viewer_error.set(Some(message));
         }
         // Paper is handled by `next_viewer_paper` above; the SPA is a read-only

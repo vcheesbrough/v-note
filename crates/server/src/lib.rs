@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::middleware;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use protocol::{HealthResponse, MetaResponse, PROTOCOL_VERSION};
 use sqlx::PgPool;
@@ -279,6 +279,11 @@ fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         )
         .nest("/api", public_api.merge(protected_api))
         .nest("/otlp", client_telemetry)
+        // Not covered by the nest above, and not redundant with its fallback:
+        // axum registers a nest as `/otlp/{*tail}`, and a catch-all does not
+        // match an empty tail — so `/otlp/` would otherwise fall through to the
+        // SPA and be answered with `index.html` (found by e2e, #354).
+        .route("/otlp/", any(routes::telemetry::not_found))
         .route(
             "/api/realtime",
             get(realtime_socket).with_state(state.clone()),
@@ -350,5 +355,79 @@ impl AppState {
             realtime_compression: RealtimeConfig::default().compression,
             client_telemetry: None,
         }
+    }
+}
+
+/// The `/otlp` ingress against the router as it is deployed — **with** the SPA's
+/// static fallback. The integration tests build the router without one, and
+/// that hid a real escape: axum's nested catch-all does not match an empty tail,
+/// so `/otlp/` fell past the ingress to `ServeDir`, which answers a `GET` with
+/// `200 index.html`. Found by the e2e suite (#354), pinned here.
+#[cfg(test)]
+mod otlp_route_tests {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    use super::{AppState, router};
+
+    const INDEX: &str = "<!doctype html><title>spa</title>";
+
+    fn static_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "v-note-otlp-route-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp static dir");
+        std::fs::write(dir.join("index.html"), INDEX).expect("index.html");
+        dir
+    }
+
+    #[tokio::test]
+    async fn nothing_under_otlp_reaches_the_spa_fallback() {
+        let dir = static_dir();
+        let app = router(AppState::for_tests(), Some(dir.clone()));
+
+        for method in [Method::GET, Method::POST] {
+            for path in ["/otlp", "/otlp/", "/otlp/spa", "/otlp/anything/else"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method.clone())
+                            .uri(path)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+                assert_ne!(body, INDEX, "{method} {path} was served the SPA");
+            }
+        }
+
+        // …while the fallback itself still works, or this proves nothing. By
+        // body, not status: `ServeDir`'s `not_found_service` serves index.html
+        // *with a 404*, which is also why the status check above could not catch
+        // the escape on its own.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/p/some-page")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(body, INDEX, "the SPA fallback should serve a deep link");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
