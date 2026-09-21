@@ -50,16 +50,20 @@ async fn library_realtime_once(
     pages_loaded: RwSignal<bool>,
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
-    let ticket = api::realtime_ticket("realtime ticket").await?;
+    // One parent per connection attempt, captured before anything awaits: a
+    // reconnect after the user has changed screen belongs to the new screen,
+    // and every part of *this* attempt stays together in the one it began in.
+    let parent = telemetry::screen();
+    let ticket = api::realtime_ticket(parent, "realtime ticket").await?;
 
-    api::load_pages(pages, pages_loaded, library_error).await?;
+    api::load_pages(parent, pages, pages_loaded, library_error).await?;
 
     let ws_url = api::realtime_url(&ticket.ticket)?;
     // Ends as soon as the socket is open rather than spanning the connection:
     // this is the trace of *opening* it, and the connection outlives the trace
     // the ticket belongs to. The server's own connection span is parented to
     // that ticket, which is what links the two.
-    let connect = telemetry::span("realtime.connect").attr("vnote.channel", "library");
+    let connect = telemetry::span("realtime.connect", parent).attr("vnote.channel", "library");
     let mut socket = match WebSocket::open(&ws_url) {
         Ok(socket) => {
             connect.end();
@@ -71,7 +75,7 @@ async fn library_realtime_once(
             return Err(message);
         }
     };
-    telemetry::info("library realtime connected");
+    telemetry::info_in(parent, "library realtime connected");
     while let Some(message) = socket.next().await {
         let message = message.map_err(|error| format!("realtime socket failed: {error:?}"))?;
         if let Message::Text(text) = message {
@@ -79,7 +83,7 @@ async fn library_realtime_once(
                 // A message the SPA cannot read is a contract break between two
                 // deployed things, which is worth an error even though the loop
                 // recovers by reconnecting.
-                telemetry::error("library realtime event did not parse");
+                telemetry::error_in(parent, "library realtime event did not parse");
                 format!("invalid realtime event: {error}")
             })?;
             library::apply_event(pages, selected_page, event);
@@ -142,9 +146,10 @@ async fn page_realtime_once(
     last_seq: RwSignal<u64>,
     paper: RwSignal<Paper>,
 ) -> Result<(), String> {
-    let ticket = api::realtime_ticket("page realtime ticket").await?;
+    let parent = telemetry::screen();
+    let ticket = api::realtime_ticket(parent, "page realtime ticket").await?;
     let ws_url = api::page_realtime_url(page_id, &ticket.ticket)?;
-    let connect = telemetry::span("realtime.connect")
+    let connect = telemetry::span("realtime.connect", parent)
         .attr("vnote.channel", "page")
         .attr("vnote.page_id", page_id.to_string());
     let socket = match WebSocket::open(&ws_url) {
@@ -163,7 +168,7 @@ async fn page_realtime_once(
     // `from_seq` is the viewer's cursor, so this span says how much of the page
     // a reconnect had to ask for — the difference between a cheap resume and a
     // full replay.
-    let subscribe = telemetry::span("realtime.subscribe")
+    let subscribe = telemetry::span("realtime.subscribe", parent)
         .attr("vnote.page_id", page_id.to_string())
         .attr("vnote.from_seq", from_seq as i64);
     if let Err(error) = write
@@ -180,14 +185,19 @@ async fn page_realtime_once(
     // `debug`, not `info`: one line per (re)connect is per-request detail, and a
     // flapping page channel would otherwise fill the log with it. The span above
     // carries the same `from_seq` for anyone looking at the trace.
-    telemetry::debug(format!("page realtime subscribed from seq {from_seq}"));
+    telemetry::log_in(
+        parent,
+        telemetry::Severity::Debug,
+        format!("page realtime subscribed from seq {from_seq}"),
+        Vec::new(),
+    );
     viewer_status.set("Subscribing".to_string());
 
     while let Some(message) = read.next().await {
         let message = message.map_err(|error| format!("page realtime socket failed: {error:?}"))?;
         if let Message::Text(text) = message {
             let event: PageServerMessage = serde_json::from_str(&text).map_err(|error| {
-                telemetry::error("page realtime event did not parse");
+                telemetry::error_in(parent, "page realtime event did not parse");
                 format!("invalid page realtime event: {error}")
             })?;
             viewer::apply_page_event(event, batches, viewer_status, viewer_error, last_seq, paper);

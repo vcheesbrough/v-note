@@ -242,7 +242,7 @@ services:
   # unauthenticated OTLP endpoint to the whole LAN/VPN range.
   #
   # Not behind a profile and not in deploy-v-note.sh's readiness gate: it is
-  # inert until `observability.client-telemetry-enabled` is set, and telemetry
+  # inert until `client-telemetry.enabled` is set, and telemetry
   # must never be able to fail a deploy of the product.
   v-note-alloy:
     # Same digest as mini-config's monitoring-stack Alloy, so there is one Alloy

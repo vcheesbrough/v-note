@@ -148,6 +148,10 @@ impl ExportPolicy {
         self.authenticated = authenticated;
     }
 
+    pub(crate) fn is_authenticated(&self) -> bool {
+        self.authenticated
+    }
+
     /// Called once per tick. `true` means "send now"; a `false` during backoff
     /// consumes one tick of the wait.
     pub(crate) fn should_export(&mut self) -> bool {

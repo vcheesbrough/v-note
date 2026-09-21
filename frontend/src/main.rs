@@ -224,7 +224,7 @@ fn PageTile(
                         .unwrap_or(false)
                     {
                         wasm_bindgen_futures::spawn_local(async move {
-                            match api::delete_page(&page_id).await {
+                            match api::delete_page(telemetry::screen(), &page_id).await {
                                 Ok(()) => {
                                     remove_page(pages, selected_page, &page_id);
                                     library_error.set(None);
@@ -382,16 +382,20 @@ fn App() -> impl IntoView {
     // Telemetry is batched, so a tab closed between ticks would lose whatever
     // the last few seconds produced — which is exactly the window an error
     // arrives in. `pagehide` rather than `unload`: it is the one the bfcache
-    // does not break, and it fires on mobile tab switches too.
+    // does not break, and it fires on mobile tab switches too. Sent as a beacon,
+    // because an ordinary fetch started here is cancelled by the unload.
     Effect::new(move |_| {
-        let pagehide = window_event_listener(ev::pagehide, move |_| telemetry::flush());
+        let pagehide = window_event_listener(ev::pagehide, move |_| telemetry::flush_on_pagehide());
         on_cleanup(move || pagehide.remove());
     });
 
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
-            meta.set(Some(api::fetch_meta().await));
-            let profile = api::fetch_me().await;
+            // Captured once, before the first await: both requests belong to
+            // the screen that was showing when they were made.
+            let parent = telemetry::screen();
+            meta.set(Some(api::fetch_meta(parent).await));
+            let profile = api::fetch_me(parent).await;
             // Exports authenticate with the session cookie, so nothing is sent
             // until there is a session to send it with.
             telemetry::set_session(profile.is_ok());
@@ -401,8 +405,11 @@ fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         if matches!(me.get(), Some(Ok(_))) {
+            let parent = telemetry::screen();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Err(error) = api::load_pages(pages, pages_loaded, library_error).await {
+                if let Err(error) =
+                    api::load_pages(parent, pages, pages_loaded, library_error).await
+                {
                     library_error.set(Some(error));
                 }
             });

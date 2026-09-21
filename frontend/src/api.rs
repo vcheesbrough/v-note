@@ -14,7 +14,7 @@ use protocol::{
     RealtimeTicketResponse,
 };
 
-use crate::telemetry::{self, SpanHandle};
+use crate::telemetry::{self, Parent, SpanHandle};
 
 const TRACEPARENT_HEADER: &str = "traceparent";
 
@@ -30,11 +30,16 @@ fn request_id() -> String {
 /// `route` is the *template*, never the concrete path: a span attribute with an
 /// id in it is fine, but this one is also how spans are grouped, and
 /// `/api/pages/abc123` as a name makes every page its own operation.
-fn start(method: &'static str, route: &'static str, url: &str) -> (RequestBuilder, SpanHandle) {
-    let span = telemetry::client_span("http.client")
+fn start(
+    parent: Parent,
+    method: &'static str,
+    route: &'static str,
+    url: &str,
+) -> (RequestBuilder, SpanHandle) {
+    let span = telemetry::client_span("http.client", parent)
         .attr("http.request.method", method)
         .attr("url.template", route);
-    let mut request = match method {
+    let request = match method {
         "GET" => Request::get(url),
         "POST" => Request::post(url),
         "DELETE" => Request::delete(url),
@@ -42,10 +47,8 @@ fn start(method: &'static str, route: &'static str, url: &str) -> (RequestBuilde
         // the mistake, and the SPA is read-only so there is nothing to add.
         other => unreachable!("unsupported method {other}"),
     }
-    .header(REQUEST_ID_HEADER, &request_id());
-    if let Some(traceparent) = span.traceparent() {
-        request = request.header(TRACEPARENT_HEADER, &traceparent);
-    }
+    .header(REQUEST_ID_HEADER, &request_id())
+    .header(TRACEPARENT_HEADER, &span.traceparent());
     (request, span)
 }
 
@@ -63,14 +66,23 @@ async fn send(request: RequestBuilder) -> Result<gloo_net::http::Response, gloo_
 /// The span matters more here than anywhere else in this file: a browser cannot
 /// put a `traceparent` on a WebSocket upgrade, so the server stores *this*
 /// request's trace with the ticket and parents the connection to it (#354).
-pub(crate) async fn realtime_ticket(context: &str) -> Result<RealtimeTicketResponse, String> {
-    let (request, span) = start("POST", "/api/realtime-ticket", "/api/realtime-ticket");
+pub(crate) async fn realtime_ticket(
+    parent: Parent,
+    context: &str,
+) -> Result<RealtimeTicketResponse, String> {
+    let (request, span) = start(
+        parent,
+        "POST",
+        "/api/realtime-ticket",
+        "/api/realtime-ticket",
+    );
+    let ctx = span.context();
     let response = match send(request).await {
         Ok(response) => response,
         Err(error) => {
             let message = format!("{context} failed: {error}");
             span.fail(message.clone());
-            telemetry::warn(format!("realtime ticket request failed ({context})"));
+            telemetry::warn_in(ctx, format!("realtime ticket request failed ({context})"));
             return Err(message);
         }
     };
@@ -78,10 +90,13 @@ pub(crate) async fn realtime_ticket(context: &str) -> Result<RealtimeTicketRespo
     if !response.ok() {
         let message = format!("{context} failed: HTTP {}", response.status());
         span.fail(message.clone());
-        telemetry::warn(format!(
-            "realtime ticket refused ({context}): HTTP {}",
-            response.status()
-        ));
+        telemetry::warn_in(
+            ctx,
+            format!(
+                "realtime ticket refused ({context}): HTTP {}",
+                response.status()
+            ),
+        );
         return Err(message);
     }
     match response.json::<RealtimeTicketResponse>().await {
@@ -92,17 +107,19 @@ pub(crate) async fn realtime_ticket(context: &str) -> Result<RealtimeTicketRespo
         Err(error) => {
             let message = format!("invalid {context}: {error}");
             span.fail(message.clone());
-            telemetry::error(format!(
-                "realtime ticket response did not parse ({context})"
-            ));
+            telemetry::error_in(
+                ctx,
+                format!("realtime ticket response did not parse ({context})"),
+            );
             Err(message)
         }
     }
 }
 
 /// `GET /api/meta`.
-pub(crate) async fn fetch_meta() -> Result<MetaResponse, String> {
-    let (request, span) = start("GET", "/api/meta", "/api/meta");
+pub(crate) async fn fetch_meta(parent: Parent) -> Result<MetaResponse, String> {
+    let (request, span) = start(parent, "GET", "/api/meta", "/api/meta");
+    let ctx = span.context();
     let response = match send(request).await {
         Ok(response) => response,
         Err(error) => {
@@ -120,7 +137,7 @@ pub(crate) async fn fetch_meta() -> Result<MetaResponse, String> {
         Err(error) => {
             let message = format!("invalid response JSON: {error}");
             span.fail(message.clone());
-            telemetry::warn("meta response did not parse");
+            telemetry::warn_in(ctx, "meta response did not parse");
             Err(message)
         }
     }
@@ -128,8 +145,9 @@ pub(crate) async fn fetch_meta() -> Result<MetaResponse, String> {
 
 /// `GET /api/me`. `Err(status)` for a non-2xx reply, `Err(0)` for a transport
 /// error, `Err(500)` for a profile that does not parse.
-pub(crate) async fn fetch_me() -> Result<MeResponse, u16> {
-    let (request, span) = start("GET", "/api/me", "/api/me");
+pub(crate) async fn fetch_me(parent: Parent) -> Result<MeResponse, u16> {
+    let (request, span) = start(parent, "GET", "/api/me", "/api/me");
+    let ctx = span.context();
     let result = send(request).await;
     match result {
         Ok(response) if response.ok() => {
@@ -141,7 +159,7 @@ pub(crate) async fn fetch_me() -> Result<MeResponse, u16> {
                 }
                 Err(_) => {
                     span.fail("profile did not parse");
-                    telemetry::error("profile response did not parse");
+                    telemetry::error_in(ctx, "profile response did not parse");
                     Err(500)
                 }
             }
@@ -155,7 +173,7 @@ pub(crate) async fn fetch_me() -> Result<MeResponse, u16> {
         }
         Err(error) => {
             span.fail(format!("request failed: {error}"));
-            telemetry::warn("profile request failed");
+            telemetry::warn_in(ctx, "profile request failed");
             Err(0)
         }
     }
@@ -166,17 +184,19 @@ pub(crate) async fn fetch_me() -> Result<MeResponse, u16> {
 /// list has simply not reached yet. It lives here rather than at a call site
 /// because every successful load establishes it, including the retrying one.
 pub(crate) async fn load_pages(
+    parent: Parent,
     pages: RwSignal<Vec<PageSummary>>,
     pages_loaded: RwSignal<bool>,
     library_error: RwSignal<Option<String>>,
 ) -> Result<(), String> {
-    let (request, span) = start("GET", "/api/pages", "/api/pages");
+    let (request, span) = start(parent, "GET", "/api/pages", "/api/pages");
+    let ctx = span.context();
     let response = match send(request).await {
         Ok(response) => response,
         Err(error) => {
             let message = format!("loading pages failed: {error}");
             span.fail(message.clone());
-            telemetry::warn("loading pages failed: transport error");
+            telemetry::warn_in(ctx, "loading pages failed: transport error");
             return Err(message);
         }
     };
@@ -184,7 +204,10 @@ pub(crate) async fn load_pages(
     if !response.ok() {
         let message = format!("loading pages failed: HTTP {}", response.status());
         span.fail(message.clone());
-        telemetry::error(format!("loading pages failed: HTTP {}", response.status()));
+        telemetry::error_in(
+            ctx,
+            format!("loading pages failed: HTTP {}", response.status()),
+        );
         return Err(message);
     }
     let body = match response.json::<ListPagesResponse>().await {
@@ -192,7 +215,7 @@ pub(crate) async fn load_pages(
         Err(error) => {
             let message = format!("invalid pages response: {error}");
             span.fail(message.clone());
-            telemetry::error("pages response did not parse");
+            telemetry::error_in(ctx, "pages response did not parse");
             return Err(message);
         }
     };
@@ -206,12 +229,14 @@ pub(crate) async fn load_pages(
 
 /// `DELETE /api/pages/{id}`. The caller drops the page from the library; see
 /// `library::remove_page`.
-pub(crate) async fn delete_page(page_id: &str) -> Result<(), String> {
+pub(crate) async fn delete_page(parent: Parent, page_id: &str) -> Result<(), String> {
     let (request, span) = start(
+        parent,
         "DELETE",
         "/api/pages/{page_id}",
         &format!("/api/pages/{page_id}"),
     );
+    let ctx = span.context();
     // The page id is an opaque identifier, not user content, and it is the one
     // thing that makes this span answerable ("which delete failed?").
     let span = span.attr("vnote.page_id", page_id.to_string());
@@ -220,7 +245,7 @@ pub(crate) async fn delete_page(page_id: &str) -> Result<(), String> {
         Err(error) => {
             let message = format!("deleting page failed: {error}");
             span.fail(message.clone());
-            telemetry::warn("deleting page failed: transport error");
+            telemetry::warn_in(ctx, "deleting page failed: transport error");
             return Err(message);
         }
     };
@@ -228,11 +253,14 @@ pub(crate) async fn delete_page(page_id: &str) -> Result<(), String> {
     if !response.ok() {
         let message = format!("deleting page failed: HTTP {}", response.status());
         span.fail(message.clone());
-        telemetry::error(format!("deleting page failed: HTTP {}", response.status()));
+        telemetry::error_in(
+            ctx,
+            format!("deleting page failed: HTTP {}", response.status()),
+        );
         return Err(message);
     }
     span.end();
-    telemetry::info("page deleted");
+    telemetry::info_in(ctx, "page deleted");
     Ok(())
 }
 

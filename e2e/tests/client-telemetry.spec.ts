@@ -500,6 +500,7 @@ test.describe('the SPA in a real browser', () => {
         return (batch.scopeSpans ?? []).flatMap((scope: any) =>
           (scope.spans ?? []).map((span: any) => ({
             name: span.name as string,
+            id: span.spanId as string,
             parent: (span.parentSpanId ?? '') as string,
             service,
           })),
@@ -511,6 +512,20 @@ test.describe('the SPA in a real browser', () => {
     const roots = spans.filter((span: any) => !span.parent);
     expect(roots.length, 'exactly one root').toBe(1);
     expect(roots[0].service).toBe('v-note-spa');
+
+    // …and every browser request span hangs directly off that root. This is
+    // the check that was missing when overlapping requests mis-parented each
+    // other: `load_pages` and the realtime ticket run concurrently on every
+    // signed-in load, and a global "current span" put one under the other
+    // while "one trace, one root" still passed.
+    const rootId = roots[0].id;
+    const browserRequests = spans.filter(
+      (span: any) => span.service === 'v-note-spa' && span.name === 'http.client',
+    );
+    expect(browserRequests.length, 'the page load makes several requests').toBeGreaterThan(1);
+    for (const span of browserRequests) {
+      expect(span.parent, `${span.name} ${span.id}`).toBe(rootId);
+    }
   });
 
   /**
@@ -534,6 +549,124 @@ test.describe('the SPA in a real browser', () => {
     expect(stream.deployment_environment).toBe(EXPECTED_ENV);
     // Correlated: the line names the trace it happened in.
     expect(stream.trace_id).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  /**
+   * A browser cannot put a `traceparent` on a WebSocket upgrade, so the server
+   * stores the trace of the `POST /api/realtime-ticket` request with the ticket
+   * and parents the connection span to it when the ticket is redeemed. This is
+   * the assembly the hub's unit tests cannot see: that `page_socket` and
+   * `realtime_socket` really build their connection span from the ticket.
+   *
+   * A connection span is exported when it *ends*, which is when its socket
+   * closes — so the page is left before Tempo is asked.
+   */
+  test('each realtime connection span sits in the trace its ticket was requested in', async ({
+    page,
+    request,
+  }) => {
+    // The Tempo wait below is 45s; the default test budget is 30s.
+    test.setTimeout(120_000);
+    const created = await request.post('/api/pages', { data: {} });
+    expect(created.status()).toBe(201);
+    const id: string = (await created.json()).page.id;
+
+    const ticketTraces = new Set<string>();
+    page.on('request', (req) => {
+      if (req.method() === 'POST' && req.url().endsWith('/api/realtime-ticket')) {
+        const header = req.headers()['traceparent'];
+        if (header) ticketTraces.add(header.split('-')[1]);
+      }
+    });
+
+    await page.goto(`/p/${id}`, { waitUntil: 'load' });
+    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible({ timeout: 15_000 });
+    // The page channel has to be *connected* before leaving, not merely
+    // requested: `WebSocket::open` returns before the handshake, so neither a
+    // ticket request nor a `realtime.connect` span proves the server ever ran
+    // the handler whose span this is looking for. `Connected` comes from the
+    // server's own `welcome`.
+    await expect(page.getByText(/Synced · seq 0|Connected · seq 0|Live · seq 0/)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect.poll(() => ticketTraces.size, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+    // Leaving closes both sockets, which ends their spans.
+    await page.goto('about:blank');
+
+    const found = await eventually('connection spans in the ticket traces', async () => {
+      const names = new Set<string>();
+      for (const traceId of ticketTraces) {
+        const res = await backends.get(`${TEMPO_URL}/api/traces/${traceId}`);
+        if (!res.ok()) continue;
+        const body = await res.json();
+        for (const batch of body?.batches ?? []) {
+          for (const scope of batch.scopeSpans ?? []) {
+            for (const span of scope.spans ?? []) names.add(span.name);
+          }
+        }
+      }
+      return names.has('handle_page_socket') && names.has('handle_library_socket')
+        ? names
+        : null;
+    }, 45_000);
+
+    expect(found.has('handle_page_socket')).toBe(true);
+    expect(found.has('handle_library_socket')).toBe(true);
+  });
+
+  /**
+   * An ordinary `fetch` started during `pagehide` is cancelled by the unload, so
+   * the exporter sends what is queued as a beacon instead. Asserted the hard
+   * way: the beacon is read off the real request, and then its spans are looked
+   * for in Tempo — i.e. it was *delivered*, after the page it came from was gone.
+   */
+  test('telemetry queued when the page goes away still arrives', async ({ page }) => {
+    // Playwright cannot read a beacon's Blob body, so the trace to look for is
+    // taken from the page's own requests instead: every request on one screen
+    // carries that screen's trace, and the queued spans belong to it.
+    let traceId: string | undefined;
+    const exports: Array<{ type: string; contentType: string }> = [];
+    page.on('request', (req) => {
+      const header = req.headers()['traceparent'];
+      if (header && req.url().includes('/api/')) traceId ??= header.split('-')[1];
+      if (req.url().includes('/otlp/spa/v1/traces')) {
+        exports.push({
+          type: req.resourceType(),
+          contentType: req.headers()['content-type'] ?? '',
+        });
+      }
+    });
+
+    await page.goto('/', { waitUntil: 'load' });
+    await expect(page.locator('summary[aria-label="Open main menu"]')).toBeVisible({
+      timeout: 15_000,
+    });
+    // The first ordinary export is 5s after start. If one has already gone, the
+    // spans below could have arrived that way and this would prove nothing, so
+    // it fails as inconclusive rather than passing.
+    expect(exports, 'an ordinary export ran before the page was left').toHaveLength(0);
+    await page.goto('about:blank');
+
+    await expect.poll(() => exports.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    // `ping` is how Chromium reports a sendBeacon — an ordinary fetch here is
+    // exactly what the unload cancels.
+    expect(exports[0].type).toBe('ping');
+    // Without an explicit type a beacon goes as text/plain, which the receiver
+    // will not parse as OTLP JSON.
+    expect(exports[0].contentType).toContain('application/json');
+    expect(traceId).toBeDefined();
+
+    // Delivered, not merely sent: the page that sent it no longer exists.
+    const service = await eventually(`beaconed trace ${traceId} in tempo`, async () => {
+      const res = await backends.get(`${TEMPO_URL}/api/traces/${traceId}`);
+      if (!res.ok()) return null;
+      const body = await res.json();
+      const services = (body?.batches ?? []).map(
+        (batch: any) => flattenAttributes(batch.resource?.attributes)['service.name'],
+      );
+      return services.includes('v-note-spa') ? 'v-note-spa' : null;
+    });
+    expect(service).toBe('v-note-spa');
   });
 
   /**

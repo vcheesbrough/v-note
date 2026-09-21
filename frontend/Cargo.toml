@@ -18,6 +18,6 @@ protocol = { path = "../crates/protocol" }
 serde.workspace = true
 serde_json = "1"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Crypto", "console", "CanvasPattern", "CanvasRenderingContext2d", "Document", "DomRect", "ImageData", "Element", "Event", "EventTarget", "History", "HtmlCanvasElement", "HtmlDetailsElement", "HtmlElement", "KeyboardEvent", "Location", "Node", "Performance", "PointerEvent", "PopStateEvent", "Storage", "WheelEvent", "Window"] }
+web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "Crypto", "console", "Navigator", "CanvasPattern", "CanvasRenderingContext2d", "Document", "DomRect", "ImageData", "Element", "Event", "EventTarget", "History", "HtmlCanvasElement", "HtmlDetailsElement", "HtmlElement", "KeyboardEvent", "Location", "Node", "Performance", "PointerEvent", "PopStateEvent", "Storage", "WheelEvent", "Window"] }
 wasm-bindgen-futures = "0.4"
 wasm-bindgen = "0.2"
