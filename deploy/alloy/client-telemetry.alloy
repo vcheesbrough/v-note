@@ -1,0 +1,195 @@
+// Client telemetry sidecar (#354): OTLP traces and logs from the SPA and, from
+// #406, the Android app.
+//
+// This process has NO ingress. The only thing that can reach it is the v-note
+// server, which authenticates an export with the same middleware as every other
+// API call and then proxies the bytes here undecoded (`routes/telemetry.rs`).
+// So nothing in this file authenticates anything — by the time a request
+// arrives, that has been done.
+//
+// What this file is for is the one thing that proxy deliberately does not do:
+// decide what the telemetry says about where it came from. A client is
+// untrusted input. Left alone it could label its spans `v-note` and pass for
+// the server, or mint a fresh `service.instance.id` per request — which Loki's
+// OTLP ingest promotes to an index label, so that is a stream-cardinality
+// attack, not just a lie. Every resource attribute is therefore either on the
+// allow-list below or replaced with a value this process owns.
+//
+// One receiver per client kind, because `service.name` is forced per receiver.
+// Routing on a client-declared attribute we then overwrite would be the same
+// trust problem one step earlier.
+//
+// No `metrics` output is wired on purpose (client metrics were dropped from
+// #354). The receiver answers 404 on /v1/metrics, which is the behaviour we
+// want: a client that starts sending metrics fails loudly instead of having
+// them accepted and discarded.
+//
+// Every environment-varying value comes from sys.env() so that this exact file
+// runs in dev, in local compose and in the e2e stack. Do not fork it per
+// environment: e2e asserting against the production config is the point.
+
+// ---------------------------------------------------------------------------
+// Receivers
+// ---------------------------------------------------------------------------
+
+otelcol.receiver.otlp "spa" {
+	http {
+		endpoint = "0.0.0.0:4318"
+
+		// The server caps the *wire* body at 1 MiB and answers 413. This bounds
+		// the *decompressed* size, which the server never sees because it does
+		// not decode — so it is the gzip-bomb guard, not a second copy of the
+		// same limit. (Over-limit here is a 400, not a 413.)
+		max_request_body_size = "4MiB"
+	}
+
+	output {
+		traces = [otelcol.processor.transform.spa.input]
+		logs   = [otelcol.processor.transform.spa.input]
+	}
+}
+
+otelcol.receiver.otlp "android" {
+	http {
+		endpoint              = "0.0.0.0:4319"
+		max_request_body_size = "4MiB"
+	}
+
+	output {
+		traces = [otelcol.processor.transform.android.input]
+		logs   = [otelcol.processor.transform.android.input]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Resource-attribute integrity
+// ---------------------------------------------------------------------------
+//
+// `keep_keys` first, `set` second: anything not allow-listed is dropped, then
+// the identity attributes are written from values the client never touches.
+// `set` alone would overwrite the three we name and wave through everything
+// else. The allow-list is SDK self-description only — harmless, bounded, and
+// useful when two client builds disagree.
+//
+// `error_mode = "propagate"` is deliberate. The default (`ignore`) would log a
+// failed statement and forward the record *unmodified*, i.e. with the client's
+// own claims intact. Better to drop telemetry than to ingest a forgery.
+//
+// These run before memory_limiter, against the usual advice to put the limiter
+// first, because they have to: once both receivers merge into one pipeline the
+// client kind is gone. The statements are a constant-cost map rewrite, and the
+// receivers' body cap already bounds what reaches them.
+
+otelcol.processor.transform "spa" {
+	error_mode = "propagate"
+
+	trace_statements {
+		context    = "resource"
+		statements = [
+			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
+			`set(resource.attributes["service.name"], "v-note-spa")`,
+			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
+			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
+		]
+	}
+
+	log_statements {
+		context    = "resource"
+		statements = [
+			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
+			`set(resource.attributes["service.name"], "v-note-spa")`,
+			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
+			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
+		]
+	}
+
+	output {
+		traces = [otelcol.processor.memory_limiter.clients.input]
+		logs   = [otelcol.processor.memory_limiter.clients.input]
+	}
+}
+
+otelcol.processor.transform "android" {
+	error_mode = "propagate"
+
+	trace_statements {
+		context    = "resource"
+		statements = [
+			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
+			`set(resource.attributes["service.name"], "v-note-android")`,
+			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
+			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
+		]
+	}
+
+	log_statements {
+		context    = "resource"
+		statements = [
+			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
+			`set(resource.attributes["service.name"], "v-note-android")`,
+			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
+			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
+		]
+	}
+
+	output {
+		traces = [otelcol.processor.memory_limiter.clients.input]
+		logs   = [otelcol.processor.memory_limiter.clients.input]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared tail: limit, batch, export
+// ---------------------------------------------------------------------------
+
+// Refuses new data rather than growing without bound when an exporter backs
+// up. Sized well under the container's mem_limit in docker-compose.yml so the
+// limiter acts before the OOM killer does.
+otelcol.processor.memory_limiter "clients" {
+	check_interval = "1s"
+	limit          = "64MiB"
+	spike_limit    = "16MiB"
+
+	output {
+		traces = [otelcol.processor.batch.clients.input]
+		logs   = [otelcol.processor.batch.clients.input]
+	}
+}
+
+otelcol.processor.batch "clients" {
+	// Clients already batch before they send, so this mostly coalesces several
+	// clients' exports into one write to the backend.
+	timeout = "5s"
+
+	output {
+		traces = [otelcol.exporter.otlp.tempo.input]
+		logs   = [otelcol.exporter.otlphttp.loki.input]
+	}
+}
+
+// Exported straight to the backends rather than through mini-config's shared
+// Alloy (#354 Q1): its OTLP receiver forwards traces only, so logs sent there
+// are accepted and dropped. Both targets are on `proxy-backend`.
+
+// Tempo's distributor, OTLP/gRPC. `host:port`, no scheme.
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = sys.env("CLIENT_TELEMETRY_TEMPO_ENDPOINT")
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+// Loki's native OTLP ingest (Loki 3+). A base URL: the exporter appends
+// /v1/logs, so this ends in `/otlp`, not `/otlp/v1/logs`.
+otelcol.exporter.otlphttp "loki" {
+	client {
+		endpoint = sys.env("CLIENT_TELEMETRY_LOKI_ENDPOINT")
+
+		tls {
+			insecure = true
+		}
+	}
+}

@@ -51,9 +51,29 @@ services:
       # which correctly leaves trace export disabled.
       VNOTE__OBSERVABILITY__OTLP-ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       VNOTE__ANDROID__ASSETLINKS-JSON: ${ASSETLINKS_JSON:-}
+      # Client telemetry (#354): off unless asked for, like the deployed default.
+      # `CLIENT_TELEMETRY_ENABLED=true just run-compose` turns the ingress on;
+      # the sidecar below is always running, so there is nothing else to start.
+      # See docs/DEV.md → Client telemetry for where the exports then go.
+      VNOTE__CLIENT-TELEMETRY__ENABLED: ${CLIENT_TELEMETRY_ENABLED:-false}
+      VNOTE__CLIENT-TELEMETRY__SPA-ENDPOINT: http://${V_NOTE_CONTAINER_NAME:-v-note-local}-alloy:4318
+      VNOTE__CLIENT-TELEMETRY__ANDROID-ENDPOINT: http://${V_NOTE_CONTAINER_NAME:-v-note-local}-alloy:4319
     depends_on:
       mock-oidc:
         condition: service_started
+
+  # Local has no proxy-backend (it is mini's shared Traefik network) and no
+  # monitoring stack, so the sidecar joins only the app's network. Its exporters
+  # keep their deployed defaults and so fail to resolve — Alloy logs that and
+  # drops the data, which is the right behaviour for "no backend here". Point
+  # CLIENT_TELEMETRY_TEMPO_ENDPOINT / CLIENT_TELEMETRY_LOKI_ENDPOINT at your own
+  # to see the output.
+  v-note-alloy:
+    container_name: ${V_NOTE_CONTAINER_NAME:-v-note-local}-alloy
+    networks: !override
+      - v-note-net
+    labels: !override
+      - traefik.enable=false
 
 volumes:
   v-note-db:

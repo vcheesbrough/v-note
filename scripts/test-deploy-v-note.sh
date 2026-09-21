@@ -44,6 +44,9 @@ if [ "$1" = "compose" ] && [ "$2" = "up" ]; then
   # #299: the Traefik header the script derives, so the test can assert it
   # matches the credential pgweb is configured to check.
   echo "pgweb-auth-b64=${PGWEB_AUTH_B64:-}" >> "$DOCKER_CALLS"
+  # #354: a digest of the sidecar config the script hands to compose, so the
+  # test can assert it is the committed file and not, say, an empty string.
+  echo "alloy-config-sha=$(printf '%s' "${CLIENT_TELEMETRY_ALLOY_CONFIG:-}" | sha256sum | cut -d' ' -f1)" >> "$DOCKER_CALLS"
 fi
 # The health gate reads the container's own state, so the stub has to answer
 # `docker inspect` — a stub that just exits 0 would return an empty status and
@@ -220,6 +223,21 @@ assert_succeeds "a non-default metrics port is carried through" \
   "V_NOTE_METRICS_ADDR=0.0.0.0:9191"
 assert_recorded "scrape port tracks the listener, not a hardcoded 9090" \
   "metrics scrape=true port=9191"
+
+echo "==> the client telemetry sidecar's config is read from the repo (#354)"
+# Compose accepts an empty `environment:`-sourced config without complaint, and
+# Alloy runs an empty config quite happily — so the failure this guards against
+# is a sidecar that deploys green and accepts nothing. Compared by digest, and
+# through `$(cat …)` on both sides because command substitution strips the
+# trailing newline the file on disk has.
+expected_alloy_sha=$(printf '%s' "$(cat "$ROOT/deploy/alloy/client-telemetry.alloy")" | sha256sum | cut -d' ' -f1)
+assert_succeeds "the sidecar config is handed to compose" "true"
+assert_recorded "it is the committed file, byte for byte" "alloy-config-sha=$expected_alloy_sha"
+# Run from a directory that has no deploy/alloy/ in it. V_NOTE_IMAGE_TAG is set
+# by base_env, so nothing else in the script reads a repo-relative path first.
+mkdir -p "$WORK/elsewhere"
+assert_fails_untouched "a missing sidecar config stops the deploy before it starts" \
+  "cd '$WORK/elsewhere'" "client-telemetry.alloy"
 
 echo "==> the health gate reads the container's own healthcheck status"
 # Iteration 23 replaced an external wget probe with the container's own status.

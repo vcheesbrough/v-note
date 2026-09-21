@@ -1,4 +1,4 @@
-use super::{Metrics, PROTOCOL_VERSION, request_span, trace_context_from_span};
+use super::{Metrics, PROTOCOL_VERSION, normalized_route, request_span, trace_context_from_span};
 
 /// `PROTOCOL_VERSION` is duplicated across five places, and this one is a
 /// bare `&str` with no compile-time link to the canonical constant. Without
@@ -288,4 +288,32 @@ fn lagged_is_a_recorded_realtime_result() {
     );
     let text = metrics.render().expect("metrics should render");
     assert!(text.contains(r#"v_note_realtime_events_total{channel="library",result="lagged"} 1"#));
+}
+
+/// The `route` label is taken before routing, from the raw path — so for the
+/// `/otlp` ingress (#354) it is taken before an unknown `{client}` has been
+/// 404'd. Every path under it must therefore collapse to one value, or anyone
+/// who can reach the server can mint a time series per request.
+#[test]
+fn every_otlp_path_shares_one_route_label() {
+    for path in [
+        "/otlp/spa/v1/traces",
+        "/otlp/android/v1/logs",
+        "/otlp/attacker-chosen-0001/v1/traces",
+        "/otlp/spa/v1/attacker-chosen-0002",
+        "/otlp/",
+        "/otlp",
+    ] {
+        assert_eq!(normalized_route(path), "/otlp/*", "{path}");
+    }
+}
+
+/// …and it must not swallow its neighbours. `/otlpx` is not the ingress, and
+/// before #354 the ingress's own traffic was counted as static assets, which is
+/// the series this keeps clean.
+#[test]
+fn the_otlp_route_label_does_not_capture_other_paths() {
+    assert_eq!(normalized_route("/otlpx/spa/v1/traces"), "/static/*");
+    assert_eq!(normalized_route("/assets/otlp/app.js"), "/static/*");
+    assert_eq!(normalized_route("/api/pages"), "/api/pages");
 }

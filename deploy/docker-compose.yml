@@ -230,6 +230,117 @@ services:
       - observability.env=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
 
+  # Client telemetry sidecar (#354): receives the SPA's (and, from #406, the
+  # Android app's) OTLP traces and logs, rewrites what they claim about their
+  # origin, and exports to Tempo and Loki. See deploy/alloy/client-telemetry.alloy
+  # for why it exists at all rather than the app forwarding straight to Tempo.
+  #
+  # 🚫 No Traefik labels, and that is the design — not an omission. This service
+  # has no ingress. The app authenticates an export and proxies it here
+  # (`/otlp/{client}/v1/{signal}`), so the only caller is a process that has
+  # already checked the session. Routing it through Traefik would expose an
+  # unauthenticated OTLP endpoint to the whole LAN/VPN range.
+  #
+  # Not behind a profile and not in deploy-v-note.sh's readiness gate: it is
+  # inert until `client-telemetry.enabled` is set, and telemetry
+  # must never be able to fail a deploy of the product.
+  v-note-alloy:
+    # Same digest as mini-config's monitoring-stack Alloy, so there is one Alloy
+    # version to reason about on this host. Bump them together.
+    image: grafana/alloy:v1.17.1@sha256:4f6ddc56ffdcf8a6316748fc5162972e20cb301523cac1bb4a31957df733ae9b
+    # The app addresses the sidecar by THIS name, not by the service name.
+    # Compose aliases a service name onto every network the service joins, and
+    # `proxy-backend` is shared by every environment on the host — so once a
+    # second environment exists (#388), `v-note-alloy` there resolves to both
+    # stacks' sidecars and Docker DNS round-robins between them. The container
+    # name carries the environment, exactly as the app's does.
+    container_name: ${V_NOTE_CONTAINER_NAME}-alloy
+    restart: unless-stopped
+    command:
+      - run
+      - /etc/alloy/client-telemetry.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      # The pipeline keeps no state worth persisting (no WAL, no positions), so
+      # this only has to be writable, and /tmp is the tmpfs below.
+      - --storage.path=/tmp/alloy
+    environment:
+      # The same two values the observability.* labels use, so what the sidecar
+      # stamps on client telemetry and what Alloy scrapes off the app's labels
+      # cannot disagree.
+      APP_ENV: ${APP_ENV:-dev}
+      APP_VERSION: ${APP_VERSION:-unknown}
+      # Exported direct to the backends, not via monitor-alloy:4317 — that
+      # receiver forwards traces only and would silently drop logs (#354 Q1).
+      # `host:port` for OTLP/gRPC; a base URL for OTLP/HTTP (the exporter
+      # appends /v1/logs).
+      CLIENT_TELEMETRY_TEMPO_ENDPOINT: ${CLIENT_TELEMETRY_TEMPO_ENDPOINT:-monitor-tempo:4317}
+      CLIENT_TELEMETRY_LOKI_ENDPOINT: ${CLIENT_TELEMETRY_LOKI_ENDPOINT:-http://monitor-loki:3100/otlp}
+    configs:
+      - source: client_telemetry_alloy
+        target: /etc/alloy/client-telemetry.alloy
+    # It parses input that originated on a client, so it gets the hardening the
+    # rest of this file does not bother with. None of it is load-bearing for the
+    # pipeline: no state, no privileged port, nothing written outside /tmp.
+    #
+    # `read_only: true` is absent because it cannot be combined with the config
+    # below: compose delivers an `environment:`-sourced config by writing it into
+    # the container's filesystem over the API, and refuses to on a read-only
+    # rootfs ("`file` is the sole supported option"). A `file:` source is the
+    # bind mount this stack cannot use — see `configs:` at the bottom.
+    user: "65534:65534"
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Above the config's memory_limiter (64 MiB + 16 MiB spike) plus the ~60 MiB
+    # the process idles at, so the limiter refuses data before the OOM killer
+    # acts. Measured on #354.
+    mem_limit: 192m
+    networks:
+      - v-note-net
+      - proxy-backend
+    # Probes the two OTLP receivers, NOT Alloy's own /-/ready. An *unset*
+    # CLIENT_TELEMETRY_ALLOY_CONFIG is loud — `up` refuses to start — but a
+    # set-and-empty one (a `$(cat …)` that failed without `set -e`) delivers an
+    # empty file, and Alloy is perfectly "ready" running an empty config. So
+    # readiness would be green on a sidecar that accepts nothing. The ports only
+    # listen once the real pipeline has loaded. bash's /dev/tcp because the image
+    # ships no curl, wget or nc.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/4318 && exec 4<>/dev/tcp/127.0.0.1/4319"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    labels:
+      - traefik.enable=false
+      # Alloy's own metrics (receiver accepted/refused, exporter sent/failed).
+      # Scraped like the app's; charted nowhere, for the reason given on sqltool.
+      - observability.metrics.scrape=true
+      - observability.metrics.port=12345
+      - observability.metrics.path=/metrics
+      - observability.metrics.scheme=http
+      - observability.service=v-note-client-telemetry
+      - observability.env=${APP_ENV:-dev}
+      - observability.release=${APP_VERSION:-unknown}
+
+configs:
+  # The committed deploy/alloy/client-telemetry.alloy, delivered through the
+  # Docker API rather than bind-mounted — the same mechanism, for the same
+  # reason, as the secret below. The deploy step runs compose inside a CI
+  # container against the host's socket, so a bind-mount source is resolved on
+  # the *host*, where the CI workspace does not exist; Docker then creates the
+  # missing path as an empty directory and the sidecar fails to start.
+  #
+  # Verified byte-exact: compose does not interpolate an `environment:` source,
+  # so the file's backticks, `%s` and quotes arrive untouched.
+  #
+  # deploy-v-note.sh fills this from the file; `just run-compose` does likewise.
+  client_telemetry_alloy:
+    environment: CLIENT_TELEMETRY_ALLOY_CONFIG
+
 secrets:
   # Sourced straight from /v-note/devops/<env>/compose/SOVEREIGN_CONFIG_ACCESS_URL_FILE,
   # which `sovereign-config render` puts in the deploy step's environment (#391). Compose

@@ -102,6 +102,17 @@ services:
       # for #342 is that a real browser negotiates and then works. The off path
       # is the pre-#342 wire and is covered by the config unit tests.
       VNOTE__REALTIME__COMPRESSION: "true"
+      # #354: client telemetry ingest on, pointed at the sidecar below. Ships
+      # **off** (the kill switch defaults to false); e2e runs it on for the same
+      # reason compression is on above — the acceptance is that the real path
+      # works. The off path is covered by the ingress's Rust tests.
+      VNOTE__CLIENT-TELEMETRY__ENABLED: "true"
+      VNOTE__CLIENT-TELEMETRY__SPA-ENDPOINT: http://alloy:4318
+      VNOTE__CLIENT-TELEMETRY__ANDROID-ENDPOINT: http://alloy:4319
+      # The server's OWN spans, exported straight to Tempo. Without this the
+      # browser's trace would arrive with nothing beneath it, and "one trace
+      # spans browser → server → Postgres" could not be asserted at all.
+      VNOTE__OBSERVABILITY__OTLP-ENDPOINT: http://tempo:4317
     # `test` is deliberately absent: the probe command is inherited from the
     # image (Dockerfile.web), so there is still exactly one definition of what
     # "healthy" means. Only the timings are overridden, because the image is
@@ -267,6 +278,79 @@ services:
     networks:
       - e2e-net
 
+  # Client telemetry (#354). Three services, and the point of all three is that
+  # none of them is a stand-in:
+  #
+  #   alloy   the sidecar, running deploy/alloy/client-telemetry.alloy — the file
+  #           that ships, not a test copy of it
+  #   tempo   a real Tempo for it to export traces to
+  #   loki    a real Loki for it to export logs to
+  #
+  # so client-telemetry.spec.ts asserts on what the backends actually stored. A
+  # mock collector would happily "receive" a span whose forged service.name the
+  # real pipeline was supposed to have overwritten; Tempo and Loki are where that
+  # either happened or did not.
+  #
+  # Tempo and Loki are pinned to the digests mini-config's monitoring stack runs,
+  # so "Loki accepts OTLP at /otlp" is a fact about the Loki we deploy against.
+  alloy:
+    image: v-note-e2e-alloy:${OCI_IMAGE_VERSION:-local}
+    # Baked in rather than bind-mounted, like every other fixture in this file:
+    # in CI this stack is started from inside a container against the host's
+    # docker socket, where a bind-mount source path does not exist. The deployed
+    # stack solves the same problem with a compose `configs:` entry; here there
+    # is already a build step, so COPY is the smaller thing.
+    build:
+      context: .
+      additional_contexts:
+        alloy-config: ../deploy/alloy
+      dockerfile_inline: |
+        FROM grafana/alloy:v1.17.1@sha256:4f6ddc56ffdcf8a6316748fc5162972e20cb301523cac1bb4a31957df733ae9b
+        COPY --from=alloy-config client-telemetry.alloy /etc/alloy/client-telemetry.alloy
+    command:
+      - run
+      - /etc/alloy/client-telemetry.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/tmp/alloy
+    environment:
+      # Distinctive on purpose: the spec asserts these exact values arrive, and
+      # `dev`/`unknown` — the deployed defaults — would also be what a pipeline
+      # that ignored its environment produced.
+      APP_ENV: e2e-sidecar
+      APP_VERSION: 0.0.0-e2e
+      CLIENT_TELEMETRY_TEMPO_ENDPOINT: tempo:4317
+      CLIENT_TELEMETRY_LOKI_ENDPOINT: http://loki:3100/otlp
+    # Same probe as the deployed service: the receiver ports, not /-/ready.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/4318 && exec 4<>/dev/tcp/127.0.0.1/4319"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+    networks:
+      - e2e-net
+
+  tempo:
+    image: v-note-e2e-tempo:${OCI_IMAGE_VERSION:-local}
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM grafana/tempo:2.10.7@sha256:032b3acb51ed02c4b801473d54bb63e9e9f13738d215126d9843c30283794f4b
+        COPY fixtures/tempo.yaml /etc/tempo.yaml
+    command: ["-config.file=/etc/tempo.yaml"]
+    # No healthcheck: the image has no shell to run one with. The spec waits on
+    # /ready itself, which it has to do anyway — Tempo's ring takes ~15s to
+    # settle after the process is up, and a started container is not a ready one.
+    networks:
+      - e2e-net
+
+  loki:
+    # The image's own default config: single binary, filesystem storage, and
+    # structured metadata on, which OTLP ingest requires. No healthcheck for the
+    # same reason as tempo — distroless, no shell — so the spec waits on /ready.
+    image: grafana/loki:3.7.3@sha256:70b9f699fc9bb868b62f1cfd4f787dfa50242f1fd92e6089787d5d7daea75fe8
+    networks:
+      - e2e-net
+
   playwright:
     image: v-note-e2e-playwright:${OCI_IMAGE_VERSION:-local}
     build:
@@ -305,6 +389,14 @@ services:
       SQL_CONSOLE_URL: http://sqltool:8081/dbconsole
       SQL_CONSOLE_AUTH_USER: console
       SQL_CONSOLE_AUTH_PASS: console-test-password
+      # #354 — where client-telemetry.spec.ts reads back what the sidecar
+      # exported. Absent means the spec skips, as with the console above. The
+      # expected values are the alloy service's APP_ENV / APP_VERSION, passed
+      # here so the spec asserts against the stack's config, not a copy of it.
+      TEMPO_URL: http://tempo:3200
+      LOKI_URL: http://loki:3100
+      CLIENT_TELEMETRY_EXPECTED_ENV: e2e-sidecar
+      CLIENT_TELEMETRY_EXPECTED_VERSION: 0.0.0-e2e
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
@@ -316,6 +408,13 @@ services:
         condition: service_healthy
       sqltool:
         condition: service_healthy
+      alloy:
+        condition: service_healthy
+      # `service_started`, not healthy: neither image can run a healthcheck.
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
     networks:
       - e2e-net
 

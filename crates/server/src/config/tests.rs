@@ -1017,3 +1017,179 @@ fn env_layer_still_overrides_the_sovereign_metrics_addr() {
         Some("127.0.0.1:9292".parse().expect("addr"))
     );
 }
+
+// ---------------------------------------------------------------------------
+// client-telemetry (#354)
+// ---------------------------------------------------------------------------
+
+const SPA_ENDPOINT: (&str, &str) = ("VNOTE__CLIENT_TELEMETRY__SPA_ENDPOINT", "http://alloy:4318");
+const ANDROID_ENDPOINT: (&str, &str) = (
+    "VNOTE__CLIENT_TELEMETRY__ANDROID_ENDPOINT",
+    "http://alloy:4319",
+);
+const ENABLED: (&str, &str) = ("VNOTE__CLIENT_TELEMETRY__ENABLED", "true");
+
+/// The kill switch ships off, and "off" has to be reachable with no
+/// `client-telemetry` leaf anywhere — that is every environment on the day this
+/// lands, before anyone has written one.
+#[test]
+fn client_telemetry_is_off_with_no_leaves_at_all() {
+    let telemetry: ClientTelemetryConfig =
+        load_group(&cfg(&[]), "client-telemetry").expect("group defaults");
+
+    assert!(!telemetry.enabled);
+    assert_eq!(telemetry.upstreams(), None);
+}
+
+/// Both spellings of the group segment: `CLIENT-TELEMETRY` is the canonical
+/// kebab form compose files use, `CLIENT_TELEMETRY` is the only one a POSIX
+/// shell can export. The group name is the first in this file to contain a
+/// hyphen, so the snake-to-kebab fold is being relied on for a *group* here,
+/// not just for a leaf as everywhere else.
+#[test]
+fn client_telemetry_group_name_is_addressable_in_both_spellings() {
+    for prefix in ["VNOTE__CLIENT-TELEMETRY__", "VNOTE__CLIENT_TELEMETRY__"] {
+        let enabled = format!("{prefix}ENABLED");
+        let spa = format!("{prefix}SPA-ENDPOINT");
+        let android = format!("{prefix}ANDROID_ENDPOINT");
+        let telemetry: ClientTelemetryConfig = load_group(
+            &cfg(&[
+                (enabled.as_str(), "true"),
+                (spa.as_str(), "http://alloy:4318"),
+                (android.as_str(), "http://alloy:4319"),
+            ]),
+            "client-telemetry",
+        )
+        .unwrap_or_else(|error| panic!("{prefix} should load: {error}"));
+
+        let upstreams = telemetry.upstreams().expect("enabled with both endpoints");
+        assert_eq!(upstreams.spa.as_str(), "http://alloy:4318/");
+        assert_eq!(upstreams.android.as_str(), "http://alloy:4319/");
+    }
+}
+
+/// Endpoints alone do not turn ingest on. The switch is the switch.
+#[test]
+fn client_telemetry_endpoints_without_the_switch_stay_off() {
+    let telemetry: ClientTelemetryConfig =
+        load_group(&cfg(&[SPA_ENDPOINT, ANDROID_ENDPOINT]), "client-telemetry").expect("loads");
+
+    assert_eq!(telemetry.upstreams(), None);
+}
+
+/// "Enabled with nowhere to send" must fail at startup, naming the leaf —
+/// otherwise it surfaces as a 502 on every export, which looks like a sidecar
+/// outage rather than a missing value.
+#[test]
+fn client_telemetry_enabled_requires_both_endpoints() {
+    for (present, missing) in [
+        (SPA_ENDPOINT, "client-telemetry.android-endpoint"),
+        (ANDROID_ENDPOINT, "client-telemetry.spa-endpoint"),
+    ] {
+        let error =
+            load_group::<ClientTelemetryConfig>(&cfg(&[ENABLED, present]), "client-telemetry")
+                .expect_err("a missing endpoint should be rejected");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(missing),
+            "should name {missing}: {message}"
+        );
+        assert!(message.contains("required when"), "{message}");
+    }
+}
+
+/// A blank leaf is how deploy tooling renders "unset", so it must read as
+/// absent — and therefore as missing when the switch is on.
+#[test]
+fn client_telemetry_blank_endpoint_counts_as_missing() {
+    let error = load_group::<ClientTelemetryConfig>(
+        &cfg(&[
+            ENABLED,
+            SPA_ENDPOINT,
+            ("VNOTE__CLIENT_TELEMETRY__ANDROID_ENDPOINT", "   "),
+        ]),
+        "client-telemetry",
+    )
+    .expect_err("a blank endpoint should be rejected when enabled");
+
+    assert!(
+        error
+            .to_string()
+            .contains("client-telemetry.android-endpoint"),
+        "{error}"
+    );
+}
+
+/// `Url::join` replaces the last segment of a base with no trailing slash, so
+/// `http://alloy:4318/otlp` + `v1/traces` silently becomes `/v1/traces`. Only a
+/// bare origin is accepted, which is the one shape that cannot do that.
+#[test]
+fn client_telemetry_endpoint_must_be_a_bare_http_origin() {
+    for (value, expected) in [
+        ("http://alloy:4318/otlp", "bare origin"),
+        ("http://alloy:4318/otlp/", "bare origin"),
+        ("http://alloy:4318/?x=1", "bare origin"),
+        ("ftp://alloy:4318", "http(s)"),
+    ] {
+        let error = load_group::<ClientTelemetryConfig>(
+            &cfg(&[
+                ENABLED,
+                ("VNOTE__CLIENT_TELEMETRY__SPA_ENDPOINT", value),
+                ANDROID_ENDPOINT,
+            ]),
+            "client-telemetry",
+        )
+        .expect_err("a non-origin endpoint should be rejected");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("client-telemetry.spa-endpoint"),
+            "{value}: {message}"
+        );
+        assert!(message.contains(expected), "{value}: {message}");
+    }
+}
+
+/// A malformed endpoint behind a *disabled* switch still fails startup. Found
+/// now, it is a typo; found when someone flips the switch during an incident,
+/// it is the incident.
+#[test]
+fn client_telemetry_bad_endpoint_is_rejected_even_when_disabled() {
+    let error = load_group::<ClientTelemetryConfig>(
+        &cfg(&[(
+            "VNOTE__CLIENT_TELEMETRY__SPA_ENDPOINT",
+            "http://alloy:4318/otlp",
+        )]),
+        "client-telemetry",
+    )
+    .expect_err("validated regardless of the switch");
+
+    assert!(error.to_string().contains("bare origin"), "{error}");
+}
+
+/// The switch is a text leaf in sovereign-config and has to work from there,
+/// with env still able to override it on one container.
+#[test]
+fn client_telemetry_switch_is_read_from_sovereign_and_env_overrides_it() {
+    let sovereign = [
+        ("client-telemetry.enabled", "true"),
+        ("client-telemetry.spa-endpoint", "http://alloy:4318"),
+        ("client-telemetry.android-endpoint", "http://alloy:4319"),
+    ];
+
+    let on: ClientTelemetryConfig =
+        load_group(&cfg_with_sovereign(&sovereign, &[]), "client-telemetry").expect("loads");
+    assert!(on.upstreams().is_some(), "sovereign leaf should turn it on");
+
+    let forced_off: ClientTelemetryConfig = load_group(
+        &cfg_with_sovereign(&sovereign, &[("VNOTE__CLIENT_TELEMETRY__ENABLED", "false")]),
+        "client-telemetry",
+    )
+    .expect("loads");
+    assert_eq!(
+        forced_off.upstreams(),
+        None,
+        "env should be able to kill it"
+    );
+}

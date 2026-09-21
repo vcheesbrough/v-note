@@ -1,7 +1,7 @@
 {
   "uid": "v-note-overview",
-  "title": "v-note — overview",
-  "description": "v-note realtime WebSocket, HTTP and thumbnail metrics for the dev environment. Every query filters on env=\"$env\", and $env is a constant pinned to 'dev' — dev is the only deployment today (#392), and a second environment (#388) gets its own copy of this dashboard with that constant changed. Source of truth: deploy/grafana/v-note-overview.json in the v-note repo, published by the publish-grafana-dashboard step on every push that deploys dev, from any branch (the last push wins; the version message names the branch). Edits made in the Grafana UI are overwritten by the next publish unless exported back into the repo.",
+  "title": "v-note \u2014 overview",
+  "description": "v-note realtime WebSocket, HTTP and thumbnail metrics for the dev environment. Every query filters on env=\"$env\", and $env is a constant pinned to 'dev' \u2014 dev is the only deployment today (#392), and a second environment (#388) gets its own copy of this dashboard with that constant changed. Source of truth: deploy/grafana/v-note-overview.json in the v-note repo, published by the publish-grafana-dashboard step on every push that deploys dev, from any branch (the last push wins; the version message names the branch). Edits made in the Grafana UI are overwritten by the next publish unless exported back into the repo.",
   "tags": [
     "v-note",
     "realtime"
@@ -49,7 +49,7 @@
         "name": "env",
         "label": "env",
         "type": "constant",
-        "description": "Pinned to the one environment this dashboard charts. It was a label_values() query, which would have silently widened to any new env series; #392 pinned it while dev is the only deployment. #388 copies this dashboard under a new uid and changes this value — every panel keeps env=\"$env\" so nothing else moves.",
+        "description": "Pinned to the one environment this dashboard charts. It was a label_values() query, which would have silently widened to any new env series; #392 pinned it while dev is the only deployment. #388 copies this dashboard under a new uid and changes this value \u2014 every panel keeps env=\"$env\" so nothing else moves.",
         "query": "dev",
         "current": {
           "text": "dev",
@@ -71,7 +71,7 @@
     {
       "id": 1,
       "type": "row",
-      "title": "Realtime — frames sent",
+      "title": "Realtime \u2014 frames sent",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -144,7 +144,7 @@
           "sort": "desc"
         }
       },
-      "description": "Serialized size of each page-channel frame the server sent, by the frame's serde `type` tag. Quantiles are interpolated within buckets (128 B … 8 MiB, x4 steps). Sizes are pre-`permessage-deflate` (#342) — payload, not wire; see **Bytes sent per second by channel**."
+      "description": "Serialized size of each page-channel frame the server sent, by the frame's serde `type` tag. Quantiles are interpolated within buckets (128 B \u2026 8 MiB, x4 steps). Sizes are pre-`permessage-deflate` (#342) \u2014 payload, not wire; see **Bytes sent per second by channel**."
     },
     {
       "id": 3,
@@ -209,7 +209,7 @@
           "sort": "desc"
         }
       },
-      "description": "Serialized size of each library-channel frame the server sent, by the frame's serde `type` tag. Quantiles are interpolated within buckets (128 B … 8 MiB, x4 steps). Sizes are pre-`permessage-deflate` (#342) — payload, not wire; see **Bytes sent per second by channel**."
+      "description": "Serialized size of each library-channel frame the server sent, by the frame's serde `type` tag. Quantiles are interpolated within buckets (128 B \u2026 8 MiB, x4 steps). Sizes are pre-`permessage-deflate` (#342) \u2014 payload, not wire; see **Bytes sent per second by channel**."
     },
     {
       "id": 4,
@@ -319,12 +319,12 @@
           "sort": "desc"
         }
       },
-      "description": "Serialized JSON size of the frames the server sent — **before** `permessage-deflate` (#342), so this is payload size, not wire size. With compression negotiated the bytes actually leaving the host are several-fold smaller (measured ~4.7x on a coalesced replay), and this panel will not move when the extension is turned on. That is deliberate: frame size is a property of the protocol, not of which peers offered compression. To see whether wire bytes differ from this, read **permessage-deflate negotiation rate by channel (#342)** — where it is 0, this panel is the wire size."
+      "description": "Serialized JSON size of the frames the server sent \u2014 **before** `permessage-deflate` (#342), so this is payload size, not wire size. With compression negotiated the bytes actually leaving the host are several-fold smaller (measured ~4.7x on a coalesced replay), and this panel will not move when the extension is turned on. That is deliberate: frame size is a property of the protocol, not of which peers offered compression. To see whether wire bytes differ from this, read **permessage-deflate negotiation rate by channel (#342)** \u2014 where it is 0, this panel is the wire size."
     },
     {
       "id": 6,
       "type": "row",
-      "title": "Realtime — subscribe replay (coalesced by #323)",
+      "title": "Realtime \u2014 subscribe replay (coalesced by #323)",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -407,7 +407,7 @@
           "sort": "desc"
         }
       },
-      "description": "One observation per completed page-channel Subscribe replay. Since #323 a replay is a single `page-replay` frame carrying every stroke batch, every tombstone batch and `last_seq`, so frames should read 1 — anything higher is a regression. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets — read `mean` over a window holding one replay for a baseline."
+      "description": "One observation per completed page-channel Subscribe replay. Since #323 a replay is a single `page-replay` frame carrying every stroke batch, every tombstone batch and `last_seq`, so frames should read 1 \u2014 anything higher is a regression. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets \u2014 read `mean` over a window holding one replay for a baseline."
     },
     {
       "id": 8,
@@ -483,12 +483,12 @@
           "sort": "desc"
         }
       },
-      "description": "One observation per completed page-channel Subscribe replay. Since #323 a replay is a single `page-replay` frame carrying every stroke batch, every tombstone batch and `last_seq`, so frames should read 1 — anything higher is a regression. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets — read `mean` over a window holding one replay for a baseline."
+      "description": "One observation per completed page-channel Subscribe replay. Since #323 a replay is a single `page-replay` frame carrying every stroke batch, every tombstone batch and `last_seq`, so frames should read 1 \u2014 anything higher is a regression. `mean` is exact (sum / count); p50 / p95 are interpolated within buckets \u2014 read `mean` over a window holding one replay for a baseline."
     },
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Replay duration p50 / p95 (subscribe received → replay sent)",
+      "title": "Replay duration p50 / p95 (subscribe received \u2192 replay sent)",
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
@@ -580,7 +580,7 @@
     {
       "id": 10,
       "type": "row",
-      "title": "Realtime — inbound handling and connections",
+      "title": "Realtime \u2014 inbound handling and connections",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -666,7 +666,7 @@
           "sort": "desc"
         }
       },
-      "description": "Server-side handling time: parse to the last frame the handler sends. This is NOT end-to-end freshness (Android commit → SPA visible), which needs client timestamps — see #154."
+      "description": "Server-side handling time: parse to the last frame the handler sends. This is NOT end-to-end freshness (Android commit \u2192 SPA visible), which needs client timestamps \u2014 see #154."
     },
     {
       "id": 12,
@@ -741,7 +741,7 @@
           "sort": "desc"
         }
       },
-      "description": "Server-side handling time: parse to the last frame the handler sends. This is NOT end-to-end freshness (Android commit → SPA visible), which needs client timestamps — see #154."
+      "description": "Server-side handling time: parse to the last frame the handler sends. This is NOT end-to-end freshness (Android commit \u2192 SPA visible), which needs client timestamps \u2014 see #154."
     },
     {
       "id": 13,
@@ -871,7 +871,7 @@
           "sort": "desc"
         }
       },
-      "description": "`lagged` means a subscriber fell behind its broadcast channel and dropped fan-out (the page channel skips it, the library channel closes — recovery is #279). `*_error` results are failed sends, receives, replays or paper reads."
+      "description": "`lagged` means a subscriber fell behind its broadcast channel and dropped fan-out (the page channel skips it, the library channel closes \u2014 recovery is #279). `*_error` results are failed sends, receives, replays or paper reads."
     },
     {
       "id": 15,
@@ -1205,7 +1205,7 @@
           "sort": "desc"
         }
       },
-      "description": "Completed thumbnail renders (success or error) — one per page commit or erase that creates a thumbnail job, plus jobs re-queued on startup."
+      "description": "Completed thumbnail renders (success or error) \u2014 one per page commit or erase that creates a thumbnail job, plus jobs re-queued on startup."
     },
     {
       "id": 23,
@@ -1270,7 +1270,7 @@
           "sort": "desc"
         }
       },
-      "description": "Wall time of one render, from the job starting to the PNG being stored (or the failure being recorded). Quantiles interpolate within the default buckets (5 ms … 10 s)."
+      "description": "Wall time of one render, from the job starting to the PNG being stored (or the failure being recorded). Quantiles interpolate within the default buckets (5 ms \u2026 10 s)."
     },
     {
       "id": 24,
@@ -1480,7 +1480,7 @@
         "x": 16,
         "y": 69
       },
-      "description": "Failed renders (the page shows a failed thumbnail) and failed startup recoveries over the selected time range. Anything above zero is worth a look — the error is in the logs panel.",
+      "description": "Failed renders (the page shows a failed thumbnail) and failed startup recoveries over the selected time range. Anything above zero is worth a look \u2014 the error is in the logs panel.",
       "targets": [
         {
           "refId": "A",
@@ -1545,12 +1545,135 @@
       }
     },
     {
+      "id": 29,
+      "type": "row",
+      "title": "Client telemetry",
       "collapsed": false,
+      "panels": [],
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 77
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Client telemetry exports per second by client and outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum by (client, outcome) (rate(v_note_client_telemetry_requests_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{client}} {{outcome}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*(unreachable|rejected|too_large|body_error).*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Exports reaching the /otlp ingress (#354). `forwarded` is healthy. `sidecar_unreachable` means the v-note-alloy container is down and client telemetry is being dropped \u2014 the product is unaffected. `sidecar_rejected` is the sidecar refusing data (malformed, or its memory limiter shedding load). No alert by design: losing telemetry is not user-facing."
+    },
+    {
+      "id": 31,
+      "type": "logs",
+      "title": "SPA errors and warnings",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 86
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "expr": "{service_name=\"v-note-spa\", deployment_environment=\"$env\"} | severity_text=~\"ERROR|WARN\"",
+          "legendFormat": "",
+          "range": true,
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "description": "Logs the browser sent (#354), labelled by the sidecar rather than by the client. Each line carries trace_id/span_id as structured metadata, which links it to the trace in Tempo."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 96
       },
       "id": 27,
       "panels": [],
@@ -1569,7 +1692,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 78
+        "y": 97
       },
       "targets": [
         {

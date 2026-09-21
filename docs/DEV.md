@@ -110,6 +110,8 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
 | `VNOTE__REALTIME__COALESCE-REPLAY` | `true` | **Feature flag (#323).** Answer a `subscribe` with one coalesced `page-replay` frame. Set `false` to restore the pre-#323 shape (a `stroke-batch` per stored batch, then `synced`) without rebuilding — see below. A non-boolean value **fails startup** rather than reading as `false` |
 | `VNOTE__REALTIME__COMPRESSION` | `false` code default, but **`true` in every deployed environment** | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. The code default is off; the sovereign leaves are **on** — see below. A non-boolean value **fails startup** rather than reading as `false` |
+| `VNOTE__CLIENT-TELEMETRY__ENABLED` | `false` | **Kill switch (#354).** With it off every `/otlp` request is a 404 — before authentication, so a signed-out client learns to stop rather than retrying on 401. A non-boolean value **fails startup** |
+| `VNOTE__CLIENT-TELEMETRY__SPA-ENDPOINT` / `__ANDROID-ENDPOINT` | unset | Base URL of the sidecar's `spa` (`:4318`) / `android` (`:4319`) OTLP receiver. **Required when enabled.** Must be a bare origin (`http://host:port`) — a path or query fails startup, even with the switch off |
 | `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
 | `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
 | `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
@@ -217,6 +219,31 @@ does not expose `/metrics` through Traefik. Local checks:
 VNOTE__OBSERVABILITY__METRICS_ADDR=127.0.0.1:9090 cargo run -p server
 curl http://127.0.0.1:9090/metrics
 ```
+
+#### Client telemetry (#354)
+
+The SPA exports its own spans and logs (see `frontend/src/telemetry.rs`); the
+browser console still shows every log line, so nothing changes for a developer
+with the page open. `just run-compose` always runs the `v-note-alloy` sidecar
+but leaves the ingress **off**. To turn it on and see the output:
+
+```bash
+CLIENT_TELEMETRY_ENABLED=true \
+CLIENT_TELEMETRY_TEMPO_ENDPOINT=<your-tempo>:4317 \
+CLIENT_TELEMETRY_LOKI_ENDPOINT=http://<your-loki>:3100/otlp \
+just run-compose
+```
+
+Without the two endpoints the sidecar still accepts exports and logs its own
+failure to deliver them — which is also what a dead backend looks like in a
+deployed environment. The e2e stack runs a real Tempo and Loki; reading
+`e2e/tests/client-telemetry.spec.ts` is the quickest way to see what arrives.
+
+The sidecar's config is validated offline by `./scripts/test-alloy-config.sh`
+(the `alloy-config-validation` CI step): `alloy fmt`, `alloy validate` with a
+negative control, the image pin agreeing across files, and the properties that
+make it a security control (every statement block allow-lists before it sets;
+failed rewrites drop rather than forward; no metrics pipeline).
 
 ---
 

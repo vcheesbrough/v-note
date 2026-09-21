@@ -25,6 +25,9 @@ base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 config = { version = "0.15", default-features = false }
 futures-util = "0.3"
+# Only for `LengthLimitError`: telling "over the body cap" (413) apart from a broken
+# upload (400) on the /otlp ingress. Already in the tree through axum.
+http-body-util = "0.1"
 # 10+ selects its crypto backend by feature and compiles either way, but panics at the
 # first encode/decode unless exactly one of `rust_crypto`/`aws_lc_rs` is enabled.
 # aws-lc is already in the build and avoids pulling the `rsa` crate.

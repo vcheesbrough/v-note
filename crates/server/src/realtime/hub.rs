@@ -69,6 +69,18 @@ pub(super) fn fanout_delivery_span(
 struct Ticket {
     owner_id: String,
     expires_at: DateTime<Utc>,
+    /// The trace the ticket was requested in (#354). A browser cannot put a
+    /// `traceparent` header on a WebSocket upgrade, so the ticket — which it
+    /// *can* request with one — is what carries the client's trace across to the
+    /// connection that redeems it. Invalid when nothing was tracing the request.
+    origin: SpanContext,
+}
+
+/// What redeeming a ticket yields: who it was for, and the trace it was
+/// requested in.
+pub(super) struct RedeemedTicket {
+    pub(super) owner_id: String,
+    pub(super) origin: SpanContext,
 }
 
 struct Lease {
@@ -82,7 +94,7 @@ pub(super) enum LeaseOutcome {
 }
 
 impl RealtimeHub {
-    pub fn issue_ticket(&self, owner_id: String) -> RealtimeTicketResponse {
+    pub fn issue_ticket(&self, owner_id: String, origin: SpanContext) -> RealtimeTicketResponse {
         let ticket = format!("ticket_{}", random_hex(32));
         let expires_at = Utc::now() + Duration::seconds(TICKET_TTL_SECONDS);
         self.tickets.lock().expect("ticket mutex poisoned").insert(
@@ -90,6 +102,7 @@ impl RealtimeHub {
             Ticket {
                 owner_id,
                 expires_at,
+                origin,
             },
         );
         RealtimeTicketResponse {
@@ -98,12 +111,15 @@ impl RealtimeHub {
         }
     }
 
-    pub(super) fn consume_ticket(&self, ticket: &str) -> Option<String> {
+    pub(super) fn consume_ticket(&self, ticket: &str) -> Option<RedeemedTicket> {
         let now = Utc::now();
         let mut tickets = self.tickets.lock().expect("ticket mutex poisoned");
         tickets.retain(|_, value| value.expires_at > now);
         let ticket = tickets.remove(ticket)?;
-        (ticket.expires_at > now).then_some(ticket.owner_id)
+        (ticket.expires_at > now).then_some(RedeemedTicket {
+            owner_id: ticket.owner_id,
+            origin: ticket.origin,
+        })
     }
 
     pub(super) fn subscribe_library(
@@ -280,6 +296,81 @@ mod tests {
                 "the delivery should sit inside the publisher's trace"
             );
         });
+    }
+
+    /// #354: the browser cannot put `traceparent` on a WebSocket upgrade, so the
+    /// ticket carries the trace instead. This is the hub's half of that — the
+    /// context that comes out is the one that went in, and a connection span
+    /// parented to it lands in the requesting trace.
+    #[test]
+    fn a_ticket_carries_the_requesting_trace_to_the_connection_that_redeems_it() {
+        with_otel_layer(|| {
+            let hub = RealtimeHub::default();
+            let ticket_request = tracing::info_span!("http.request");
+            let issued = ticket_request.in_scope(|| {
+                hub.issue_ticket(
+                    "owner_1".to_string(),
+                    crate::observability::current_span_context(),
+                )
+            });
+
+            let redeemed = hub
+                .consume_ticket(&issued.ticket)
+                .expect("a fresh ticket should redeem");
+            assert_eq!(redeemed.owner_id, "owner_1");
+            assert_eq!(
+                redeemed.origin.trace_id().to_string(),
+                trace_id(&ticket_request)
+            );
+
+            // What `page_socket` does with it, outside any ambient span — the
+            // connection task is not running inside the ticket request.
+            let connection = tracing::info_span!("handle_page_socket");
+            crate::observability::set_remote_parent(&connection, &redeemed.origin);
+            assert_eq!(
+                trace_id(&connection),
+                trace_id(&ticket_request),
+                "the connection should sit inside the trace the ticket was requested in"
+            );
+        });
+    }
+
+    /// A ticket requested with nothing tracing it must not drag the connection
+    /// anywhere: the context is invalid, `set_remote_parent` ignores it, and the
+    /// span keeps whatever parent it already had. That is every ticket while
+    /// trace export is off.
+    #[test]
+    fn a_ticket_issued_outside_a_trace_leaves_the_connection_where_it_was() {
+        with_otel_layer(|| {
+            let hub = RealtimeHub::default();
+            let issued = hub.issue_ticket(
+                "owner_1".to_string(),
+                crate::observability::current_span_context(),
+            );
+            let redeemed = hub.consume_ticket(&issued.ticket).expect("redeems");
+            assert!(!redeemed.origin.is_valid());
+
+            let upgrade = tracing::info_span!("http.request");
+            let connection = upgrade.in_scope(|| tracing::info_span!("handle_page_socket"));
+            crate::observability::set_remote_parent(&connection, &redeemed.origin);
+            assert_eq!(
+                trace_id(&connection),
+                trace_id(&upgrade),
+                "with no origin the connection stays under the upgrade request"
+            );
+        });
+    }
+
+    /// Single use, now that a ticket carries a trace as well as an identity: a
+    /// replayed ticket must yield neither.
+    #[test]
+    fn a_ticket_redeems_exactly_once() {
+        let hub = RealtimeHub::default();
+        let issued = hub.issue_ticket("owner_1".to_string(), SpanContext::empty_context());
+
+        assert!(hub.consume_ticket(&issued.ticket).is_some());
+        assert!(hub.consume_ticket(&issued.ticket).is_none());
+        assert!(hub.consume_ticket("ticket_never_issued").is_none());
     }
 
     #[test]

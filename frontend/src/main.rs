@@ -12,6 +12,7 @@ mod library;
 mod realtime;
 mod render;
 mod route;
+mod telemetry;
 mod viewer;
 
 use leptos::prelude::*;
@@ -223,7 +224,7 @@ fn PageTile(
                         .unwrap_or(false)
                     {
                         wasm_bindgen_futures::spawn_local(async move {
-                            match api::delete_page(&page_id).await {
+                            match api::delete_page(telemetry::screen(), &page_id).await {
                                 Ok(()) => {
                                     remove_page(pages, selected_page, &page_id);
                                     library_error.set(None);
@@ -370,17 +371,45 @@ fn App() -> impl IntoView {
         }
     };
 
+    // One trace per screen. Driven off `selected_page` rather than off each
+    // navigation call site because every route change — a tile, the back arrow,
+    // a deep link, Back/Forward — ends here, so there is one place to get right.
+    Effect::new(move |_| match selected_page.get() {
+        Some(page) => telemetry::start_screen("screen.page", &format!("/p/{}", page.id)),
+        None => telemetry::start_screen("screen.library", "/"),
+    });
+
+    // Telemetry is batched, so a tab closed between ticks would lose whatever
+    // the last few seconds produced — which is exactly the window an error
+    // arrives in. `pagehide` rather than `unload`: it is the one the bfcache
+    // does not break, and it fires on mobile tab switches too. Sent as a beacon,
+    // because an ordinary fetch started here is cancelled by the unload.
+    Effect::new(move |_| {
+        let pagehide = window_event_listener(ev::pagehide, move |_| telemetry::flush_on_pagehide());
+        on_cleanup(move || pagehide.remove());
+    });
+
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
-            meta.set(Some(api::fetch_meta().await));
-            me.set(Some(api::fetch_me().await));
+            // Captured once, before the first await: both requests belong to
+            // the screen that was showing when they were made.
+            let parent = telemetry::screen();
+            meta.set(Some(api::fetch_meta(parent).await));
+            let profile = api::fetch_me(parent).await;
+            // Exports authenticate with the session cookie, so nothing is sent
+            // until there is a session to send it with.
+            telemetry::set_session(profile.is_ok());
+            me.set(Some(profile));
         });
     });
 
     Effect::new(move |_| {
         if matches!(me.get(), Some(Ok(_))) {
+            let parent = telemetry::screen();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Err(error) = api::load_pages(pages, pages_loaded, library_error).await {
+                if let Err(error) =
+                    api::load_pages(parent, pages, pages_loaded, library_error).await
+                {
                     library_error.set(Some(error));
                 }
             });
@@ -409,6 +438,15 @@ fn App() -> impl IntoView {
             None if pages_loaded.get() => {
                 pending_page_id.set(None);
                 route::replace(&Route::Library);
+                // A deep link to a page this owner does not have. Not an error:
+                // a shared or stale URL is a thing users do, and the app handles
+                // it. Worth knowing about because a *rise* in it means links are
+                // breaking somewhere.
+                telemetry::log(
+                    telemetry::Severity::Info,
+                    "deep link named a page not in the library",
+                    vec![telemetry::attr("vnote.page_id", page_id.clone())],
+                );
                 route_notice.set(Some("That page is not in your library.".to_string()));
             }
             None => {}
@@ -474,6 +512,9 @@ fn App() -> impl IntoView {
 }
 
 fn main() {
-    console_error_panic_hook::set_once();
+    // Before anything else: the panic hook it installs covers mounting, and a
+    // span opened later needs the collector to already exist.
+    telemetry::init();
+    telemetry::install_panic_hook();
     mount_to_body(App);
 }

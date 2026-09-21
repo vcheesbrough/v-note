@@ -91,7 +91,9 @@ where
     let (response, upgraded) = match upgrade.upgrade(options) {
         Ok(pair) => pair,
         Err(error) => {
-            tracing::error!(error = %error, channel, "websocket upgrade failed");
+            // `warn`, not `error`: the handshake is the client's to get right
+            // and this is the 400 that says it did not. Nothing here failed.
+            tracing::warn!(error = %error, channel, "websocket upgrade failed");
             crate::observability::metrics().record_realtime_event(channel, "upgrade_error");
             return (StatusCode::BAD_REQUEST, "websocket upgrade failed").into_response();
         }
@@ -167,7 +169,14 @@ pub async fn realtime_ticket(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
 ) -> Json<RealtimeTicketResponse> {
-    Json(state.realtime.issue_ticket(claims.sub))
+    // The span context of *this* request, which sits inside the client's trace
+    // when the client sent a `traceparent`. Stored with the ticket so the
+    // connection that redeems it can be parented there — see `Ticket::origin`.
+    Json(
+        state
+            .realtime
+            .issue_ticket(claims.sub, crate::observability::current_span_context()),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,43 +194,65 @@ pub async fn realtime_socket(
     // Unchanged by #342: `IncomingUpgrade` is an extractor, so authentication
     // still runs here, before anything is upgraded. A rejected request never
     // reaches `spawn_upgraded` and so never switches protocols.
-    let owner_id = match authenticate_realtime(&state, &headers, query.ticket.as_deref()).await {
-        Ok(owner_id) => owner_id,
-        Err(status) => {
-            crate::observability::metrics().record_auth_failure("realtime_auth");
-            return (status, "realtime authentication failed").into_response();
-        }
-    };
+    let RealtimeCaller { owner_id, origin } =
+        match authenticate_realtime(&state, &headers, query.ticket.as_deref()).await {
+            Ok(caller) => caller,
+            Err(status) => {
+                crate::observability::metrics().record_auth_failure("realtime_auth");
+                return (status, "realtime authentication failed").into_response();
+            }
+        };
 
     let options = realtime_ws_options(&state);
     spawn_upgraded(ws, options, "library", move |socket| {
-        handle_library_socket(state, owner_id, socket)
+        let span = tracing::info_span!("handle_library_socket");
+        crate::observability::set_remote_parent(&span, &origin);
+        handle_library_socket(state, owner_id, socket).instrument(span)
     })
+}
+
+/// Who is on the other end of a realtime upgrade, and the trace to put the
+/// connection in.
+struct RealtimeCaller {
+    owner_id: String,
+    /// Valid only for a ticket that was requested inside a trace. Invalid for a
+    /// bearer caller, which needs nothing carried for it: it can send
+    /// `traceparent` on the upgrade itself, so the connection is already in its
+    /// trace by way of the request span.
+    origin: opentelemetry::trace::SpanContext,
 }
 
 async fn authenticate_realtime(
     state: &AppState,
     headers: &HeaderMap,
     ticket: Option<&str>,
-) -> Result<String, StatusCode> {
+) -> Result<RealtimeCaller, StatusCode> {
     if let Some(ticket) = ticket {
         return state
             .realtime
             .consume_ticket(ticket)
+            .map(|redeemed| RealtimeCaller {
+                owner_id: redeemed.owner_id,
+                origin: redeemed.origin,
+            })
             .ok_or(StatusCode::UNAUTHORIZED);
     }
 
     let token = extract_bearer(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     validate_jwt(&token, &state.auth, &state.jwks_cache)
         .await
-        .map(|claims| claims.sub)
+        .map(|claims| RealtimeCaller {
+            owner_id: claims.sub,
+            origin: opentelemetry::trace::SpanContext::empty_context(),
+        })
         .map_err(|error| match error {
             crate::auth::TokenValidationError::MissingScope => StatusCode::FORBIDDEN,
             crate::auth::TokenValidationError::Invalid(_) => StatusCode::UNAUTHORIZED,
         })
 }
 
-#[tracing::instrument(skip_all)]
+/// Its span is built by the caller, not by `#[tracing::instrument]`, because the
+/// parent has to be chosen before the span is entered — see `realtime_socket`.
 async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWebSocket) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
     crate::observability::metrics().record_realtime_event("library", "connected");
@@ -298,13 +329,14 @@ pub async fn page_socket(
     ws: IncomingUpgrade,
 ) -> Response {
     // Both gates below still run before any upgrade — see `realtime_socket`.
-    let owner_id = match authenticate_realtime(&state, &headers, query.ticket.as_deref()).await {
-        Ok(owner_id) => owner_id,
-        Err(status) => {
-            crate::observability::metrics().record_auth_failure("realtime_auth");
-            return (status, "realtime authentication failed").into_response();
-        }
-    };
+    let RealtimeCaller { owner_id, origin } =
+        match authenticate_realtime(&state, &headers, query.ticket.as_deref()).await {
+            Ok(caller) => caller,
+            Err(status) => {
+                crate::observability::metrics().record_auth_failure("realtime_auth");
+                return (status, "realtime authentication failed").into_response();
+            }
+        };
 
     let store = PgPageStore::new(state.db.clone());
 
@@ -319,11 +351,21 @@ pub async fn page_socket(
 
     let options = realtime_ws_options(&state);
     spawn_upgraded(ws, options, "page", move |socket| {
-        handle_page_socket(state, store, page_id, socket)
+        // Same name and fields `#[tracing::instrument]` produced, so nothing
+        // that queries for this span changes — only where it hangs. With a valid
+        // `origin` that is the trace the SPA opened the page in; without one it
+        // stays under the upgrade request, exactly as before #354.
+        let span = tracing::info_span!(
+            "handle_page_socket",
+            page_id = %page_id,
+            session_id = tracing::field::Empty,
+        );
+        crate::observability::set_remote_parent(&span, &origin);
+        handle_page_socket(state, store, page_id, socket).instrument(span)
     })
 }
 
-#[tracing::instrument(skip_all, fields(page_id = %page_id, session_id))]
+/// Span built by the caller — see `page_socket`.
 async fn handle_page_socket(
     state: AppState,
     store: PgPageStore,

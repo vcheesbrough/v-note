@@ -166,9 +166,17 @@ pub async fn callback(
         // Nothing proven, so nothing is cleared — note that `auth_pkce` may still be
         // present on its own, and clearing it here would be the same cross-site
         // login-denial the ordering above exists to prevent.
+        //
+        // Logged because these two rejections are the CSRF guard doing its job,
+        // and a guard that fires silently cannot be told from one that never
+        // fires. Neither logs the state value: the mismatching one is the
+        // caller's, and echoing it into a log makes the log the payload
+        // carrier the truncation below exists to prevent.
+        tracing::warn!("auth callback without a state cookie");
         return (StatusCode::BAD_REQUEST, "missing state cookie").into_response();
     };
     if cookie_state != params.state {
+        tracing::warn!("auth callback state did not match the state cookie");
         return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
     }
 
@@ -206,6 +214,7 @@ pub async fn callback(
     };
 
     let Some(code) = params.code else {
+        tracing::warn!("auth callback carried neither a code nor an error");
         return abort_flow(jar, StatusCode::BAD_REQUEST, "missing code");
     };
 

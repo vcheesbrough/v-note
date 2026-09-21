@@ -72,7 +72,7 @@ steps:
         export OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)"
         REPORT=/srv/dev/playwright-reports/v-note-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
         START=$$(date +%s)
-        TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml build playwright v-note-android-apk legacy-migration-fixture
+        TEST_IMAGE="registry.desync.link/v-note:$$RELEASE_TAG" docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml build playwright v-note-android-apk legacy-migration-fixture alloy tempo
         echo "timing: e2e support image build took $$(( $$(date +%s) - $$START ))s"
         ./scripts/check-image-metadata.sh "v-note-e2e-playwright:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
         START=$$(date +%s)

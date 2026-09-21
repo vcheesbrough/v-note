@@ -25,7 +25,7 @@
 1. **validate-deployment** — manual deployment target must be `dev`, the only environment that exists; the error names **#388**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint-dev** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
-4. **deploy** — `scripts/install-sovereign-config-cli.sh` installs the CLI, then `sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
+4. **deploy** — `sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **tag-release** — after a successful deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
 6. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
@@ -133,12 +133,10 @@ through the Woodpecker broker; local compose secrets still come from OpenBao.
 
 ### The deploy renders its configuration (#391)
 
-The deploy step installs the sovereign-config CLI and wraps the deploy script in
-it:
+The deploy step wraps the deploy script in the sovereign-config CLI:
 
 ```yaml
 commands:
-  - ./scripts/install-sovereign-config-cli.sh
   - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
 ```
 
@@ -149,33 +147,31 @@ with a `-` or a leading digit is refused. It **fails closed**: an unreadable
 layer, or one that contributes no values at all, means the deploy script never
 runs.
 
-#### The CLI is pinned
+#### The CLI comes from the step image
 
-There is no CLI container image — the server publishes a self-extracting
-installer under `/dist`, and `scripts/install-sovereign-config-cli.sh` pins both
-the version and the digest it must hash to:
+The pipeline does **not** install the CLI. Both deploy steps (`deploy-dev`,
+`auto-deploy-dev`) run in
+`registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf4909…1827`
+(`&deploy-image` in `.woodpecker/deploy.yml`): the docker CLI image with the
+sovereign-config CLI baked in, published by the operator. It carries everything
+the step uses — Docker with the compose plugin, `sh`, and the busybox tools
+`deploy-v-note.sh` needs — so it is a drop-in for `docker:27-cli`. Every other
+step keeps `docker:27-cli`.
 
-```sh
-CLI_VERSION="2.26.2"
-CLI_SHA256="b05aab9cbca4952bcaea4f2213241b468987b50fb98a26373c881cad485869d8"
-```
+Until PR #55 the step installed the CLI from the server's `/dist` with a pinned
+version and digest (`scripts/install-sovereign-config-cli.sh`). That was removed
+when the server retired the pinned 2.26.2 installer: the download 404'd and every
+deploy failed, on every branch and on master. A host bind mount of an
+operator-installed binary briefly replaced it and was then dropped for this
+image, because a host file drifts from the server silently while a pin changes
+only by commit.
 
-This is the same bargain as the `@sha256:` pins on every CI image and Woodpecker
-plugin here, spelled for a file. The digest lives in git rather than being read
-from the `.sha256` the server publishes beside the installer, because a checksum
-handed over with the file it describes attests nothing.
-
-**When the server is upgraded, the pinned installer 404s and the deploy fails**
-with a message naming both constants. That is deliberate: bump them together as
-a commit, having checked the new CLI. An unpinned installer that tracked
-whatever the server currently publishes would instead change the deploy's
-behaviour silently.
-
-This is the **second** pin kept in lockstep with the running server — the other
-is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
-[Runtime config](#runtime-config-sovereign-config)). Both move when the server
-does; neither is enforced automatically, so check the live version
-(sovereign-config MCP `status`) before relocking either.
+**The CLI must match the running server**, so bump the image's tag and digest
+together, as a commit, when the server is upgraded (verified at pin time: 2.30.2
+against 2.30.2). The other client pinned to the
+server is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
+[Runtime config](#runtime-config-sovereign-config)); check the live version
+(sovereign-config MCP `status`) before relocking it.
 
 | `/v-note/devops/dev/compose/…` | Kind | Notes |
 | --- | --- | --- |
@@ -528,6 +524,7 @@ v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 
 - **Metrics:** the app serves Prometheus text on internal port `9090` at `/metrics`. Alloy discovers it through Docker labels on the `v-note` service: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.metrics.scheme=http`, `observability.service=v-note`, `observability.env`, `observability.release`, and `observability.protocol`.
 - **Traces:** the `observability` config group sets `otlp-endpoint=http://monitor-alloy:4317`, `otlp-protocol=grpc`, and `service-name=v-note` in each deployed environment's subtree; `observability/environment` supplies the OTEL `deployment.environment` attribute (`dev` / `production`). Every `http.request` span adopts the W3C `traceparent` Traefik forwards, so a request's trace starts at Traefik's edge span and drills down into v-note. WebSocket connection spans nest under their upgrade request; each inbound page message is its own trace, linked to its connection span. A broadcast carries its publisher's trace context, so each socket's send of a fanned-out message is a `realtime.fanout.deliver` span (`channel`, `message_type`, `bytes`, plus `session_id` on the page channel) inside the publisher's trace — a `commit-batch` trace shows the delivery to every sibling session — and linked to the receiving connection. Every Postgres round trip — each query, and each transaction's `BEGIN`/`COMMIT` — is a `db.query` span carrying `db.operation` and `db.query_name` (the call site, never SQL text or values), plus the size of the result: `db.response.returned_rows`, `db.response.bytes` and `db.response.max_row_bytes` (Postgres wire bytes of the returned column values, in total and for the widest row), and `db.response.affected_rows` for writes. Every span also carries the OpenTelemetry `code.file.path` / `code.module.name` / `code.line.number` the tracing layer derives from where the span was opened; `db_query_span!` is a macro so that those name the query's own call site rather than `observability.rs` (#343). Thumbnail jobs run detached, so each is its own `thumbnail.generate` trace (with `db.query` and `thumbnail.render` children) linked to the request that queued it.
+- **Client telemetry (#354):** the SPA's traces and logs arrive at `POST /otlp/{spa|android}/v1/{traces|logs}` on the app, are authenticated there (cookie or bearer, plus `required-scope`; body capped at 1 MiB → 413; sidecar down → prompt 502), and are proxied to the **`${V_NOTE_CONTAINER_NAME}-alloy`** sidecar running the committed `deploy/alloy/client-telemetry.alloy`. The sidecar has **no Traefik route** — the app is its only caller — and exports to `monitor-tempo:4317` (traces) and `http://monitor-loki:3100/otlp` (logs), overridable with `CLIENT_TELEMETRY_TEMPO_ENDPOINT` / `CLIENT_TELEMETRY_LOKI_ENDPOINT`. Its config reaches the container as a compose `configs:` entry that `deploy-v-note.sh` fills from the file (a bind mount would resolve on the host, where the CI workspace does not exist). It is **not** in the deploy health gate: telemetry must never fail a product deploy. Ingest is **off** until the environment's sovereign-config subtree sets `client-telemetry/enabled = "true"`, `client-telemetry/spa-endpoint = "http://<container>-alloy:4318"` and `client-telemetry/android-endpoint = "http://<container>-alloy:4319"` (bare origins; a path is rejected at startup). Measured on #354: the sidecar idles at ~60 MiB RSS and ~0.1% CPU, with `mem_limit: 192m` above its 64 MiB memory limiter. Charted on the dashboard's **Client telemetry** row; no alert, since losing telemetry is not user-facing.
 - **Logs:** the server writes structured JSON to stdout/stderr. Docker log scraping gets environment, release, protocol, and service metadata from the same Docker labels; request IDs, user/page/session IDs, trace IDs, and error details stay in JSON log fields.
 - **No public metrics route:** `/metrics` is present on the app for internal scrape and e2e checks, but should not be routed through Traefik as a public service.
 
