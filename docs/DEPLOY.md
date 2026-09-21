@@ -116,7 +116,7 @@ export SOVEREIGN_CONFIG_ACCESS_URL_FILE=… V_NOTE_METRICS_ADDR=0.0.0.0:9090
 > **Watch out on a developer box.** `COMPOSE_FILE=deploy/…` makes `deploy/` the
 > compose *project directory*, and compose auto-loads `deploy/.env` from there.
 > That file is gitignored and absent from CI's fresh clone, so the pipeline is
-> unaffected — but locally `scripts/fetch-compose-env.sh` fills it with the
+> unaffected — but locally `scripts/local-compose-env.sh` fills it with the
 > **local** stack's values (`V_NOTE_CONTAINER_NAME=v-note-local`,
 > `V_NOTE_HOST=localhost`, `DB_VOLUME=v-note-local-db`, `V_NOTE_IMAGE_TAG=local`).
 > A hand-run that forgets one of the exports above silently picks those up instead
@@ -129,7 +129,8 @@ export SOVEREIGN_CONFIG_ACCESS_URL_FILE=… V_NOTE_METRICS_ADDR=0.0.0.0:9090
 
 **Never commit values.** The deploy reads its configuration from sovereign-config
 with the CLI; a small set of shared infrastructure credentials still arrives
-through the Woodpecker broker; local compose secrets still come from OpenBao.
+through the Woodpecker broker; local compose generates its one secret on the
+developer's machine and stores it nowhere else (#400).
 
 ### The deploy renders its configuration (#391)
 
@@ -243,16 +244,16 @@ The unified client is **public + PKCE**, so no client secret is used anywhere.
 | The dev OIDC client-secret broker leaf | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) | deleted |
 | `oidc/client-secret` | sovereign-config `/v-note/dev/server/` | deleted |
 | `oidc/android/client-id`, `oidc/android/issuer-url` | sovereign-config `/v-note/dev/server/` — named the `v-note-android-dev` client that #274 retired | deleted |
-| `OIDC_CLIENT_SECRET` | OpenBao `secret/v-note-stack/env` | **still present** — deletion needs a `BAO_TOKEN`; tracked on **#394** |
+| `OIDC_CLIENT_SECRET` (with the now-unused local `POSTGRES_PASSWORD`) | the retired local-compose secret store's `v-note-stack/env` path (historical: v-note no longer uses that store, #400) | **not deleted, by decision** (2026-09-21, #400) — left in the decommissioned store; inert, see below |
 
-The OpenBao copy is inert (`scripts/fetch-compose-env.sh` requires only
-`POSTGRES_PASSWORD`, so nothing reads it) but it is a **live stored credential**.
-Do not treat this section as saying every copy is gone until that row says
-`deleted`.
+The retired store may still hold those two values. That was a deliberate call
+when v-note stopped using it: neither value grants anything. The Authentik
+provider has been `client_type: public` with no secret since #274, so the client
+secret authenticates nothing. The local password belonged to a disposable
+per-machine database. Decommissioning the store itself belongs to `mini-config`.
 
-`OidcConfig` has no `client_secret` or `android` field, and
-`scripts/fetch-compose-env.sh` requires only `POSTGRES_PASSWORD`, so nothing
-reads any of them. `crates/server/src/config/tests.rs` keeps
+`OidcConfig` has no `client_secret` or `android` field, and local compose
+carries only `POSTGRES_PASSWORD`, so nothing reads any of them. `crates/server/src/config/tests.rs` keeps
 `oidc_ignores_retired_android_subtree` and `oidc_ignores_retired_client_secret`
 so that a stale leaf reappearing in a subtree still cannot fail a load.
 
@@ -400,18 +401,18 @@ at `android/assetlinks-json`. The former `v_note_<env>_assetlinks_json` keys hav
 been deleted — rotating a signing certificate means rewriting that leaf (see
 [Set App Links JSON](#set-app-links-json) below), not patching a CI secret.
 
-### Local compose (WSL / laptop) — OpenBao
+### Local compose (WSL / laptop) — no secret store
 
-`secret/v-note-stack/env`:
-
-| Key | Used for |
-| --- | --- |
-| `POSTGRES_PASSWORD` | Local Postgres in `deploy/docker-compose.yml` |
+Local compose has one secret, `POSTGRES_PASSWORD`, for the disposable local
+Postgres. It is **generated on the developer's machine** by
+**`./scripts/local-compose-env.sh`** (run by `just run-compose`), written into the
+gitignored `deploy/.env` next to the committed **`deploy/compose.env`**, and kept
+on every later run, because Postgres fixes it when it initialises the volume.
+Nothing else has to know it, so no store holds it and no developer needs a
+credential to run the stack (#400). See [`DEV.md`](DEV.md) → Compose (local).
 
 There is no OIDC client secret: the SPA and Android share one **public** Authentik
 client using Authorization Code + **PKCE** (**#274**).
-
-Fetch into gitignored `deploy/.env`: **`./scripts/fetch-compose-env.sh`** (merges with committed **`deploy/compose.env`**). Seed: **`./scripts/patch-v-note-openbao-secrets.sh`**.
 
 ---
 
@@ -466,9 +467,9 @@ half-configuring it.
 
 The secret leaf (`database/password`) is stored with `put_secret` and revealed to
 the app at load. `POSTGRES_PASSWORD` is **the same stored value**, aliased into
-the deploy's layer — not a second copy, and no longer in OpenBao for deployed
-environments. Local compose still keeps its own `POSTGRES_PASSWORD` in OpenBao,
-because that is a different database.
+the deploy's layer — not a second copy. Local compose generates its own
+`POSTGRES_PASSWORD` on the developer's machine, because that is a different
+database.
 
 The provider is pinned to tag **2.30.2**, the sovereign-config server version
 deployed when it was last bumped. Since 2.25 the provider **negotiates** a protocol
@@ -557,7 +558,7 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 ### Set App Links JSON
 
 Operator task. Since iteration 19 this lives in sovereign-config
-at the `android/assetlinks-json` leaf, not in OpenBao — render it and write it to
+at the `android/assetlinks-json` leaf — render it and write it to
 each deployed environment's subtree:
 
 ```bash

@@ -1,4 +1,5 @@
 import { expect, request, test } from '@playwright/test';
+import * as tls from 'node:tls';
 
 /**
  * #354 — client telemetry, end to end.
@@ -49,6 +50,65 @@ function hex(bytes: number): string {
 }
 
 const nowNanos = () => `${Date.now()}000000`;
+
+/**
+ * POST `path` declaring a `Content-Length` of `declaredLength` but sending no
+ * body, and resolve with the response's status code. Rejects if the server
+ * waits for the body instead of answering — which is exactly the failure a
+ * declared-length check is there to prevent.
+ */
+function statusForDeclaredLengthOnly(
+  path: string,
+  declaredLength: number,
+  cookie: string,
+): Promise<number> {
+  const url = new URL(path, process.env.BASE_URL);
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect(
+      {
+        host: url.hostname,
+        port: Number(url.port || 443),
+        servername: url.hostname,
+        // The stack's self-signed cert, as `ignoreHTTPSErrors` in the config.
+        rejectUnauthorized: false,
+        ALPNProtocols: ['http/1.1'],
+      },
+      () => {
+        socket.write(
+          [
+            `POST ${url.pathname} HTTP/1.1`,
+            `Host: ${url.host}`,
+            `Cookie: ${cookie}`,
+            'Content-Type: application/json',
+            `Content-Length: ${declaredLength}`,
+            'Connection: close',
+            '',
+            '',
+          ].join('\r\n'),
+        );
+      },
+    );
+    let received = '';
+    socket.setEncoding('latin1');
+    socket.setTimeout(10_000, () =>
+      socket.destroy(
+        new Error('no response while the body was withheld: the declared length was not checked first'),
+      ),
+    );
+    socket.on('data', (chunk: string) => {
+      received += chunk;
+      const statusLine = /^HTTP\/1\.1 (\d{3})/.exec(received);
+      if (statusLine) {
+        resolve(Number(statusLine[1]));
+        socket.destroy();
+      }
+    });
+    socket.on('error', reject);
+    socket.on('close', () =>
+      reject(new Error(`connection closed before a status line: ${JSON.stringify(received.slice(0, 200))}`)),
+    );
+  });
+}
 
 /**
  * A resource that claims to be something else entirely, including a unique
@@ -368,12 +428,25 @@ test.describe('the /otlp ingress', () => {
     }
   });
 
+  /**
+   * Over a raw socket that declares the size and then sends **no body**, not
+   * `request.post` with a real 1 MiB one. The server refuses on the declared
+   * `Content-Length` before reading a byte and closes the connection, so a
+   * client still uploading races that close: with `request.post` the 413 lost
+   * to a `write EPIPE` on most CI runs (#400). With nothing to upload there is
+   * no race — and a status line arriving at all is the stronger claim, that
+   * the refusal happens *before* the body is read, which a client that sends
+   * the whole body could never show. The streamed, undeclared-length case is
+   * `crates/server/tests/telemetry.rs`.
+   */
   test('rejects a body over the 1 MiB cap with 413', async ({ request }) => {
-    const res = await request.post('/otlp/spa/v1/traces', {
-      headers: { 'content-type': 'application/json' },
-      data: 'a'.repeat(1024 * 1024 + 1),
-    });
-    expect(res.status()).toBe(413);
+    const { cookies } = await request.storageState();
+    const status = await statusForDeclaredLengthOnly(
+      '/otlp/spa/v1/traces',
+      1024 * 1024 + 1,
+      cookies.map((c) => `${c.name}=${c.value}`).join('; '),
+    );
+    expect(status).toBe(413);
   });
 
   /**

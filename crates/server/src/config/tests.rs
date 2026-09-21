@@ -773,7 +773,7 @@ fn whitespace_only_value_is_still_rejected() {
 }
 
 /// A trailing newline is the common real-world case — the dev `assetlinks-json`
-/// leaf carried one from its original OpenBao value.
+/// leaf carried one from the value it was migrated from.
 #[test]
 fn trailing_newline_on_a_json_leaf_is_trimmed() {
     let json = r#"[{"relation":["delegate_permission/common.handle_all_urls"]}]"#;

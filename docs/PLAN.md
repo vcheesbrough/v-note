@@ -299,14 +299,14 @@ See **[`docs/DEV.md`](DEV.md)** — prerequisites, **`just`** / Makefile targets
 
 ### Deploy & release
 
-See **[`docs/DEPLOY.md`](DEPLOY.md)** — Woodpecker auto-dev deploy after green push e2e, manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`), OpenBao secrets, Authentik blueprint apply, compose roll-out. **Prod** only from **`master`** and manual-only.
+See **[`docs/DEPLOY.md`](DEPLOY.md)** — Woodpecker auto-dev deploy after green push e2e, manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`), sovereign-config secrets, Authentik blueprint apply, compose roll-out. **Prod** only from **`master`** and manual-only.
 
 ### Android distribution (MVP)
 
 - **Sideload** to Tab S8 Ultra / Note 9 — no Play Store in MVP.
 - **`dev`** flavor → **`v-notes-dev.desync.link`**; **`prod`** flavor → **`v-notes.desync.link`**. **(#392: only the `dev` and `devLocal` flavors exist in `android/app/build.gradle.kts` today; the `prod` flavor is specified here and re-added by #388, which needs the release keystore from #178.)**
 - APK served at **`https://{env-host}/dl/apk`** after each `deploy-dev` / `deploy-prod`. The env hostname is the discriminator — no env suffix in the path. The SPA links to it.
-- **Release keystore** lives outside repo (OpenBao / operator machine); **debug** keystore for dev/CI only.
+- **Release keystore** lives outside repo — where is decided on **#178** (historical: this line once said OpenBao, which v-note retired in #400); **debug** keystore for dev/CI only.
 - CI builds **`devDebug`** nginx image (`registry.desync.link/v-note-android:{release}`); **`prodRelease`** signing wired before prod device rollout (**#152** or first prod deploy).
 
 ### Observability (MVP baseline)

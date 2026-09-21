@@ -22,7 +22,7 @@ The agent fetches the PR diff via the GitHub API, runs Claude Code headless with
 
 ## Required secrets
 
-Woodpecker YAML uses `from_secret: <name>`. Values are **not** stored in Woodpecker itself — they are fetched from **OpenBao** via the Woodpecker secret extension ([woodpecker-openbao-broker](https://github.com/vcheesbrough/woodpecker-openbao-broker)). Add or rotate values under the path your broker maps for **`vcheesbrough/v-note`** (same pattern as bored: `secret/woodpecker/repos/vcheesbrough/<repo>`).
+Woodpecker YAML uses `from_secret: <name>`. Values are **not** stored in Woodpecker itself — the Woodpecker secret broker serves them from **sovereign-config**. Add or rotate values under **`/woodpecker/repos/vcheesbrough/v-note/`** (same pattern as bored: `/woodpecker/repos/vcheesbrough/<repo>/`).
 
 | Secret | Env var in container | Purpose |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ Woodpecker YAML uses `from_secret: <name>`. Values are **not** stored in Woodpec
 | `pr_reviewer_gh_app_installation_id` | `PR_REVIEWER_GH_APP_INSTALLATION_ID` | Installation ID for this org/repo |
 | `pr_reviewer_gh_app_private_key_b64` | `PR_REVIEWER_GH_APP_PRIVATE_KEY_B64` | Base64-encoded PEM private key |
 
-**Woodpecker / OpenBao:** mark these secrets **pull_request-allowed** so fork PRs are handled per your security policy (same as bored).
+**Woodpecker broker:** mark these secrets **pull_request-allowed** so fork PRs are handled per your security policy (same as bored).
 
 **Optional:** `ANTHROPIC_API_KEY` inside the image takes precedence over `CLAUDE_CODE_OAUTH_TOKEN` if set — bored uses OAuth only.
 
@@ -43,7 +43,7 @@ The reviewer authenticates as a **GitHub App** (not a PAT). The app must be **in
 - Contents: read (fetch changed files)
 - Metadata: read
 
-If v-note shares the same app as bored/mini-config, add a **new installation** or extend the existing installation to include `vcheesbrough/v-note` and use the matching `pr_reviewer_gh_app_installation_id` for this repo’s OpenBao path.
+If v-note shares the same app as bored/mini-config, add a **new installation** or extend the existing installation to include `vcheesbrough/v-note` and use the matching `pr_reviewer_gh_app_installation_id` for this repo’s sovereign-config path.
 
 ## Disabling quickly
 

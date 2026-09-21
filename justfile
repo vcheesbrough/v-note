@@ -13,7 +13,7 @@ run-spa:
 # has no `build:` block — it defines production, and the web image's canonical build
 # is CI — so the build happens here, from the same Dockerfile with the same args.
 run-compose:
-    ./scripts/fetch-compose-env.sh
+    ./scripts/local-compose-env.sh
     VERSION="$(git describe --tags --always --dirty)" && \
     docker build -f Dockerfile.web -t registry.desync.link/v-note:local \
       --secret id=github_token,env=GITHUB_TOKEN \
