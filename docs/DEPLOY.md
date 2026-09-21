@@ -149,10 +149,18 @@ runs.
 
 #### The CLI is provided by the operator
 
-The pipeline does **not** install the CLI; the step assumes `sovereign-config` is
-already on its PATH, and the operator is responsible for putting it there. If it
-is missing, the step fails with `sovereign-config: not found` before anything is
-deployed.
+The pipeline does **not** install the CLI. The operator installs it on the
+Woodpecker agent host (mini) at `/home/vincent/.local/bin/sovereign-config`, and
+both deploy steps (`deploy-dev`, `auto-deploy-dev`) bind-mount that file
+read-only to `/usr/local/bin/sovereign-config` in the step container
+(`&deploy-volumes` in `.woodpecker/deploy.yml`). A host path is needed because
+the step runs inside `docker:27-cli` and cannot see the host's PATH; the binary is
+static-pie, so it runs unchanged in that Alpine image.
+
+**To upgrade the CLI**, replace that file on mini — no commit. If the file is
+missing the deploy step fails with `sovereign-config: not found` before anything
+is deployed; if it is a directory or absent, Docker may create an empty directory
+at that path instead, with the same result.
 
 Until PR #55 the step installed it from the server's `/dist` with a pinned version
 and digest (`scripts/install-sovereign-config-cli.sh`). That was removed when the
