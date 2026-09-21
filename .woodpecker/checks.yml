@@ -53,11 +53,17 @@ steps:
   # only ever exercise the happy path, so the guards get their own test. Runs on
   # the docker CLI image for the compose plugin — `compose config` resolves the
   # model client-side, so this needs no docker socket.
+  #
+  # local-compose-env.sh rides along (#400): it generates the local stack's
+  # Postgres password once and must never regenerate it, and nothing in the
+  # pipeline runs the local stack, so a regression would surface only as a dev box
+  # that can no longer open its own database.
   deploy-script-validation:
     depends_on: []
     image: *docker-image
     commands:
       - ./scripts/test-deploy-v-note.sh
+      - ./scripts/test-local-compose-env.sh
 
   # The blueprint is applied by CI to the shared Authentik, so a typo in it takes
   # down login for everyone and is found by the next person trying to sign in.

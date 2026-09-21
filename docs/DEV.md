@@ -395,11 +395,8 @@ WSL builds/install via `adb` (USB or emulator started on Windows); `just android
 ## Compose (local)
 
 ```bash
-export BAO_ADDR=https://secrets.desync.link
-export BAO_TOKEN=<token with read on secret/v-note-stack/env>
 export GITHUB_TOKEN=<token with read on vcheesbrough/sovereign-config>  # for the image build
-./scripts/fetch-compose-env.sh   # writes deploy/.env from OpenBao + deploy/compose.env
-just run-compose
+just run-compose   # writes deploy/.env via scripts/local-compose-env.sh, builds, brings the stack up
 ```
 
 `just run-compose` builds `registry.desync.link/v-note:local` from `Dockerfile.web`
@@ -414,7 +411,7 @@ The build also stamps `OCI_IMAGE_VERSION` / `OCI_IMAGE_REVISION` /
 `OCI_IMAGE_CREATED` and `V_NOTE_RELEASE` from git, so a local image's version
 label, `/api/meta` and `v_note_build_info{version=…}` all agree.
 
-Non-secret compose defaults are in **`deploy/compose.env`** (committed). The only secret (**`POSTGRES_PASSWORD`**) lives in OpenBao **`secret/v-note-stack/env`**. Seed with **`scripts/patch-v-note-openbao-secrets.sh`** (operator). There is no OIDC client secret: since **#274** the SPA and Android share one **public** Authentik client using Authorization Code + **PKCE**.
+Non-secret compose defaults are in **`deploy/compose.env`** (committed). The only secret, **`POSTGRES_PASSWORD`**, is **generated on your machine and kept in no store** (**#400**): `scripts/local-compose-env.sh` creates it the first time, writes it into the gitignored **`deploy/.env`**, and keeps it on every later run, because Postgres fixes the password when it initialises the `DB_VOLUME` volume. No credential is needed to run the local stack. An existing `deploy/.env` keeps its password, so nothing needs regenerating after the switch. To start the database over, remove both `deploy/.env` and the volume (`docker volume rm v-note-local-db`). Removing only one of them leaves a password that does not match the volume. There is no OIDC client secret: since **#274** the SPA and Android share one **public** Authentik client using Authorization Code + **PKCE**.
 
 The local overlay maps those into the `VNOTE__*` layer and blanks
 `SOVEREIGN_CONFIG_ACCESS_URL_FILE`, so local dev never talks to sovereign-config.
@@ -452,6 +449,7 @@ DATABASE_URL=postgres://v_note:<password>@127.0.0.1:5432/v_note \
 docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --build-arg OCI_IMAGE_* for a labelled image (see DEPLOY.md)
 ./scripts/test-container-health.sh v-note:local   # HEALTHCHECK config + a real unhealthy transition
 ./scripts/test-deploy-v-note.sh                   # deploy parameter guards + health gate (no docker socket needed)
+./scripts/test-local-compose-env.sh               # CI `deploy-script-validation`: local deploy/.env generated once, then kept
 ./scripts/test-grafana-dashboard.sh               # CI `grafana-dashboard-validation`: dashboard JSON + publish payload (needs jq)
 ./scripts/test-authentik-blueprints.sh            # CI `authentik-blueprint-validation`: both blueprints, without an Authentik
 ./scripts/test-smoke-oidc-login.sh                # CI `oidc-login-smoke-validation`: the post-deploy login smoke check, against a stub IdP
