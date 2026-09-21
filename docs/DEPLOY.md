@@ -244,7 +244,13 @@ The unified client is **public + PKCE**, so no client secret is used anywhere.
 | The dev OIDC client-secret broker leaf | sovereign-config `/woodpecker/repos/vcheesbrough/v-note/` (the Woodpecker broker layer) | deleted |
 | `oidc/client-secret` | sovereign-config `/v-note/dev/server/` | deleted |
 | `oidc/android/client-id`, `oidc/android/issuer-url` | sovereign-config `/v-note/dev/server/` — named the `v-note-android-dev` client that #274 retired | deleted |
-| `OIDC_CLIENT_SECRET` | the retired local-compose secret store's `v-note-stack/env` path (historical: v-note no longer uses that store, #400) | deleted |
+| `OIDC_CLIENT_SECRET` (with the now-unused local `POSTGRES_PASSWORD`) | the retired local-compose secret store's `v-note-stack/env` path (historical: v-note no longer uses that store, #400) | **not deleted, by decision** (2026-09-21, #400) — left in the decommissioned store; inert, see below |
+
+The retired store may still hold those two values. That was a deliberate call
+when v-note stopped using it: neither value grants anything. The Authentik
+provider has been `client_type: public` with no secret since #274, so the client
+secret authenticates nothing. The local password belonged to a disposable
+per-machine database. Decommissioning the store itself belongs to `mini-config`.
 
 `OidcConfig` has no `client_secret` or `android` field, and local compose
 carries only `POSTGRES_PASSWORD`, so nothing reads any of them. `crates/server/src/config/tests.rs` keeps
