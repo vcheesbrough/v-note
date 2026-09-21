@@ -36,6 +36,7 @@ import link.desync.vnote.ink.Paper
 import link.desync.vnote.ink.PaperPreferences
 import link.desync.vnote.ink.normalizedSamsungSpenAction
 import link.desync.vnote.library.LibraryStateHolder
+import link.desync.vnote.telemetry.AppLog
 import link.desync.vnote.ui.theme.VNoteTheme
 
 class MainActivity : ComponentActivity() {
@@ -44,6 +45,7 @@ class MainActivity : ComponentActivity() {
         private const val AUTH_CANCELED_ACTION = "link.desync.vnote.AUTH_CANCELED"
         private const val AUTH_COMPLETED_REQUEST_CODE = 100
         private const val AUTH_CANCELED_REQUEST_CODE = 101
+        private const val TAG = "VNoteSession"
 
         @Volatile
         internal var apiClientFactory: ((TokenStore, AuthRepository) -> ApiClient)? = null
@@ -151,6 +153,7 @@ class MainActivity : ComponentActivity() {
                     canceledIntent = authPendingIntent(AUTH_CANCELED_ACTION, AUTH_CANCELED_REQUEST_CODE),
                 )
             }.onFailure { error ->
+                AppLog.w(TAG, "sign in could not start", error)
                 sessionState.value =
                     SessionState.Error(error.message ?: "Unable to start sign in")
             }
@@ -189,6 +192,7 @@ class MainActivity : ComponentActivity() {
             return false
         }
         if (action == AUTH_CANCELED_ACTION) {
+            AppLog.i(TAG, "sign in canceled")
             sessionState.value = SessionState.Error("Sign in was canceled")
             return true
         }
@@ -197,6 +201,7 @@ class MainActivity : ComponentActivity() {
             authRepository.handleAuthorizationResponse(intent).fold(
                 onSuccess = { reloadSession() },
                 onFailure = { error ->
+                    AppLog.w(TAG, "sign in failed", error)
                     sessionState.value =
                         SessionState.Error(error.message ?: "Sign in failed")
                 },
@@ -206,6 +211,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun signOut() {
+        AppLog.i(TAG, "signed out")
         val endSessionIntent = authRepository.createEndSessionIntent()
         library.clear()
         authRepository.signOutLocal()
@@ -229,6 +235,7 @@ class MainActivity : ComponentActivity() {
                     library.start()
                 },
                 onFailure = { error ->
+                    AppLog.w(TAG, "session check failed; signing out locally", error)
                     authRepository.signOutLocal()
                     sessionState.value =
                         SessionState.Error(error.message ?: "Session check failed")

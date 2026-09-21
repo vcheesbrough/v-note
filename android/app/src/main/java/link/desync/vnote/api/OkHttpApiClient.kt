@@ -1,6 +1,5 @@
 package link.desync.vnote.api
 
-import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import link.desync.vnote.api.codec.decodeLibraryEvent
@@ -14,6 +13,11 @@ import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.MeProfile
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.telemetry.AppLog
+import link.desync.vnote.telemetry.TRACEPARENT_HEADER
+import link.desync.vnote.telemetry.TracingInterceptor
+import link.desync.vnote.telemetry.parseTraceparent
+import link.desync.vnote.telemetry.traced
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,14 +34,23 @@ private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
 private const val LOG_TAG = "VNoteApi"
 private const val NORMAL_CLOSURE = 1000
 
+// Thumbnail URLs come from the server whole, so this is the route they match
+// rather than something derived from the URL.
+private const val THUMBNAIL_ROUTE = "/api/pages/{page_id}/thumbnails/{source_seq}"
+
 // [ApiClient] over OkHttp: bearer-authenticated REST with one refresh-and-retry
 // on 401, and the two realtime WebSockets. Wire formats live in `api.codec`.
+// Every request — upgrades included — is traced by [TracingInterceptor] (#406).
 class OkHttpApiClient(
     private val baseUrl: String,
     private val tokenStore: TokenStore,
     private val authRepository: AuthRepository,
 ) : ApiClient {
-    private val http = OkHttpClient()
+    private val http =
+        OkHttpClient
+            .Builder()
+            .addInterceptor(TracingInterceptor())
+            .build()
     private val jsonMediaType = "application/json".toMediaType()
     private val thumbnailCache = ConcurrentHashMap<String, ByteArray>()
 
@@ -49,7 +62,7 @@ class OkHttpApiClient(
     override suspend fun listPages(): Result<List<PageSummary>> =
         withContext(Dispatchers.IO) {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
-                authorizedRequest("$baseUrl/api/pages", token)
+                authorizedRequest("$baseUrl/api/pages", token, "/api/pages")
                     .get()
                     .build()
             }.mapCatching { body -> decodePageList(JSONObject(body)) }
@@ -62,7 +75,7 @@ class OkHttpApiClient(
         withContext(Dispatchers.IO) {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 val body = encodeCreatePage(title, paper).toRequestBody(jsonMediaType)
-                authorizedRequest("$baseUrl/api/pages", token)
+                authorizedRequest("$baseUrl/api/pages", token, "/api/pages")
                     .post(body)
                     .build()
             }.mapCatching { body -> decodePage(JSONObject(body).getJSONObject("page")) }
@@ -71,7 +84,7 @@ class OkHttpApiClient(
     override suspend fun deletePage(pageId: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
-                authorizedRequest("$baseUrl/api/pages/$pageId", token)
+                authorizedRequest("$baseUrl/api/pages/$pageId", token, "/api/pages/{page_id}")
                     .delete()
                     .build()
             }.map { }
@@ -81,14 +94,14 @@ class OkHttpApiClient(
         withContext(Dispatchers.IO) {
             thumbnailCache[url]?.let { return@withContext Result.success(it) }
             makeAuthorizedApiRequestForBytes(retryOnUnauthorized = true) { token ->
-                authorizedRequest("$baseUrl$url", token).get().build()
+                authorizedRequest("$baseUrl$url", token, THUMBNAIL_ROUTE).get().build()
             }.onSuccess { bytes -> thumbnailCache[url] = bytes }
         }
 
     override fun openLibrarySocket(listener: LibraryEventListener): WebSocket? {
         val token = tokenStore.accessToken() ?: return null
         val request =
-            authorizedRequest("${wsBaseUrl()}/api/realtime", token)
+            authorizedRequest("${wsBaseUrl()}/api/realtime", token, "/api/realtime")
                 .build()
         return http.newWebSocket(
             request,
@@ -146,7 +159,7 @@ class OkHttpApiClient(
     ): PageSocket? {
         val token = tokenStore.accessToken() ?: return null
         val request =
-            authorizedRequest("${wsBaseUrl()}/api/pages/$pageId/realtime", token)
+            authorizedRequest("${wsBaseUrl()}/api/pages/$pageId/realtime", token, "/api/pages/{page_id}/realtime")
                 .build()
         val webSocket =
             http.newWebSocket(
@@ -225,7 +238,7 @@ class OkHttpApiClient(
                 ?: return Result.failure(IllegalStateException("Not signed in"))
 
         val request =
-            authorizedRequest("$baseUrl/api/me", accessToken)
+            authorizedRequest("$baseUrl/api/me", accessToken, "/api/me")
                 .get()
                 .build()
 
@@ -296,15 +309,20 @@ class OkHttpApiClient(
         }
     }
 
+    // [route] is the URL template the request's span is named by — see
+    // [link.desync.vnote.telemetry.TraceTag]. Its parent is the current screen,
+    // captured now rather than when the call runs.
     private fun authorizedRequest(
         url: String,
         token: String,
+        route: String,
     ): Request.Builder =
         Request
             .Builder()
             .url(url)
             .header("Authorization", "Bearer $token")
             .header(REQUEST_ID_HEADER, requestId())
+            .traced(route)
 
     private fun requestFailureMessage(
         prefix: String,
@@ -319,7 +337,13 @@ class OkHttpApiClient(
         context: String,
         response: Response,
     ) {
-        Log.w(LOG_TAG, "$context failed: HTTP ${response.code} request_id=${response.requestId().orEmpty()}")
+        // `response.request` is the request as sent, so it carries the
+        // `traceparent` the interceptor added: the log line lands on that span.
+        AppLog.w(
+            LOG_TAG,
+            "$context failed: HTTP ${response.code} request_id=${response.requestId().orEmpty()}",
+            context = parseTraceparent(response.request.header(TRACEPARENT_HEADER)),
+        )
     }
 
     private fun logWebSocketFailure(
@@ -327,10 +351,11 @@ class OkHttpApiClient(
         response: Response?,
         throwable: Throwable,
     ) {
-        Log.w(
+        AppLog.w(
             LOG_TAG,
             "$context failed request_id=${response?.requestId().orEmpty()}",
             throwable,
+            context = parseTraceparent(response?.request?.header(TRACEPARENT_HEADER)),
         )
     }
 

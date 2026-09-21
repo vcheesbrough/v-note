@@ -6,6 +6,8 @@ import android.content.Intent
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import link.desync.vnote.telemetry.AppLog
+import link.desync.vnote.telemetry.Telemetry
 import net.openid.appauth.AuthorizationException
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationResponse
@@ -84,7 +86,7 @@ open class AuthRepository(
     }
 
     private suspend fun exchangeAuthorizationCode(response: AuthorizationResponse): Result<Unit> =
-        performTokenRequest(response.createTokenExchangeRequest())
+        performTokenRequest(response.createTokenExchangeRequest(), "auth.sign_in")
 
     open suspend fun refreshAccessTokenIfNeeded(force: Boolean = false): Boolean {
         val refreshToken = tokenStore.refreshToken() ?: return false
@@ -107,7 +109,7 @@ open class AuthRepository(
                 .setGrantType("refresh_token")
                 .setRefreshToken(refreshToken)
                 .build()
-        return performTokenRequest(request).fold(
+        return performTokenRequest(request, "auth.token_refresh").fold(
             onSuccess = { true },
             onFailure = {
                 tokenStore.clear()
@@ -116,8 +118,15 @@ open class AuthRepository(
         )
     }
 
-    private suspend fun performTokenRequest(tokenRequest: TokenRequest): Result<Unit> =
+    // One token-endpoint round trip, as a span named [spanName] (#406). The
+    // request itself carries no `traceparent`: it goes to the identity
+    // provider, which is not ours to put in our traces.
+    private suspend fun performTokenRequest(
+        tokenRequest: TokenRequest,
+        spanName: String,
+    ): Result<Unit> =
         withContext(Dispatchers.IO) {
+            val span = Telemetry.span(spanName)
             runCatching {
                 val bodyBuilder = FormBody.Builder()
                 bodyBuilder.add("client_id", config.clientId)
@@ -144,6 +153,14 @@ open class AuthRepository(
                     }
                     persistTokenResponse(json)
                 }
+            }.onSuccess {
+                span.end()
+            }.onFailure { error ->
+                span.fail(error.javaClass.simpleName)
+                // The message is the provider's `error_description`, or ours —
+                // never a token: those are only ever in the request and response
+                // bodies, which are not logged.
+                AppLog.w(TAG, "$spanName failed", error, context = span.context)
             }
         }
 
@@ -174,5 +191,9 @@ open class AuthRepository(
             refreshToken = refreshToken,
             accessTokenExpiryEpochSeconds = expiry,
         )
+    }
+
+    private companion object {
+        const val TAG = "VNoteAuth"
     }
 }

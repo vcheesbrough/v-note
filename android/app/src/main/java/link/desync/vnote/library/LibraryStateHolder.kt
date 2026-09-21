@@ -12,6 +12,7 @@ import link.desync.vnote.api.LibraryEventListener
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.LibraryEvent
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.telemetry.Telemetry
 import okhttp3.WebSocket
 
 // The signed-in page library: the page list, the open page, the library error
@@ -49,6 +50,9 @@ internal class LibraryStateHolder(
 
     // Loads the list and opens the library channel, once a session is signed in.
     fun start() {
+        // A new trace for the library (#406): one per visit, as the SPA does per
+        // route, so a library left open all day does not grow one endless trace.
+        Telemetry.startScreen(LIBRARY_SCREEN)
         val generation = connectionGeneration
         reconnectScope.launch { if (loadSnapshot(generation)) connect() }
     }
@@ -59,6 +63,7 @@ internal class LibraryStateHolder(
 
     fun closePage() {
         selectedPage = null
+        Telemetry.startScreen(LIBRARY_SCREEN)
         // Shares the connect path's snapshot guard: a refetch superseded by a
         // sign-out or a reconnect is dropped rather than applied late. Safe
         // because each of those either clears the list deliberately or takes its
@@ -115,6 +120,7 @@ internal class LibraryStateHolder(
         pages = pages.applying(event)
         if (event is LibraryEvent.PageDeleted && selectedPage?.id == event.pageId) {
             selectedPage = null
+            Telemetry.startScreen(LIBRARY_SCREEN)
         }
         error = null
     }
@@ -184,6 +190,8 @@ internal class LibraryStateHolder(
             )
     }
 }
+
+private const val LIBRARY_SCREEN = "screen.library"
 
 // Whether a library channel opened as [generation] may still reconnect: it must
 // be the newest channel ([currentGeneration]), and the session must still be

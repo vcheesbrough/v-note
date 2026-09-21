@@ -1,7 +1,6 @@
 package link.desync.vnote.ink
 
 import android.os.SystemClock
-import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -14,6 +13,11 @@ import link.desync.vnote.api.PageEventListener
 import link.desync.vnote.api.PageSocket
 import link.desync.vnote.model.PageEvent
 import link.desync.vnote.model.Stroke
+import link.desync.vnote.telemetry.AppLog
+import link.desync.vnote.telemetry.Attribute
+import link.desync.vnote.telemetry.OpenSpan
+import link.desync.vnote.telemetry.SpanContext
+import link.desync.vnote.telemetry.Telemetry
 import java.util.UUID
 
 // Drives one open page's ink channel: connects the WSS, replays persisted
@@ -89,8 +93,24 @@ class PageInkSession(
     private var replayBatches = 0
     private var replayStartedAt = 0L
 
+    // Telemetry (#406). One trace per open page, rooted when it connects; every
+    // span below is parented to [screen] explicitly, never to "the current"
+    // screen, so work still in flight when the user leaves stays in this trace.
+    private var screen: SpanContext = Telemetry.screen()
+    private var connectSpan: OpenSpan? = null
+    private var subscribeSpan: OpenSpan? = null
+    private val strokeSpans = hashMapOf<String, StrokeSpans>()
+
+    // Set by [disconnect]: the close that follows is ours, not a failure.
+    private var closing = false
+
     fun connect() {
         statusBanner = CONNECTING
+        screen = Telemetry.startScreen("screen.page", listOf(Attribute("vnote.page_id", pageId)))
+        connectSpan = Telemetry.span("realtime.connect", screen).attr("vnote.channel", "page")
+        // The upgrade request's own `http.client` span is opened by the
+        // interceptor under this screen, and its `traceparent` is what the
+        // server parents the connection to.
         val opened =
             apiClient.openPageSocket(
                 pageId,
@@ -111,10 +131,14 @@ class PageInkSession(
         socket = opened
         if (opened == null) {
             statusBanner = NOT_SIGNED_IN
+            connectSpan?.fail(NOT_SIGNED_IN)
+            connectSpan = null
         }
     }
 
     fun disconnect() {
+        closing = true
+        failStrokeSpans("page closed")
         stopLeaseRenewal()
         socket?.releaseLease()
         socket?.close()
@@ -131,6 +155,7 @@ class PageInkSession(
         val submitted = listOf(stroke)
         val activeSocket = socket ?: return
         pendingBatches[clientBatchId] = submitted
+        strokeSpans[clientBatchId] = StrokeSpans.open(screen, clientBatchId, stroke)
         publishRenderableStrokes()
         activeSocket.commitBatch(clientBatchId, submitted)
     }
@@ -186,6 +211,9 @@ class PageInkSession(
     }
 
     private fun onWelcome(event: PageEvent.Welcome) {
+        connectSpan?.end()
+        connectSpan = null
+        AppLog.i(TAG, "page channel connected", context = screen)
         sessionId = event.sessionId
         statusBanner = null
         // Authoritative on every (re)connect, which is what
@@ -208,7 +236,9 @@ class PageInkSession(
     private fun onStrokeBatch(event: PageEvent.StrokeBatch) {
         if (seenBatchIds.add(event.clientBatchId)) {
             confirmedStrokes.addAll(event.strokes)
-            pendingBatches.remove(event.clientBatchId)
+            if (pendingBatches.remove(event.clientBatchId) != null) {
+                strokeSpans.remove(event.clientBatchId)?.confirmed(event.seq)
+            }
             if (replaying) {
                 replayBatches += 1
             }
@@ -275,6 +305,7 @@ class PageInkSession(
     }
 
     private fun onLeaseDenied() {
+        AppLog.i(TAG, "edit lease denied", context = screen)
         canEdit = false
         stopLeaseRenewal()
         clearPendingErasures()
@@ -298,9 +329,16 @@ class PageInkSession(
     }
 
     private fun onFailure(event: PageEvent.Failure) {
+        // The code only: the message is the server's, shown to the user as is.
+        AppLog.w(
+            TAG,
+            "page channel error",
+            context = screen,
+            attributes = listOf(Attribute("vnote.error_code", event.code)),
+        )
         // A replay that ends in an error still shows whatever arrived
         // before it — `replay_failed` must not leave the page blank.
-        endReplay()
+        endReplay(failure = event.code)
         if (event.code == TOMBSTONE_FAILED) {
             restorePendingErasure(event.clientMutationId)
         }
@@ -338,20 +376,26 @@ class PageInkSession(
         replaying = true
         replayBatches = 0
         replayStartedAt = SystemClock.elapsedRealtime()
+        subscribeSpan = Telemetry.span("realtime.subscribe", screen).attr("vnote.channel", "page")
     }
 
     // Close the replay window and paint what arrived. Idempotent, because the
     // window can be closed by `synced`, by an error, or by the socket dropping.
-    private fun endReplay() {
+    // [failure] says why it closed early, and fails the subscribe span.
+    private fun endReplay(failure: String? = null) {
         if (!replaying) {
             return
         }
         replaying = false
-        Log.d(
+        val span = subscribeSpan?.attr("vnote.replay.batches", replayBatches)
+        subscribeSpan = null
+        AppLog.d(
             TAG,
             "page replay applied: batches=$replayBatches " +
                 "durationMs=${SystemClock.elapsedRealtime() - replayStartedAt}",
+            context = span?.context ?: screen,
         )
+        if (failure == null) span?.end() else span?.fail(failure)
         publishRenderableStrokes()
     }
 
@@ -385,6 +429,7 @@ class PageInkSession(
     }
 
     private fun discardPendingBatches() {
+        failStrokeSpans("discarded")
         if (pendingBatches.isNotEmpty()) {
             pendingBatches.clear()
             publishRenderableStrokes()
@@ -392,13 +437,23 @@ class PageInkSession(
     }
 
     private fun handleDisconnected(message: String) {
+        if (!closing) {
+            AppLog.w(TAG, "page channel disconnected: $message", context = screen)
+        }
+        connectSpan?.fail(message)
+        connectSpan = null
         // A socket that drops mid-replay never sends `synced`, so publish the
         // partial page rather than withholding it until the next connect.
-        endReplay()
+        endReplay(failure = "disconnected")
         canEdit = false
         stopLeaseRenewal()
         revertUnconfirmedPaper()
         statusBanner = message
+    }
+
+    private fun failStrokeSpans(reason: String) {
+        strokeSpans.values.forEach { it.failed(reason) }
+        strokeSpans.clear()
     }
 
     // Drop an optimistic paper the server never acknowledged. `paper_failed` is
