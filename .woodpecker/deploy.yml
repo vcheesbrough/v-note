@@ -167,18 +167,17 @@ steps:
       - compute-version
       - apply-authentik-blueprint-dev
       - attach-sqltool-outpost-dev
-    image: *docker-image
-    # The docker socket, plus the operator-installed sovereign-config CLI from
-    # the agent host (mini), bind-mounted read-only onto the step's PATH. The
-    # host binary is static-pie, so it runs unchanged in this Alpine image —
-    # verified against this exact digest. It is a plain file, not a symlink, so
-    # the mount is of the binary itself. Upgrading the CLI is now an operator
-    # action on the host (replace that file), not a commit; it must still match
-    # the running server. See docs/DEPLOY.md → The CLI is provided by the
-    # operator.
-    volumes: &deploy-volumes
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /home/vincent/.local/bin/sovereign-config:/usr/local/bin/sovereign-config:ro
+    # The docker CLI image with the sovereign-config CLI baked in, published by
+    # the operator. It replaces `*docker-image` for the two steps that run
+    # `sovereign-config render`, and carries everything else they use: Docker
+    # 27.5.1 with the compose plugin (v2.33.0), sh and the busybox tools
+    # deploy-v-note.sh needs. Pinned by digest like every other image here.
+    #
+    # The CLI must match the running sovereign-config server, so this pin moves
+    # when the server does: bump the tag and digest together, deliberately, as a
+    # commit. Verified at pin time: CLI 2.30.2 against server 2.30.2.
+    image: &deploy-image registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf49099830f99b6dbc421527f13fd3f32e1156ed62c9d26987d26c256d1827
+    volumes: *docker-socket
     # The whole dev environment, defined once and reused by auto-deploy-dev.
     # deploy-v-note.sh takes no arguments and knows nothing about which
     # environment it is deploying — every environment-specific value reaches it
@@ -260,10 +259,10 @@ steps:
     # longer from_secret, so nothing here may echo them: `docker compose config`
     # keeps its --quiet, and deploy-v-note.sh must never gain `set -x`.
     #
-    # The `sovereign-config` CLI is NOT installed here. It is the operator's copy
-    # on the agent host, mounted in by `&deploy-volumes` above. The in-pipeline
-    # installer pinned a version the server later retired (its download 404'd
-    # and failed every deploy), and was removed on PR #55.
+    # The `sovereign-config` CLI is NOT installed here: it is baked into the step
+    # image (`&deploy-image` above). The in-pipeline installer pinned a version
+    # the server later retired (its download 404'd and failed every deploy), and
+    # was removed on PR #55.
     commands: &deploy-commands
       - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
 
@@ -287,8 +286,8 @@ steps:
       - compute-version
       - apply-authentik-blueprint-auto-dev
       - attach-sqltool-outpost-auto-dev
-    image: *docker-image
-    volumes: *deploy-volumes
+    image: *deploy-image
+    volumes: *docker-socket
     environment: *deploy-dev-environment
     commands: *deploy-commands
 

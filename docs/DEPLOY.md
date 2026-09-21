@@ -147,27 +147,28 @@ with a `-` or a leading digit is refused. It **fails closed**: an unreadable
 layer, or one that contributes no values at all, means the deploy script never
 runs.
 
-#### The CLI is provided by the operator
+#### The CLI comes from the step image
 
-The pipeline does **not** install the CLI. The operator installs it on the
-Woodpecker agent host (mini) at `/home/vincent/.local/bin/sovereign-config`, and
-both deploy steps (`deploy-dev`, `auto-deploy-dev`) bind-mount that file
-read-only to `/usr/local/bin/sovereign-config` in the step container
-(`&deploy-volumes` in `.woodpecker/deploy.yml`). A host path is needed because
-the step runs inside `docker:27-cli` and cannot see the host's PATH; the binary is
-static-pie, so it runs unchanged in that Alpine image.
+The pipeline does **not** install the CLI. Both deploy steps (`deploy-dev`,
+`auto-deploy-dev`) run in
+`registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf4909…1827`
+(`&deploy-image` in `.woodpecker/deploy.yml`): the docker CLI image with the
+sovereign-config CLI baked in, published by the operator. It carries everything
+the step uses — Docker with the compose plugin, `sh`, and the busybox tools
+`deploy-v-note.sh` needs — so it is a drop-in for `docker:27-cli`. Every other
+step keeps `docker:27-cli`.
 
-**To upgrade the CLI**, replace that file on mini — no commit. If the file is
-missing the deploy step fails with `sovereign-config: not found` before anything
-is deployed; if it is a directory or absent, Docker may create an empty directory
-at that path instead, with the same result.
+Until PR #55 the step installed the CLI from the server's `/dist` with a pinned
+version and digest (`scripts/install-sovereign-config-cli.sh`). That was removed
+when the server retired the pinned 2.26.2 installer: the download 404'd and every
+deploy failed, on every branch and on master. A host bind mount of an
+operator-installed binary briefly replaced it and was then dropped for this
+image, because a host file drifts from the server silently while a pin changes
+only by commit.
 
-Until PR #55 the step installed it from the server's `/dist` with a pinned version
-and digest (`scripts/install-sovereign-config-cli.sh`). That was removed when the
-server retired the pinned 2.26.2 installer: the download 404'd and every deploy
-failed, on every branch and on master.
-
-The CLI must still match the running server. The other client pinned to the
+**The CLI must match the running server**, so bump the image's tag and digest
+together, as a commit, when the server is upgraded (verified at pin time: 2.30.2
+against 2.30.2). The other client pinned to the
 server is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
 [Runtime config](#runtime-config-sovereign-config)); check the live version
 (sovereign-config MCP `status`) before relocking it.
