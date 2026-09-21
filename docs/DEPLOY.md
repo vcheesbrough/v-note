@@ -474,14 +474,15 @@ the deploy's layer — not a second copy, and no longer in OpenBao for deployed
 environments. Local compose still keeps its own `POSTGRES_PASSWORD` in OpenBao,
 because that is a different database.
 
-The provider is pinned to the running sovereign-config server's tag (**2.19.4**).
-Only the **protocol** is enforced: the provider **fails closed on protocol
-mismatch** (both sides speak `v3`), but nothing checks the tag itself — the server
-once ran 2.19.4 against a 2.12.1 client without anything failing. So the pin is a
-convention to keep, not a guarantee: before relocking, compare it with the live
-version (sovereign-config MCP `status`, or the unauthenticated gRPC
-`System.GetVersion`), and if the server has moved, bump `sovereign-config-provider`
-in `crates/server/Cargo.toml` and rebuild.
+The provider is pinned to tag **2.30.2**, the sovereign-config server version
+deployed when it was last bumped. Since 2.25 the provider **negotiates** a protocol
+version with the server on connect and fails closed only when they share none, so
+a server upgrade no longer requires rebuilding v-note: a build keeps working until
+the server *retires* every protocol version it speaks — an announced, observable
+event. Bumping the pin is still worthwhile to pick up client fixes; when you do,
+read the `## Upgrade` section of sovereign-config's `README.md` at the new tag for
+source-breaking changes to the client crates, and compare against the live version
+(sovereign-config MCP `status`, or the unauthenticated gRPC `System.GetVersion`).
 
 ### Compose env vars that remain (per deployment)
 

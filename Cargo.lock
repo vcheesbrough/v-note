@@ -3711,17 +3711,18 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-client"
-version = "2.19.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.19.4#b2743cdbef4639ae157e662976570e3cbbcf294f"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "async-trait",
  "sovereign-config-core",
+ "tracing",
 ]
 
 [[package]]
 name = "sovereign-config-core"
-version = "2.19.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.19.4#b2743cdbef4639ae157e662976570e3cbbcf294f"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3732,8 +3733,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-native"
-version = "2.19.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.19.4#b2743cdbef4639ae157e662976570e3cbbcf294f"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "async-trait",
  "http",
@@ -3752,8 +3753,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-proto"
-version = "2.19.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.19.4#b2743cdbef4639ae157e662976570e3cbbcf294f"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -3764,8 +3765,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-provider"
-version = "2.19.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.19.4#b2743cdbef4639ae157e662976570e3cbbcf294f"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "async-trait",
  "config",
@@ -4111,7 +4112,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
