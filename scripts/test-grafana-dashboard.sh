@@ -6,7 +6,7 @@
 # Everything here runs with no network and no token:
 #
 #   1. deploy/grafana/v-note-overview.json — parses, keeps its stable uid, commits
-#      no numeric id, filters every query by `env`, uses one Prometheus datasource
+#      no numeric id, filters every query by `deployment_environment`, uses one Prometheus datasource
 #      by uid, charts only metrics the server actually registers, and never
 #      mentions an unbounded id (page/session/owner/client batch).
 #   2. scripts/publish-grafana-dashboard.sh — the --dry-run payload envelope, the
@@ -97,17 +97,21 @@ dash_check "Prometheus is referenced by uid $PROMETHEUS_UID only" \
 dash_check "no datasource template variable" \
   '[.templating.list[] | select(.type == "datasource")] | length == 0'
 
-dash_check "every Prometheus metric selector filters env=\"\$env\"" \
-  'prom_exprs | length > 0 and all([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length > 0 and all(test("env=\"\\$env\"")))' \
-  'prom_exprs | map(select([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length == 0 or any(test("env=\"\\$env\"") | not)))'
-# Two spellings of the same scope. Docker-scraped streams carry `env` (from the
-# observability.env container label); OTLP-ingested ones — client telemetry,
-# #354 — carry `deployment_environment`, which Loki indexes from the resource
-# attribute the sidecar forces. Anchored so neither is satisfied by a longer
-# label that merely ends in the same letters.
-dash_check "every Loki query filters env=\"\$env\" (or deployment_environment for OTLP streams)" \
-  'loki_exprs | all(test("[{,[:space:]](env|deployment_environment)=\"\\$env\""))' \
-  'loki_exprs | map(select(test("[{,[:space:]](env|deployment_environment)=\"\\$env\"") | not))'
+# One label name for every signal. mini-config's Alloy attaches the
+# observability.env container label as `deployment_environment` on scraped
+# metrics and Docker logs — the name Loki gives the `deployment.environment`
+# resource attribute on OTLP ingest (client telemetry, #354) — so the same
+# selector covers both. Anchored so it is not satisfied by a longer label that
+# merely ends in the same letters, and so a leftover bare `env=` fails.
+dash_check "every Prometheus metric selector filters deployment_environment=\"\$env\"" \
+  'prom_exprs | length > 0 and all([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length > 0 and all(test("[{,[:space:]]deployment_environment=\"\\$env\"")))' \
+  'prom_exprs | map(select([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length == 0 or any(test("[{,[:space:]]deployment_environment=\"\\$env\"") | not)))'
+dash_check "every Loki query filters deployment_environment=\"\$env\"" \
+  'loki_exprs | all(test("[{,[:space:]]deployment_environment=\"\\$env\""))' \
+  'loki_exprs | map(select(test("[{,[:space:]]deployment_environment=\"\\$env\"") | not))'
+dash_check "no query filters the retired env label" \
+  '(prom_exprs + loki_exprs) | all(test("[{,[:space:]]env=") | not)' \
+  '(prom_exprs + loki_exprs) | map(select(test("[{,[:space:]]env=")))'
 
 # The whole document, not just exprs and legends: nothing on this dashboard has
 # any business naming a per-user, per-page or per-session id.
