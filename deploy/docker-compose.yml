@@ -67,7 +67,7 @@ services:
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
       - observability.service=v-note
-      - observability.env=${APP_ENV:-dev}
+      - observability.deployment.environment=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
       # No `observability.protocol` label: the protocol version is a compile-time
       # constant, not configuration. `v_note_build_info{protocol=…}` states it
@@ -227,7 +227,7 @@ services:
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
       - observability.service=v-note-sql-console
-      - observability.env=${APP_ENV:-dev}
+      - observability.deployment.environment=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
 
   # Client telemetry sidecar (#354): receives the SPA's (and, from #406, the
@@ -323,7 +323,7 @@ services:
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
       - observability.service=v-note-client-telemetry
-      - observability.env=${APP_ENV:-dev}
+      - observability.deployment.environment=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
 
 configs:

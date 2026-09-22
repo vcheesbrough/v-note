@@ -98,7 +98,7 @@ dash_check "no datasource template variable" \
   '[.templating.list[] | select(.type == "datasource")] | length == 0'
 
 # One label name for every signal. mini-config's Alloy attaches the
-# observability.env container label as `deployment_environment` on scraped
+# observability.deployment.environment container label as `deployment_environment` on scraped
 # metrics and Docker logs — the name Loki gives the `deployment.environment`
 # resource attribute on OTLP ingest (client telemetry, #354) — so the same
 # selector covers both. Anchored so it is not satisfied by a longer label that
