@@ -71,6 +71,12 @@ otelcol.receiver.otlp "android" {
 // else. The allow-list is SDK self-description only — harmless, bounded, and
 // useful when two client builds disagree.
 //
+// Logs also get `log_source = "otlp"`, which mini-config's Loki indexes as a
+// stream label. Every other path into that Loki sets it too (the Docker stdout
+// of this same stack arrives as `log_source = "docker"`), so each source is
+// selectable by a positive match rather than by a label's absence. Traces don't
+// need it, so they don't get it.
+//
 // `error_mode = "propagate"` is deliberate. The default (`ignore`) would log a
 // failed statement and forward the record *unmodified*, i.e. with the client's
 // own claims intact. Better to drop telemetry than to ingest a forgery.
@@ -98,6 +104,7 @@ otelcol.processor.transform "spa" {
 		statements = [
 			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
 			`set(resource.attributes["service.name"], "v-note-spa")`,
+			`set(resource.attributes["log_source"], "otlp")`,
 			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
 			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
 		]
@@ -127,6 +134,7 @@ otelcol.processor.transform "android" {
 		statements = [
 			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
 			`set(resource.attributes["service.name"], "v-note-android")`,
+			`set(resource.attributes["log_source"], "otlp")`,
 			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
 			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
 		]

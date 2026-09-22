@@ -122,6 +122,9 @@ function forgedResource(marker: string) {
       { key: 'deployment.environment', value: { stringValue: 'forged-env' } },
       { key: 'service.version', value: { stringValue: '9.9.9-forged' } },
       { key: 'service.instance.id', value: { stringValue: `cardinality-bomb-${marker}` } },
+      // Loki indexes `log_source`; claiming `docker` would pass client logs
+      // off as a container's stdout.
+      { key: 'log_source', value: { stringValue: 'docker' } },
       // Allow-listed, so this one is expected to survive untouched — which is
       // what shows the pipeline is filtering rather than simply dropping
       // everything it did not write itself.
@@ -329,6 +332,7 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
     const stream = streams[0].stream;
     expect(stream.service_name).toBe('v-note-spa');
     expect(stream.deployment_environment).toBe(EXPECTED_ENV);
+    expect(stream.log_source).toBe('otlp');
     // Trace correlation is the whole point of shipping logs over OTLP: this is
     // what Grafana turns into a link from the log line to the trace.
     expect(stream.trace_id).toBe(traceId);
@@ -344,6 +348,22 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
       },
     });
     expect((await res2.json()).data.result).toHaveLength(0);
+  });
+
+  test('an Android log reaches Loki as an OTLP-sourced v-note-android stream', async ({ request }) => {
+    const marker = `android-log-${hex(4)}`;
+
+    const res = await request.post('/otlp/android/v1/logs', {
+      data: logBody(marker, hex(16), hex(8), `android: ${marker}`),
+    });
+    expect(res.status()).toBe(200);
+
+    const streams = await lokiStreams('{service_name="v-note-android"}', (line) =>
+      line.includes(marker),
+    );
+    const stream = streams[0].stream;
+    expect(stream.deployment_environment).toBe(EXPECTED_ENV);
+    expect(stream.log_source).toBe('otlp');
   });
 });
 
