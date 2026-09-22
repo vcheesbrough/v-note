@@ -66,7 +66,7 @@ services:
       - observability.metrics.port=${V_NOTE_METRICS_PORT:-9090}
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
-      - observability.service=v-note
+      - observability.service.name=v-note
       - observability.deployment.environment=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
       # No `observability.protocol` label: the protocol version is a compile-time
@@ -226,7 +226,7 @@ services:
       - observability.metrics.port=9191
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
-      - observability.service=v-note-sql-console
+      - observability.service.name=v-note-sql-console
       - observability.deployment.environment=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
 
@@ -322,7 +322,7 @@ services:
       - observability.metrics.port=12345
       - observability.metrics.path=/metrics
       - observability.metrics.scheme=http
-      - observability.service=v-note-client-telemetry
+      - observability.service.name=v-note-client-telemetry
       - observability.deployment.environment=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
 
