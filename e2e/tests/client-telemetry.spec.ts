@@ -291,6 +291,18 @@ async function lokiStreamCount(query: string): Promise<number> {
   return ((await res.json()).data.result as unknown[]).length;
 }
 
+/**
+ * How many traces a TraceQL search finds right now. No start/end, so Tempo
+ * searches what its ingesters hold — the recent data every test here writes.
+ */
+async function tempoSearchCount(traceql: string): Promise<number> {
+  const res = await backends.get(`${TEMPO_URL}/api/search`, {
+    params: { q: traceql, limit: '100' },
+  });
+  expect(res.ok(), `tempo search ${traceql}`).toBe(true);
+  return (((await res.json()).traces ?? []) as unknown[]).length;
+}
+
 // ---------------------------------------------------------------------------
 // Resource-attribute integrity — the reason the sidecar exists
 // ---------------------------------------------------------------------------
@@ -419,6 +431,16 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
     ).toBe(200);
 
     expect((await tempoResource(traceId))['log_source']).toBe('client');
+    // …and a *search* separates client spans from the server's by the marker
+    // alone. The span name is unique to this run, so "found under client" and
+    // "not found under otlp" are about this one span; the positive comes first
+    // so the negative cannot pass merely because search returned nothing.
+    const clientSpan = `{ resource.log_source = "client" && name = "${marker}" }`;
+    const forgedSpan = `{ resource.log_source = "otlp" && name = "${marker}" }`;
+    await eventually(`tempo search ${clientSpan}`, async () =>
+      (await tempoSearchCount(clientSpan)) > 0 ? true : null,
+    );
+    expect(await tempoSearchCount(forgedSpan)).toBe(0);
 
     // Selectable by the marker alone, without `service_name` doing the work.
     const streams = await lokiStreams('{log_source="client"}', (line) => line.includes(marker));
