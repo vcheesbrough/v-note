@@ -344,10 +344,18 @@ services:
       - e2e-net
 
   loki:
-    # The image's own default config: single binary, filesystem storage, and
-    # structured metadata on, which OTLP ingest requires. No healthcheck for the
-    # same reason as tempo — distroless, no shell — so the spec waits on /ready.
-    image: grafana/loki:3.7.3@sha256:70b9f699fc9bb868b62f1cfd4f787dfa50242f1fd92e6089787d5d7daea75fe8
+    # Single binary, filesystem storage, structured metadata on (which OTLP
+    # ingest requires) — and, from #418, `log_source` indexed as a stream label
+    # the way mini-config's Loki indexes it, so the spec's selectors on the
+    # marker mean what they say. No healthcheck for the same reason as tempo —
+    # distroless, no shell — so the spec waits on /ready.
+    image: v-note-e2e-loki:${OCI_IMAGE_VERSION:-local}
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM grafana/loki:3.7.3@sha256:70b9f699fc9bb868b62f1cfd4f787dfa50242f1fd92e6089787d5d7daea75fe8
+        COPY fixtures/loki.yaml /etc/loki/local-config.yaml
+    command: ["-config.file=/etc/loki/local-config.yaml"]
     networks:
       - e2e-net
 
