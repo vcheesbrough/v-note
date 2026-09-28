@@ -109,10 +109,18 @@ services:
       VNOTE__CLIENT-TELEMETRY__ENABLED: "true"
       VNOTE__CLIENT-TELEMETRY__SPA-ENDPOINT: http://alloy:4318
       VNOTE__CLIENT-TELEMETRY__ANDROID-ENDPOINT: http://alloy:4319
-      # The server's OWN spans, exported straight to Tempo. Without this the
-      # browser's trace would arrive with nothing beneath it, and "one trace
-      # spans browser → server → Postgres" could not be asserted at all.
-      VNOTE__OBSERVABILITY__OTLP-ENDPOINT: http://tempo:4317
+      # The server's OWN spans and, from #417, its logs — exported to the
+      # shared-Alloy stand-in below, as a deployed server exports to
+      # monitor-alloy. Without spans the browser's trace would arrive with
+      # nothing beneath it; without the stand-in's logs pipeline Tempo would be
+      # the only receiver, and it does not take logs.
+      VNOTE__OBSERVABILITY__OTLP-ENDPOINT: http://monitor-alloy:4317
+    # What the deployed stack sets (deploy/docker-compose.yml), and what the
+    # stand-in's Docker scrape reads, as the shared Alloy does: `service_name`
+    # and `deployment_environment` on the stdout copy of every line.
+    labels:
+      observability.service.name: v-note
+      observability.deployment.environment: test
     # `test` is deliberately absent: the probe command is inherited from the
     # image (Dockerfile.web), so there is still exactly one definition of what
     # "healthy" means. Only the timings are overridden, because the image is
@@ -126,6 +134,10 @@ services:
       mock-oidc:
         condition: service_started
       postgres:
+        condition: service_healthy
+      # Up before the server so its startup lines — the resolved observability
+      # config among them — are exported rather than retried into the void.
+      monitor-alloy:
         condition: service_healthy
     networks:
       - e2e-net
@@ -329,6 +341,43 @@ services:
     networks:
       - e2e-net
 
+  # Stand-in for the SHARED monitoring Alloy (#417): the collector a deployed
+  # server exports its own telemetry to, and the Docker scrape that ships its
+  # stdout. A fixture mirroring mini-config's config.alloy, not a deployed
+  # artifact — see the header of e2e/alloy/monitor-alloy.alloy for what it
+  # mirrors (as of mini-config #47), what it leaves out, and the drift risk.
+  # Named for the real service so a config that names `monitor-alloy` reads the
+  # same here and on dev.
+  monitor-alloy:
+    image: v-note-e2e-monitor-alloy:${OCI_IMAGE_VERSION:-local}
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM grafana/alloy:v1.17.1@sha256:4f6ddc56ffdcf8a6316748fc5162972e20cb301523cac1bb4a31957df733ae9b
+        COPY alloy/monitor-alloy.alloy /etc/alloy/monitor-alloy.alloy
+    command:
+      - run
+      - /etc/alloy/monitor-alloy.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/tmp/alloy
+    environment:
+      # Narrows the Docker scrape to this stack's `app`. A CI host's socket sees
+      # every container on the machine; compose's own default project name is
+      # the directory, `e2e`.
+      E2E_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-e2e}
+    volumes:
+      # The Docker scrape, exactly as the shared Alloy is given it. The one bind
+      # mount in this file that works when compose runs inside a CI container:
+      # the source is the daemon's own socket, which exists on the host.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/4317 && exec 4<>/dev/tcp/127.0.0.1/4318"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+    networks:
+      - e2e-net
+
   tempo:
     image: v-note-e2e-tempo:${OCI_IMAGE_VERSION:-local}
     build:
@@ -417,6 +466,8 @@ services:
       sqltool:
         condition: service_healthy
       alloy:
+        condition: service_healthy
+      monitor-alloy:
         condition: service_healthy
       # `service_started`, not healthy: neither image can run a healthcheck.
       tempo:

@@ -89,6 +89,8 @@ pub fn recover_pending(state: AppState) {
                     return;
                 }
             };
+            // A startup event outside any request: what the restart found.
+            tracing::info!(jobs = pending.len(), "recovering pending thumbnail jobs");
             for (page_id, owner_id, source_seq) in pending {
                 let source_seq = source_seq as u64;
                 crate::observability::metrics().record_thumbnail_recovery("queued");
@@ -119,14 +121,21 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
         "thumbnail.generate",
         page_id = %page_id,
         source_seq = source_seq,
+        png_bytes = tracing::field::Empty,
     );
     span.follows_from(tracing::Span::current());
+    // In the queuing request's trace, so the commit that caused a render says
+    // so; the render itself is the linked `thumbnail.generate` trace.
+    tracing::info!(page_id = %page_id, source_seq, "thumbnail job queued");
     tokio::spawn(async move {
         let pool = &state.db;
         let started = Instant::now();
         let result = generate(pool, &page_id, source_seq).await;
         let thumbnail = match result {
             Ok(()) => {
+                // Size and duration are this span's `png_bytes` and the
+                // thumbnail histograms; the line is the outcome.
+                tracing::info!(page_id = %page_id, source_seq, "thumbnail rendered");
                 crate::observability::metrics()
                     .record_page_mutation("generate_thumbnail", "success");
                 crate::observability::metrics()
@@ -186,6 +195,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
         .acquire()
         .await
         .map_err(|error| error.to_string())?;
+    tracing::debug!("render permit acquired");
     // Thumbnails are immutable per revision, so the paper comes from the *job
     // row* — the paper in force when this revision was minted — never from
     // `pages.paper`, which may already name a later choice. This is the only
@@ -251,6 +261,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .await
     .map_err(|error| error.to_string())?;
     crate::observability::metrics().observe_thumbnail_artifact_bytes(png_bytes);
+    tracing::Span::current().record("png_bytes", png_bytes);
     cleanup_best_effort(pool, page_id).await;
     Ok(())
 }
@@ -662,6 +673,8 @@ async fn cleanup_best_effort(pool: &PgPool, page_id: &str) {
     match cleanup(pool, page_id).await {
         Ok(()) => {
             crate::observability::metrics().record_page_mutation("cleanup_thumbnails", "success");
+            // What it removed is the `db.query` span's `db.response.affected_rows`.
+            tracing::debug!("thumbnail retention cleanup done");
         }
         Err(error) => {
             crate::observability::metrics().record_page_mutation("cleanup_thumbnails", "error");

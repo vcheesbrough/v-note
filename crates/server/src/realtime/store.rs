@@ -90,6 +90,7 @@ struct TombstoneBatchRow {
     stroke_ids: sqlx::types::Json<Vec<String>>,
 }
 
+#[tracing::instrument(skip_all, fields(page_id = %page_id))]
 async fn load_page_replay(
     pool: &PgPool,
     page_id: &str,
@@ -114,7 +115,12 @@ async fn load_page_replay(
         client_mutation_id: row.client_mutation_id,
         stroke_ids: row.stroke_ids.0,
     })
-    .collect();
+    .collect::<Vec<_>>();
+    tracing::debug!(
+        batches = batches.len(),
+        tombstone_batches = tombstones.len(),
+        "page replay loaded"
+    );
     Ok((batches, tombstones))
 }
 
@@ -137,6 +143,14 @@ pub(super) struct PersistedBatch {
     pub(super) updated_at: Option<String>,
 }
 
+/// Spanned per call so its queries group under one commit in Tempo. Logs the
+/// two outcomes that change no ink — a retry and a fully suppressed add — at
+/// `debug`; the committed batch itself is logged by `dispatch::commit_batch`,
+/// which is where the outcome is acted on.
+#[tracing::instrument(
+    skip_all,
+    fields(page_id = %page_id, client_batch_id = %client_batch_id, strokes = strokes.len())
+)]
 async fn persist_batch(
     pool: &PgPool,
     page_id: &str,
@@ -190,6 +204,10 @@ async fn persist_batch(
     .await?;
     if let Some((seq, revision)) = existing {
         // Idempotent retry: re-echo only the strokes still visible today.
+        tracing::debug!(
+            seq,
+            "stroke batch already stored; treating the commit as a retry"
+        );
         tx.commit()
             .instrument(db_query_span!("COMMIT", "persist_batch"))
             .await?;
@@ -206,6 +224,7 @@ async fn persist_batch(
     if visible_strokes.is_empty() {
         // Every submitted stroke is tombstoned — acknowledge the add as a no-op
         // without inserting a batch, advancing the revision, or broadcasting.
+        tracing::debug!("every stroke in the batch is tombstoned; add suppressed");
         let head_seq: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(seq), 0) FROM stroke_batches WHERE page_id = $1",
         )
@@ -327,6 +346,16 @@ pub(super) struct PersistedTombstones {
     pub(super) updated_at: Option<String>,
 }
 
+/// See [`persist_batch`]: no-op outcomes at `debug` here, the commit itself in
+/// `dispatch::commit_tombstones`.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        page_id = %page_id,
+        client_mutation_id = %client_mutation_id,
+        requested = requested_ids.len(),
+    )
+)]
 async fn persist_tombstones(
     pool: &PgPool,
     page_id: &str,
@@ -352,6 +381,7 @@ async fn persist_tombstones(
     .fetch_optional(metered(&mut *tx))
     .instrument(db_query_span!("SELECT", "persist_tombstones_existing"))
     .await? {
+        tracing::debug!(revision, "tombstone batch already stored; treating the commit as a retry");
         tx.commit().instrument(db_query_span!("COMMIT", "persist_tombstones")).await?;
         return Ok(PersistedTombstones { revision: revision as u64, owner_id, stroke_ids: ids.0, thumbnail_job_created: false, updated_at: None });
     }
@@ -371,6 +401,9 @@ async fn persist_tombstones(
     ))
     .await?;
     ids.retain(|id| !existing.contains(id));
+    if ids.is_empty() {
+        tracing::debug!("every requested stroke was already tombstoned; nothing to erase");
+    }
     let revision = if ids.is_empty() {
         current_revision
     } else {
@@ -434,6 +467,9 @@ pub(super) struct PersistedPaper {
     pub(super) updated_at: Option<String>,
 }
 
+/// See [`persist_batch`]: the same-value no-op at `debug` here, the change
+/// itself in `dispatch::set_paper`.
+#[tracing::instrument(skip_all, fields(page_id = %page_id, paper = paper.wire_value()))]
 async fn persist_paper(
     pool: &PgPool,
     page_id: &str,
@@ -452,6 +488,7 @@ async fn persist_paper(
     .await?;
 
     if current_paper == paper.wire_value() {
+        tracing::debug!("page already has this paper; nothing to change");
         tx.commit()
             .instrument(db_query_span!("COMMIT", "persist_paper"))
             .await?;

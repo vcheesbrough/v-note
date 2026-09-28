@@ -7,7 +7,8 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
@@ -150,4 +151,90 @@ async fn a_thumbnail_is_served_immutable_while_available_and_gone_otherwise(pool
         ThumbnailMetadata::Generating { source_seq: 2 },
         "a page reports its newest thumbnail job"
     );
+}
+
+/// Every info-level event this test binary emits, as its fields.
+type Events = Arc<Mutex<Vec<BTreeMap<String, String>>>>;
+
+/// The info-level events of the whole test binary, from a global subscriber
+/// installed once. Global rather than a thread-local default on purpose: the
+/// tests here run in parallel and all create pages, and a callsite first
+/// reached by another test while no subscriber was listening caches "never
+/// interested", so a thread-local capture misses the line — a flake that looks
+/// exactly like the line being gone. Callers filter by the ids they own.
+fn info_events() -> Events {
+    use std::sync::OnceLock;
+    use tracing_subscriber::layer::{Context, SubscriberExt as _};
+
+    struct Fields<'a>(&'a mut BTreeMap<String, String>);
+
+    impl tracing::field::Visit for Fields<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct Capture(Events);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            if *event.metadata().level() != tracing::Level::INFO {
+                return;
+            }
+            let mut fields = BTreeMap::new();
+            event.record(&mut Fields(&mut fields));
+            self.0.lock().expect("capture lock").push(fields);
+        }
+    }
+
+    static EVENTS: OnceLock<Events> = OnceLock::new();
+    EVENTS
+        .get_or_init(|| {
+            let events = Events::default();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(Capture(Arc::clone(&events))),
+            )
+            .expect("no other test installs a global subscriber");
+            events
+        })
+        .clone()
+}
+
+/// #417: the page CRUD surface logged one line before the sweep. Each mutation
+/// now says what it did, at `info`, with the page it did it to — the line a
+/// Loki search for a page id finds.
+#[sqlx::test(migrations = "./migrations")]
+async fn page_mutations_log_at_info_with_their_page_id(pool: PgPool) {
+    let events = info_events();
+
+    let id = create_page(&pool, Some("Logged"), Paper::None)
+        .await
+        .page
+        .id;
+    let (status, _, _) = send(
+        &pool,
+        OWNER,
+        Method::DELETE,
+        &format!("/api/pages/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = events.lock().expect("capture lock").clone();
+    for message in ["page created", "page deleted"] {
+        let line = events.iter().find(|fields| {
+            fields.get("message").map(String::as_str) == Some(message)
+                && fields.get("page_id") == Some(&id)
+        });
+        assert!(
+            line.is_some(),
+            "no info-level {message:?} line with page_id {id}"
+        );
+    }
 }

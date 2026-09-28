@@ -102,11 +102,12 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__OIDC__REQUIRED-SCOPE` | **required** | the deployed environment's scope, e.g. `v-note:dev:access` |
 | `VNOTE__OIDC__END-SESSION-URL` | optional | RP-initiated logout redirect |
 | `VNOTE__OBSERVABILITY__ENVIRONMENT` | **required** | OTEL `deployment.environment` (`dev` \| `production`) |
-| `VNOTE__OBSERVABILITY__OTLP-ENDPOINT` | unset | when set, exports OTLP traces to Alloy, e.g. `http://monitor-alloy:4317` |
+| `VNOTE__OBSERVABILITY__OTLP-ENDPOINT` | unset | when set, exports OTLP traces **and logs** (#417) to Alloy, e.g. `http://monitor-alloy:4317`; unset turns both off and leaves stdout logging as it was |
 | `VNOTE__OBSERVABILITY__OTLP-PROTOCOL` | `grpc` | only gRPC is supported; anything else fails startup |
 | `VNOTE__OBSERVABILITY__OTLP-TIMEOUT-MS` | `2000` | coerced to `u64` |
 | `VNOTE__OBSERVABILITY__SERVICE-NAME` | `v-note` | trace service name |
 | `VNOTE__OBSERVABILITY__METRICS-ADDR` | `0.0.0.0:9090` | internal Prometheus listener; `disabled`/blank turns it off |
+| `VNOTE__OBSERVABILITY__OTLP-LOG-FILTER` | unset (= the stdout filter) | `EnvFilter` directive for the **OTLP log layer only** (#417), e.g. `server=warn` to keep Loki quiet while `RUST_LOG=server=debug` stays on stdout. An invalid directive **fails startup** |
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
 | `VNOTE__REALTIME__COALESCE-REPLAY` | `true` | **Feature flag (#323).** Answer a `subscribe` with one coalesced `page-replay` frame. Set `false` to restore the pre-#323 shape (a `stroke-batch` per stored batch, then `synced`) without rebuilding — see below. A non-boolean value **fails startup** rather than reading as `false` |
 | `VNOTE__REALTIME__COMPRESSION` | `false` code default, but **`true` in every deployed environment** | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. The code default is off; the sovereign leaves are **on** — see below. A non-boolean value **fails startup** rather than reading as `false` |
@@ -115,6 +116,27 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
 | `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
 | `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
+
+#### Server telemetry against a local collector (#417)
+
+`cargo run -p server` exports nothing unless `VNOTE__OBSERVABILITY__OTLP-ENDPOINT`
+is set, and logs to stdout either way. To see the OTLP side — spans in Tempo,
+log records in Loki as `{service_name="v-note", log_source="otlp"}` — point it
+at the e2e stack's shared-Alloy stand-in, which mirrors dev's `monitor-alloy`
+(its OTLP `apps` pipeline since mini-config #47, and its Docker scrape):
+
+```bash
+TEST_IMAGE=unused docker compose -f e2e/docker-compose.test.yml up -d --build monitor-alloy tempo loki
+# publish them first (e.g. a `ports:` override), then:
+VNOTE__OBSERVABILITY__OTLP-ENDPOINT=http://localhost:4317 \
+VNOTE__OBSERVABILITY__OTLP-LOG-FILTER=server=debug \
+cargo run -p server
+```
+
+`RUST_LOG` still governs stdout (and which spans are recorded); the log filter
+governs only what is exported. A collector that is down costs nothing but the
+telemetry: the exporter drops batches and the SDK says so once per interval on
+stdout under the `opentelemetry` target.
 
 #### `realtime.coalesce-replay` — runtime rollback for #323
 

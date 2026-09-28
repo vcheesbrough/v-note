@@ -151,6 +151,13 @@ where
         .iter()
         .any(|stroke| stroke.id.is_empty() || stroke.validate().is_err())
     {
+        tracing::warn!(
+            page_id = ctx.page_id,
+            session_id = ctx.session_id,
+            client_batch_id = %client_batch_id,
+            strokes = strokes.len(),
+            "stroke batch rejected: a stroke has no id or an unsupported style"
+        );
         return send_page(
             sender,
             PageServerMessage::Error {
@@ -184,6 +191,21 @@ where
         }
     };
     crate::observability::metrics().record_page_mutation("commit_batch", "success");
+    // The outcome of the ink write path's one mutation, with what the store did
+    // to it: counts and ids only, never stroke geometry. `page_id` and
+    // `session_id` are repeated from the message span because the OTLP log
+    // bridge carries an event's own fields, not its span's.
+    tracing::info!(
+        page_id = ctx.page_id,
+        session_id = ctx.session_id,
+        client_batch_id = %client_batch_id,
+        seq = persisted.seq,
+        revision = persisted.revision,
+        submitted = strokes.len(),
+        visible = persisted.visible_strokes.len(),
+        thumbnail_queued = persisted.thumbnail_job_created,
+        "stroke batch committed"
+    );
     // Delete-wins: broadcast only strokes that survived tombstone
     // filtering. An add fully suppressed by tombstones changes no
     // visible state, so it is acknowledged without a fan-out.
@@ -244,6 +266,16 @@ where
             .await;
         }
     };
+    tracing::info!(
+        page_id = ctx.page_id,
+        session_id = ctx.session_id,
+        client_mutation_id = %client_mutation_id,
+        revision = persisted.revision,
+        requested = stroke_ids.len(),
+        tombstoned = persisted.stroke_ids.len(),
+        thumbnail_queued = persisted.thumbnail_job_created,
+        "tombstones committed"
+    );
     ctx.state.realtime.publish_page(
         ctx.page_id,
         PageServerMessage::TombstoneBatch(TombstoneBatch {
@@ -313,6 +345,15 @@ where
         )
         .await;
     }
+    tracing::info!(
+        page_id = ctx.page_id,
+        session_id = ctx.session_id,
+        client_mutation_id = %client_mutation_id,
+        paper = paper.wire_value(),
+        revision = persisted.revision,
+        thumbnail_queued = persisted.thumbnail_job_created,
+        "paper changed"
+    );
     // The broadcast reaches the sender too, as with StrokeBatch.
     ctx.state.realtime.publish_page(
         ctx.page_id,
@@ -423,19 +464,37 @@ where
         let replay = build_page_replay(page_id, last_seq, batches, tombstones);
         let Some(bytes) = send_page_frame(sender, PageServerMessage::PageReplay(replay)).await
         else {
+            tracing::info!(
+                page_id,
+                outcome = "aborted",
+                "page replay cut short: send failed"
+            );
             return false;
         };
         cost.add_frame(bytes);
     } else {
         if !send_replay_frames(sender, batches, tombstones, &mut cost).await {
+            tracing::info!(
+                page_id,
+                outcome = "aborted",
+                "page replay cut short: send failed"
+            );
             return false;
         }
         let Some(bytes) = send_page_frame(sender, PageServerMessage::Synced { last_seq }).await
         else {
+            tracing::info!(
+                page_id,
+                outcome = "aborted",
+                "page replay cut short: send failed"
+            );
             return false;
         };
         cost.add_frame(bytes);
     }
+    // The outcome and where the subscriber now stands. Frames, bytes and
+    // duration are this span's fields and the replay histograms, not this line.
+    tracing::info!(page_id, outcome = "synced", last_seq, "page replay sent");
 
     let span = tracing::Span::current();
     span.record("frames", cost.frames);
@@ -972,6 +1031,81 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    // ---- what the ink write path says (#417) ---------------------------------
+    //
+    // These keep the logging sweep from rotting: the realtime store and hub
+    // logged nothing before #417, so a commit was visible in Tempo and silent
+    // in Loki.
+
+    #[tokio::test]
+    async fn a_committed_batch_logs_its_outcome_and_counts_never_its_ink() {
+        let (_guard, logs) = crate::observability::log_capture::capture();
+        let state = AppState::for_tests();
+        let store = FakeStore {
+            batch: Mutex::new(Some(Ok(persisted_batch(vec![fixture_stroke("kept")])))),
+            ..FakeStore::default()
+        };
+
+        handle(&state, &store, commit(&["kept", "erased"])).await;
+
+        let line = logs.only("stroke batch committed");
+        assert_eq!(line.level, tracing::Level::INFO);
+        assert_eq!(line.field("client_batch_id"), Some("batch_1"));
+        // On the line itself: the OTLP bridge does not copy span fields.
+        assert_eq!(line.field("page_id"), Some(PAGE));
+        assert_eq!(line.field("session_id"), Some(SESSION));
+        assert_eq!(line.field("seq"), Some("5"));
+        assert_eq!(line.field("revision"), Some("9"));
+        assert_eq!(line.field("submitted"), Some("2"));
+        assert_eq!(line.field("visible"), Some("1"));
+        assert!(
+            line.fields.keys().all(|key| !key.contains("point")),
+            "no stroke geometry on the line: {:?}",
+            line.fields
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_tombstones_and_a_paper_change_log_at_info() {
+        let (_guard, logs) = crate::observability::log_capture::capture();
+        let state = AppState::for_tests();
+        let store = FakeStore {
+            tombstones: Mutex::new(Some(Ok(persisted_tombstones()))),
+            paper: Mutex::new(Some(Ok(persisted_paper(true)))),
+            ..FakeStore::default()
+        };
+
+        handle(&state, &store, erase_message()).await;
+        handle(&state, &store, set_paper_message()).await;
+
+        let erased = logs.only("tombstones committed");
+        assert_eq!(erased.level, tracing::Level::INFO);
+        assert_eq!(erased.field("client_mutation_id"), Some("erase_1"));
+        assert_eq!(erased.field("tombstoned"), Some("1"));
+        assert_eq!(erased.field("page_id"), Some(PAGE));
+        let paper = logs.only("paper changed");
+        assert_eq!(paper.level, tracing::Level::INFO);
+        assert_eq!(paper.field("paper"), Some("ruled-wide"));
+        assert_eq!(paper.field("page_id"), Some(PAGE));
+    }
+
+    #[tokio::test]
+    async fn a_denied_lease_warns_with_the_session_that_holds_it() {
+        // Moves the `lease_denied` counter other tests assert exact deltas on.
+        let _metrics = METRICS_LOCK.lock().await;
+        let (_guard, logs) = crate::observability::log_capture::capture();
+        let state = AppState::for_tests();
+        hold_lease(&state, "session_other");
+
+        handle(&state, &FakeStore::default(), commit(&["kept"])).await;
+
+        let denied = logs.only("edit lease denied: another session holds it");
+        assert_eq!(denied.level, tracing::Level::WARN);
+        assert_eq!(denied.field("holder"), Some("session_other"));
+        assert_eq!(denied.field("session_id"), Some(SESSION));
+        assert_eq!(denied.field("page_id"), Some(PAGE));
     }
 
     // ---- commit-tombstones --------------------------------------------------

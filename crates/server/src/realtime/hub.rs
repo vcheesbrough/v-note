@@ -97,6 +97,8 @@ impl RealtimeHub {
     pub fn issue_ticket(&self, owner_id: String, origin: SpanContext) -> RealtimeTicketResponse {
         let ticket = format!("ticket_{}", random_hex(32));
         let expires_at = Utc::now() + Duration::seconds(TICKET_TTL_SECONDS);
+        // Never the ticket itself: it is a bearer credential until redeemed.
+        tracing::debug!(owner_id = %owner_id, "realtime ticket issued");
         self.tickets.lock().expect("ticket mutex poisoned").insert(
             ticket.clone(),
             Ticket {
@@ -115,7 +117,12 @@ impl RealtimeHub {
         let now = Utc::now();
         let mut tickets = self.tickets.lock().expect("ticket mutex poisoned");
         tickets.retain(|_, value| value.expires_at > now);
-        let ticket = tickets.remove(ticket)?;
+        let Some(ticket) = tickets.remove(ticket) else {
+            // Expired tickets were swept just above, so unknown and expired
+            // are one case here. The caller answers 401 and logs the rejection.
+            tracing::debug!("realtime ticket not found or expired");
+            return None;
+        };
         (ticket.expires_at > now).then_some(RedeemedTicket {
             owner_id: ticket.owner_id,
             origin: ticket.origin,
@@ -153,7 +160,15 @@ impl RealtimeHub {
                 })
                 .clone()
         };
-        let _ = sender.send(Fanout::from_current_span(event));
+        let event_type = event.message_type();
+        // `Err` only means nobody is subscribed right now, which is normal.
+        let receivers = sender.send(Fanout::from_current_span(event)).unwrap_or(0);
+        tracing::debug!(
+            owner_id = %owner_id,
+            event_type,
+            receivers,
+            "library event published"
+        );
     }
 
     pub(super) fn subscribe_page(
@@ -187,7 +202,14 @@ impl RealtimeHub {
                 })
                 .clone()
         };
-        let _ = sender.send(Fanout::from_current_span(message));
+        let message_type = message.message_type();
+        let receivers = sender.send(Fanout::from_current_span(message)).unwrap_or(0);
+        tracing::debug!(
+            page_id = %page_id,
+            message_type,
+            receivers,
+            "page message published"
+        );
     }
 
     /// Acquire (or renew, for the current holder) the single-editor edit lease.
@@ -197,17 +219,34 @@ impl RealtimeHub {
         if let Some(existing) = leases.get(page_id)
             && existing.expires_at <= now
         {
+            tracing::info!(
+                page_id = %page_id,
+                holder = %existing.holder,
+                "edit lease expired"
+            );
             leases.remove(page_id);
         }
         match leases.get_mut(page_id) {
+            // A renewal: every commit renews, so this is deliberately silent.
             Some(existing) if existing.holder == session_id => {
                 existing.expires_at = now + Duration::seconds(LEASE_TTL_SECONDS);
                 LeaseOutcome::Granted
             }
-            Some(existing) => LeaseOutcome::Denied {
-                holder: existing.holder.clone(),
-            },
+            Some(existing) => {
+                // The `lease_denied` counter says how often; this says who held
+                // it against whom, which the counter cannot.
+                tracing::warn!(
+                    page_id = %page_id,
+                    session_id = %session_id,
+                    holder = %existing.holder,
+                    "edit lease denied: another session holds it"
+                );
+                LeaseOutcome::Denied {
+                    holder: existing.holder.clone(),
+                }
+            }
             None => {
+                tracing::info!(page_id = %page_id, session_id = %session_id, "edit lease granted");
                 leases.insert(
                     page_id.to_string(),
                     Lease {
@@ -226,6 +265,7 @@ impl RealtimeHub {
         match leases.get(page_id) {
             Some(existing) if existing.holder == session_id => {
                 leases.remove(page_id);
+                tracing::info!(page_id = %page_id, session_id = %session_id, "edit lease released");
                 true
             }
             _ => false,
@@ -237,7 +277,12 @@ impl RealtimeHub {
         let mut leases = self.leases.lock().expect("lease mutex poisoned");
         match leases.get(page_id) {
             Some(existing) if existing.expires_at > now => Some(existing.holder.clone()),
-            Some(_) => {
+            Some(existing) => {
+                tracing::info!(
+                    page_id = %page_id,
+                    holder = %existing.holder,
+                    "edit lease expired"
+                );
                 leases.remove(page_id);
                 None
             }

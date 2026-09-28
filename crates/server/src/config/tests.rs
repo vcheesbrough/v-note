@@ -409,6 +409,77 @@ fn observability_metrics_can_be_disabled() {
     }
 }
 
+/// #417: unset means "the same filter as stdout", which the telemetry module
+/// resolves — so the group itself carries nothing.
+#[test]
+fn observability_otlp_log_filter_defaults_to_unset() {
+    for extra in [
+        &[][..],
+        &[("VNOTE__OBSERVABILITY__OTLP-LOG-FILTER", "  ")][..],
+    ] {
+        let mut entries = vec![("VNOTE__OBSERVABILITY__ENVIRONMENT", "dev")];
+        entries.extend_from_slice(extra);
+        let observability: ObservabilityConfig =
+            load_group(&cfg(&entries), "observability").expect("should load");
+        assert!(observability.otlp_log_filter.is_none(), "{extra:?}");
+    }
+
+    let defaults = crate::observability::LogFilters::new(None, None);
+    assert_eq!(
+        defaults,
+        crate::observability::LogFilters::new(None, Some("")),
+        "an unset filter is the stdout filter"
+    );
+}
+
+#[test]
+fn observability_otlp_log_filter_parses_from_env_and_sovereign() {
+    let config = cfg(&[
+        ("VNOTE__OBSERVABILITY__ENVIRONMENT", "dev"),
+        (
+            "VNOTE__OBSERVABILITY__OTLP-LOG-FILTER",
+            "server=debug,tower_http=warn",
+        ),
+    ]);
+    let observability: ObservabilityConfig =
+        load_group(&config, "observability").expect("should load");
+    assert_eq!(
+        observability.otlp_log_filter.as_deref(),
+        Some("server=debug,tower_http=warn")
+    );
+
+    let config = cfg_with_sovereign(
+        &[
+            ("observability.environment", "dev"),
+            ("observability.otlp-log-filter", "server=warn"),
+        ],
+        &[],
+    );
+    let observability: ObservabilityConfig =
+        load_group(&config, "observability").expect("should load");
+    assert_eq!(
+        observability.otlp_log_filter.as_deref(),
+        Some("server=warn")
+    );
+}
+
+#[test]
+fn observability_rejects_an_invalid_otlp_log_filter() {
+    let config = cfg(&[
+        ("VNOTE__OBSERVABILITY__ENVIRONMENT", "dev"),
+        ("VNOTE__OBSERVABILITY__OTLP-LOG-FILTER", "server=loudly"),
+    ]);
+    let error = load_group::<ObservabilityConfig>(&config, "observability")
+        .expect_err("an unparseable directive should fail startup");
+
+    match error {
+        ConfigError::Invalid { ref path, .. } => {
+            assert_eq!(path, "observability.otlp-log-filter");
+        }
+        other => panic!("expected Invalid, got: {other}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // android
 // ---------------------------------------------------------------------------
