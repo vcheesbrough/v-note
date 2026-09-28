@@ -819,13 +819,13 @@ pub async fn run_metrics_server(
     Ok(())
 }
 
-/// What `init_tracing` installs when `RUST_LOG` is unset. `opentelemetry` at
-/// `warn` is where the SDK reports a failed export, so a collector that is down
-/// shows up in `docker logs` rather than nowhere.
 /// The estate's path-marker key (observability contract §4): a bare
 /// snake_case name, deliberately outside any semconv namespace.
 pub(crate) const TELEMETRY_SOURCE: &str = "telemetry_source";
 
+/// What `init_tracing` installs when `RUST_LOG` is unset. `opentelemetry` at
+/// `warn` is where the SDK reports a failed export, so a collector that is down
+/// shows up in `docker logs` rather than nowhere.
 pub(crate) const DEFAULT_LOG_FILTER: &str =
     "server=info,tower_http=info,axum=info,opentelemetry=warn";
 

@@ -345,7 +345,7 @@ services:
   # server exports its own telemetry to, and the Docker scrape that ships its
   # stdout. A fixture mirroring mini-config's config.alloy, not a deployed
   # artifact — see the header of e2e/alloy/monitor-alloy.alloy for what it
-  # mirrors, the one pipeline it has ahead of the real one, and the drift risk.
+  # mirrors (as of mini-config #47), what it leaves out, and the drift risk.
   # Named for the real service so a config that names `monitor-alloy` reads the
   # same here and on dev.
   monitor-alloy:

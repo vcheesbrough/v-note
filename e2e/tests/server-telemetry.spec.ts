@@ -3,10 +3,12 @@ import { expect, request, test, type APIRequestContext, type Page } from '@playw
 /**
  * #417 — the server's OWN logs, end to end.
  *
- * The server exports log records over OTLP next to its spans, to the
- * `monitor-alloy` stand-in (e2e/alloy/monitor-alloy.alloy), which marks them
- * `log_source="otlp"` and writes them to a real Loki; the same stand-in scrapes
- * the container's stdout as `log_source="docker"`, as the shared Alloy does.
+ * The server exports log records over OTLP next to its spans, marked
+ * `telemetry_source="otlp"` on its resource, to the `monitor-alloy` stand-in
+ * (e2e/alloy/monitor-alloy.alloy). The stand-in, like the shared Alloy since
+ * mini-config #47, stamps no marker itself: it copies `telemetry_source` into
+ * the indexed `log_source` and writes to a real Loki. It also scrapes the
+ * container's stdout as `log_source="docker"`, as the shared Alloy does.
  * So every assertion here is about what Loki and Tempo actually stored:
  *
  *  - a mutation's line reaches Loki over OTLP, with the resource attributes
@@ -16,8 +18,8 @@ import { expect, request, test, type APIRequestContext, type Page } from '@playw
  *  - the stdout copy of the same line carries the same `trace_id` and
  *    `span_id` as body fields — the crash-safe path is correlated too.
  *
- * What a green run does NOT prove: that mini-config's shared Alloy has the
- * logs pipeline the stand-in has. That is dev's to show (see the fixture).
+ * What a green run does NOT prove: that mini-config's shared Alloy still has
+ * the shape the stand-in mirrors. That is dev's to show (see the fixture).
  */
 
 const TEMPO_URL = process.env.TEMPO_URL;

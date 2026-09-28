@@ -122,8 +122,8 @@ name the canonical kebab path. Blank optional values mean "absent".
 `cargo run -p server` exports nothing unless `VNOTE__OBSERVABILITY__OTLP-ENDPOINT`
 is set, and logs to stdout either way. To see the OTLP side — spans in Tempo,
 log records in Loki as `{service_name="v-note", log_source="otlp"}` — point it
-at the e2e stack's shared-Alloy stand-in, which is the same collector shape as
-dev's `monitor-alloy` plus the logs pipeline dev is still waiting on:
+at the e2e stack's shared-Alloy stand-in, which mirrors dev's `monitor-alloy`
+(its OTLP `apps` pipeline since mini-config #47, and its Docker scrape):
 
 ```bash
 TEST_IMAGE=unused docker compose -f e2e/docker-compose.test.yml up -d --build monitor-alloy tempo loki
