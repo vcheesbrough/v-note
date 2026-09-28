@@ -302,7 +302,7 @@ pub(crate) const SERVICE_NAME: &str = "v-note-spa";
 
 /// What the SPA says about itself: which of v-note's services it is and which
 /// build (#439). Since `otlp-collector-oidc` both are the client's to state and
-/// are kept as sent — the old sidecar overwrote `service.version` with the
+/// are kept as sent — the retired #354 sidecar overwrote `service.version` with the
 /// *server's*, which was the bug. What the client never states is identity:
 /// `deployment.environment.name`, `telemetry_source` and every `user.*` are
 /// stamped by the ingest from its own config and the token, over anything sent.

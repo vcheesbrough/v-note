@@ -387,7 +387,7 @@ steps:
       github_token:
         from_secret: github_token
 
-  # Publishes deploy/grafana/v-note-overview.json and v-note-alerts.json to Grafana (Applications / v-note)
+  # Publishes deploy/grafana/v-note-overview.json to Grafana (Applications / v-note)
   # over the HTTP API — the dashboard counterpart of apply-authentik-blueprint.
   # Every push, on any branch, right after auto-deploy-dev: the dashboard tracks
   # whatever is deployed to dev, so a branch's panels go live with the metrics
@@ -412,9 +412,12 @@ steps:
     commands:
       - apk add --no-cache curl jq
       - GRAFANA_MESSAGE_PREFIX="v-note $$CI_COMMIT_BRANCH" RELEASE_TAG="$$(cat .release-tag)" COMMIT_SHA="$$CI_COMMIT_SHA" ./scripts/publish-grafana-dashboard.sh deploy/grafana/v-note-overview.json
-      # The alert rules beside it (#439), into the same folder by the same
-      # token: the ruler API is governed by folder permissions.
-      - ./scripts/publish-grafana-alerts.sh deploy/grafana/v-note-alerts.json
+      # NOT the alert rules (#439): the woodpecker-ci service account may not
+      # write alerting — by design (mini-config OBSERVABILITY.md), and Grafana
+      # also wants datasources:query on Prometheus, which it lacks. Until the
+      # platform grants that (mini-config #445), deploy/grafana/v-note-alerts.json
+      # is published by an operator with scripts/publish-grafana-alerts.sh;
+      # re-add it here once the grant lands.
 
   tag-release-dev:
     when:

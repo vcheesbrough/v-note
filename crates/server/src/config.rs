@@ -262,9 +262,9 @@ fn apply_defaults(
         // `"true"` — this is the no-leaf fallback, not what a deployed server
         // does. See `RealtimeConfig`.
         ("realtime.compression", "false"),
-        // Kill switch (#354). Off unless an environment turns it on, and present
-        // so the `client-telemetry` sub-branch always exists.
-        ("client-telemetry.enabled", "false"),
+        // Client telemetry (#439). Blank is "off"; present so the
+        // `client-telemetry` sub-branch always exists.
+        ("client-telemetry.endpoint", ""),
     ];
     let mut builder = builder;
     for (key, value) in defaults {
@@ -537,119 +537,58 @@ impl ValidatedConfig for RealtimeConfig {
 // client-telemetry
 // ---------------------------------------------------------------------------
 
-/// The authenticated `/otlp` ingress for client telemetry (#354).
+/// Where signed-in clients send their telemetry (#439).
 ///
-/// Its own group rather than three more leaves on `observability`: that group
-/// belongs to the server's *own* tracing and is consumed by `init_tracing`
-/// before the router exists. This one configures a route.
+/// Its own group rather than a leaf on `observability`: that group belongs to
+/// the server's *own* telemetry and is consumed by `init_tracing` before the
+/// router exists. This one is configuration the server hands to clients.
+///
+/// Leaves from the retired #354 ingress (`enabled`, `spa-endpoint`,
+/// `android-endpoint`) are ignored if an environment still carries them.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ClientTelemetryConfig {
-    /// The kill switch. **Off by default**: with it off every `/otlp` request is
-    /// a 404, whatever else is set, so ingest can be stopped from sovereign-config
-    /// without touching the sidecar, Traefik or the clients.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Base URL of the sidecar's `spa` OTLP receiver, e.g.
-    /// `http://v-note-dev-alloy:4318`. The signal path is appended to it.
-    #[serde(default, deserialize_with = "blank_as_none")]
-    pub spa_endpoint: Option<Url>,
-    /// As `spa_endpoint`, for the `android` receiver. Two leaves rather than one
-    /// host and a port table in code, so that the receivers' port layout lives
-    /// in deploy config beside the `.alloy` file and the server knows none of it.
-    #[serde(default, deserialize_with = "blank_as_none")]
-    pub android_endpoint: Option<Url>,
-    /// The **public** origin of this environment's `otlp-collector-oidc` ingest
-    /// (#439), handed to signed-in clients by `GET /api/telemetry/config`.
-    /// Unset is "client telemetry off": the route answers `204` and clients never
+    /// The **public** origin of this environment's `otlp-collector-oidc` ingest,
+    /// handed to signed-in clients by `GET /api/telemetry/config`. Unset is
+    /// "client telemetry off": the route answers `204` and clients never
     /// initialise OTLP. Never derived from the app's own origin — an environment
     /// without the ingest must not have clients guessing where it would be.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub endpoint: Option<Url>,
 }
 
-/// Where each client kind's exports are forwarded. Only obtainable from an
-/// enabled, validated [`ClientTelemetryConfig`], so "enabled with nowhere to
-/// send" is not a state the ingress ever has to handle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientTelemetryUpstreams {
-    pub spa: Url,
-    pub android: Url,
-}
-
 impl ClientTelemetryConfig {
-    /// The ingest origin clients are told to send to (#439), when there is one.
+    /// The ingest origin clients are told to send to, when there is one.
     pub fn ingest_endpoint(&self) -> Option<&Url> {
         self.endpoint.as_ref()
-    }
-
-    /// The upstreams when ingest is on, else `None`.
-    pub fn upstreams(&self) -> Option<ClientTelemetryUpstreams> {
-        if !self.enabled {
-            return None;
-        }
-        // validate() guarantees both are present when enabled.
-        Some(ClientTelemetryUpstreams {
-            spa: self.spa_endpoint.clone()?,
-            android: self.android_endpoint.clone()?,
-        })
     }
 }
 
 impl ValidatedConfig for ClientTelemetryConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        // Checked whether or not ingest is enabled: a malformed endpoint sitting
-        // behind a disabled switch is a startup failure waiting for the day
-        // someone flips it, which is the worst moment to discover it.
-        for (path, endpoint) in [
-            ("client-telemetry.spa-endpoint", &self.spa_endpoint),
-            ("client-telemetry.android-endpoint", &self.android_endpoint),
-        ] {
-            let Some(endpoint) = endpoint else {
-                if self.enabled {
-                    return Err(ConfigError::invalid(
-                        path,
-                        "required when `client-telemetry.enabled` is true",
-                    ));
-                }
-                continue;
-            };
-            if !matches!(endpoint.scheme(), "http" | "https") {
-                return Err(ConfigError::invalid(path, "must be an http(s) URL"));
-            }
-            // The ingress appends `v1/<signal>` with `Url::join`, which *replaces*
-            // the last path segment of a base that lacks a trailing slash. A bare
-            // origin is the one shape where that cannot go wrong, and it is all an
-            // OTLP receiver on its default paths needs.
-            if endpoint.path() != "/" || endpoint.query().is_some() {
-                return Err(ConfigError::invalid(
-                    path,
-                    "must be a bare origin (`http://host:port`) with no path or query",
-                ));
-            }
+        let Some(endpoint) = &self.endpoint else {
+            return Ok(());
+        };
+        // Handed to browsers and phones, and every request to it carries the
+        // user's access token, so it is TLS or nothing.
+        if endpoint.scheme() != "https" {
+            return Err(ConfigError::invalid(
+                "client-telemetry.endpoint",
+                "must be an https URL",
+            ));
         }
-        if let Some(endpoint) = &self.endpoint {
-            // Handed to browsers and phones, and every request to it carries the
-            // user's access token, so it is TLS or nothing.
-            if endpoint.scheme() != "https" {
-                return Err(ConfigError::invalid(
-                    "client-telemetry.endpoint",
-                    "must be an https URL",
-                ));
-            }
-            // Clients append `/v1/<signal>`: the ingest serves OTLP on its own
-            // paths, unprefixed, so anything but a bare origin is a mistake.
-            if endpoint.path() != "/"
-                || endpoint.query().is_some()
-                || endpoint.fragment().is_some()
-                || !endpoint.username().is_empty()
-                || endpoint.password().is_some()
-            {
-                return Err(ConfigError::invalid(
-                    "client-telemetry.endpoint",
-                    "must be a bare origin (`https://host[:port]`) with no path, query or credentials",
-                ));
-            }
+        // Clients append `/v1/<signal>`: the ingest serves OTLP on its own
+        // paths, unprefixed, so anything but a bare origin is a mistake.
+        if endpoint.path() != "/"
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+        {
+            return Err(ConfigError::invalid(
+                "client-telemetry.endpoint",
+                "must be a bare origin (`https://host[:port]`) with no path, query or credentials",
+            ));
         }
         Ok(())
     }

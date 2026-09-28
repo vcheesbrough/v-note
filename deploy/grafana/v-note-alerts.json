@@ -4,6 +4,7 @@
   "rules": [
     {
       "for": "15m",
+      "keep_firing_for": "0s",
       "labels": {
         "severity": "warning",
         "service": "v-note"
@@ -19,6 +20,7 @@
         "condition": "C",
         "no_data_state": "OK",
         "exec_err_state": "Error",
+        "missing_series_evals_to_resolve": 2,
         "data": [
           {
             "refId": "A",
