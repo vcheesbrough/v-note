@@ -35,6 +35,31 @@ entries:
       expression: |
         return {}
 
+  # The scope the client-telemetry ingest requires on every export (#439,
+  # `otlp-collector-oidc`'s REQUIRED_SCOPE). It adds no claim: being granted it
+  # is the permission. Named exactly as the image's own blueprint
+  # (docs/providers/authentik/otlp-collector-oidc.yaml upstream) names it, so the
+  # estate has one `telemetry:write` mapping however many products attach it —
+  # which also means it is not v-note's alone to delete.
+  #
+  # Per user or group? No: an authentik scope mapping is granted to every token
+  # the provider mints for a client that asks for it — its expression can add
+  # claims but cannot withhold the scope — so this scope says "this client may
+  # send telemetry", which the audience already says. A per-user telemetry
+  # opt-out is therefore not available from the provider; the lever that exists
+  # is membership of the application's group, which gates sign-in as a whole
+  # (recorded on #439).
+  - model: authentik_providers_oauth2.scopemapping
+    state: present
+    identifiers:
+      name: "otlp-collector-oidc: telemetry:write"
+    attrs:
+      name: "otlp-collector-oidc: telemetry:write"
+      scope_name: telemetry:write
+      description: Send telemetry
+      expression: |
+        return {}
+
   # One **public** provider serves both the SPA and the Android app (#274). Both
   # run Authorization Code + PKCE, so neither holds a secret — a native app cannot
   # keep one, and the server-side browser exchange is bound by the PKCE verifier
@@ -73,6 +98,10 @@ entries:
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, email]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, profile]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, "v-note:dev:access"]]
+        # #439: the ingest refuses a token without it. `profile` above is what
+        # puts `preferred_username` in the access token, which the ingest also
+        # requires — removing it would stop all client telemetry.
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "otlp-collector-oidc: telemetry:write"]]
 
   - model: authentik_core.application
     state: present

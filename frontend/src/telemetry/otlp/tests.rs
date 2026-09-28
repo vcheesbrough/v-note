@@ -207,19 +207,37 @@ fn severities_are_ordered_and_numbered_per_the_spec() {
     assert!(Severity::Debug < Severity::Info && Severity::Warn < Severity::Error);
 }
 
-/// The sidecar overwrites these three whatever a client sends, so the SPA
-/// sending them could only ever be misleading — to a reader of this code, or to
-/// anyone pointing the SPA at a collector that does *not* overwrite them.
+/// The SPA states which service and which build it is (#439): the ingest keeps
+/// both as sent. It never states identity or environment — those are the
+/// ingest's to stamp, and a client value would only be overwritten.
 #[test]
-fn the_resource_claims_no_identity() {
+fn the_resource_names_the_service_and_build_but_no_identity() {
     for body in [
         traces_request(&[span()], "1.2.3"),
         logs_request(&[], "1.2.3"),
     ] {
-        assert!(!body.contains("service.name"), "{body}");
+        let resource = if body.contains("resourceSpans") {
+            parse(&body)["resourceSpans"][0]["resource"].clone()
+        } else {
+            parse(&body)["resourceLogs"][0]["resource"].clone()
+        };
+        let attribute = |key: &str| {
+            resource["attributes"]
+                .as_array()
+                .expect("attributes")
+                .iter()
+                .find(|kv| kv["key"] == key)
+                .map(|kv| kv["value"]["stringValue"].clone())
+        };
+        assert_eq!(
+            attribute("service.name"),
+            Some(json!("v-note-spa")),
+            "{body}"
+        );
+        assert_eq!(attribute("service.version"), Some(json!("1.2.3")), "{body}");
         assert!(!body.contains("deployment.environment"), "{body}");
-        assert!(!body.contains("service.version"), "{body}");
-        assert!(body.contains(r#""telemetry.sdk.name""#), "{body}");
+        assert!(!body.contains("telemetry_source"), "{body}");
+        assert!(!body.contains("user."), "{body}");
     }
 }
 

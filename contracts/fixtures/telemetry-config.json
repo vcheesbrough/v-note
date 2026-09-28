@@ -1,0 +1,5 @@
+{
+  "endpoint": "https://v-notes-dev.desync.link",
+  "access_token": "eyJhbGciOiJSUzI1NiJ9.e30.fixture-not-a-real-token",
+  "expires_at": 1790000000
+}

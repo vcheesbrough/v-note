@@ -64,10 +64,11 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_SCOPES",
-                "\"openid profile email offline_access v-note:dev:access\"",
+                // `telemetry:write`: the client-telemetry ingest refuses any
+                // token without it (#439); `profile` supplies the
+                // `preferred_username` it also requires.
+                "\"openid profile email offline_access v-note:dev:access telemetry:write\"",
             )
-            // Client telemetry (#406) to `{BASE_URL}/otlp/android`.
-            buildConfigField("boolean", "TELEMETRY_EXPORT", "true")
         }
         create("devLocal") {
             dimension = "env"
@@ -94,11 +95,11 @@ android {
             buildConfigField(
                 "String",
                 "OIDC_SCOPES",
-                "\"openid profile email offline_access v-note:dev:access\"",
+                "\"openid profile email offline_access v-note:dev:access telemetry:write\"",
             )
-            // Off: a laptop server must never feed the dev environment's Tempo
-            // and Loki, and has no collector of its own to export to (#406).
-            buildConfigField("boolean", "TELEMETRY_EXPORT", "false")
+            // No telemetry switch per flavor (#439): whether and where to export
+            // is the server's answer to `GET /api/telemetry/config`, and a laptop
+            // server that configures no ingest answers "off".
         }
     }
 

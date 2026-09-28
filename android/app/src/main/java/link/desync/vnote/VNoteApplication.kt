@@ -5,6 +5,7 @@ import android.app.Application
 import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
+import android.util.Log
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.telemetry.CrashHandler
 import link.desync.vnote.telemetry.OpenSpan
@@ -16,9 +17,10 @@ import link.desync.vnote.telemetry.millisToNanos
 // Process-wide setup (#406): client telemetry and the crash handler, installed
 // before any activity exists so the first screen is covered.
 //
-// Export is per flavor (`TELEMETRY_EXPORT`): on for `dev`, which exports to the
-// dev server it talks to; off for `devLocal`, whose server is a laptop and must
-// never feed the dev environment's Tempo and Loki.
+// Whether telemetry is exported is not decided here (#439): the runtime asks the
+// server it talks to (`GET /api/telemetry/config`) once there is a session, and
+// a server with no ingest configured — a laptop behind `devLocal`, or an
+// environment that has switched it off — answers "off".
 class VNoteApplication : Application() {
     // Process start → first activity resumed: cold start as the user sees it.
     private var launch: OpenSpan? = null
@@ -27,28 +29,34 @@ class VNoteApplication : Application() {
         super.onCreate()
         // First, so a failure in anything below is itself reported.
         CrashHandler.install()
-        if (BuildConfig.TELEMETRY_EXPORT) {
-            // Built on first use — on the export thread, not here: it is
-            // Keystore work that would otherwise sit on the main thread inside
-            // the `app.start` span. A keystore that cannot be opened means "not
-            // signed in" to the exporter, never a crash at startup.
-            val tokenStore by lazy { runCatching { TokenStore(this) }.getOrNull() }
-            Telemetry.install(
-                TelemetryRuntime(
-                    OtlpHttpTransport(
-                        BuildConfig.BASE_URL,
-                        accessToken = { tokenStore?.accessToken() },
-                        accessTokenExpiry = { tokenStore?.accessTokenExpiryEpochSeconds() },
-                    ),
+        // Built on first use — on the export thread, not here: it is Keystore
+        // work that would otherwise sit on the main thread inside the
+        // `app.start` span. A keystore that cannot be opened means "not signed
+        // in" to the exporter, never a crash at startup.
+        val tokenStore by lazy { runCatching { TokenStore(this) }.getOrNull() }
+        Telemetry.install(
+            TelemetryRuntime(
+                OtlpHttpTransport(
+                    BuildConfig.BASE_URL,
+                    accessToken = { tokenStore?.accessToken() },
+                    accessTokenExpiry = { tokenStore?.accessTokenExpiryEpochSeconds() },
                 ),
-            )
-        }
+                serviceVersion = BuildConfig.VERSION_NAME,
+                // State changes only — first failure, recovery, giving up —
+                // never a line per batch, and never the token.
+                localLog = { message -> Log.w(TELEMETRY_TAG, message) },
+            ),
+        )
         val root = Telemetry.startScreen("app.launch")
         launch =
             Telemetry
                 .span("app.start", root, startUnixNanos = processStartUnixNanos())
                 .attr("app.start.type", "cold")
         registerActivityLifecycleCallbacks(LifecycleTelemetry())
+    }
+
+    private companion object {
+        const val TELEMETRY_TAG = "VNoteTelemetry"
     }
 
     private fun processStartUnixNanos(): Long {

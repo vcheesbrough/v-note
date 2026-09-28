@@ -66,6 +66,18 @@ fn abort_flow(jar: CookieJar, status: StatusCode, message: impl Into<String>) ->
     (status, clear_flow_cookies(jar), message.into()).into_response()
 }
 
+/// The scope `otlp-collector-oidc` requires on every client export (#439). Asked
+/// for on every login, whether or not this environment runs the ingest: a
+/// provider without the mapping simply leaves it out of the token, and asking
+/// unconditionally keeps the login URL independent of telemetry config.
+pub const TELEMETRY_SCOPE: &str = "telemetry:write";
+
+/// What the SPA's login asks for. `profile` is load-bearing twice over: the app
+/// reads `preferred_username`, and the ingest refuses any token without it.
+fn login_scopes(required_scope: &str) -> String {
+    format!("openid profile email {required_scope} {TELEMETRY_SCOPE}")
+}
+
 #[tracing::instrument(skip_all)]
 pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     let auth = &state.auth;
@@ -83,10 +95,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
             ("response_type", "code"),
             ("client_id", auth.client_id.as_str()),
             ("redirect_uri", auth.redirect_uri.as_str()),
-            (
-                "scope",
-                &format!("openid profile email {}", auth.required_scope),
-            ),
+            ("scope", &login_scopes(&auth.required_scope)),
             ("state", &nonce),
             ("code_challenge", &code_challenge),
             ("code_challenge_method", "S256"),

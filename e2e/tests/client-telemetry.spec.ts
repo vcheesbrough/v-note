@@ -1,44 +1,54 @@
-import { expect, request, test } from '@playwright/test';
-import * as tls from 'node:tls';
+import { expect, request, test, type APIRequestContext } from '@playwright/test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as zlib from 'node:zlib';
 
 /**
- * #354 — client telemetry, end to end.
+ * #439 — client telemetry through `otlp-collector-oidc`, end to end.
  *
- * Nothing here is mocked. The stack runs the **production**
- * `deploy/alloy/client-telemetry.alloy` in a real Alloy, exporting to a real
- * Tempo and a real Loki at the digests mini-config's monitoring stack runs. So
- * every assertion below is about what those backends actually stored, which is
- * the only thing that makes the interesting claim testable: a mock collector
- * would happily "receive" a span carrying the forged `service.name` the
- * pipeline was supposed to have overwritten.
+ * Nothing here is mocked. The stack runs the **pinned** ingest image the
+ * deployment runs (e2e/docker-compose.test.yml), forwarding to a stand-in for
+ * the shared Alloy and to a real Tempo and a real Loki at the digests
+ * mini-config runs. Every assertion is about what those backends stored, or
+ * about what the ingest itself answered.
  *
- * Two things this suite deliberately does not cover, so they are not mistaken
- * for gaps:
+ * The image is unproven — v-note is its first real deployment — so each of its
+ * behaviours v-note relies on is asserted here against the pinned tag rather
+ * than taken from its docs: the refusals and their reasons, identity stamping
+ * over a forged payload, the environment and path marker, the bounds on
+ * `service.name` and timestamps, client metrics dropped, the decompressed body
+ * cap, and the self-metrics the dashboard charts. A gap found here is fixed
+ * upstream and re-pinned, never worked around in v-note.
  *
- *  - **The kill switch.** This stack runs with ingest on, because that is the
- *    path worth exercising in a browser. The off path (`/otlp` → 404, and the
- *    404 arriving before the 401) is `crates/server/tests/telemetry.rs`.
- *  - **A real WASM panic.** No reachable code path in the SPA panics, and
- *    adding one to make a test pass would be adding a bug. The panic hook's
- *    route to Loki is covered here by posting a record of exactly the shape it
- *    produces; that the hook is installed and formats that shape is
- *    `frontend/src/telemetry.rs`.
+ * What this stack cannot show: the Traefik route that makes the SPA's export
+ * same-origin in the deployment (here the ingest is a second origin, admitted
+ * by its CORS_ALLOWED_ORIGINS). That is checked on dev.
  */
 
+const INGEST_URL = process.env.INGEST_URL;
+const INGEST_METRICS_URL = process.env.INGEST_METRICS_URL;
 const TEMPO_URL = process.env.TEMPO_URL;
 const LOKI_URL = process.env.LOKI_URL;
 const EXPECTED_ENV = process.env.CLIENT_TELEMETRY_EXPECTED_ENV;
-const EXPECTED_VERSION = process.env.CLIENT_TELEMETRY_EXPECTED_VERSION;
+const OIDC_TOKEN_URL = process.env.OIDC_TOKEN_URL;
 
 // Loud rather than skipped, for the reason spelled out in sql-console.spec.ts:
 // `playwright` hard-depends on these services, so an unset variable is a broken
 // stack, and a skip would quietly retire the only proof the pipeline works.
-if (!TEMPO_URL || !LOKI_URL || !EXPECTED_ENV || !EXPECTED_VERSION) {
+if (!INGEST_URL || !INGEST_METRICS_URL || !TEMPO_URL || !LOKI_URL || !EXPECTED_ENV || !OIDC_TOKEN_URL) {
   throw new Error(
-    'TEMPO_URL / LOKI_URL / CLIENT_TELEMETRY_EXPECTED_ENV / CLIENT_TELEMETRY_EXPECTED_VERSION are unset — ' +
-      'the telemetry backends are part of e2e/docker-compose.test.yml, so this is a broken stack, not an opt-out',
+    'INGEST_URL / INGEST_METRICS_URL / TEMPO_URL / LOKI_URL / CLIENT_TELEMETRY_EXPECTED_ENV / OIDC_TOKEN_URL are unset — ' +
+      'the telemetry services are part of e2e/docker-compose.test.yml, so this is a broken stack, not an opt-out',
   );
 }
+
+/** The mock IdP's identity for the suite's token (`v-note-test`). */
+const USER = {
+  id: 'v-note-test-service-account',
+  name: 'test-user',
+  email: 'test@example.com',
+  fullName: 'Test User',
+};
 
 /** Lowercase hex, as OTLP/JSON requires (not the base64 protobuf would use). */
 function hex(bytes: number): string {
@@ -49,110 +59,37 @@ function hex(bytes: number): string {
   ).join('');
 }
 
-const nowNanos = () => `${Date.now()}000000`;
+const nanos = (ms: number) => `${ms}000000`;
+const nowNanos = () => nanos(Date.now());
 
-/**
- * POST `path` declaring a `Content-Length` of `declaredLength` but sending no
- * body, and resolve with the response's status code. Rejects if the server
- * waits for the body instead of answering — which is exactly the failure a
- * declared-length check is there to prevent.
- */
-function statusForDeclaredLengthOnly(
-  path: string,
-  declaredLength: number,
-  cookie: string,
-): Promise<number> {
-  const url = new URL(path, process.env.BASE_URL);
-  return new Promise((resolve, reject) => {
-    const socket = tls.connect(
-      {
-        host: url.hostname,
-        port: Number(url.port || 443),
-        servername: url.hostname,
-        // The stack's self-signed cert, as `ignoreHTTPSErrors` in the config.
-        rejectUnauthorized: false,
-        ALPNProtocols: ['http/1.1'],
-      },
-      () => {
-        socket.write(
-          [
-            `POST ${url.pathname} HTTP/1.1`,
-            `Host: ${url.host}`,
-            `Cookie: ${cookie}`,
-            'Content-Type: application/json',
-            `Content-Length: ${declaredLength}`,
-            'Connection: close',
-            '',
-            '',
-          ].join('\r\n'),
-        );
-      },
-    );
-    let received = '';
-    socket.setEncoding('latin1');
-    socket.setTimeout(10_000, () =>
-      socket.destroy(
-        new Error('no response while the body was withheld: the declared length was not checked first'),
-      ),
-    );
-    socket.on('data', (chunk: string) => {
-      received += chunk;
-      const statusLine = /^HTTP\/1\.1 (\d{3})/.exec(received);
-      if (statusLine) {
-        resolve(Number(statusLine[1]));
-        socket.destroy();
-      }
-    });
-    socket.on('error', reject);
-    socket.on('close', () =>
-      reject(new Error(`connection closed before a status line: ${JSON.stringify(received.slice(0, 200))}`)),
-    );
-  });
-}
+type KV = { key: string; value: { stringValue: string } };
+const kv = (key: string, value: string): KV => ({ key, value: { stringValue: value } });
 
-/**
- * A resource that claims to be something else entirely, including a unique
- * `service.instance.id` — which Loki's OTLP ingest promotes to an index label,
- * so it is a stream-cardinality attack and not merely a lie.
- *
- * `claimedSource` is what the payload says about how it reached the store —
- * the estate's path marker, which the sidecar must overwrite to `client` on
- * every signal. `docker` would pass client logs off as a container's stdout;
- * `otlp` is the server's own value, and the claim that actually buys something:
- * a span wearing the server's provenance, in a trace the server also writes to.
- */
-function forgedResource(marker: string, claimedSource = 'docker') {
-  return {
-    attributes: [
-      { key: 'service.name', value: { stringValue: 'totally-not-v-note' } },
-      { key: 'deployment.environment', value: { stringValue: 'forged-env' } },
-      { key: 'service.version', value: { stringValue: '9.9.9-forged' } },
-      { key: 'service.instance.id', value: { stringValue: `cardinality-bomb-${marker}` } },
-      { key: 'log_source', value: { stringValue: claimedSource } },
-      // Allow-listed, so this one is expected to survive untouched — which is
-      // what shows the pipeline is filtering rather than simply dropping
-      // everything it did not write itself.
-      { key: 'telemetry.sdk.name', value: { stringValue: 'v-note-spa-otlp' } },
-    ],
-  };
-}
-
-function traceBody(marker: string, traceId: string, spanId: string, claimedSource?: string) {
+function traceBody(opts: {
+  name: string;
+  traceId: string;
+  spanId: string;
+  resource: KV[];
+  attributes?: KV[];
+  startMs?: number;
+}) {
+  const start = opts.startMs ?? Date.now();
   return {
     resourceSpans: [
       {
-        resource: forgedResource(marker, claimedSource),
+        resource: { attributes: opts.resource },
         scopeSpans: [
           {
             scope: { name: 'e2e' },
             spans: [
               {
-                traceId,
-                spanId,
-                name: marker,
+                traceId: opts.traceId,
+                spanId: opts.spanId,
+                name: opts.name,
                 kind: 1,
-                startTimeUnixNano: nowNanos(),
-                endTimeUnixNano: nowNanos(),
+                startTimeUnixNano: nanos(start),
+                endTimeUnixNano: nanos(start + 1),
+                attributes: opts.attributes ?? [],
               },
             ],
           },
@@ -162,29 +99,29 @@ function traceBody(marker: string, traceId: string, spanId: string, claimedSourc
   };
 }
 
-function logBody(
-  marker: string,
-  traceId: string,
-  spanId: string,
-  body: string,
-  claimedSource?: string,
-) {
+function logBody(opts: {
+  body: string;
+  traceId: string;
+  spanId: string;
+  resource: KV[];
+  attributes?: KV[];
+}) {
   return {
     resourceLogs: [
       {
-        resource: forgedResource(marker, claimedSource),
+        resource: { attributes: opts.resource },
         scopeLogs: [
           {
             scope: { name: 'e2e' },
             logRecords: [
               {
                 timeUnixNano: nowNanos(),
-                severityNumber: 17,
-                severityText: 'ERROR',
-                body: { stringValue: body },
-                traceId,
-                spanId,
-                attributes: [{ key: 'exception.type', value: { stringValue: 'panic' } }],
+                severityNumber: 13,
+                severityText: 'WARN',
+                body: { stringValue: opts.body },
+                traceId: opts.traceId,
+                spanId: opts.spanId,
+                attributes: opts.attributes ?? [],
               },
             ],
           },
@@ -193,6 +130,25 @@ function logBody(
     ],
   };
 }
+
+/**
+ * What a client might claim about itself to pass as something it is not: the
+ * environment, the server's own path marker, and an identity. Every one of
+ * these must be overwritten or removed by the ingest.
+ */
+function forgedClaims(): KV[] {
+  return [
+    kv('deployment.environment.name', 'forged-env'),
+    kv('telemetry_source', 'otlp'),
+    kv('user.id', 'forged-user-on-resource'),
+  ];
+}
+
+const forgedIdentityAttributes = (): KV[] => [
+  kv('user.id', 'forged-user'),
+  kv('user.name', 'forged-name'),
+  kv('user.email', 'forged@example.com'),
+];
 
 /** Polls until `check` returns a value, or the deadline passes. */
 async function eventually<T>(
@@ -226,13 +182,48 @@ function flattenAttributes(raw: Array<{ key: string; value: Record<string, strin
   );
 }
 
-let backends: import('@playwright/test').APIRequestContext;
+let backends: APIRequestContext;
+let suiteToken: string;
+
+async function mintToken(clientId: string, tokenUrl = OIDC_TOKEN_URL!): Promise<string> {
+  const res = await backends.post(tokenUrl, {
+    form: {
+      grant_type: 'client_credentials',
+      client_id: clientId,
+      client_secret: 'test-secret',
+      scope: 'openid',
+    },
+  });
+  expect(res.ok(), `mint a token for ${clientId}`).toBe(true);
+  return (await res.json()).access_token as string;
+}
+
+/** POST straight to the ingest, as a client would. */
+async function ingest(
+  signal: 'traces' | 'logs' | 'metrics',
+  body: unknown,
+  token: string | null,
+  extraHeaders: Record<string, string> = {},
+) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extraHeaders };
+  if (token !== null) headers.Authorization = `Bearer ${token}`;
+  return backends.post(`${INGEST_URL}/v1/${signal}`, {
+    headers,
+    data: typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body),
+  });
+}
 
 test.beforeAll(async () => {
-  // The hook's own limit, which defaults to 30s and would otherwise cut the two
-  // waits below off before either could time out on its own terms.
-  test.setTimeout(150_000);
-  backends = await request.newContext({ ignoreHTTPSErrors: true });
+  // The hook's own limit, which defaults to 30s and would otherwise cut the
+  // waits below off before any could time out on its own terms.
+  test.setTimeout(180_000);
+  // No inherited credentials: the config's `use` hands every context the suite
+  // token and cookie, and a request here must carry exactly what it says.
+  backends = await request.newContext({
+    ignoreHTTPSErrors: true,
+    extraHTTPHeaders: {},
+    storageState: { cookies: [], origins: [] },
+  });
   // Tempo's ring takes a few seconds to settle after the process starts, and
   // neither image can carry a container healthcheck (both are distroless), so
   // the wait lives here rather than in compose.
@@ -244,24 +235,39 @@ test.beforeAll(async () => {
     const res = await backends.get(`${LOKI_URL}/ready`);
     return res.ok() ? true : null;
   }, 60_000);
+  suiteToken = await mintToken('v-note-test');
+  // The ingest's HEALTHCHECK says the process is up, not that it has loaded
+  // the provider's keys: until it has, every export is `503 not ready`.
+  await eventually('the ingest to have loaded the OIDC provider', async () => {
+    const res = await ingest('traces', { resourceSpans: [] }, suiteToken);
+    return res.status() === 200 ? true : null;
+  }, 60_000);
 });
 
 test.afterAll(async () => {
   await backends.dispose();
 });
 
-/** The resource attributes Tempo stored for a trace, once it has one. */
-async function tempoResource(traceId: string): Promise<Attributes> {
+/** The batches Tempo stored for a trace, once it has one with `service`. */
+async function tempoBatches(traceId: string, service?: string, timeoutMs = 30_000) {
   return eventually(`trace ${traceId} in tempo`, async () => {
     const res = await backends.get(`${TEMPO_URL}/api/traces/${traceId}`);
     if (!res.ok()) return null;
-    const body = await res.json();
-    const resource = body?.batches?.[0]?.resource?.attributes;
-    return resource ? flattenAttributes(resource) : null;
-  });
+    const batches = ((await res.json())?.batches ?? []) as any[];
+    if (batches.length === 0) return null;
+    if (
+      service &&
+      !batches.some(
+        (batch) => flattenAttributes(batch.resource?.attributes)['service.name'] === service,
+      )
+    ) {
+      return null;
+    }
+    return batches;
+  }, timeoutMs);
 }
 
-async function lokiStreams(query: string, match?: (line: string) => boolean) {
+async function lokiStreams(query: string, match?: (line: string) => boolean, timeoutMs = 30_000) {
   return eventually(`loki streams for ${query}`, async () => {
     const end = Date.now() * 1e6;
     const start = end - 15 * 60 * 1e9;
@@ -274,27 +280,12 @@ async function lokiStreams(query: string, match?: (line: string) => boolean) {
       stream: Attributes;
       values: Array<[string, string]>;
     }>;
-    const hit = match
-      ? results.filter((r) => r.values.some(([, line]) => match(line)))
-      : results;
+    const hit = match ? results.filter((r) => r.values.some(([, line]) => match(line))) : results;
     return hit.length > 0 ? hit : null;
-  });
+  }, timeoutMs);
 }
 
-/** How many streams a Loki query matches right now — no polling; for negatives. */
-async function lokiStreamCount(query: string): Promise<number> {
-  const end = Date.now() * 1e6;
-  const res = await backends.get(`${LOKI_URL}/loki/api/v1/query_range`, {
-    params: { query, start: `${end - 15 * 60 * 1e9}`, end: `${end}`, limit: '100' },
-  });
-  expect(res.ok(), `loki query ${query}`).toBe(true);
-  return ((await res.json()).data.result as unknown[]).length;
-}
-
-/**
- * How many traces a TraceQL search finds right now. No start/end, so Tempo
- * searches what its ingesters hold — the recent data every test here writes.
- */
+/** How many traces a TraceQL search finds right now — no polling; for negatives. */
 async function tempoSearchCount(traceql: string): Promise<number> {
   const res = await backends.get(`${TEMPO_URL}/api/search`, {
     params: { q: traceql, limit: '100' },
@@ -303,160 +294,300 @@ async function tempoSearchCount(traceql: string): Promise<number> {
   return (((await res.json()).traces ?? []) as unknown[]).length;
 }
 
+/** The ingest's own Prometheus metrics, summed over labels, by name. */
+async function ingestMetrics(): Promise<Map<string, number>> {
+  const res = await backends.get(INGEST_METRICS_URL!);
+  expect(res.ok(), 'the ingest serves its own metrics').toBe(true);
+  const totals = new Map<string, number>();
+  for (const line of (await res.text()).split('\n')) {
+    const match = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+(\S+)/.exec(line);
+    if (!match) continue;
+    totals.set(match[1], (totals.get(match[1]) ?? 0) + Number(match[2]));
+  }
+  return totals;
+}
+
 // ---------------------------------------------------------------------------
-// Resource-attribute integrity — the reason the sidecar exists
+// The ingest, driven directly (as a simulated Android client, and to prove
+// each behaviour of the pinned image)
 // ---------------------------------------------------------------------------
 
-test.describe('the sidecar owns what client telemetry says about itself', () => {
-  test('a forged service.name on a span is replaced with the sidecar\'s', async ({ request }) => {
-    const marker = `spa-forgery-${hex(4)}`;
-    const traceId = hex(16);
-
-    const res = await request.post('/otlp/spa/v1/traces', {
-      data: traceBody(marker, traceId, hex(8)),
+test.describe('otlp-collector-oidc (pinned) as v-note deploys it', () => {
+  /**
+   * Every refusal of a token is `401`, with the failed rule in the body — the
+   * client contract's one rule (refresh once, then stop) depends on it.
+   */
+  test('refuses every bad token with 401 and names the reason', async () => {
+    const span = traceBody({
+      name: 'refused',
+      traceId: hex(16),
+      spanId: hex(8),
+      resource: [kv('service.name', 'v-note-spa')],
     });
-    expect(res.status()).toBe(200);
-
-    const resource = await tempoResource(traceId);
-    expect(resource['service.name']).toBe('v-note-spa');
-    expect(resource['deployment.environment']).toBe(EXPECTED_ENV);
-    expect(resource['service.version']).toBe(EXPECTED_VERSION);
-    // The path marker, on a *span*: the client claimed `docker`, and it comes
-    // out as `client` — the value that says a user's device sent it. This is
-    // what separates a client's span from the server's in a trace both write to.
-    expect(resource['log_source']).toBe('client');
-    // Not overwritten — *dropped*. An overwrite-only pipeline would leave this
-    // one through, and it is the one that costs Loki a stream per request.
-    expect(resource['service.instance.id']).toBeUndefined();
-    // The SDK's own description is allow-listed, so it survives.
-    expect(resource['telemetry.sdk.name']).toBe('v-note-spa-otlp');
-  });
-
-  test('the two receivers give the two clients distinct identities', async ({ request }) => {
-    const spaTrace = hex(16);
-    const androidTrace = hex(16);
-
-    expect(
-      (await request.post('/otlp/spa/v1/traces', { data: traceBody('spa', spaTrace, hex(8)) }))
-        .status(),
-    ).toBe(200);
-    expect(
-      (
-        await request.post('/otlp/android/v1/traces', {
-          data: traceBody('android', androidTrace, hex(8)),
-        })
-      ).status(),
-    ).toBe(200);
-
-    expect((await tempoResource(spaTrace))['service.name']).toBe('v-note-spa');
-    const android = await tempoResource(androidTrace);
-    expect(android['service.name']).toBe('v-note-android');
-    // Distinct identities, the same provenance: both are client-origin.
-    expect(android['log_source']).toBe('client');
-  });
-
-  test('a forged identity on a log is replaced before Loki indexes it', async ({ request }) => {
-    const marker = `log-forgery-${hex(4)}`;
-    const traceId = hex(16);
-    const spanId = hex(8);
-
-    const res = await request.post('/otlp/spa/v1/logs', {
-      data: logBody(marker, traceId, spanId, `wasm panic: ${marker}`),
-    });
-    expect(res.status()).toBe(200);
-
-    const streams = await lokiStreams('{service_name="v-note-spa"}', (line) =>
-      line.includes(marker),
-    );
-    const stream = streams[0].stream;
-    expect(stream.service_name).toBe('v-note-spa');
-    expect(stream.deployment_environment).toBe(EXPECTED_ENV);
-    // The path marker: claimed `docker`, stored as `client`.
-    expect(stream.log_source).toBe('client');
-    // Trace correlation is the whole point of shipping logs over OTLP: this is
-    // what Grafana turns into a link from the log line to the trace.
-    expect(stream.trace_id).toBe(traceId);
-    expect(stream.span_id).toBe(spanId);
-    expect(stream.severity_text).toBe('ERROR');
-
-    // …and nothing was ever stored under the name the client claimed.
-    expect(await lokiStreamCount('{service_name="totally-not-v-note"}')).toBe(0);
-  });
-
-  test('an Android log reaches Loki as a client-origin v-note-android stream', async ({ request }) => {
-    const marker = `android-log-${hex(4)}`;
-
-    const res = await request.post('/otlp/android/v1/logs', {
-      data: logBody(marker, hex(16), hex(8), `android: ${marker}`),
-    });
-    expect(res.status()).toBe(200);
-
-    const streams = await lokiStreams('{service_name="v-note-android"}', (line) =>
-      line.includes(marker),
-    );
-    const stream = streams[0].stream;
-    expect(stream.deployment_environment).toBe(EXPECTED_ENV);
-    expect(stream.log_source).toBe('client');
+    const cases: Array<[string, string | null, string]> = [
+      ['no token', null, 'no token'],
+      ['not a JWT', 'not-a-jwt', 'invalid token'],
+      // The audience check is what keeps every other application's tokens out:
+      // the issuer and the `telemetry:write` mapping are shared estate-wide.
+      ['another application\'s token', await mintToken('v-note-other-app-test'), 'invalid token: wrong aud'],
+      // Signed by the provider's own key, but naming another issuer: reaches
+      // the issuer check itself rather than failing earlier on an unknown key.
+      ['another issuer\'s token', await mintToken('v-note-wrong-issuer-test'), 'invalid token: wrong iss'],
+      ['an expired token', await mintToken('v-note-expired-test'), 'invalid token: expired'],
+      ['no telemetry:write', await mintToken('v-note-no-telemetry-test'), 'missing scope: telemetry:write'],
+      ['no preferred_username', await mintToken('v-note-no-username-test'), 'missing claim: preferred_username'],
+    ];
+    for (const [what, token, reason] of cases) {
+      const res = await ingest('traces', span, token);
+      expect(res.status(), what).toBe(401);
+      expect(await res.text(), what).toContain(reason);
+    }
   });
 
   /**
-   * The claim the marker exists to defeat. A client chooses its own trace ids,
-   * so it can put a span into a trace the server is also writing to, and
-   * `log_source` is what lets a reader tell which spans the server vouches for.
-   * So the forgery worth testing is the server's own value, `otlp` — and it is
-   * not merely dropped but rewritten to `client` on both signals, because an
-   * absent label is not selectable and `{log_source="otlp"}` must never return
-   * a client's data.
+   * The acceptance's identity line, on a span: `user.*` comes from the token,
+   * not the payload; the environment and path marker from the deployment; the
+   * client's own `service.name` and `service.version` are kept.
    */
-  test("a client claiming the server's own provenance is re-marked as client-origin on both signals", async ({
-    request,
-  }) => {
-    const marker = `provenance-forgery-${hex(4)}`;
+  test('stamps identity and environment over a forged SPA span and keeps its build', async () => {
+    const traceId = hex(16);
+    const name = `forged-spa-span-${hex(4)}`;
+    const res = await ingest(
+      'traces',
+      traceBody({
+        name,
+        traceId,
+        spanId: hex(8),
+        resource: [
+          kv('service.name', 'v-note-spa'),
+          kv('service.version', '1.2.3-e2e-client'),
+          ...forgedClaims(),
+        ],
+        attributes: forgedIdentityAttributes(),
+      }),
+      suiteToken,
+    );
+    expect(res.status()).toBe(200);
+
+    const [batch] = await tempoBatches(traceId);
+    const resource = flattenAttributes(batch.resource.attributes);
+    expect(resource['service.name']).toBe('v-note-spa');
+    // The client's own build — the old sidecar stamped the server's here.
+    expect(resource['service.version']).toBe('1.2.3-e2e-client');
+    expect(resource['deployment.environment.name']).toBe(EXPECTED_ENV);
+    expect(resource['telemetry_source']).toBe('client');
+    // Identity on the resource is removed, not merely left beside the real one.
+    expect(resource['user.id']).toBeUndefined();
+
+    const span = flattenAttributes(batch.scopeSpans[0].spans[0].attributes);
+    expect(span['user.id']).toBe(USER.id);
+    expect(span['user.name']).toBe(USER.name);
+    expect(span['user.email']).toBe(USER.email);
+    expect(span['user.full_name']).toBe(USER.fullName);
+
+    // Searchable by the marker, and never under the server's own value.
+    await eventually('the span under telemetry_source=client', async () =>
+      (await tempoSearchCount(`{ resource.telemetry_source = "client" && name = "${name}" }`)) > 0
+        ? true
+        : null,
+    );
+    expect(await tempoSearchCount(`{ resource.telemetry_source = "otlp" && name = "${name}" }`)).toBe(0);
+  });
+
+  /** The Android half: a log, as the app sends it, reaching Loki stamped and correlated. */
+  test('a simulated Android log reaches Loki attributed to the user, in this environment', async () => {
+    const marker = `android-log-${hex(4)}`;
     const traceId = hex(16);
     const spanId = hex(8);
-
-    expect(
-      (
-        await request.post('/otlp/spa/v1/traces', {
-          data: traceBody(marker, traceId, spanId, 'otlp'),
-        })
-      ).status(),
-    ).toBe(200);
-    expect(
-      (
-        await request.post('/otlp/spa/v1/logs', {
-          data: logBody(marker, traceId, spanId, `forged provenance: ${marker}`, 'otlp'),
-        })
-      ).status(),
-    ).toBe(200);
-
-    expect((await tempoResource(traceId))['log_source']).toBe('client');
-    // …and a *search* separates client spans from the server's by the marker
-    // alone. The span name is unique to this run, so "found under client" and
-    // "not found under otlp" are about this one span; the positive comes first
-    // so the negative cannot pass merely because search returned nothing.
-    const clientSpan = `{ resource.log_source = "client" && name = "${marker}" }`;
-    const forgedSpan = `{ resource.log_source = "otlp" && name = "${marker}" }`;
-    await eventually(`tempo search ${clientSpan}`, async () =>
-      (await tempoSearchCount(clientSpan)) > 0 ? true : null,
+    const res = await ingest(
+      'logs',
+      logBody({
+        body: `android: ${marker}`,
+        traceId,
+        spanId,
+        resource: [
+          kv('service.name', 'v-note-android'),
+          kv('service.version', '0.58.0-e2e-android'),
+          ...forgedClaims(),
+        ],
+        attributes: forgedIdentityAttributes(),
+      }),
+      suiteToken,
     );
-    expect(await tempoSearchCount(forgedSpan)).toBe(0);
+    expect(res.status()).toBe(200);
 
-    // Selectable by the marker alone, without `service_name` doing the work.
-    const streams = await lokiStreams('{log_source="client"}', (line) => line.includes(marker));
-    expect(streams[0].stream.service_name).toBe('v-note-spa');
-    expect(streams[0].stream.trace_id).toBe(traceId);
-    // …and never indexed under the value it claimed.
-    expect(await lokiStreamCount(`{log_source="otlp"} |= "${marker}"`)).toBe(0);
+    // Selected the way the dashboard's client-logs panel selects: the shared
+    // Alloy (the stand-in mirrors mini-config's) turns the ingest's
+    // `deployment.environment.name` and `telemetry_source=client` into the
+    // indexed `deployment_environment` and `log_source="client"`.
+    const streams = await lokiStreams(
+      `{service_name="v-note-android", deployment_environment="${EXPECTED_ENV}", log_source="client"}`,
+      (line) => line.includes(marker),
+    );
+    const stream = streams[0].stream;
+    expect(stream.deployment_environment_name).toBe(EXPECTED_ENV);
+    expect(stream.service_version).toBe('0.58.0-e2e-android');
+    expect(stream.telemetry_source).toBe('client');
+    expect(stream.user_id).toBe(USER.id);
+    expect(stream.user_name).toBe(USER.name);
+    // Trace correlation is the point of shipping logs over OTLP: this is what
+    // Grafana turns into a link from the log line to the trace.
+    expect(stream.trace_id).toBe(traceId);
+    expect(stream.span_id).toBe(spanId);
+    expect(stream.deployment_environment).toBe(EXPECTED_ENV);
+    expect(stream.log_source).toBe('client');
+    // …and never stored under what the client claimed — by every label the
+    // dashboard and the platform select on, not only the contract's name.
+    for (const query of [
+      `{deployment_environment_name="forged-env"} |= "${marker}"`,
+      `{deployment_environment="forged-env"} |= "${marker}"`,
+      `{log_source="otlp"} |= "${marker}"`,
+    ]) {
+      const forged = await backends.get(`${LOKI_URL}/loki/api/v1/query_range`, {
+        params: {
+          query,
+          start: `${(Date.now() - 15 * 60 * 1000) * 1e6}`,
+          end: `${Date.now() * 1e6}`,
+        },
+      });
+      expect(((await forged.json()).data?.result ?? []).length, query).toBe(0);
+    }
+  });
+
+  /**
+   * The bounds: a `service.name` outside ALLOWED_SERVICE_NAMES and a span older
+   * than MAX_PAST_AGE are answered 200 and dropped, and client metrics are
+   * dropped (the allowlists are empty). "Dropped" is asserted the only way it
+   * can be — the item is absent after a later sentinel has arrived — and
+   * "counted" on the ingest's own metrics, which the dashboard charts.
+   */
+  test('drops and counts an unregistered service, an ancient span and client metrics', async () => {
+    const before = await ingestMetrics();
+    const stranger = `stranger-${hex(4)}`;
+    const ancient = `ancient-${hex(4)}`;
+
+    expect(
+      (
+        await ingest(
+          'traces',
+          traceBody({ name: stranger, traceId: hex(16), spanId: hex(8), resource: [kv('service.name', 'totally-not-v-note')] }),
+          suiteToken,
+        )
+      ).status(),
+    ).toBe(200);
+    expect(
+      (
+        await ingest(
+          'logs',
+          logBody({ body: stranger, traceId: hex(16), spanId: hex(8), resource: [kv('service.name', 'totally-not-v-note')] }),
+          suiteToken,
+        )
+      ).status(),
+    ).toBe(200);
+    expect(
+      (
+        await ingest(
+          'traces',
+          traceBody({
+            name: ancient,
+            traceId: hex(16),
+            spanId: hex(8),
+            resource: [kv('service.name', 'v-note-spa')],
+            startMs: Date.now() - 72 * 3600 * 1000,
+          }),
+          suiteToken,
+        )
+      ).status(),
+    ).toBe(200);
+    expect(
+      (
+        await ingest(
+          'metrics',
+          {
+            resourceMetrics: [
+              {
+                resource: { attributes: [kv('service.name', 'v-note-spa')] },
+                scopeMetrics: [
+                  { metrics: [{ name: 'vnote.client.e2e', gauge: { dataPoints: [{ asDouble: 1, timeUnixNano: nowNanos() }] } }] },
+                ],
+              },
+            ],
+          },
+          suiteToken,
+        )
+      ).status(),
+    ).toBe(200);
+
+    // A sentinel after them all: once it is stored, anything that was going to
+    // be stored has been.
+    const sentinel = hex(16);
+    await ingest(
+      'traces',
+      traceBody({ name: 'sentinel', traceId: sentinel, spanId: hex(8), resource: [kv('service.name', 'v-note-spa')] }),
+      suiteToken,
+    );
+    await tempoBatches(sentinel);
+    expect(await tempoSearchCount(`{ name = "${stranger}" }`)).toBe(0);
+    expect(await tempoSearchCount(`{ name = "${ancient}" }`)).toBe(0);
+
+    const after = await eventually('the drops to be counted', async () => {
+      const now = await ingestMetrics();
+      const grew = (name: string, by: number) => (now.get(name) ?? 0) - (before.get(name) ?? 0) >= by;
+      return grew('otelcol_processor_filter_spans_filtered', 2) &&
+        grew('otelcol_processor_filter_logs_filtered', 1) &&
+        grew('otelcol_processor_filter_datapoints_filtered', 1)
+        ? now
+        : null;
+    });
+    expect(after.get('otelcol_processor_filter_spans_filtered')).toBeGreaterThan(0);
+  });
+
+  /** A gzip bomb is refused on its *decompressed* size, before it is parsed. */
+  test('caps the decompressed body with 413', async () => {
+    const bomb = zlib.gzipSync(Buffer.alloc(5 * 1024 * 1024, ' '));
+    expect(bomb.length).toBeLessThan(64 * 1024);
+    const res = await ingest('traces', bomb, suiteToken, { 'Content-Encoding': 'gzip' });
+    expect(res.status()).toBe(413);
+  });
+
+  /**
+   * The dashboard and the alert query these names (deploy/grafana/). They are
+   * listed once, in deploy/grafana/otlp-collector-oidc-metrics.txt, which
+   * scripts/test-grafana-dashboard.sh holds the dashboard to — and here the
+   * pinned image is held to the list, so a rename upstream fails a test rather
+   * than blanking a panel. Runs after the tests above have driven every event
+   * the counters count.
+   */
+  test('exports every metric the dashboard and alert query', async () => {
+    const listed = fs
+      .readFileSync(path.resolve(__dirname, '../fixtures/otlp-collector-oidc-metrics.txt'), 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    expect(listed.length).toBeGreaterThan(5);
+    const exported = await ingestMetrics();
+    for (const name of listed) {
+      expect(exported.has(name), `${name} exported by the pinned image`).toBe(true);
+    }
   });
 });
 
 // ---------------------------------------------------------------------------
-// The front door
+// The configuration route
 // ---------------------------------------------------------------------------
 
-test.describe('the /otlp ingress', () => {
-  test('rejects an export with no credentials, and forwards nothing', async () => {
+test.describe('GET /api/telemetry/config', () => {
+  test('hands a signed-in client the endpoint and its own token, uncached', async ({ request }) => {
+    const res = await request.get('/api/telemetry/config');
+    expect(res.status()).toBe(200);
+    expect(res.headers()['cache-control']).toBe('no-store');
+    const config = await res.json();
+    expect(config.endpoint).toBe(INGEST_URL);
+    expect(config.access_token).toBe(process.env.AUTH_TOKEN);
+    expect(config.expires_at).toBeGreaterThan(Date.now() / 1000);
+  });
+
+  test('gives an anonymous caller nothing', async () => {
     const anonymous = await request.newContext({
       baseURL: process.env.BASE_URL,
       ignoreHTTPSErrors: true,
@@ -464,127 +595,11 @@ test.describe('the /otlp ingress', () => {
       extraHTTPHeaders: {},
     });
     try {
-      const res = await anonymous.post('/otlp/spa/v1/traces', {
-        data: traceBody('anon', hex(16), hex(8)),
-      });
+      const res = await anonymous.get('/api/telemetry/config');
       expect(res.status()).toBe(401);
+      expect(await res.text()).not.toContain('endpoint');
     } finally {
       await anonymous.dispose();
-    }
-  });
-
-  /**
-   * The SPA's entire auth story: a same-origin `fetch` carries the `HttpOnly`
-   * session cookie by itself, so the browser never holds a token. This context
-   * has the cookie and *no* Authorization header.
-   */
-  test('accepts an export authenticated by the session cookie alone', async ({ browser }) => {
-    const context = await browser.newContext({
-      baseURL: process.env.BASE_URL,
-      ignoreHTTPSErrors: true,
-      extraHTTPHeaders: {},
-    });
-    try {
-      const traceId = hex(16);
-      const res = await context.request.post('/otlp/spa/v1/traces', {
-        data: traceBody('cookie-only', traceId, hex(8)),
-      });
-      expect(res.status()).toBe(200);
-      expect((await tempoResource(traceId))['service.name']).toBe('v-note-spa');
-    } finally {
-      await context.close();
-    }
-  });
-
-  test('rejects a valid token that lacks the required scope', async () => {
-    const tokenUrl = process.env.OIDC_TOKEN_URL;
-    test.skip(!tokenUrl, 'OIDC_TOKEN_URL required to mint a wrong-scope token');
-
-    const idp = await request.newContext({ ignoreHTTPSErrors: true });
-    const token = await idp
-      .post(tokenUrl!, {
-        form: {
-          grant_type: 'client_credentials',
-          client_id: 'v-note-test-wrong',
-          client_secret: 'test-secret',
-          scope: 'openid profile email v-note:wrong:access',
-        },
-      })
-      .then((res) => res.json())
-      .then((body) => body.access_token as string);
-    await idp.dispose();
-
-    const wrongScope = await request.newContext({
-      baseURL: process.env.BASE_URL,
-      ignoreHTTPSErrors: true,
-      storageState: { cookies: [], origins: [] },
-      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
-    });
-    try {
-      const res = await wrongScope.post('/otlp/spa/v1/traces', {
-        data: traceBody('wrong-scope', hex(16), hex(8)),
-      });
-      // 403, not 401: this is the same `auth_middleware` as every other route,
-      // which distinguishes "who are you" from "not allowed".
-      expect(res.status()).toBe(403);
-    } finally {
-      await wrongScope.dispose();
-    }
-  });
-
-  /**
-   * Over a raw socket that declares the size and then sends **no body**, not
-   * `request.post` with a real 1 MiB one. The server refuses on the declared
-   * `Content-Length` before reading a byte and closes the connection, so a
-   * client still uploading races that close: with `request.post` the 413 lost
-   * to a `write EPIPE` on most CI runs (#400). With nothing to upload there is
-   * no race — and a status line arriving at all is the stronger claim, that
-   * the refusal happens *before* the body is read, which a client that sends
-   * the whole body could never show. The streamed, undeclared-length case is
-   * `crates/server/tests/telemetry.rs`.
-   */
-  test('rejects a body over the 1 MiB cap with 413', async ({ request }) => {
-    const { cookies } = await request.storageState();
-    const status = await statusForDeclaredLengthOnly(
-      '/otlp/spa/v1/traces',
-      1024 * 1024 + 1,
-      cookies.map((c) => `${c.name}=${c.value}`).join('; '),
-    );
-    expect(status).toBe(413);
-  });
-
-  /**
-   * `/otlp/spa/v1/metrics` is the case with teeth: client metrics were dropped
-   * from #354, a client could plausibly send them, and the sidecar has no
-   * pipeline for them. 404 is the honest answer; silently accepting and
-   * discarding them is what this asserts does not happen.
-   *
-   * The rest matter because the SPA's catch-all serves `index.html` with a
-   * **200** for any unrecognised path — so "not 404" here would not be a
-   * harmless miss, it would be the SPA's HTML answering an export.
-   */
-  test('answers anything that is not a known client and signal with 404', async ({ request }) => {
-    for (const path of [
-      '/otlp/spa/v1/metrics',
-      '/otlp/ios/v1/traces',
-      '/otlp/v1/traces',
-      '/otlp/spa/v2/traces',
-      '/otlp/',
-    ]) {
-      const res = await request.post(path, { data: traceBody('nope', hex(16), hex(8)) });
-      expect(res.status(), `POST ${path}`).toBe(404);
-    }
-
-    // The same paths by GET, which is how the catch-all would be reached. By
-    // body as well as status: the SPA fallback serves index.html *with a 404*,
-    // so a status check alone passes on exactly the escape it is looking for —
-    // which is how `/otlp/` slipped past the Rust tests until this caught it.
-    for (const path of ['/otlp', '/otlp/', '/otlp/spa/v1/traces', '/otlp/anything']) {
-      const res = await request.get(path);
-      expect(res.ok(), `GET ${path} must not succeed`).toBe(false);
-      expect(await res.text(), `GET ${path} must not be answered by the SPA`).not.toContain(
-        '<html',
-      );
     }
   });
 });
@@ -593,19 +608,17 @@ test.describe('the /otlp ingress', () => {
 // A real browser
 // ---------------------------------------------------------------------------
 
+const MENU = 'summary[aria-label="Open main menu"]';
+const isExport = (url: string) => url.startsWith(`${INGEST_URL}/v1/`);
+
 test.describe('the SPA in a real browser', () => {
   /**
-   * The acceptance criterion the whole card exists for: one trace that starts
-   * in the browser and reaches Postgres.
-   *
-   * The trace id is taken from the `traceparent` the SPA puts on its own
-   * requests — the real header, read off the real request, rather than anything
-   * the test chose. Tempo is then asked for that id, and has to hold both the
-   * browser's span and the server's.
+   * The acceptance criterion #354 exists for, now through the ingest: one
+   * trace that starts in the browser and reaches Postgres.
    */
-  test('a page load produces one trace spanning browser, server and database', async ({
-    page,
-  }) => {
+  test('a page load produces one trace spanning browser, server and database', async ({ page }) => {
+    // The browser exports on a 5 s tick, then Tempo or Loki ingest it.
+    test.setTimeout(90_000);
     const traceparents: string[] = [];
     page.on('request', (req) => {
       const header = req.headers()['traceparent'];
@@ -615,86 +628,65 @@ test.describe('the SPA in a real browser', () => {
     });
 
     await page.goto('/', { waitUntil: 'load' });
-    await expect(page.locator('summary[aria-label="Open main menu"]')).toBeVisible({
-      timeout: 15_000,
-    });
+    await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
 
-    expect(traceparents.length, 'the SPA must send traceparent on its API calls').toBeGreaterThan(
-      0,
-    );
-    // `00-<32 hex>-<16 hex>-01`: version 00, and always sampled — a `-00` here
-    // would switch off the server's spans too, since Traefik samples on parent.
+    expect(traceparents.length, 'the SPA must send traceparent on its API calls').toBeGreaterThan(0);
     for (const header of traceparents) {
       expect(header).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     }
-    // Every call from one screen shares the screen's trace.
     const traceIds = new Set(traceparents.map((header) => header.split('-')[1]));
     expect(traceIds.size, 'one screen is one trace').toBe(1);
     const traceId = [...traceIds][0];
 
-    // The browser's spans are exported on a tick, so the trace fills in over a
-    // few seconds; `eventually` covers both that and Tempo's ingestion.
-    const names = await eventually(`browser and server spans in trace ${traceId}`, async () => {
-      const res = await backends.get(`${TEMPO_URL}/api/traces/${traceId}`);
-      if (!res.ok()) return null;
-      const body = await res.json();
-      const all = (body?.batches ?? []).flatMap((batch: any) =>
-        (batch.scopeSpans ?? []).flatMap((scope: any) =>
-          (scope.spans ?? []).map((span: any) => span.name as string),
-        ),
-      );
-      // Wait for the browser's own span, which arrives last.
-      return all.includes('http.client') ? all : null;
-    }, 45_000);
-
-    // The browser's client span, the server's request span, and the database
-    // work underneath it — one trace, three tiers.
+    const batches = await tempoBatches(traceId, 'v-note-spa', 45_000);
+    const names = batches.flatMap((batch: any) =>
+      (batch.scopeSpans ?? []).flatMap((scope: any) => (scope.spans ?? []).map((span: any) => span.name as string)),
+    );
     expect(names).toContain('http.client');
     expect(names).toContain('http.request');
-    expect(names.some((name) => name.startsWith('db.'))).toBe(true);
+    expect(names.some((name: string) => name.startsWith('db.'))).toBe(true);
+
+    // The browser's spans carry the user the ingest stamped from the token.
+    const spa = batches.find(
+      (batch: any) => flattenAttributes(batch.resource?.attributes)['service.name'] === 'v-note-spa',
+    );
+    const resource = flattenAttributes(spa.resource.attributes);
+    expect(resource['telemetry_source']).toBe('client');
+    expect(resource['deployment.environment.name']).toBe(EXPECTED_ENV);
+    const attributes = flattenAttributes(spa.scopeSpans[0].spans[0].attributes);
+    expect(attributes['user.name']).toBe(USER.name);
   });
 
   /** The browser's span must be the root, or the trace is not the user's. */
   test('the browser span is the root of the trace', async ({ page }) => {
+    // The browser exports on a 5 s tick, then Tempo or Loki ingest it.
+    test.setTimeout(90_000);
     let traceparent: string | undefined;
     page.on('request', (req) => {
       traceparent ??= req.headers()['traceparent'];
     });
 
     await page.goto('/', { waitUntil: 'load' });
-    await expect(page.locator('summary[aria-label="Open main menu"]')).toBeVisible({
-      timeout: 15_000,
-    });
+    await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
     expect(traceparent).toBeDefined();
     const [, traceId] = traceparent!.split('-');
 
-    const spans = await eventually(`the root span of ${traceId}`, async () => {
-      const res = await backends.get(`${TEMPO_URL}/api/traces/${traceId}`);
-      if (!res.ok()) return null;
-      const body = await res.json();
-      const all = (body?.batches ?? []).flatMap((batch: any) => {
-        const service = flattenAttributes(batch.resource?.attributes)['service.name'];
-        return (batch.scopeSpans ?? []).flatMap((scope: any) =>
-          (scope.spans ?? []).map((span: any) => ({
-            name: span.name as string,
-            id: span.spanId as string,
-            parent: (span.parentSpanId ?? '') as string,
-            service,
-          })),
-        );
-      });
-      return all.some((span: any) => span.service === 'v-note-spa') ? all : null;
-    }, 45_000);
+    const batches = await tempoBatches(traceId, 'v-note-spa', 45_000);
+    const spans = batches.flatMap((batch: any) => {
+      const service = flattenAttributes(batch.resource?.attributes)['service.name'];
+      return (batch.scopeSpans ?? []).flatMap((scope: any) =>
+        (scope.spans ?? []).map((span: any) => ({
+          name: span.name as string,
+          id: span.spanId as string,
+          parent: (span.parentSpanId ?? '') as string,
+          service,
+        })),
+      );
+    });
 
     const roots = spans.filter((span: any) => !span.parent);
     expect(roots.length, 'exactly one root').toBe(1);
     expect(roots[0].service).toBe('v-note-spa');
-
-    // …and every browser request span hangs directly off that root. This is
-    // the check that was missing when overlapping requests mis-parented each
-    // other: `load_pages` and the realtime ticket run concurrently on every
-    // signed-in load, and a global "current span" put one under the other
-    // while "one trace, one root" still passed.
     const rootId = roots[0].id;
     const browserRequests = spans.filter(
       (span: any) => span.service === 'v-note-spa' && span.name === 'http.client',
@@ -706,43 +698,58 @@ test.describe('the SPA in a real browser', () => {
   });
 
   /**
-   * A log the SPA itself decided to write, reaching Loki by the real path —
-   * not one posted by the test. Opening a deep link to a page that does not
-   * exist is a genuine, reachable failure path, and the SPA logs it at `info`.
+   * A log the SPA itself decided to write, reaching Loki by the real path, as
+   * this build, attributed to the signed-in user.
    */
-  test('a failure the SPA notices reaches Loki, correlated with its trace', async ({ page }) => {
+  test('a failure the SPA notices reaches Loki, attributed and correlated', async ({ page, request }) => {
+    // The browser exports on a 5 s tick, then Tempo or Loki ingest it.
+    test.setTimeout(90_000);
+    const version = (await (await request.get('/api/meta')).json()).app_version as string;
     const missing = `page_does_not_exist_${hex(4)}`;
     await page.goto(`/p/${missing}`, { waitUntil: 'load' });
-    // The app recovers: it falls back to the library and says why.
-    await expect(page.getByText('That page is not in your library.')).toBeVisible({
-      timeout: 15_000,
-    });
+    await expect(page.getByText('That page is not in your library.')).toBeVisible({ timeout: 15_000 });
 
-    const streams = await lokiStreams('{service_name="v-note-spa"}', (line) =>
-      line.includes('deep link named a page not in the library'),
+    const streams = await lokiStreams(
+      `{service_name="v-note-spa", deployment_environment_name="${EXPECTED_ENV}"}`,
+      (line) => line.includes('deep link named a page not in the library'),
     );
     const stream = streams[0].stream;
     expect(stream.severity_text).toBe('INFO');
-    expect(stream.deployment_environment).toBe(EXPECTED_ENV);
-    // Correlated: the line names the trace it happened in.
+    expect(stream.telemetry_source).toBe('client');
+    expect(stream.user_name).toBe(USER.name);
+    expect(stream.user_id).toBe(USER.id);
+    // The SPA's own build, which is the server's here — the same image.
+    expect(stream.service_version).toBe(version);
     expect(stream.trace_id).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  /**
+   * The credential: the bearer the config route handed out, per request, and
+   * never the session cookie — the ingest accepts only a bearer, and the
+   * cookie has no business reaching it.
+   */
+  test('exports carry the bearer from the config route, and no cookie', async ({ page }) => {
+    const exports: Array<Record<string, string>> = [];
+    page.on('request', (req) => {
+      if (isExport(req.url()) && req.method() === 'POST') exports.push(req.headers());
+    });
+    await page.goto('/', { waitUntil: 'load' });
+    await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => exports.length, { timeout: 15_000 }).toBeGreaterThan(0);
+    expect(exports[0]['authorization']).toBe(`Bearer ${process.env.AUTH_TOKEN}`);
+    expect(exports[0]['cookie']).toBeUndefined();
+    expect(exports[0]['content-type']).toContain('application/json');
   });
 
   /**
    * A browser cannot put a `traceparent` on a WebSocket upgrade, so the server
    * stores the trace of the `POST /api/realtime-ticket` request with the ticket
-   * and parents the connection span to it when the ticket is redeemed. This is
-   * the assembly the hub's unit tests cannot see: that `page_socket` and
-   * `realtime_socket` really build their connection span from the ticket.
-   *
-   * A connection span is exported when it *ends*, which is when its socket
-   * closes — so the page is left before Tempo is asked.
+   * and parents the connection span to it when the ticket is redeemed.
    */
   test('each realtime connection span sits in the trace its ticket was requested in', async ({
     page,
     request,
   }) => {
-    // The Tempo wait below is 45s; the default test budget is 30s.
     test.setTimeout(120_000);
     const created = await request.post('/api/pages', { data: {} });
     expect(created.status()).toBe(201);
@@ -758,16 +765,10 @@ test.describe('the SPA in a real browser', () => {
 
     await page.goto(`/p/${id}`, { waitUntil: 'load' });
     await expect(page.getByLabel('Read-only ink canvas')).toBeVisible({ timeout: 15_000 });
-    // The page channel has to be *connected* before leaving, not merely
-    // requested: `WebSocket::open` returns before the handshake, so neither a
-    // ticket request nor a `realtime.connect` span proves the server ever ran
-    // the handler whose span this is looking for. `Connected` comes from the
-    // server's own `welcome`.
     await expect(page.getByText(/Synced · seq 0|Connected · seq 0|Live · seq 0/)).toBeVisible({
       timeout: 15_000,
     });
     await expect.poll(() => ticketTraces.size, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
-    // Leaving closes both sockets, which ends their spans.
     await page.goto('about:blank');
 
     const found = await eventually('connection spans in the ticket traces', async () => {
@@ -782,9 +783,7 @@ test.describe('the SPA in a real browser', () => {
           }
         }
       }
-      return names.has('handle_page_socket') && names.has('handle_library_socket')
-        ? names
-        : null;
+      return names.has('handle_page_socket') && names.has('handle_library_socket') ? names : null;
     }, 45_000);
 
     expect(found.has('handle_page_socket')).toBe(true);
@@ -792,87 +791,186 @@ test.describe('the SPA in a real browser', () => {
   });
 
   /**
-   * An ordinary `fetch` started during `pagehide` is cancelled by the unload, so
-   * the exporter sends what is queued as a beacon instead. Asserted the hard
-   * way: the beacon is read off the real request, and then its spans are looked
-   * for in Tempo — i.e. it was *delivered*, after the page it came from was gone.
+   * An ordinary `fetch` started during `pagehide` is cancelled by the unload;
+   * `sendBeacon` survives but cannot carry the bearer the ingest needs. So the
+   * flush is `fetch(…, { keepalive: true })` with the bearer, and this asserts
+   * it was *delivered* after the page that sent it was gone.
    */
   test('telemetry queued when the page goes away still arrives', async ({ page }) => {
-    // Playwright cannot read a beacon's Blob body, so the trace to look for is
-    // taken from the page's own requests instead: every request on one screen
-    // carries that screen's trace, and the queued spans belong to it.
+    // The browser exports on a 5 s tick, then Tempo or Loki ingest it.
+    test.setTimeout(90_000);
     let traceId: string | undefined;
-    const exports: Array<{ type: string; contentType: string }> = [];
+    let configured = false;
+    const exports: Array<Record<string, string>> = [];
     page.on('request', (req) => {
       const header = req.headers()['traceparent'];
       if (header && req.url().includes('/api/')) traceId ??= header.split('-')[1];
-      if (req.url().includes('/otlp/spa/v1/traces')) {
-        exports.push({
-          type: req.resourceType(),
-          contentType: req.headers()['content-type'] ?? '',
-        });
+      if (req.url().endsWith('/api/telemetry/config')) configured = true;
+      if (isExport(req.url()) && req.url().endsWith('/v1/traces') && req.method() === 'POST') {
+        exports.push(req.headers());
       }
     });
 
     await page.goto('/', { waitUntil: 'load' });
-    await expect(page.locator('summary[aria-label="Open main menu"]')).toBeVisible({
-      timeout: 15_000,
-    });
-    // The first ordinary export is 5s after start. If one has already gone, the
-    // spans below could have arrived that way and this would prove nothing, so
-    // it fails as inconclusive rather than passing.
+    await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => configured, { timeout: 10_000 }).toBe(true);
+    // Let the config response land, well before the first 5s tick.
+    await page.waitForTimeout(1_000);
+    // If an ordinary export has already gone, the spans below could have
+    // arrived that way and this would prove nothing: inconclusive, not a pass.
     expect(exports, 'an ordinary export ran before the page was left').toHaveLength(0);
     await page.goto('about:blank');
 
     await expect.poll(() => exports.length, { timeout: 10_000 }).toBeGreaterThan(0);
-    // `ping` is how Chromium reports a sendBeacon — an ordinary fetch here is
-    // exactly what the unload cancels.
-    expect(exports[0].type).toBe('ping');
-    // Without an explicit type a beacon goes as text/plain, which the receiver
-    // will not parse as OTLP JSON.
-    expect(exports[0].contentType).toContain('application/json');
+    expect(exports[0]['authorization']).toBe(`Bearer ${process.env.AUTH_TOKEN}`);
     expect(traceId).toBeDefined();
 
     // Delivered, not merely sent: the page that sent it no longer exists.
-    const service = await eventually(`beaconed trace ${traceId} in tempo`, async () => {
-      const res = await backends.get(`${TEMPO_URL}/api/traces/${traceId}`);
-      if (!res.ok()) return null;
-      const body = await res.json();
-      const services = (body?.batches ?? []).map(
-        (batch: any) => flattenAttributes(batch.resource?.attributes)['service.name'],
-      );
-      return services.includes('v-note-spa') ? 'v-note-spa' : null;
-    });
-    expect(service).toBe('v-note-spa');
+    await tempoBatches(traceId!, 'v-note-spa');
   });
 
   /**
-   * The rule the module is built around: telemetry must never cost the product
-   * anything. Asserted the only way that means something — by breaking the
-   * collector and checking the app does not care.
+   * Telemetry must never cost the product anything: break the ingest and check
+   * the app does not care.
    */
-  test('the SPA stays fully usable when the sidecar refuses everything', async ({ browser }) => {
-    const context = await browser.newContext({
-      baseURL: process.env.BASE_URL,
-      ignoreHTTPSErrors: true,
-    });
+  test('the SPA stays fully usable when the ingest refuses everything', async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: process.env.BASE_URL, ignoreHTTPSErrors: true });
     try {
       const page = await context.newPage();
-      // Every export fails, as it would with the sidecar stopped.
-      await page.route('**/otlp/**', (route) => route.abort('connectionrefused'));
+      await page.route(`${INGEST_URL}/**`, (route) => route.abort('connectionrefused'));
 
       await page.goto('/', { waitUntil: 'load' });
-      await expect(page.locator('summary[aria-label="Open main menu"]')).toBeVisible({
-        timeout: 15_000,
-      });
-      // Past the first export tick (5s), so failures have actually happened.
+      await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
       await page.waitForTimeout(7_000);
 
-      // The app is still live: the library renders and the menu still works.
-      await page.locator('summary[aria-label="Open main menu"]').click();
+      await page.locator(MENU).click();
       await expect(page.getByRole('link', { name: 'Sign out' })).toBeVisible();
-      // And nothing about telemetry reached the user.
       await expect(page.locator('.alert')).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  /**
+   * No configuration, no telemetry: with the config route saying "off" the SPA
+   * never initialises OTLP — not one request to the ingest — and says so once
+   * on the console.
+   */
+  test('with no telemetry configuration the SPA sends nothing', async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: process.env.BASE_URL, ignoreHTTPSErrors: true });
+    try {
+      const page = await context.newPage();
+      const console: string[] = [];
+      page.on('console', (message) => console.push(message.text()));
+      let exports = 0;
+      page.on('request', (req) => {
+        if (isExport(req.url())) exports += 1;
+      });
+      await page.route('**/api/telemetry/config', (route) => route.fulfill({ status: 204 }));
+
+      await page.goto('/', { waitUntil: 'load' });
+      await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
+      await expect
+        .poll(() => console.filter((line) => line.includes('client telemetry off for this page')).length, {
+          timeout: 10_000,
+        })
+        .toBe(1);
+      // Past two export ticks.
+      await page.waitForTimeout(11_000);
+      expect(exports).toBe(0);
+      expect(console.filter((line) => line.includes('client telemetry off')).length, 'said once').toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  /**
+   * A server that does not answer the first config fetch (a `503` during a
+   * deploy, say) is not a "no": the SPA asks again on a later tick, within the
+   * pre-config window, and telemetry comes on — with what waited in the buffer.
+   */
+  test('an unanswered first config fetch is asked again, and telemetry comes on', async ({ browser }) => {
+    test.setTimeout(60_000);
+    const context = await browser.newContext({ baseURL: process.env.BASE_URL, ignoreHTTPSErrors: true });
+    try {
+      const page = await context.newPage();
+      let configFetches = 0;
+      let exports = 0;
+      page.on('request', (req) => {
+        if (isExport(req.url()) && req.method() === 'POST') exports += 1;
+      });
+      await page.route('**/api/telemetry/config', async (route) => {
+        configFetches += 1;
+        if (configFetches === 1) {
+          await route.fulfill({ status: 503, body: 'deploying' });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.goto('/', { waitUntil: 'load' });
+      await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
+      await expect.poll(() => exports, { timeout: 30_000 }).toBeGreaterThan(0);
+      expect(configFetches, 'the 503, then the retry that configured it').toBe(2);
+    } finally {
+      await context.close();
+    }
+  });
+
+  /**
+   * `401` → one refresh (a fresh config fetch) → a second `401` stops telemetry
+   * for the page load: no loop, and one console line saying so.
+   */
+  test('a refused token is refreshed once, then telemetry stops for the page', async ({ browser }) => {
+    test.setTimeout(90_000);
+    const context = await browser.newContext({ baseURL: process.env.BASE_URL, ignoreHTTPSErrors: true });
+    try {
+      const page = await context.newPage();
+      const console: string[] = [];
+      page.on('console', (message) => console.push(message.text()));
+      let configFetches = 0;
+      let exports = 0;
+      page.on('request', (req) => {
+        if (req.url().endsWith('/api/telemetry/config')) configFetches += 1;
+      });
+      await page.route(`${INGEST_URL}/**`, async (route) => {
+        // The export is cross-origin in this stack, so the browser may ask
+        // first; answer the preflight as the ingest's CORS config would.
+        if (route.request().method() === 'OPTIONS') {
+          await route.fulfill({
+            status: 204,
+            headers: {
+              'access-control-allow-origin': 'https://app',
+              'access-control-allow-methods': 'POST',
+              'access-control-allow-headers': 'authorization,content-type',
+            },
+          });
+          return;
+        }
+        if (route.request().method() === 'POST') exports += 1;
+        await route.fulfill({
+          status: 401,
+          contentType: 'application/json',
+          headers: { 'access-control-allow-origin': 'https://app' },
+          body: '{"code":16,"message":"missing scope: telemetry:write"}',
+        });
+      });
+
+      await page.goto('/', { waitUntil: 'load' });
+      await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
+      await expect
+        .poll(() => console.some((line) => line.includes('client telemetry off for this page')), {
+          timeout: 40_000,
+        })
+        .toBe(true);
+      expect(configFetches, 'the first fetch and exactly one refresh').toBe(2);
+      expect(exports, 'one export per token').toBe(2);
+
+      // Stopped: nothing more, however long the page stays open.
+      await page.waitForTimeout(11_000);
+      expect(exports).toBe(2);
+      expect(configFetches).toBe(2);
+      expect(console.filter((line) => line.includes('export failing')).length, 'one line when failing starts').toBe(1);
     } finally {
       await context.close();
     }

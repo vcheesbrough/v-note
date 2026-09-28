@@ -263,8 +263,16 @@ steps:
     # image (`&deploy-image` above). The in-pipeline installer pinned a version
     # the server later retired (its download 404'd and failed every deploy), and
     # was removed on PR #55.
+    #
+    # Two layers (#439): the environment's compose values, then the client
+    # telemetry ingest's own (OIDC_ISSUER_URL, OIDC_AUDIENCE — aliases of the
+    # app's oidc leaves — and ALLOWED_SERVICE_NAMES). Its own layer so it is
+    # listed and reviewed apart from the database password. Both are required:
+    # the deploy fails closed without either (deploy/docker-compose.yml says
+    # why); telemetry is switched off by `client-telemetry/endpoint`, not by
+    # dropping this layer.
     commands: &deploy-commands
-      - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
+      - sovereign-config render /v-note/devops/dev/compose /v-note/devops/dev/otlp-collector-oidc -- ./scripts/deploy-v-note.sh
 
   # Also every push: dev and the blueprint move together, and the blueprint is
   # applied on any branch above. Deploying a branch build against a master-era
@@ -407,6 +415,12 @@ steps:
     commands:
       - apk add --no-cache curl jq
       - GRAFANA_MESSAGE_PREFIX="v-note $$CI_COMMIT_BRANCH" RELEASE_TAG="$$(cat .release-tag)" COMMIT_SHA="$$CI_COMMIT_SHA" ./scripts/publish-grafana-dashboard.sh deploy/grafana/v-note-overview.json
+      # NOT the alert rules (#439): the woodpecker-ci service account may not
+      # write alerting — by design (mini-config OBSERVABILITY.md), and Grafana
+      # also wants datasources:query on Prometheus, which it lacks. Until the
+      # platform grants that (mini-config #445), deploy/grafana/v-note-alerts.json
+      # is published by an operator with scripts/publish-grafana-alerts.sh;
+      # re-add it here once the grant lands.
 
   tag-release-dev:
     when:

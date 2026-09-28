@@ -1,23 +1,29 @@
-//! Client telemetry for the SPA (#354): spans and levelled logs, exported as
-//! OTLP/JSON to `/otlp/spa` on the SPA's own origin.
+//! Client telemetry for the SPA: spans and levelled logs, exported as OTLP/JSON
+//! to this environment's `otlp-collector-oidc` ingest (#439; built in #354).
 //!
-//! Same origin is the whole authentication story. The export is a same-origin
-//! `fetch`, so the browser attaches the `HttpOnly` session cookie by itself, the
-//! SPA never holds a token, and there is no CORS involved.
+//! **No configuration, no telemetry.** Nothing is sent until the server has
+//! answered `GET /api/telemetry/config` with an endpoint and a bearer token;
+//! until then items wait in a small, short-lived buffer, and if the server
+//! says nothing (ingest off, a failed fetch, no session) they are discarded and
+//! OTLP is never initialised. The ingest accepts only a bearer, so the token
+//! the SPA's `HttpOnly` cookie carries is handed to it by that route — the
+//! deliberate cost of the reference ingest, recorded in `AGENTS.md`.
 //!
 //! Three rules hold everywhere in this module, because telemetry that costs the
 //! product anything is worse than no telemetry:
 //!
 //! 1. **Nothing here can fail loudly.** Every entry point swallows its errors.
 //!    There is no `?` that reaches a caller and no error that reaches the UI.
+//!    Failures are said once, on the console, on a change of state only.
 //! 2. **Nothing here blocks.** Exports are spawned, never awaited by the code
 //!    being measured.
-//! 3. **Nothing here is unbounded.** The queues are capped and the send rate is
-//!    capped, whatever the app does.
+//! 3. **Nothing here is unbounded.** The queues are capped, retries are capped,
+//!    and repeated failure stops telemetry for the page load.
 //!
-//! The pure parts live in [`otlp`] (the wire encoding) and [`outbox`] (queueing
-//! and the send policy) and are unit-tested on the host; this file is the part
-//! that needs a browser, and is covered by `e2e/tests/client-telemetry.spec.ts`.
+//! The pure parts live in [`otlp`] (the wire encoding) and [`outbox`] (queueing,
+//! configuration and the send policy) and are unit-tested on the host; this
+//! file is the part that needs a browser, and is covered by
+//! `e2e/tests/client-telemetry.spec.ts`.
 
 pub(crate) mod otlp;
 pub(crate) mod outbox;
@@ -26,10 +32,15 @@ pub(crate) mod span;
 use std::cell::RefCell;
 
 use gloo_timers::future::TimeoutFuture;
+use protocol::TelemetryConfigResponse;
+use wasm_bindgen::JsCast as _;
 
 pub(crate) use otlp::Severity;
 use otlp::{ErrorStatus, KeyValue, LogRecord, Span, SpanId, SpanKind, TraceId, UnixNanos};
-use outbox::{ExportOutcome, ExportPolicy, Outbox};
+use outbox::{
+    ConfigFetch, ConfigOutcome, Credentials, ExportOutcome, ExportPolicy, Lifecycle, OffReason,
+    Outbox, Signal, Transition,
+};
 use span::OpenSpan;
 pub(crate) use span::Parent;
 
@@ -38,10 +49,8 @@ pub(crate) use span::Parent;
 /// still looking at the screen that produced it.
 const TICK_MS: u32 = 5_000;
 
-/// Version of this hand-rolled exporter, reported as `telemetry.sdk.version`.
-/// Bump when the encoding changes, not when the app does — `service.version` is
-/// the app's, and the sidecar supplies it.
-const SDK_VERSION: &str = "1";
+/// Where the configuration comes from. Same origin, cookie-authenticated.
+const CONFIG_PATH: &str = "/api/telemetry/config";
 
 thread_local! {
     /// The SPA is single-threaded (`wasm32-unknown-unknown`, no threads), so a
@@ -51,11 +60,15 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
+/// A batch that failed retryably, kept to be sent again.
+struct Pending {
+    body: String,
+    items: usize,
+    attempts: u32,
+}
+
 struct State {
     trace_id: TraceId,
-    /// Items dropped for lack of room that have already been reported, so the
-    /// warning below is emitted on each new loss rather than every tick.
-    reported_drops: u64,
     /// The span enclosing everything the current screen does. Route changes
     /// replace it, which is what keeps one trace per screen rather than one per
     /// page load. Read only by [`screen`] — nothing else consults "the current"
@@ -63,8 +76,34 @@ struct State {
     root: SpanId,
     spans: Outbox<Span>,
     logs: Outbox<LogRecord>,
+    lifecycle: Lifecycle,
     policy: ExportPolicy,
-    enabled: bool,
+    retry_spans: Option<Pending>,
+    retry_logs: Option<Pending>,
+    /// Items thrown away after a send failed — reported in the local lines.
+    dropped_after_send: u64,
+    /// Whether the outbox overflow has been said on the console yet.
+    overflow_reported: bool,
+    /// One export at a time: a slow ingest must not stack requests up.
+    exporting: bool,
+    /// One config fetch at a time.
+    fetching_config: bool,
+    /// Whether `set_session` has confirmed a session: until then a config
+    /// fetch could only be a `401`.
+    signed_in: bool,
+}
+
+impl State {
+    fn dropped(&self) -> u64 {
+        self.spans.dropped() + self.logs.dropped() + self.dropped_after_send
+    }
+
+    fn discard_everything(&mut self) {
+        self.spans.clear();
+        self.logs.clear();
+        self.retry_spans = None;
+        self.retry_logs = None;
+    }
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
@@ -82,29 +121,138 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 /// Starts telemetry for this page load and spawns the export loop.
 ///
 /// Called before anything else in `main`, so the panic hook and the first route
-/// span are covered. Collecting begins immediately but nothing is *sent* until
-/// [`set_session`] confirms a signed-in session, since the cookie is what
-/// authorises an export.
+/// span are covered. Collecting begins immediately into the small pre-config
+/// buffer; nothing is *sent* until [`set_session`] has fetched configuration.
 pub(crate) fn init() {
     let trace_id = TraceId::from_random(random_bytes());
     let root = SpanId::from_random(random_bytes());
     STATE.with(|state| {
         *state.borrow_mut() = Some(State {
             trace_id,
-            reported_drops: 0,
             root,
-            spans: Outbox::new(outbox::CAPACITY),
-            logs: Outbox::new(outbox::CAPACITY),
+            spans: Outbox::new(outbox::PRE_CONFIG_CAPACITY),
+            logs: Outbox::new(outbox::PRE_CONFIG_CAPACITY),
+            lifecycle: Lifecycle::new(now_ms()),
             policy: ExportPolicy::default(),
-            enabled: true,
+            retry_spans: None,
+            retry_logs: None,
+            dropped_after_send: 0,
+            overflow_reported: false,
+            exporting: false,
+            fetching_config: false,
+            signed_in: false,
         });
     });
     wasm_bindgen_futures::spawn_local(export_loop());
 }
 
-/// Whether there is a signed-in session. Until this says `true` nothing is sent.
+/// Whether there is a signed-in session. The config route needs one, so this
+/// is what starts the fetch; a signed-out page never has telemetry.
 pub(crate) fn set_session(signed_in: bool) {
-    with_state(|state| state.policy.set_authenticated(signed_in));
+    if !signed_in {
+        stop(OffReason::SignedOut);
+        return;
+    }
+    with_state(|state| state.signed_in = true);
+    wasm_bindgen_futures::spawn_local(async {
+        refresh_config().await;
+    });
+}
+
+/// Fetches configuration and applies it ([`Lifecycle::on_config`] holds the
+/// rules). The first answer turns telemetry on or off; later calls are the
+/// refresh — near the token's expiry, and after a `401`.
+async fn refresh_config() {
+    let Some(false) = with_state(|state| {
+        let busy = state.fetching_config || state.lifecycle.is_off();
+        if !busy {
+            state.fetching_config = true;
+        }
+        busy
+    }) else {
+        return;
+    };
+    let fetch = fetch_config().await;
+    let endpoint = match &fetch {
+        ConfigFetch::Configured(credentials) => credentials.endpoint.clone(),
+        _ => String::new(),
+    };
+    let outcome = with_state(|state| {
+        state.fetching_config = false;
+        let outcome = state.lifecycle.on_config(fetch, now_ms() / 1_000.0);
+        if matches!(
+            outcome,
+            ConfigOutcome::Configured | ConfigOutcome::Refreshed
+        ) {
+            state.policy.refreshed();
+            state.spans.set_capacity(outbox::CAPACITY);
+            state.logs.set_capacity(outbox::CAPACITY);
+        }
+        outcome
+    });
+    match outcome {
+        Some(ConfigOutcome::Configured) => console(
+            Severity::Info,
+            &format!("client telemetry: exporting to {endpoint}"),
+        ),
+        Some(ConfigOutcome::Off(reason)) => stop(reason),
+        Some(ConfigOutcome::Refreshed | ConfigOutcome::Wait) | None => {}
+    }
+}
+
+/// `GET /api/telemetry/config`, reduced to what it means for a client: `200`
+/// with a body is configuration; `204` or `404` (a server that predates the
+/// route) is "none"; `401` is "no session"; anything else — no response, a
+/// `5xx` — is "not answered yet".
+async fn fetch_config() -> ConfigFetch {
+    let Ok(response) = gloo_net::http::Request::get(CONFIG_PATH).send().await else {
+        return ConfigFetch::Unavailable;
+    };
+    match response.status() {
+        200 => match response.json::<TelemetryConfigResponse>().await {
+            Ok(config) if !config.endpoint.is_empty() => ConfigFetch::Configured(Credentials {
+                endpoint: config.endpoint,
+                access_token: config.access_token,
+                expires_at: config.expires_at as f64,
+            }),
+            _ => ConfigFetch::Unavailable,
+        },
+        204 | 404 => ConfigFetch::Absent,
+        401 => ConfigFetch::SignedOut,
+        _ => ConfigFetch::Unavailable,
+    }
+}
+
+/// Turns telemetry off for the page load, discards what is queued, and says so
+/// — once, whatever the reason and however many callers race to it.
+fn stop(reason: OffReason) {
+    let Some(Some(dropped)) = with_state(|state| {
+        if state.lifecycle.is_off() && state.policy.stopped().is_some() {
+            return None;
+        }
+        let was_off = state.lifecycle.is_off();
+        state.lifecycle.turn_off(reason);
+        let transition = state.policy.stop(reason);
+        let dropped = state.dropped();
+        state.discard_everything();
+        (!was_off || transition.is_some()).then_some(dropped)
+    }) else {
+        return;
+    };
+    let level = match reason {
+        OffReason::NotConfigured
+        | OffReason::SignedOut
+        | OffReason::ConfigTimedOut
+        | OffReason::SessionExpired => Severity::Info,
+        OffReason::Unauthorized | OffReason::GaveUp => Severity::Warn,
+    };
+    console(
+        level,
+        &format!(
+            "client telemetry off for this page: {}; {dropped} item(s) dropped",
+            reason.describe()
+        ),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +297,11 @@ impl SpanHandle {
 
     fn finish(self, status: Option<ErrorStatus>) {
         let span = self.0.finish(now_unix_nanos(), status);
-        with_state(|state| state.spans.push(span));
+        with_state(|state| {
+            if !state.lifecycle.is_off() {
+                state.spans.push(span);
+            }
+        });
     }
 }
 
@@ -205,6 +357,9 @@ pub(crate) fn start_screen(name: &'static str, route: &str) {
     with_state(|state| {
         state.trace_id = trace_id;
         state.root = root;
+        if state.lifecycle.is_off() {
+            return;
+        }
         // A zero-length span standing for the screen itself, so the route's
         // spans have a named root to hang from even before anything finishes.
         state.spans.push(Span {
@@ -249,13 +404,15 @@ pub(crate) fn log_in(
     let time = now_unix_nanos();
     let message = message.into();
     with_state(|state| {
-        state.logs.push(LogRecord {
-            time,
-            severity,
-            body: message.clone(),
-            attributes,
-            context: Some((context.trace_id, context.span_id)),
-        });
+        if !state.lifecycle.is_off() {
+            state.logs.push(LogRecord {
+                time,
+                severity,
+                body: message.clone(),
+                attributes,
+                context: Some((context.trace_id, context.span_id)),
+            });
+        }
     });
     // The browser console stays the local view. It is what a developer with the
     // page open actually reads, and it keeps working when export is off.
@@ -329,68 +486,204 @@ pub(crate) fn install_panic_hook() {
 async fn export_loop() {
     loop {
         TimeoutFuture::new(TICK_MS).await;
-        if with_state(|state| state.policy.is_switched_off()).unwrap_or(true) {
-            // Nothing will be sent again this page load, so stop waking up.
-            with_state(|state| {
-                state.enabled = false;
-                state.spans.clear();
-                state.logs.clear();
-            });
+        let now = now_ms();
+        let Some(step) = with_state(|state| {
+            if state.lifecycle.expire(now) {
+                return Step::TimedOut;
+            }
+            if state.lifecycle.is_off() || state.policy.stopped().is_some() {
+                return Step::Finished;
+            }
+            let Some(credentials) = state.lifecycle.credentials() else {
+                // Not configured yet: ask again, once there is a session to ask
+                // with and no fetch already in flight. The first fetch is
+                // started by `set_session`; this is the retry after the server
+                // did not answer, bounded by `expire` above.
+                return if state.lifecycle.is_awaiting() && state.signed_in && !state.fetching_config
+                {
+                    Step::Refresh
+                } else {
+                    Step::Wait
+                };
+            };
+            if state.policy.needs_refresh() || credentials.usable_token(now / 1_000.0).is_none() {
+                return Step::Refresh;
+            }
+            Step::Export
+        }) else {
             return;
+        };
+        report_overflow();
+        match step {
+            Step::TimedOut => stop(OffReason::ConfigTimedOut),
+            // Nothing will be sent again this page load, so stop waking up.
+            Step::Finished => {
+                with_state(State::discard_everything);
+                return;
+            }
+            Step::Wait => {}
+            Step::Refresh => refresh_config().await,
+            Step::Export => export_once().await,
         }
-        export_once().await;
     }
 }
 
-/// Telemetry that was thrown away is itself worth knowing about — otherwise a
-/// gap in a trace looks like something that never happened rather than
-/// something that was dropped. Queued as an ordinary log, so it rides out on
-/// the next tick; it cannot recurse, since pushing a log never drops anything
-/// except by displacing an older item.
-fn report_drops() {
-    let Some(Some((dropped, _))) = with_state(|state| {
-        let dropped = state.spans.dropped() + state.logs.dropped();
-        (dropped > state.reported_drops).then(|| {
-            let previously = state.reported_drops;
-            state.reported_drops = dropped;
-            (dropped, previously)
+enum Step {
+    TimedOut,
+    Finished,
+    Wait,
+    Refresh,
+    Export,
+}
+
+/// The first time a queue overflows, say so on the console. Not into the
+/// telemetry queue: when items are piling up, that is the channel that is
+/// failing, and a report queued behind them only displaces one more.
+fn report_overflow() {
+    let Some(Some(dropped)) = with_state(|state| {
+        let overflowed = state.spans.dropped() + state.logs.dropped() > 0;
+        (overflowed && !state.overflow_reported).then(|| {
+            state.overflow_reported = true;
+            state.dropped()
         })
     }) else {
         return;
     };
-    log(
+    console(
         Severity::Warn,
-        "client telemetry was dropped: the queue filled up",
-        vec![attr("vnote.telemetry_dropped", dropped as i64)],
+        &format!("client telemetry queue full; {dropped} item(s) dropped so far"),
     );
 }
 
+/// What one signal's turn in an export found to send.
+struct Batch {
+    signal: Signal,
+    url: String,
+    token: String,
+    body: String,
+    items: usize,
+    attempts: u32,
+}
+
+/// Takes the next batch for `signal` — a retry first, else fresh items — with
+/// the credential as it is **now**: the token is read per request, so a
+/// refreshed one is used by the very next export.
+fn next_batch(state: &mut State, signal: Signal, now_s: f64) -> Option<Batch> {
+    let credentials = state.lifecycle.credentials()?;
+    let token = credentials.usable_token(now_s)?.to_string();
+    let url = credentials.url(signal);
+    let retry = match signal {
+        Signal::Traces => state.retry_spans.take(),
+        Signal::Logs => state.retry_logs.take(),
+    };
+    let (body, items, attempts) = match retry {
+        Some(pending) => (pending.body, pending.items, pending.attempts),
+        None => match signal {
+            Signal::Traces => {
+                let spans = state.spans.take_batch(outbox::MAX_BATCH);
+                if spans.is_empty() {
+                    return None;
+                }
+                (
+                    otlp::traces_request(&spans, release_version()),
+                    spans.len(),
+                    0,
+                )
+            }
+            Signal::Logs => {
+                let logs = state.logs.take_batch(outbox::MAX_BATCH);
+                if logs.is_empty() {
+                    return None;
+                }
+                (otlp::logs_request(&logs, release_version()), logs.len(), 0)
+            }
+        },
+    };
+    Some(Batch {
+        signal,
+        url,
+        token,
+        body,
+        items,
+        attempts: attempts + 1,
+    })
+}
+
 async fn export_once() {
-    report_drops();
-    let Some(should) = with_state(|state| {
-        state.policy.should_export() && !(state.spans.is_empty() && state.logs.is_empty())
+    let Some(true) = with_state(|state| {
+        let go = !state.exporting && state.policy.should_export(now_ms());
+        if go {
+            state.exporting = true;
+        }
+        go
     }) else {
         return;
     };
-    if !should {
-        return;
-    }
-
-    let spans = with_state(|state| state.spans.take_batch(outbox::MAX_BATCH)).unwrap_or_default();
-    if !spans.is_empty() {
-        let body = otlp::traces_request(&spans, SDK_VERSION);
-        let outcome = post("/otlp/spa/v1/traces", body).await;
-        with_state(|state| state.policy.record(outcome));
-        if outcome == ExportOutcome::SwitchedOff {
-            return;
+    for signal in [Signal::Traces, Signal::Logs] {
+        let Some(Some(batch)) = with_state(|state| next_batch(state, signal, now_ms() / 1_000.0))
+        else {
+            continue;
+        };
+        let outcome = post(&batch.url, &batch.token, batch.body.clone(), false).await;
+        let accepted = outcome == ExportOutcome::Accepted;
+        let reported = with_state(|state| {
+            let decision =
+                state
+                    .policy
+                    .record(outcome, batch.attempts, now_ms(), js_sys::Math::random());
+            if decision.retry_batch {
+                let pending = Some(Pending {
+                    body: batch.body,
+                    items: batch.items,
+                    attempts: batch.attempts,
+                });
+                match batch.signal {
+                    Signal::Traces => state.retry_spans = pending,
+                    Signal::Logs => state.retry_logs = pending,
+                }
+            } else if !accepted {
+                state.dropped_after_send += batch.items as u64;
+            }
+            decision
+                .transition
+                .map(|transition| (transition, state.dropped()))
+        })
+        .flatten();
+        if let Some((transition, dropped)) = reported {
+            report_transition(transition, outcome, &batch.url, dropped);
+        }
+        if !accepted {
+            // One answer that is not "accepted" is enough for this tick: the
+            // other signal waits for the policy, not for a second refusal.
+            break;
         }
     }
+    with_state(|state| state.exporting = false);
+    if let Some(Some(reason)) = with_state(|state| state.policy.stopped()) {
+        stop(reason);
+    }
+}
 
-    let logs = with_state(|state| state.logs.take_batch(outbox::MAX_BATCH)).unwrap_or_default();
-    if !logs.is_empty() {
-        let body = otlp::logs_request(&logs, SDK_VERSION);
-        let outcome = post("/otlp/spa/v1/logs", body).await;
-        with_state(|state| state.policy.record(outcome));
+/// One console line per change of state (`client-export.md`, *Log transitions,
+/// not batches*): the status or error kind, where, and how much was lost. Never
+/// the token.
+fn report_transition(transition: Transition, outcome: ExportOutcome, url: &str, dropped: u64) {
+    match transition {
+        Transition::StartedFailing => console(
+            Severity::Warn,
+            &format!(
+                "client telemetry export failing: {} from {url}; {dropped} item(s) dropped so far",
+                outcome.describe()
+            ),
+        ),
+        Transition::Recovered => console(
+            Severity::Warn,
+            &format!(
+                "client telemetry export recovered at {url}; {dropped} item(s) dropped while failing"
+            ),
+        ),
+        // `stop` says the final line, with the reason, once.
+        Transition::Stopped(_) => {}
     }
 }
 
@@ -400,8 +693,7 @@ async fn export_once() {
 /// [`flush_on_pagehide`].
 pub(crate) fn flush() {
     let Some(true) = with_state(|state| {
-        state.enabled
-            && !state.policy.is_switched_off()
+        state.lifecycle.credentials().is_some()
             && !(state.spans.is_empty() && state.logs.is_empty())
     }) else {
         return;
@@ -409,99 +701,121 @@ pub(crate) fn flush() {
     wasm_bindgen_futures::spawn_local(export_once());
 }
 
-/// The most a `sendBeacon` body may be. Browsers queue beacons against a 64 KiB
-/// budget per page and refuse one that would exceed it; this leaves room for
-/// the two beacons (traces, logs) to share it.
-const BEACON_MAX_BYTES: usize = 30 * 1024;
+/// The most a pagehide body may be. Browsers queue `keepalive` requests against
+/// a 64 KiB budget per page and refuse one that would exceed it; this leaves
+/// room for the two (traces, logs) to share it.
+const KEEPALIVE_MAX_BYTES: usize = 30 * 1024;
 
-/// How many items a pagehide beacon starts from, before trimming to fit.
-const BEACON_MAX_ITEMS: usize = 64;
+/// How many items a pagehide flush starts from, before trimming to fit.
+const KEEPALIVE_MAX_ITEMS: usize = 64;
 
 /// Sends what is queued as the page goes away.
 ///
-/// A normal `fetch` started during `pagehide` is cancelled when the document
-/// unloads, so the previous version of this — which spawned an ordinary export —
-/// delivered nothing, and the last few seconds before a tab close (exactly when
-/// an error tends to arrive) were lost. `sendBeacon` is queued by the browser
-/// and survives the unload. It is same-origin, so the session cookie
-/// authenticates it at the ingress exactly as for a normal export.
+/// An ordinary `fetch` started during `pagehide` is cancelled when the document
+/// unloads; a `keepalive` one is not. `sendBeacon` would survive too, but it
+/// cannot carry an `Authorization` header, and the ingest accepts nothing else
+/// (#439). So this is `fetch(…, { keepalive: true })` with the bearer, within
+/// keepalive's budget.
 ///
-/// Fire-and-forget: a beacon returns no status, and nothing is left to act on
-/// one. So the backoff wait is not consumed and the policy is not updated;
-/// only the two hard gates apply — the server has not switched ingest off, and
-/// there is a session to send with.
+/// Fire-and-forget: nothing runs after unload to act on the answer, so the
+/// backoff is not consulted and the policy is not updated; only the hard gates
+/// apply — configured, not stopped, no refresh owed, and a usable token.
 pub(crate) fn flush_on_pagehide() {
-    let Some((spans, logs)) = with_state(|state| {
-        if !state.enabled || state.policy.is_switched_off() || !state.policy.is_authenticated() {
+    let now_s = now_ms() / 1_000.0;
+    let Some(Some((credentials, spans, logs))) = with_state(|state| {
+        if state.policy.stopped().is_some() || state.policy.needs_refresh() {
             return None;
         }
+        let credentials = state.lifecycle.credentials()?.clone();
+        credentials.usable_token(now_s)?;
         Some((
-            state.spans.take_batch(BEACON_MAX_ITEMS),
-            state.logs.take_batch(BEACON_MAX_ITEMS),
+            credentials,
+            state.spans.take_batch(KEEPALIVE_MAX_ITEMS),
+            state.logs.take_batch(KEEPALIVE_MAX_ITEMS),
         ))
-    })
-    .flatten() else {
+    }) else {
         return;
     };
+    let Some(token) = credentials.usable_token(now_s) else {
+        return;
+    };
+    let version = release_version();
     if !spans.is_empty() {
-        beacon(
-            "/otlp/spa/v1/traces",
-            fit_beacon(spans, |items| otlp::traces_request(items, SDK_VERSION)),
-        );
+        let body = fit_keepalive(spans, |items| otlp::traces_request(items, version));
+        send_on_unload(&credentials.url(Signal::Traces), token, body);
     }
     if !logs.is_empty() {
-        beacon(
-            "/otlp/spa/v1/logs",
-            fit_beacon(logs, |items| otlp::logs_request(items, SDK_VERSION)),
-        );
+        let body = fit_keepalive(logs, |items| otlp::logs_request(items, version));
+        send_on_unload(&credentials.url(Signal::Logs), token, body);
     }
 }
 
-/// Encodes `items`, halving them until the body fits a beacon. The batch is
-/// oldest-first, so halving keeps the oldest and cuts the newest. What is cut is
-/// lost — nothing runs after unload to send it — which only matters when a
-/// single tick produced more than ~30 KiB, far beyond a normal session.
-fn fit_beacon<T>(mut items: Vec<T>, encode: impl Fn(&[T]) -> String) -> String {
+/// Encodes `items`, halving them until the body fits the keepalive budget. The
+/// batch is oldest-first, so halving keeps the oldest and cuts the newest. What
+/// is cut is lost — nothing runs after unload to send it — which only matters
+/// when a single tick produced more than ~30 KiB, far beyond a normal session.
+fn fit_keepalive<T>(mut items: Vec<T>, encode: impl Fn(&[T]) -> String) -> String {
     loop {
         let body = encode(&items);
-        if body.len() <= BEACON_MAX_BYTES || items.len() <= 1 {
+        if body.len() <= KEEPALIVE_MAX_BYTES || items.len() <= 1 {
             return body;
         }
         items.truncate(items.len() / 2);
     }
 }
 
-fn beacon(path: &str, body: String) {
-    let Some(navigator) = web_sys::window().map(|window| window.navigator()) else {
-        return;
-    };
-    let parts = js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(&body));
-    let options = web_sys::BlobPropertyBag::new();
-    // Without an explicit type the beacon goes as `text/plain`, and the OTLP
-    // receiver only parses `application/json` as JSON.
-    options.set_type("application/json");
-    let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(&parts, &options) else {
-        return;
-    };
-    // `false` means the browser refused to queue it (over its budget). There is
-    // no one to tell.
-    let _ = navigator.send_beacon_with_opt_blob(path, Some(&blob));
+fn send_on_unload(url: &str, token: &str, body: String) {
+    // The request is handed to the browser synchronously by `fetch`; the
+    // promise is dropped because nothing will be alive to read it.
+    let _ = start_fetch(url, token, body, true);
 }
 
-/// A bare `fetch`, on the SPA's own origin so the session cookie rides along.
-/// Returns what the exporter should conclude — never an error, because there is
-/// no caller who could do anything with one.
-async fn post(path: &str, body: String) -> ExportOutcome {
-    let request = gloo_net::http::Request::post(path)
-        .header("content-type", "application/json")
-        .body(body);
-    let status = match request {
-        Ok(request) => request.send().await.ok().map(|response| response.status()),
-        // The body could not be built. Not a transport failure, but the same
-        // thing from here: this batch is gone.
-        Err(_) => None,
+/// Builds and starts the `fetch`. `credentials: omit` — the ingest takes a
+/// bearer, and the session cookie has no business reaching it.
+fn start_fetch(url: &str, token: &str, body: String, keepalive: bool) -> Option<js_sys::Promise> {
+    let window = web_sys::window()?;
+    let headers = web_sys::Headers::new().ok()?;
+    headers.set("content-type", "application/json").ok()?;
+    headers
+        .set("authorization", &format!("Bearer {token}"))
+        .ok()?;
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_headers(&headers);
+    init.set_body(&wasm_bindgen::JsValue::from_str(&body));
+    init.set_credentials(web_sys::RequestCredentials::Omit);
+    init.set_mode(web_sys::RequestMode::Cors);
+    // web-sys exposes no setter for `keepalive`; it is a plain RequestInit
+    // member, so it is set as one.
+    if keepalive {
+        js_sys::Reflect::set(&init, &"keepalive".into(), &true.into()).ok()?;
+    }
+    Some(window.fetch_with_str_and_init(url, &init))
+}
+
+/// One export `POST`. Returns what the exporter should conclude — never an
+/// error, because there is no caller who could do anything with one.
+async fn post(url: &str, token: &str, body: String, keepalive: bool) -> ExportOutcome {
+    let Some(promise) = start_fetch(url, token, body, keepalive) else {
+        return ExportOutcome::from_response(None, None);
     };
-    ExportOutcome::from_status(status)
+    let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else {
+        return ExportOutcome::from_response(None, None);
+    };
+    let Ok(response) = value.dyn_into::<web_sys::Response>() else {
+        return ExportOutcome::from_response(None, None);
+    };
+    let retry_after = response.headers().get("retry-after").ok().flatten();
+    ExportOutcome::from_response(Some(response.status()), retry_after.as_deref())
+}
+
+/// The build, reported as `service.version`. The same constant the version
+/// watermark shows.
+fn release_version() -> &'static str {
+    match option_env!("V_NOTE_RELEASE") {
+        Some(release) if !release.is_empty() => release,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,4 +846,9 @@ fn random_bytes<const N: usize>() -> [u8; N] {
 /// finer clocks for Spectre reasons anyway — so the nanosecond digits are zeros.
 fn now_unix_nanos() -> UnixNanos {
     UnixNanos((js_sys::Date::now() as u64).saturating_mul(1_000_000))
+}
+
+/// Wall-clock milliseconds, for the export policy's timers.
+fn now_ms() -> f64 {
+    js_sys::Date::now()
 }

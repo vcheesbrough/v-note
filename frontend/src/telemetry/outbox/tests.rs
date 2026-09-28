@@ -1,18 +1,5 @@
 use super::*;
 
-fn signed_in() -> ExportPolicy {
-    let mut policy = ExportPolicy::default();
-    policy.set_authenticated(true);
-    policy
-}
-
-/// How many ticks pass before `should_export` next says yes, that tick included.
-fn ticks_until_export(policy: &mut ExportPolicy) -> u32 {
-    (1..=1_000)
-        .find(|_| policy.should_export())
-        .expect("the policy should allow an export eventually")
-}
-
 // ---------------------------------------------------------------------------
 // Outbox
 // ---------------------------------------------------------------------------
@@ -29,7 +16,7 @@ fn a_full_outbox_discards_the_oldest_and_counts_it() {
     assert_eq!(outbox.take_batch(10), [3, 4, 5], "the newest survive");
 }
 
-/// The property that matters when the sidecar is down for an hour: memory does
+/// The property that matters when the ingest is down for an hour: memory does
 /// not track how long it has been down.
 #[test]
 fn an_outbox_never_exceeds_its_capacity() {
@@ -64,120 +51,504 @@ fn a_zero_capacity_outbox_holds_nothing_and_does_not_panic() {
     assert_eq!(outbox.dropped(), 1);
 }
 
+/// The pre-config buffer is small; configuration raises the cap without losing
+/// what waited, and lowering it drops the oldest.
+#[test]
+fn capacity_can_be_raised_and_lowered() {
+    let mut outbox = Outbox::new(2);
+    outbox.push(1);
+    outbox.push(2);
+    outbox.set_capacity(4);
+    outbox.push(3);
+    assert_eq!(outbox.len(), 3);
+
+    outbox.set_capacity(1);
+    assert_eq!(outbox.take_batch(10), [3]);
+    assert_eq!(outbox.dropped(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Configuration: no configuration, no telemetry
+// ---------------------------------------------------------------------------
+
+fn credentials(token: &str, expires_at: f64) -> Credentials {
+    Credentials {
+        endpoint: "https://v-notes-dev.desync.link".to_string(),
+        access_token: token.to_string(),
+        expires_at,
+    }
+}
+
+#[test]
+fn nothing_is_configured_until_the_server_says_so() {
+    let lifecycle = Lifecycle::new(0.0);
+    assert_eq!(lifecycle.credentials(), None);
+    assert!(!lifecycle.is_off());
+}
+
+const NOW: f64 = 1_000.0;
+
+/// `204` or `404` is the server's "no configuration", and a `401` is no
+/// session: either means OTLP is never initialised.
+#[test]
+fn absent_configuration_or_no_session_turns_telemetry_off_for_the_page() {
+    for (fetch, reason) in [
+        (ConfigFetch::Absent, OffReason::NotConfigured),
+        (ConfigFetch::SignedOut, OffReason::SignedOut),
+    ] {
+        let mut lifecycle = Lifecycle::new(0.0);
+        assert_eq!(lifecycle.on_config(fetch, NOW), ConfigOutcome::Off(reason));
+        assert_eq!(lifecycle, Lifecycle::Off(reason));
+
+        // "Off" is final: a later configuration does not revive it.
+        assert_eq!(
+            lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+            ConfigOutcome::Off(reason)
+        );
+        assert_eq!(lifecycle.credentials(), None);
+    }
+}
+
+/// A server that did not answer the first fetch is asked again: the page keeps
+/// waiting (bounded by `expire`), and a later answer still turns it on.
+#[test]
+fn an_unanswered_first_fetch_is_not_a_no() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Unavailable, NOW),
+        ConfigOutcome::Wait
+    );
+    assert!(lifecycle.is_awaiting());
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+        ConfigOutcome::Configured
+    );
+}
+
+#[test]
+fn configuration_turns_telemetry_on() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+        ConfigOutcome::Configured
+    );
+    assert_eq!(
+        lifecycle.credentials().map(|c| c.access_token.as_str()),
+        Some("t")
+    );
+}
+
+/// Once configured, an unanswered refresh keeps the credentials and is asked
+/// again — up to the give-up bound, never forever.
+#[test]
+fn an_unanswered_refresh_keeps_the_credentials_then_gives_up() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
+    for _ in 1..MAX_CONSECUTIVE_FAILURES {
+        assert_eq!(
+            lifecycle.on_config(ConfigFetch::Unavailable, NOW),
+            ConfigOutcome::Wait
+        );
+        assert!(lifecycle.credentials().is_some(), "still configured");
+    }
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Unavailable, NOW),
+        ConfigOutcome::Off(OffReason::GaveUp)
+    );
+}
+
+/// A refresh that is answered resets the count of unanswered ones.
+#[test]
+fn an_answered_refresh_resets_the_failure_count() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
+    for _ in 0..(MAX_CONSECUTIVE_FAILURES * 3) {
+        lifecycle.on_config(ConfigFetch::Unavailable, NOW);
+        assert_eq!(
+            lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+            ConfigOutcome::Refreshed
+        );
+    }
+}
+
+/// The SPA cannot renew its token: the config route hands back the cookie's
+/// own. So a refresh that returns a token already at its expiry ends telemetry
+/// — once, with the true reason — instead of re-asking every tick.
+#[test]
+fn a_refresh_that_cannot_renew_an_expiring_token_ends_it() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 2_000.0)), NOW);
+    let near_expiry = 2_000.0 - EXPIRY_MARGIN_S;
+    assert_eq!(
+        lifecycle.on_config(
+            ConfigFetch::Configured(credentials("t", 2_000.0)),
+            near_expiry
+        ),
+        ConfigOutcome::Off(OffReason::SessionExpired)
+    );
+    assert!(lifecycle.is_off());
+}
+
+/// …and so does the session itself lapsing (`401`), or the server switching
+/// telemetry off since the page loaded: the newest configuration wins.
+#[test]
+fn a_refresh_answered_no_ends_it_with_the_true_reason() {
+    for (fetch, reason) in [
+        (ConfigFetch::SignedOut, OffReason::SessionExpired),
+        (ConfigFetch::Absent, OffReason::NotConfigured),
+    ] {
+        let mut lifecycle = Lifecycle::new(0.0);
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
+        assert_eq!(lifecycle.on_config(fetch, NOW), ConfigOutcome::Off(reason));
+    }
+}
+
+/// A first configuration whose token is already unusable is not "on".
+#[test]
+fn an_expired_first_configuration_is_off() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", NOW)), NOW),
+        ConfigOutcome::Off(OffReason::SessionExpired)
+    );
+}
+
+/// The pre-config buffer is short-lived: never held for the session in hope.
+#[test]
+fn waiting_for_configuration_times_out() {
+    let mut lifecycle = Lifecycle::new(1_000.0);
+    assert!(!lifecycle.expire(1_000.0 + PRE_CONFIG_MAX_MS - 1.0));
+    assert!(lifecycle.expire(1_000.0 + PRE_CONFIG_MAX_MS));
+    assert_eq!(lifecycle, Lifecycle::Off(OffReason::ConfigTimedOut));
+    assert!(!lifecycle.expire(1e12), "only the first call reports it");
+}
+
+/// A configured page never times out.
+#[test]
+fn configured_telemetry_does_not_expire() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
+    assert!(!lifecycle.expire(1e12));
+    assert!(lifecycle.credentials().is_some());
+}
+
+#[test]
+fn urls_are_the_bare_endpoint_plus_the_otlp_path() {
+    let credentials = credentials("t", 1e12);
+    assert_eq!(
+        credentials.url(Signal::Traces),
+        "https://v-notes-dev.desync.link/v1/traces"
+    );
+    assert_eq!(
+        credentials.url(Signal::Logs),
+        "https://v-notes-dev.desync.link/v1/logs"
+    );
+    let trailing = Credentials {
+        endpoint: "https://localhost:4318/".to_string(),
+        ..credentials
+    };
+    assert_eq!(trailing.url(Signal::Logs), "https://localhost:4318/v1/logs");
+}
+
+/// The token is read per request: whatever the lifecycle holds *now* is what is
+/// sent, so a refresh takes effect on the next export without re-initialising.
+#[test]
+fn the_token_is_read_per_request_and_follows_a_refresh() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("first", 10_000.0)), NOW);
+    let token = |lifecycle: &Lifecycle| {
+        lifecycle
+            .credentials()
+            .and_then(|c| c.usable_token(1_000.0))
+            .map(str::to_string)
+    };
+    assert_eq!(token(&lifecycle).as_deref(), Some("first"));
+
+    assert_eq!(
+        lifecycle.on_config(
+            ConfigFetch::Configured(credentials("second", 10_000.0)),
+            NOW
+        ),
+        ConfigOutcome::Refreshed
+    );
+    assert_eq!(token(&lifecycle).as_deref(), Some("second"));
+}
+
+/// A token about to lapse is not spent on a certain `401`.
+#[test]
+fn a_token_near_expiry_is_not_usable() {
+    let credentials = credentials("t", 1_000.0);
+    assert_eq!(
+        credentials.usable_token(1_000.0 - EXPIRY_MARGIN_S - 1.0),
+        Some("t")
+    );
+    assert_eq!(credentials.usable_token(1_000.0 - EXPIRY_MARGIN_S), None);
+    assert_eq!(credentials.usable_token(2_000.0), None);
+}
+
 // ---------------------------------------------------------------------------
 // Status -> outcome
 // ---------------------------------------------------------------------------
 
+/// OTLP names the retryable answers, and they are the only ones.
 #[test]
-fn statuses_map_to_what_the_exporter_should_do() {
+fn statuses_are_classified_per_the_otlp_contract() {
     use ExportOutcome::*;
+    let retryable = |status| Retryable {
+        status: Some(status),
+        retry_after_ms: None,
+    };
     for (status, expected) in [
         (Some(200), Accepted),
         (Some(202), Accepted),
-        // The kill switch, and the only status that is final.
-        (Some(404), SwitchedOff),
-        // The batch's fault. Do not back off: the next one is probably fine.
-        (Some(400), BatchRefused),
-        (Some(413), BatchRefused),
-        (Some(415), BatchRefused),
-        // Not the batch's fault, and may clear up.
-        (Some(401), Unavailable),
-        (Some(403), Unavailable),
-        (Some(429), Unavailable),
-        (Some(502), Unavailable),
-        (Some(503), Unavailable),
-        (Some(307), Unavailable),
-        (None, Unavailable),
+        (Some(401), Unauthorized),
+        (Some(400), Rejected { status: 400 }),
+        (Some(403), Rejected { status: 403 }),
+        (Some(404), Rejected { status: 404 }),
+        (Some(413), Rejected { status: 413 }),
+        (Some(415), Rejected { status: 415 }),
+        (Some(500), Rejected { status: 500 }),
+        (Some(501), Rejected { status: 501 }),
+        (Some(307), Rejected { status: 307 }),
+        (Some(429), retryable(429)),
+        (Some(502), retryable(502)),
+        (Some(503), retryable(503)),
+        (Some(504), retryable(504)),
+        (
+            None,
+            Retryable {
+                status: None,
+                retry_after_ms: None,
+            },
+        ),
     ] {
-        assert_eq!(ExportOutcome::from_status(status), expected, "{status:?}");
+        assert_eq!(
+            ExportOutcome::from_response(status, None),
+            expected,
+            "{status:?}"
+        );
     }
+}
+
+#[test]
+fn retry_after_is_read_as_seconds_on_retryable_answers_only() {
+    assert_eq!(
+        ExportOutcome::from_response(Some(429), Some("7")),
+        ExportOutcome::Retryable {
+            status: Some(429),
+            retry_after_ms: Some(7_000.0)
+        }
+    );
+    assert_eq!(
+        ExportOutcome::from_response(Some(503), Some(" 2 ")),
+        ExportOutcome::Retryable {
+            status: Some(503),
+            retry_after_ms: Some(2_000.0)
+        }
+    );
+    // The HTTP-date form, or garbage, is ignored rather than guessed at.
+    assert_eq!(
+        ExportOutcome::from_response(Some(503), Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+        ExportOutcome::Retryable {
+            status: Some(503),
+            retry_after_ms: None
+        }
+    );
+    assert_eq!(
+        ExportOutcome::from_response(Some(400), Some("5")),
+        ExportOutcome::Rejected { status: 400 }
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Policy
 // ---------------------------------------------------------------------------
 
-/// The cookie is the credential, so a signed-out page can only collect 401s.
+const MID: f64 = 0.5;
+
 #[test]
-fn nothing_is_exported_until_there_is_a_session() {
+fn a_healthy_exporter_exports_whenever_asked() {
     let mut policy = ExportPolicy::default();
-    assert!(!policy.should_export());
-
-    policy.set_authenticated(true);
-    assert!(policy.should_export());
-
-    policy.set_authenticated(false);
-    assert!(!policy.should_export());
-}
-
-#[test]
-fn a_healthy_exporter_exports_every_tick() {
-    let mut policy = signed_in();
-    for _ in 0..5 {
-        assert!(policy.should_export());
-        policy.record(ExportOutcome::Accepted);
+    for tick in 0..5 {
+        let now = f64::from(tick) * 5_000.0;
+        assert!(policy.should_export(now));
+        let decision = policy.record(ExportOutcome::Accepted, 1, now, MID);
+        assert_eq!(decision.transition, None, "no line while healthy");
     }
 }
 
-/// 404 is how the server's kill switch reaches the browser, and it is final:
-/// the switch is snapshotted at server start, so it cannot come back on within
-/// a page's lifetime, and a reload starts a fresh policy anyway.
+/// A rejected batch is dropped with no backoff: it was the batch's fault.
 #[test]
-fn a_404_switches_the_exporter_off_for_good() {
-    let mut policy = signed_in();
-    policy.record(ExportOutcome::SwitchedOff);
+fn a_rejected_batch_is_dropped_without_backoff() {
+    let mut policy = ExportPolicy::default();
+    let decision = policy.record(ExportOutcome::Rejected { status: 400 }, 1, 0.0, MID);
+    assert!(!decision.retry_batch);
+    assert!(policy.should_export(0.0));
+}
 
-    assert!(policy.is_switched_off());
-    for _ in 0..100 {
-        assert!(!policy.should_export());
+/// `401` → one refresh → a second `401` stops telemetry for the page load.
+#[test]
+fn unauthorized_refreshes_once_then_stops() {
+    let mut policy = ExportPolicy::default();
+
+    let first = policy.record(ExportOutcome::Unauthorized, 1, 0.0, MID);
+    assert!(first.refresh_token);
+    assert!(!first.retry_batch, "the 401'd batch is dropped");
+    assert!(
+        !policy.should_export(0.0),
+        "nothing is sent until the refresh"
+    );
+    assert!(policy.needs_refresh());
+
+    policy.refreshed();
+    assert!(policy.should_export(0.0));
+
+    let second = policy.record(ExportOutcome::Unauthorized, 1, 0.0, MID);
+    assert_eq!(
+        second.transition,
+        Some(Transition::Stopped(OffReason::Unauthorized))
+    );
+    assert!(!second.refresh_token);
+    assert_eq!(policy.stopped(), Some(OffReason::Unauthorized));
+    assert!(!policy.should_export(1e12));
+}
+
+/// A success between two `401`s earns the next one a fresh refresh.
+#[test]
+fn a_success_resets_the_refresh_budget() {
+    let mut policy = ExportPolicy::default();
+    policy.record(ExportOutcome::Unauthorized, 1, 0.0, MID);
+    policy.refreshed();
+    policy.record(ExportOutcome::Accepted, 1, 0.0, MID);
+
+    let decision = policy.record(ExportOutcome::Unauthorized, 1, 0.0, MID);
+    assert!(decision.refresh_token);
+    assert_eq!(policy.stopped(), None);
+}
+
+#[test]
+fn retryable_failures_back_off_and_retry_the_batch() {
+    let mut policy = ExportPolicy::default();
+    let outcome = ExportOutcome::Retryable {
+        status: Some(503),
+        retry_after_ms: None,
+    };
+    let decision = policy.record(outcome, 1, 0.0, MID);
+    assert!(decision.retry_batch);
+    assert_eq!(decision.transition, Some(Transition::StartedFailing));
+    assert!(!policy.should_export(1.0));
+    assert!(policy.should_export(backoff_ms(1, MID)));
+}
+
+/// `Retry-After` wins when it is longer than the backoff, up to a cap.
+#[test]
+fn retry_after_is_honoured_and_capped() {
+    let mut policy = ExportPolicy::default();
+    policy.record(
+        ExportOutcome::Retryable {
+            status: Some(429),
+            retry_after_ms: Some(60_000.0),
+        },
+        1,
+        0.0,
+        MID,
+    );
+    assert!(!policy.should_export(59_999.0));
+    assert!(policy.should_export(60_000.0));
+
+    let mut policy = ExportPolicy::default();
+    policy.record(
+        ExportOutcome::Retryable {
+            status: Some(429),
+            retry_after_ms: Some(1e9),
+        },
+        1,
+        0.0,
+        MID,
+    );
+    assert!(policy.should_export(RETRY_AFTER_MAX_MS));
+}
+
+/// Jitter stays inside [half, all] of the exponential ceiling, and the ceiling
+/// itself is capped.
+#[test]
+fn jitter_is_bounded() {
+    for failures in 1..=20 {
+        let ceiling = (BACKOFF_BASE_MS * 2_f64.powi(failures as i32 - 1)).min(BACKOFF_MAX_MS);
+        let low = backoff_ms(failures, 0.0);
+        let high = backoff_ms(failures, 0.999_999);
+        assert!((low - ceiling / 2.0).abs() < 1e-6, "{failures}: {low}");
+        assert!(
+            high <= ceiling && high > ceiling * 0.99,
+            "{failures}: {high}"
+        );
+        // Out-of-range draws are clamped, not trusted.
+        assert!(backoff_ms(failures, 7.0) <= ceiling);
+        assert!(backoff_ms(failures, -3.0) >= ceiling / 2.0);
     }
-    // Nothing un-switches it — not a later success, not a fresh sign-in.
-    policy.record(ExportOutcome::Accepted);
-    policy.set_authenticated(true);
-    assert!(!policy.should_export());
+    assert!(backoff_ms(2, MID) > backoff_ms(1, MID), "exponential");
 }
 
-/// A sidecar that is down gets *fewer* requests the longer it stays down, and
-/// never fewer than one a minute, so recovery is noticed.
+/// A batch is sent at most MAX_BATCH_ATTEMPTS times.
 #[test]
-fn failures_back_off_exponentially_to_a_ceiling() {
-    let mut policy = signed_in();
-    // Each round: an attempt fails, then count the ticks to the next attempt
-    // (which is the one that fails in the following round).
-    let gaps: Vec<u32> = (0..7)
-        .map(|_| {
-            policy.record(ExportOutcome::Unavailable);
-            ticks_until_export(&mut policy)
-        })
-        .collect();
-
-    // A wait of 1, 2, 4, 8 ticks, then pinned at the 12-tick ceiling; the
-    // attempt itself lands on the tick after the wait, hence one more each.
-    assert_eq!(gaps, [2, 3, 5, 9, 13, 13, 13]);
+fn a_batch_is_retried_a_bounded_number_of_times() {
+    let mut policy = ExportPolicy::default();
+    let outcome = ExportOutcome::Retryable {
+        status: None,
+        retry_after_ms: None,
+    };
+    assert!(policy.record(outcome, 1, 0.0, MID).retry_batch);
+    assert!(policy.record(outcome, 2, 0.0, MID).retry_batch);
+    assert!(
+        !policy
+            .record(outcome, MAX_BATCH_ATTEMPTS, 0.0, MID)
+            .retry_batch
+    );
 }
 
+/// A crowd that keeps failing stops for the session instead of hammering.
 #[test]
-fn one_success_clears_the_backoff_completely() {
-    let mut policy = signed_in();
-    for _ in 0..6 {
-        policy.record(ExportOutcome::Unavailable);
+fn repeated_failure_gives_up_for_the_session() {
+    let mut policy = ExportPolicy::default();
+    let outcome = ExportOutcome::Retryable {
+        status: Some(502),
+        retry_after_ms: None,
+    };
+    let mut transitions = Vec::new();
+    for attempt in 1..=MAX_CONSECUTIVE_FAILURES {
+        if let Some(transition) = policy.record(outcome, attempt, 0.0, MID).transition {
+            transitions.push(transition);
+        }
     }
-    assert!(ticks_until_export(&mut policy) > 1);
-
-    policy.record(ExportOutcome::Accepted);
-    assert!(policy.should_export(), "no residual wait after a success");
-
-    // …and the *next* failure starts from the bottom again, not the ceiling.
-    policy.record(ExportOutcome::Unavailable);
-    assert_eq!(ticks_until_export(&mut policy), 2);
+    assert_eq!(
+        transitions,
+        [
+            Transition::StartedFailing,
+            Transition::Stopped(OffReason::GaveUp)
+        ],
+        "one line when it starts, one when it gives up — none in between"
+    );
+    assert!(!policy.should_export(1e15));
+    // Nothing revives it.
+    policy.record(ExportOutcome::Accepted, 1, 0.0, MID);
+    assert!(!policy.should_export(1e15));
 }
 
-/// A refused batch says nothing about the collector's health, so it must not
-/// slow the exporter down — or one malformed span would throttle a session.
 #[test]
-fn a_refused_batch_does_not_trigger_backoff() {
-    let mut policy = signed_in();
-    policy.record(ExportOutcome::BatchRefused);
+fn recovery_is_reported_once_and_clears_the_backoff() {
+    let mut policy = ExportPolicy::default();
+    let outcome = ExportOutcome::Retryable {
+        status: Some(503),
+        retry_after_ms: None,
+    };
+    policy.record(outcome, 1, 0.0, MID);
+    policy.record(outcome, 2, 0.0, MID);
 
-    assert!(policy.should_export());
+    let decision = policy.record(ExportOutcome::Accepted, 1, 100_000.0, MID);
+    assert_eq!(decision.transition, Some(Transition::Recovered));
+    assert!(policy.should_export(100_000.0), "no residual wait");
+
+    // The next failure starts from the bottom again.
+    policy.record(outcome, 1, 200_000.0, 0.0);
+    assert!(policy.should_export(200_000.0 + backoff_ms(1, 0.0)));
 }

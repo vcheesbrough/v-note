@@ -41,6 +41,28 @@ pub struct MeResponse {
     pub email: Option<String>,
 }
 
+/// `GET /api/telemetry/config` (#439): where a signed-in client sends its OTLP,
+/// and the credential to send it with. Only ever a `200` body — an environment
+/// with client telemetry off answers `204` with no body, which a client treats
+/// exactly like a failed fetch: telemetry is never initialised.
+///
+/// Additive: no protocol bump. A client talking to a server that predates the
+/// route gets a `404`, which is "no configuration" by the same rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TelemetryConfigResponse {
+    /// Bare origin of the OTLP ingest; the client appends `/v1/traces` and
+    /// `/v1/logs`. Configured, never derived from the app's own origin.
+    pub endpoint: String,
+    /// The OIDC access token the request itself was authenticated with. The
+    /// ingest accepts only a bearer, so the SPA — whose session is an `HttpOnly`
+    /// cookie — has no other way to hold one. Android ignores it: it already
+    /// holds its own.
+    pub access_token: String,
+    /// The token's `exp`, in Unix seconds, so a client can fetch a fresh one
+    /// before it lapses rather than spending a batch on a certain `401`.
+    pub expires_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PageSummary {
     pub id: String,

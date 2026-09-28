@@ -290,31 +290,21 @@ fn lagged_is_a_recorded_realtime_result() {
     assert!(text.contains(r#"v_note_realtime_events_total{channel="library",result="lagged"} 1"#));
 }
 
-/// The `route` label is taken before routing, from the raw path — so for the
-/// `/otlp` ingress (#354) it is taken before an unknown `{client}` has been
-/// 404'd. Every path under it must therefore collapse to one value, or anyone
-/// who can reach the server can mint a time series per request.
+/// The `route` label is taken before routing, from the raw path. The `/otlp`
+/// ingress is gone (#439) — client telemetry goes to its own container, which
+/// the app never sees — so a stale client still posting there, or anyone
+/// probing it, lands in the one static-asset bucket and cannot mint a series
+/// per request.
 #[test]
-fn every_otlp_path_shares_one_route_label() {
+fn retired_otlp_paths_share_the_static_route_label() {
     for path in [
         "/otlp/spa/v1/traces",
-        "/otlp/android/v1/logs",
         "/otlp/attacker-chosen-0001/v1/traces",
-        "/otlp/spa/v1/attacker-chosen-0002",
         "/otlp/",
-        "/otlp",
+        "/v1/traces",
     ] {
-        assert_eq!(normalized_route(path), "/otlp/*", "{path}");
+        assert_eq!(normalized_route(path), "/static/*", "{path}");
     }
-}
-
-/// …and it must not swallow its neighbours. `/otlpx` is not the ingress, and
-/// before #354 the ingress's own traffic was counted as static assets, which is
-/// the series this keeps clean.
-#[test]
-fn the_otlp_route_label_does_not_capture_other_paths() {
-    assert_eq!(normalized_route("/otlpx/spa/v1/traces"), "/static/*");
-    assert_eq!(normalized_route("/assets/otlp/app.js"), "/static/*");
     assert_eq!(normalized_route("/api/pages"), "/api/pages");
 }
 

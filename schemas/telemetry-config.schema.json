@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TelemetryConfigResponse",
+  "type": "object",
+  "required": ["endpoint", "access_token", "expires_at"],
+  "properties": {
+    "endpoint": { "type": "string", "format": "uri" },
+    "access_token": { "type": "string", "minLength": 1 },
+    "expires_at": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

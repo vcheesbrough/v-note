@@ -111,8 +111,7 @@ name the canonical kebab path. Blank optional values mean "absent".
 | `VNOTE__ANDROID__ASSETLINKS-JSON` | optional | Android App Links JSON at `/.well-known/assetlinks.json`; must parse as JSON |
 | `VNOTE__REALTIME__COALESCE-REPLAY` | `true` | **Feature flag (#323).** Answer a `subscribe` with one coalesced `page-replay` frame. Set `false` to restore the pre-#323 shape (a `stroke-batch` per stored batch, then `synced`) without rebuilding — see below. A non-boolean value **fails startup** rather than reading as `false` |
 | `VNOTE__REALTIME__COMPRESSION` | `false` code default, but **`true` in every deployed environment** | **Feature flag (#342).** Offer RFC 7692 `permessage-deflate` on both realtime channels. The code default is off; the sovereign leaves are **on** — see below. A non-boolean value **fails startup** rather than reading as `false` |
-| `VNOTE__CLIENT-TELEMETRY__ENABLED` | `false` | **Kill switch (#354).** With it off every `/otlp` request is a 404 — before authentication, so a signed-out client learns to stop rather than retrying on 401. A non-boolean value **fails startup** |
-| `VNOTE__CLIENT-TELEMETRY__SPA-ENDPOINT` / `__ANDROID-ENDPOINT` | unset | Base URL of the sidecar's `spa` (`:4318`) / `android` (`:4319`) OTLP receiver. **Required when enabled.** Must be a bare origin (`http://host:port`) — a path or query fails startup, even with the switch off |
+| `VNOTE__CLIENT-TELEMETRY__ENDPOINT` | unset | **Client telemetry (#439).** The public origin of this environment's `otlp-collector-oidc` ingest, handed to signed-in clients by `GET /api/telemetry/config`. Unset is **off**: the route answers `204` and clients never initialise OTLP. Must be an `https` bare origin — a path, query or credentials fail startup |
 | `VNOTE__SERVER__HTTP-PORT` | `8080` | plain-HTTP listen port, used only when TLS is unset |
 | `VNOTE__SERVER__TLS-CERT` / `__TLS-KEY` | unset | PEM paths; when both set, binds TLS on `:443` (both-or-neither). The image sets these |
 | `VNOTE__SERVER__STATIC-DIR` | unset | when set, serves the SPA + `index.html` fallback. The image sets `/app/dist` |
@@ -242,54 +241,74 @@ VNOTE__OBSERVABILITY__METRICS_ADDR=127.0.0.1:9090 cargo run -p server
 curl http://127.0.0.1:9090/metrics
 ```
 
-#### Client telemetry (#354)
+#### Client telemetry (#354, #439)
 
-The SPA exports its own spans and logs (see `frontend/src/telemetry.rs`); the
-browser console still shows every log line, so nothing changes for a developer
-with the page open. `just run-compose` always runs the `v-note-alloy` sidecar
-but leaves the ingress **off**. To turn it on and see the output:
+The SPA exports its own spans and logs (see `frontend/src/telemetry.rs`) to the
+`otlp-collector-oidc` ingest (#439); the browser console still shows every log
+line, so nothing changes for a developer with the page open. Nothing is sent
+until `GET /api/telemetry/config` names an endpoint, and `just run-compose`
+leaves it unset. To turn it on locally (the ingest runs in the local stack on
+`:4318`, cross-origin to the app since there is no Traefik here):
 
 ```bash
-CLIENT_TELEMETRY_ENABLED=true \
-CLIENT_TELEMETRY_TEMPO_ENDPOINT=<your-tempo>:4317 \
-CLIENT_TELEMETRY_LOKI_ENDPOINT=http://<your-loki>:3100/otlp \
-just run-compose
+CLIENT_TELEMETRY_ENDPOINT=https://localhost:4318 just run-compose
 ```
 
-Without the two endpoints the sidecar still accepts exports and logs its own
-failure to deliver them — which is also what a dead backend looks like in a
-deployed environment. The e2e stack runs a real Tempo and Loki; reading
-`e2e/tests/client-telemetry.spec.ts` is the quickest way to see what arrives.
+Open `https://localhost:4318/v1/traces` once to accept its self-signed
+certificate. With no monitoring stack locally its upstream export fails and is
+dropped, which is what a dead backend looks like in a deployed environment; set
+`OTEL_EXPORTER_OTLP_ENDPOINT` on the `otlp-collector-oidc` service to see the
+output. The e2e stack runs the pinned image against a real Tempo and Loki:
+reading `e2e/tests/client-telemetry.spec.ts` is the quickest way to see what
+arrives, and what the ingest refuses.
 
-The sidecar's config is validated offline by `./scripts/test-alloy-config.sh`
-(the `alloy-config-validation` CI step): `alloy fmt`, `alloy validate` with a
-negative control, the image pin agreeing across files, and the properties that
-make it a security control (every statement block allow-lists before it sets;
-failed rewrites drop rather than forward; no metrics pipeline).
+**How a client behaves** (both clients, per the estate's client contract):
 
-#### Android client telemetry (#406)
+- **No configuration, no telemetry.** Items recorded before the config arrives
+  wait in a small buffer (128) and are discarded if none arrives within a minute
+  (SPA) or two (Android); `204`, `404` or a failed fetch turns telemetry off for
+  the page load / process and says so once on the console / Logcat.
+- **Credentials:** a bearer, read per request. The SPA gets it from the config
+  route (the session cookie's token; the cookie itself is never sent to the
+  ingest, `credentials: omit`) and refetches it before expiry; Android uses its
+  own token from `TokenStore`.
+- **Retries:** only `429`, `502`, `503`, `504` and transport errors, with
+  jittered exponential backoff that honours `Retry-After`; a batch is sent at
+  most 3 times; 6 consecutive failures stop telemetry for the session. Every
+  other status drops the batch. **`401`** refreshes the token once (SPA: a new
+  config fetch; Android: waits for the app's OIDC stack to refresh) and a second
+  `401` stops telemetry for the session.
+- **Local reporting on transitions only**: the first failure, the recovery and
+  the decision to stop — status or error kind, endpoint and dropped count, never
+  the token. Nothing is pushed into the telemetry queue about the queue.
+- **Page hide:** a `fetch(…, { keepalive: true })` with the bearer, within
+  keepalive's 64 KiB budget (a beacon cannot carry an `Authorization` header).
 
-The app exports spans and logs the same way, to `{BASE_URL}/otlp/android/v1/…`
-with its bearer token (`android/app/src/main/java/link/desync/vnote/telemetry/`).
-It is per flavor: **`dev` exports** to the dev server it talks to; **`devLocal`
-never exports** (`BuildConfig.TELEMETRY_EXPORT = false`) — a laptop server must
-not feed the dev environment's Tempo and Loki. Logcat still shows every line,
-because all app logging goes through `AppLog`, which writes both.
+#### Android client telemetry (#406, #439)
+
+The app exports spans and logs the same way, to `{endpoint}/v1/…` with its
+bearer token (`android/app/src/main/java/link/desync/vnote/telemetry/`), as
+`service.name = v-note-android` with its own `service.version`. There is no
+per-flavor switch: `devLocal`'s laptop server configures no ingest, so it answers
+"off". Logcat still shows every line, because all app logging goes through
+`AppLog`, which writes both; the exporter's own state changes go to Logcat under
+the `VNoteTelemetry` tag.
 
 - **Traces:** one per screen (`app.launch`, `screen.library`, `screen.page`).
   Every REST call and both WebSocket upgrades get an `http.client` span and a
   `traceparent` (`TracingInterceptor`); `X-Request-Id` is unchanged. A stroke is
   `ink.stroke` (pen down → server echo) over `ink.capture` and `ink.commit`.
 - **Logs:** `AppLog.d/i/w/e`, trace-correlated. An uncaught exception is an
-  `error` log with its stack trace, flushed before the process dies.
+  `error` log with its stack trace, flushed before the process dies (only once
+  telemetry is configured).
 - **Batching:** exports every **30 s** (not the SPA's 5 s — a cellular radio
   stays in high power for seconds after each transfer), and on leaving the
-  foreground; gzipped; nothing sent while signed out; a 404 (kill switch off)
-  stops export for the process. No sampling.
+  foreground; gzipped. No sampling.
 
-Nothing here can be seen end to end from CI (the emulators have no collector):
-`TelemetryInstrumentedTest` covers the header, the export request and its
-token. To see real output, run the `dev` flavor against dev and query Tempo for
+Nothing here can be seen end to end from the Android CI lanes (the emulators
+have no ingest): `TelemetryInstrumentedTest` covers the header, the config fetch,
+the export request and its token, and the e2e suite drives the ingest as a
+simulated Android client. To see real output, run the `dev` flavor against dev and query Tempo for
 `service.name = v-note-android`.
 
 ---

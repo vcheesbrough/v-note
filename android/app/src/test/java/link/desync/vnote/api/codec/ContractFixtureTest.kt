@@ -11,6 +11,8 @@ import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
 import link.desync.vnote.model.StrokeStyle
 import link.desync.vnote.model.ThumbnailMetadata
+import link.desync.vnote.telemetry.ConfigFetch
+import link.desync.vnote.telemetry.parseConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -41,6 +43,15 @@ class ContractFixtureTest {
     }
 
     // ---- REST ----------------------------------------------------------------
+
+    // #439: Android reads only the endpoint; it holds its own token.
+    @Test
+    fun telemetryConfigDecodesToItsEndpoint() {
+        assertEquals(
+            ConfigFetch.Configured("https://v-notes-dev.desync.link"),
+            parseConfig(fixture("telemetry-config.json").toString()),
+        )
+    }
 
     @Test
     fun meDecodes() {
@@ -399,6 +410,7 @@ class ContractFixtureTest {
                 "stroke-batch.json",
                 "stroke-pressure.json",
                 "stroke.json",
+                "telemetry-config.json",
             )
 
         // health and meta: FixtureTest. paper-geometry: ink/PaperGeometryTest.

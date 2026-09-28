@@ -21,7 +21,12 @@ class TracingInterceptorTest {
             object : Transport {
                 override fun isReady() = true
 
+                override fun credentialId() = 1
+
+                override fun fetchConfig() = ConfigFetch.Configured("https://ingest.example")
+
                 override fun send(
+                    endpoint: String,
                     signal: Signal,
                     body: String,
                 ): ExportOutcome {

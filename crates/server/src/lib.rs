@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::middleware;
-use axum::routing::{any, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use protocol::{HealthResponse, MetaResponse, PROTOCOL_VERSION};
 use sqlx::PgPool;
@@ -18,14 +18,13 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{AuthConfig, JwksCache, auth_middleware};
 use crate::config::{
-    AndroidConfig, ClientTelemetryConfig, ClientTelemetryUpstreams, DatabaseConfig, OidcConfig,
-    RealtimeConfig, ServerConfig,
+    AndroidConfig, ClientTelemetryConfig, DatabaseConfig, OidcConfig, RealtimeConfig, ServerConfig,
 };
 use crate::observability::request_observability_middleware;
 use crate::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket};
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
-use crate::routes::telemetry::ClientTelemetryIngress;
+use crate::routes::telemetry_config::telemetry_config;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -44,10 +43,10 @@ pub struct AppState {
     /// realtime upgrades. Read once per upgrade, so flipping it only affects
     /// connections opened afterwards.
     pub realtime_compression: bool,
-    /// The `/otlp` client telemetry ingress (#354). `None` **is** the kill
-    /// switch (`client-telemetry.enabled`): with no upstreams there is nothing
-    /// to forward to, and every `/otlp` request is a 404.
-    pub client_telemetry: Option<Arc<ClientTelemetryIngress>>,
+    /// Where signed-in clients send their OTLP (#439): this environment's
+    /// `otlp-collector-oidc` ingest, as `GET /api/telemetry/config` hands it
+    /// out. `None` is "client telemetry off" — the route answers `204`.
+    pub telemetry_endpoint: Option<Arc<str>>,
 }
 
 /// The build version: the release tag baked in at compile time (`V_NOTE_RELEASE`,
@@ -144,7 +143,7 @@ pub async fn build_app_router(
         assetlinks_json: android.assetlinks_json().map(Arc::from),
         coalesce_replay: realtime.coalesce_replay,
         realtime_compression: realtime.compression,
-        client_telemetry: client_telemetry_ingress(client_telemetry.upstreams()),
+        telemetry_endpoint: telemetry_endpoint(client_telemetry.ingest_endpoint()),
     };
     // Startup work, not router construction: resume thumbnail jobs a restart
     // interrupted. Kept out of `router` so tests, whose pool never connects,
@@ -153,23 +152,18 @@ pub async fn build_app_router(
     Ok(router(state, server.static_dir.clone()))
 }
 
-/// Logged once, at `info`, because whether ingest is on is exactly what someone
-/// reading a quiet startup log after flipping the switch wants to confirm — the
-/// config is snapshotted at startup, so the switch only takes on a restart.
-fn client_telemetry_ingress(
-    upstreams: Option<ClientTelemetryUpstreams>,
-) -> Option<Arc<ClientTelemetryIngress>> {
-    match upstreams {
-        Some(upstreams) => {
-            tracing::info!(
-                spa_endpoint = %upstreams.spa,
-                android_endpoint = %upstreams.android,
-                "client telemetry ingress enabled"
-            );
-            Some(Arc::new(ClientTelemetryIngress::new(upstreams)))
+/// Logged once at startup: whether clients will be told to send telemetry is
+/// what someone reading a quiet log after changing the leaf wants to confirm —
+/// config is snapshotted at startup, so a change takes effect on a restart.
+fn telemetry_endpoint(endpoint: Option<&url::Url>) -> Option<Arc<str>> {
+    match endpoint {
+        Some(endpoint) => {
+            let endpoint = routes::telemetry_config::client_endpoint(endpoint);
+            tracing::info!(endpoint = %endpoint, "client telemetry configured for clients");
+            Some(Arc::from(endpoint))
         }
         None => {
-            tracing::info!("client telemetry ingress disabled; /otlp answers 404");
+            tracing::info!("client telemetry not configured; /api/telemetry/config answers 204");
             None
         }
     }
@@ -193,35 +187,46 @@ pub fn build_router(
     jwks_cache: Arc<JwksCache>,
     db: PgPool,
 ) -> Router {
-    build_router_with_client_telemetry(app_version, auth, jwks_cache, db, None)
+    router(test_state(app_version, auth, jwks_cache, db), None)
 }
 
-/// As [`build_router`], with the `/otlp` ingress pointed at `upstreams` — or
-/// switched off, which is what [`build_router`] gets. A sibling rather than a
-/// fifth parameter so the tests that have nothing to do with telemetry do not
-/// each have to say so.
-pub fn build_router_with_client_telemetry(
+/// As [`build_router`], with `client-telemetry.endpoint` set to `endpoint`
+/// (#439) — or unset, which is what [`build_router`] gets.
+pub fn build_router_with_telemetry_endpoint(
     app_version: String,
     auth: Arc<AuthConfig>,
     jwks_cache: Arc<JwksCache>,
     db: PgPool,
-    upstreams: Option<ClientTelemetryUpstreams>,
+    endpoint: Option<url::Url>,
 ) -> Router {
     router(
         AppState {
-            app_version,
-            auth,
-            jwks_cache,
-            db,
-            realtime: Arc::new(RealtimeHub::default()),
-            assetlinks_json: None,
-            coalesce_replay: RealtimeConfig::default().coalesce_replay,
-            realtime_compression: RealtimeConfig::default().compression,
-            client_telemetry: upstreams
-                .map(|upstreams| Arc::new(ClientTelemetryIngress::new(upstreams))),
+            telemetry_endpoint: telemetry_endpoint(endpoint.as_ref()),
+            ..test_state(app_version, auth, jwks_cache, db)
         },
         None,
     )
+}
+
+/// The state the integration-test routers share: no asset links, realtime
+/// defaults, and client telemetry off.
+fn test_state(
+    app_version: String,
+    auth: Arc<AuthConfig>,
+    jwks_cache: Arc<JwksCache>,
+    db: PgPool,
+) -> AppState {
+    AppState {
+        app_version,
+        auth,
+        jwks_cache,
+        db,
+        realtime: Arc::new(RealtimeHub::default()),
+        assetlinks_json: None,
+        coalesce_replay: RealtimeConfig::default().coalesce_replay,
+        realtime_compression: RealtimeConfig::default().compression,
+        telemetry_endpoint: None,
+    }
 }
 
 fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
@@ -238,28 +243,11 @@ fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             get(get_thumbnail),
         )
         .route("/realtime-ticket", post(realtime_ticket))
+        .route("/telemetry/config", get(telemetry_config))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ))
-        .with_state(state.clone());
-
-    // Layers run outermost-first and the last one added is outermost, so the
-    // kill switch is consulted *before* authentication. See `enabled_gate` for
-    // why that order is load-bearing. The fallback keeps every other path under
-    // `/otlp` away from the SPA's catch-all below, which would answer a stray
-    // `GET /otlp/...` with `200 index.html`.
-    let client_telemetry = Router::new()
-        .route("/{client}/v1/{signal}", post(routes::telemetry::ingest))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            routes::telemetry::enabled_gate,
-        ))
-        .fallback(routes::telemetry::not_found)
         .with_state(state.clone());
 
     let mut router = Router::new()
@@ -278,12 +266,6 @@ fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
                 .with_state(state.clone()),
         )
         .nest("/api", public_api.merge(protected_api))
-        .nest("/otlp", client_telemetry)
-        // Not covered by the nest above, and not redundant with its fallback:
-        // axum registers a nest as `/otlp/{*tail}`, and a catch-all does not
-        // match an empty tail — so `/otlp/` would otherwise fall through to the
-        // SPA and be answered with `index.html` (found by e2e, #354).
-        .route("/otlp/", any(routes::telemetry::not_found))
         .route(
             "/api/realtime",
             get(realtime_socket).with_state(state.clone()),
@@ -353,81 +335,7 @@ impl AppState {
             assetlinks_json: None,
             coalesce_replay: RealtimeConfig::default().coalesce_replay,
             realtime_compression: RealtimeConfig::default().compression,
-            client_telemetry: None,
+            telemetry_endpoint: None,
         }
-    }
-}
-
-/// The `/otlp` ingress against the router as it is deployed — **with** the SPA's
-/// static fallback. The integration tests build the router without one, and
-/// that hid a real escape: axum's nested catch-all does not match an empty tail,
-/// so `/otlp/` fell past the ingress to `ServeDir`, which answers a `GET` with
-/// `200 index.html`. Found by the e2e suite (#354), pinned here.
-#[cfg(test)]
-mod otlp_route_tests {
-    use axum::body::Body;
-    use axum::http::{Method, Request, StatusCode};
-    use tower::ServiceExt as _;
-
-    use super::{AppState, router};
-
-    const INDEX: &str = "<!doctype html><title>spa</title>";
-
-    fn static_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "v-note-otlp-route-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp static dir");
-        std::fs::write(dir.join("index.html"), INDEX).expect("index.html");
-        dir
-    }
-
-    #[tokio::test]
-    async fn nothing_under_otlp_reaches_the_spa_fallback() {
-        let dir = static_dir();
-        let app = router(AppState::for_tests(), Some(dir.clone()));
-
-        for method in [Method::GET, Method::POST] {
-            for path in ["/otlp", "/otlp/", "/otlp/spa", "/otlp/anything/else"] {
-                let response = app
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method(method.clone())
-                            .uri(path)
-                            .body(Body::empty())
-                            .expect("request"),
-                    )
-                    .await
-                    .expect("response");
-                let status = response.status();
-                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .expect("body");
-                assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
-                assert_ne!(body, INDEX, "{method} {path} was served the SPA");
-            }
-        }
-
-        // …while the fallback itself still works, or this proves nothing. By
-        // body, not status: `ServeDir`'s `not_found_service` serves index.html
-        // *with a 404*, which is also why the status check above could not catch
-        // the escape on its own.
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/p/some-page")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        assert_eq!(body, INDEX, "the SPA fallback should serve a deep link");
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

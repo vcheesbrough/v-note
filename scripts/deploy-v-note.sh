@@ -239,24 +239,6 @@ case "$V_NOTE_METRICS_ADDR" in
     ;;
 esac
 
-# --- client telemetry sidecar (#354) ----------------------------------------
-#
-# The sidecar's Alloy config reaches its container as a compose `configs:` entry
-# sourced from this variable, not as a bind mount: this script runs inside a CI
-# container against the host's docker socket, so a bind-mount path would be
-# resolved on the host, where this checkout does not exist.
-#
-# Read here rather than passed in by the pipeline step so that there is nothing
-# for a caller to forget — the file is in the repo, next to the compose file that
-# consumes it, and is the same for every environment.
-#
-# Assigned and exported on separate lines deliberately. `export X="$(cat f)"`
-# returns export's status, not cat's, so a missing file would slip past `set -e`
-# and hand compose an empty string — which it accepts, producing a sidecar that
-# starts, reports ready and accepts nothing.
-CLIENT_TELEMETRY_ALLOY_CONFIG=$(cat deploy/alloy/client-telemetry.alloy)
-export CLIENT_TELEMETRY_ALLOY_CONFIG
-
 # The remaining parameters are enforced by compose's own `:?` guards, which would
 # otherwise not fire until `up` — after a registry login and a pull. Resolving the
 # model first is client-side only (no daemon, no network), so every parameter is
@@ -281,7 +263,12 @@ export APP_VERSION="$release_tag"
 export V_NOTE_METRICS_PORT
 export V_NOTE_METRICS_SCRAPE
 
-docker compose up -d
+# `--remove-orphans`: a service deleted from the compose files must stop with
+# the deploy that deleted it, or it keeps running — and keeps being scraped —
+# on the old definition (the #354 client-telemetry sidecar, retired in #439, is
+# what found this). Profiled services such as `sqltool` are still *defined*, so
+# compose does not count them as orphans; their switch-off is handled below.
+docker compose up -d --remove-orphans
 
 # The server snapshots sovereign-config once at startup, and that config lives
 # *outside* the compose model — so changing a leaf, or rotating the access URL,

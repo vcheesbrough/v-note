@@ -25,7 +25,7 @@ use jsonschema::{Registry, Validator};
 use protocol::{
     CreatePageRequest, HealthResponse, LibraryEvent, ListPagesResponse, MeResponse, MetaResponse,
     PageClientMessage, PageReplay, PageServerMessage, PageSummary, Paper, RealtimeTicketResponse,
-    Stroke, StrokeBatch, ThumbnailMetadata, TombstoneBatch,
+    Stroke, StrokeBatch, TelemetryConfigResponse, ThumbnailMetadata, TombstoneBatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -118,6 +118,7 @@ fn schema_for_fixture(fixture: &str) -> Option<&'static str> {
         // Note: `page-server-page-replay.json` is matched by the
         // `page-server-` prefix rule below, as the wire *message*.
         "realtime-ticket.json" => "realtime-ticket.schema.json",
+        "telemetry-config.json" => "telemetry-config.schema.json",
         "stroke.json" | "stroke-pressure.json" => "stroke.schema.json",
         "stroke-batch.json" => "stroke-batch.schema.json",
         // Golden geometry table, not a wire payload: asserted by contracts.rs
@@ -216,6 +217,11 @@ fn rest_dtos_serialise_to_their_schemas() {
         &registry,
         "realtime-ticket.json",
         "realtime-ticket.schema.json",
+    );
+    assert_roundtrip::<TelemetryConfigResponse>(
+        &registry,
+        "telemetry-config.json",
+        "telemetry-config.schema.json",
     );
     assert_roundtrip::<PageReplay>(&registry, "page-replay.json", "page-replay.schema.json");
     assert_roundtrip::<StrokeBatch>(&registry, "stroke-batch.json", "stroke-batch.schema.json");

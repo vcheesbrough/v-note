@@ -382,8 +382,9 @@ fn App() -> impl IntoView {
     // Telemetry is batched, so a tab closed between ticks would lose whatever
     // the last few seconds produced — which is exactly the window an error
     // arrives in. `pagehide` rather than `unload`: it is the one the bfcache
-    // does not break, and it fires on mobile tab switches too. Sent as a beacon,
-    // because an ordinary fetch started here is cancelled by the unload.
+    // does not break, and it fires on mobile tab switches too. Sent as a
+    // keepalive fetch, because an ordinary one started here is cancelled by the
+    // unload (and a beacon cannot carry the bearer the ingest needs, #439).
     Effect::new(move |_| {
         let pagehide = window_event_listener(ev::pagehide, move |_| telemetry::flush_on_pagehide());
         on_cleanup(move || pagehide.remove());
@@ -396,8 +397,8 @@ fn App() -> impl IntoView {
             let parent = telemetry::screen();
             meta.set(Some(api::fetch_meta(parent).await));
             let profile = api::fetch_me(parent).await;
-            // Exports authenticate with the session cookie, so nothing is sent
-            // until there is a session to send it with.
+            // Telemetry configuration needs a session to fetch; a signed-out
+            // page never initialises OTLP (#439).
             telemetry::set_session(profile.is_ok());
             me.set(Some(profile));
         });
