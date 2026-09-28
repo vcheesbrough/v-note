@@ -38,8 +38,8 @@ use wasm_bindgen::JsCast as _;
 pub(crate) use otlp::Severity;
 use otlp::{ErrorStatus, KeyValue, LogRecord, Span, SpanId, SpanKind, TraceId, UnixNanos};
 use outbox::{
-    ConfigFetch, Credentials, ExportOutcome, ExportPolicy, Lifecycle, OffReason, Outbox, Signal,
-    Transition,
+    ConfigFetch, ConfigOutcome, Credentials, ExportOutcome, ExportPolicy, Lifecycle, OffReason,
+    Outbox, Signal, Transition,
 };
 use span::OpenSpan;
 pub(crate) use span::Parent;
@@ -88,6 +88,9 @@ struct State {
     exporting: bool,
     /// One config fetch at a time.
     fetching_config: bool,
+    /// Whether `set_session` has confirmed a session: until then a config
+    /// fetch could only be a `401`.
+    signed_in: bool,
 }
 
 impl State {
@@ -137,6 +140,7 @@ pub(crate) fn init() {
             overflow_reported: false,
             exporting: false,
             fetching_config: false,
+            signed_in: false,
         });
     });
     wasm_bindgen_futures::spawn_local(export_loop());
@@ -149,13 +153,15 @@ pub(crate) fn set_session(signed_in: bool) {
         stop(OffReason::SignedOut);
         return;
     }
+    with_state(|state| state.signed_in = true);
     wasm_bindgen_futures::spawn_local(async {
         refresh_config().await;
     });
 }
 
-/// Fetches configuration and applies it. The first call turns telemetry on or
-/// off; later calls are the token refresh — on expiry and after a `401`.
+/// Fetches configuration and applies it ([`Lifecycle::on_config`] holds the
+/// rules). The first answer turns telemetry on or off; later calls are the
+/// refresh — near the token's expiry, and after a `401`.
 async fn refresh_config() {
     let Some(false) = with_state(|state| {
         let busy = state.fetching_config || state.lifecycle.is_off();
@@ -167,50 +173,53 @@ async fn refresh_config() {
         return;
     };
     let fetch = fetch_config().await;
-    let (configured, endpoint) = match &fetch {
-        ConfigFetch::Configured(credentials) => (true, credentials.endpoint.clone()),
-        ConfigFetch::Absent => (false, String::new()),
+    let endpoint = match &fetch {
+        ConfigFetch::Configured(credentials) => credentials.endpoint.clone(),
+        _ => String::new(),
     };
-    let first = with_state(|state| {
+    let outcome = with_state(|state| {
         state.fetching_config = false;
-        let first = !matches!(state.lifecycle, Lifecycle::Configured(_));
-        state.lifecycle.on_config(fetch);
-        if configured {
+        let outcome = state.lifecycle.on_config(fetch, now_ms() / 1_000.0);
+        if matches!(
+            outcome,
+            ConfigOutcome::Configured | ConfigOutcome::Refreshed
+        ) {
             state.policy.refreshed();
             state.spans.set_capacity(outbox::CAPACITY);
             state.logs.set_capacity(outbox::CAPACITY);
         }
-        first
-    })
-    .unwrap_or(false);
-    if configured {
-        if first {
-            console(
-                Severity::Info,
-                &format!("client telemetry: exporting to {endpoint}"),
-            );
-        }
-    } else {
-        stop(OffReason::NotConfigured);
+        outcome
+    });
+    match outcome {
+        Some(ConfigOutcome::Configured) => console(
+            Severity::Info,
+            &format!("client telemetry: exporting to {endpoint}"),
+        ),
+        Some(ConfigOutcome::Off(reason)) => stop(reason),
+        Some(ConfigOutcome::Refreshed | ConfigOutcome::Wait) | None => {}
     }
 }
 
-/// `GET /api/telemetry/config`. Everything but a `200` with a parseable body is
-/// "no configuration" — including a `404` from a server that predates the route.
+/// `GET /api/telemetry/config`, reduced to what it means for a client: `200`
+/// with a body is configuration; `204` or `404` (a server that predates the
+/// route) is "none"; `401` is "no session"; anything else — no response, a
+/// `5xx` — is "not answered yet".
 async fn fetch_config() -> ConfigFetch {
     let Ok(response) = gloo_net::http::Request::get(CONFIG_PATH).send().await else {
-        return ConfigFetch::Absent;
+        return ConfigFetch::Unavailable;
     };
-    if response.status() != 200 {
-        return ConfigFetch::Absent;
-    }
-    match response.json::<TelemetryConfigResponse>().await {
-        Ok(config) if !config.endpoint.is_empty() => ConfigFetch::Configured(Credentials {
-            endpoint: config.endpoint,
-            access_token: config.access_token,
-            expires_at: config.expires_at as f64,
-        }),
-        _ => ConfigFetch::Absent,
+    match response.status() {
+        200 => match response.json::<TelemetryConfigResponse>().await {
+            Ok(config) if !config.endpoint.is_empty() => ConfigFetch::Configured(Credentials {
+                endpoint: config.endpoint,
+                access_token: config.access_token,
+                expires_at: config.expires_at as f64,
+            }),
+            _ => ConfigFetch::Unavailable,
+        },
+        204 | 404 => ConfigFetch::Absent,
+        401 => ConfigFetch::SignedOut,
+        _ => ConfigFetch::Unavailable,
     }
 }
 
@@ -231,9 +240,10 @@ fn stop(reason: OffReason) {
         return;
     };
     let level = match reason {
-        OffReason::NotConfigured | OffReason::SignedOut | OffReason::ConfigTimedOut => {
-            Severity::Info
-        }
+        OffReason::NotConfigured
+        | OffReason::SignedOut
+        | OffReason::ConfigTimedOut
+        | OffReason::SessionExpired => Severity::Info,
         OffReason::Unauthorized | OffReason::GaveUp => Severity::Warn,
     };
     console(
@@ -485,7 +495,16 @@ async fn export_loop() {
                 return Step::Finished;
             }
             let Some(credentials) = state.lifecycle.credentials() else {
-                return Step::Wait;
+                // Not configured yet: ask again, once there is a session to ask
+                // with and no fetch already in flight. The first fetch is
+                // started by `set_session`; this is the retry after the server
+                // did not answer, bounded by `expire` above.
+                return if state.lifecycle.is_awaiting() && state.signed_in && !state.fetching_config
+                {
+                    Step::Refresh
+                } else {
+                    Step::Wait
+                };
             };
             if state.policy.needs_refresh() || credentials.usable_token(now / 1_000.0).is_none() {
                 return Step::Refresh;

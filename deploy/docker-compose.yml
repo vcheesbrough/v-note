@@ -263,6 +263,15 @@ services:
       # value each, so the ingest and the app cannot disagree about the
       # provider. The audience check is what keeps other applications' tokens
       # out; the issuer keeps its trailing slash.
+      #
+      # The `:?` guards couple the deploy to that layer ON PURPOSE: a deploy
+      # whose render lost it fails before it touches anything (as a missing
+      # compose leaf does, and as `render` itself does for an absent layer),
+      # rather than starting an ingest that refuses every token. That is a
+      # deploy-configuration fault, not telemetry failing at runtime — the
+      # "never fail a deploy" rule is about the latter. Switching client
+      # telemetry off is `client-telemetry/endpoint` unset, not removing this
+      # layer; retiring the ingest removes the service and the layer together.
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?OIDC_ISSUER_URL is required (/v-note/devops/<env>/otlp-collector-oidc)}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:?OIDC_AUDIENCE is required (/v-note/devops/<env>/otlp-collector-oidc)}
       # A regular expression over the whole `service.name`: a resource that does
@@ -272,15 +281,12 @@ services:
       # Stamped onto every client resource over what the client sent: the
       # environment (by the contract's name) and the estate's path marker.
       CLIENT_RESOURCE_ATTRIBUTES: deployment.environment.name=${APP_ENV:-dev},telemetry_source=client
-      # Upstream: the shared Alloy, over gRPC — which forwards traces to Tempo.
+      # Upstream: the shared Alloy, over gRPC, for every signal — traces to
+      # Tempo, logs to Loki (mini-config #47). It translates the vocabulary:
+      # `telemetry_source=client` also becomes the indexed `log_source=client`,
+      # and `deployment.environment.name` fills `deployment.environment`, so
+      # client data selects like everything else on the platform.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://monitor-alloy:4317
-      # …but NOT logs, yet: monitor-alloy's `apps` receiver outputs traces only
-      # (mini-config monitoring-stack/config.alloy), so logs sent there would be
-      # dropped. Until the shared Alloy forwards logs (mini-config card, linked
-      # from #439), logs go straight to Loki's OTLP ingest by the image's own
-      # per-signal override. Delete these two lines when it does.
-      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://monitor-loki:3100/otlp/v1/logs
-      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
       # The ingest's OWN identity, on its own logs and `:8888` metrics. Named per
       # product, because two products' ingests are otherwise indistinguishable
       # in the shared Prometheus and Loki.
@@ -348,7 +354,9 @@ services:
       - observability.metrics.scheme=http
       - observability.service.name=v-note-otlp-collector-oidc
       - observability.deployment.environment=${APP_ENV:-dev}
-      - observability.release=0.13.0
+      # No `observability.release`: the shared Alloy no longer reads it
+      # (mini-config OBSERVABILITY.md), and a hand-written version here would go
+      # stale on the next re-pin. The build is `target_info{service_version}`.
 
 secrets:
   # Sourced straight from /v-note/devops/<env>/compose/SOVEREIGN_CONFIG_ACCESS_URL_FILE,

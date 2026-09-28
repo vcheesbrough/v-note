@@ -269,6 +269,8 @@ private class ExportQueue(
                 turnOff(OffReason.NotConfigured)
                 return false
             }
+            // Asked again next tick, until the pre-config deadline above.
+            ConfigFetch.NotYet -> return false
         }
     }
 

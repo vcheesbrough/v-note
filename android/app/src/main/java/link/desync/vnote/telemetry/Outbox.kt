@@ -102,9 +102,15 @@ internal sealed class ConfigFetch {
         val endpoint: String,
     ) : ConfigFetch()
 
-    // `204` (ingest off here), `404` (a server that predates the route), any
-    // other status, or no response: all "no configuration".
+    // `204` (ingest off here) or `404` (a server that predates the route): the
+    // server's answer is "no configuration".
     data object Absent : ConfigFetch()
+
+    // No response, a `5xx`, a `401`, any other status or an unparseable body:
+    // not answered yet. Asked again on a later tick, within the pre-config
+    // window — a phone's radio is at its flakiest right at launch, when this
+    // is first asked.
+    data object NotYet : ConfigFetch()
 }
 
 // Why telemetry is off. Each is said once, locally.

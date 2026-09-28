@@ -185,8 +185,8 @@ function flattenAttributes(raw: Array<{ key: string; value: Record<string, strin
 let backends: APIRequestContext;
 let suiteToken: string;
 
-async function mintToken(clientId: string): Promise<string> {
-  const res = await backends.post(OIDC_TOKEN_URL!, {
+async function mintToken(clientId: string, tokenUrl = OIDC_TOKEN_URL!): Promise<string> {
+  const res = await backends.post(tokenUrl, {
     form: {
       grant_type: 'client_credentials',
       client_id: clientId,
@@ -327,6 +327,17 @@ test.describe('otlp-collector-oidc (pinned) as v-note deploys it', () => {
     const cases: Array<[string, string | null, string]> = [
       ['no token', null, 'no token'],
       ['not a JWT', 'not-a-jwt', 'invalid token'],
+      // The audience check is what keeps every other application's tokens out:
+      // the issuer and the `telemetry:write` mapping are shared estate-wide.
+      ['another application\'s token', await mintToken('v-note-other-app-test'), 'invalid token: wrong aud'],
+      // Same provider and client, but a different issuer (the mock's second
+      // issuer path stands in for another provider).
+      [
+        'another issuer\'s token',
+        await mintToken('v-note-test', OIDC_TOKEN_URL!.replace('/default/', '/other/')),
+        'invalid token',
+      ],
+      ['an expired token', await mintToken('v-note-expired-test'), 'invalid token'],
       ['no telemetry:write', await mintToken('v-note-no-telemetry-test'), 'missing scope: telemetry:write'],
       ['no preferred_username', await mintToken('v-note-no-username-test'), 'missing claim: preferred_username'],
     ];
@@ -409,13 +420,16 @@ test.describe('otlp-collector-oidc (pinned) as v-note deploys it', () => {
     );
     expect(res.status()).toBe(200);
 
-    // Selected by the contract's environment name as an index label — the
-    // dashboard's client-logs panel depends on exactly this selector.
+    // Selected the way the dashboard's client-logs panel selects: the shared
+    // Alloy (the stand-in mirrors mini-config's) turns the ingest's
+    // `deployment.environment.name` and `telemetry_source=client` into the
+    // indexed `deployment_environment` and `log_source="client"`.
     const streams = await lokiStreams(
-      `{service_name="v-note-android", deployment_environment_name="${EXPECTED_ENV}"}`,
+      `{service_name="v-note-android", deployment_environment="${EXPECTED_ENV}", log_source="client"}`,
       (line) => line.includes(marker),
     );
     const stream = streams[0].stream;
+    expect(stream.deployment_environment_name).toBe(EXPECTED_ENV);
     expect(stream.service_version).toBe('0.58.0-e2e-android');
     expect(stream.telemetry_source).toBe('client');
     expect(stream.user_id).toBe(USER.id);

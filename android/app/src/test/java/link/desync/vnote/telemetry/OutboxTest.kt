@@ -188,9 +188,9 @@ class OutboxTest {
             ConfigFetch.Configured("https://v-notes-dev.desync.link"),
             parseConfig("""{"endpoint":"https://v-notes-dev.desync.link/","access_token":"t","expires_at":1}"""),
         )
-        assertEquals(ConfigFetch.Absent, parseConfig("""{"endpoint":""}"""))
-        assertEquals(ConfigFetch.Absent, parseConfig("""{"endpoint":"ftp://x"}"""))
-        assertEquals(ConfigFetch.Absent, parseConfig("not json"))
+        assertEquals(ConfigFetch.NotYet, parseConfig("""{"endpoint":""}"""))
+        assertEquals(ConfigFetch.NotYet, parseConfig("""{"endpoint":"ftp://x"}"""))
+        assertEquals(ConfigFetch.NotYet, parseConfig("not json"))
     }
 
     private companion object {

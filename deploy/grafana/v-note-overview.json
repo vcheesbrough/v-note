@@ -1833,7 +1833,7 @@
             "type": "loki",
             "uid": "P8E80F9AEF21F6940"
           },
-          "expr": "{service_name=~\"v-note-(spa|android)\", deployment_environment_name=\"$env\"} | telemetry_source=\"client\" | severity_text=~\"ERROR|WARN\"",
+          "expr": "{service_name=~\"v-note-(spa|android)\", deployment_environment=\"$env\", log_source=\"client\"} | severity_text=~\"ERROR|WARN\"",
           "legendFormat": "",
           "range": true,
           "queryType": "range"
@@ -1845,7 +1845,7 @@
         "sortOrder": "Descending",
         "enableLogDetails": true
       },
-      "description": "Logs the browser and the Android app sent through otlp-collector-oidc (#439). The ingest stamps `deployment.environment.name`, `telemetry_source=client` and `user.id`/`user.name` over whatever the client claimed; each line carries trace_id/span_id as structured metadata, which links it to the trace in Tempo."
+      "description": "Logs the browser and the Android app sent through otlp-collector-oidc (#439). The ingest stamps `deployment.environment.name`, `telemetry_source=client` and `user.id`/`user.name` over whatever the client claimed, and the shared Alloy translates them to the indexed `deployment_environment` and `log_source=\"client\"`. Each line carries trace_id/span_id as structured metadata, which links it to the trace in Tempo."
     },
     {
       "collapsed": false,

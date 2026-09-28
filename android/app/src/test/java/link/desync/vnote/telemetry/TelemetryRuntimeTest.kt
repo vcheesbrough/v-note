@@ -200,6 +200,45 @@ class TelemetryRuntimeTest {
         assertTrue(local.single(), local.single().contains(OffReason.NotConfigured.description))
     }
 
+    // A launch on a flaky radio: the first config fetch is not answered, the
+    // next one is — and telemetry comes on, with what waited in the buffer.
+    @Test
+    fun anUnansweredConfigFetchIsAskedAgainOnTheNextTick() {
+        transport.config = ConfigFetch.NotYet
+        runtime.log(Severity.Info, "launch")
+        runtime.exportNow()
+        assertTrue(transport.sent.isEmpty())
+        assertFalse(runtime.isExporting)
+
+        transport.config = ConfigFetch.Configured("https://ingest.example")
+        runtime.exportNow()
+        assertEquals(2, transport.configFetches)
+        assertTrue(runtime.isExporting)
+        assertEquals(
+            "launch",
+            transport.sent
+                .single()
+                .second
+                .logs()
+                .single()
+                .getJSONObject("body")
+                .getString("stringValue"),
+        )
+    }
+
+    // …but only within the pre-config window: a server that never answers
+    // leaves telemetry off, not retried for the life of the process.
+    @Test
+    fun anUnansweredConfigFetchStopsAtTheDeadline() {
+        transport.config = ConfigFetch.NotYet
+        runtime.exportNow()
+        clock += (PRE_CONFIG_MAX_MS + 1) * 1_000_000
+        runtime.exportNow()
+        runtime.exportNow()
+        assertEquals("no fetch after the deadline", 1, transport.configFetches)
+        assertTrue(local.single().contains(OffReason.ConfigTimedOut.description))
+    }
+
     // The pre-config buffer is short-lived: a session that never arrives means
     // the launch spans are discarded, not held for the process.
     @Test

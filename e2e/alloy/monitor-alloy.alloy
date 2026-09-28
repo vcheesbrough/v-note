@@ -2,33 +2,31 @@
 //
 // An e2e FIXTURE, not a deployed artifact. The real one is
 // mini-config/monitoring-stack/config.alloy, which v-note does not own and does
-// not ship. This file mirrors the two parts of it the server's own telemetry
-// goes through, so e2e exercises the server against the collector shape it is
-// deployed against:
+// not ship. This file mirrors the parts of it the server's own telemetry goes
+// through, so e2e exercises the server against the collector it is deployed
+// against. Mirrored from mini-config master 984587b (mini-config PR #47):
 //
-//   1. the `apps` OTLP receiver (gRPC :4317, HTTP :4318) the server exports to,
-//      with traces batched to Tempo — as config.alloy's `otelcol.receiver.otlp
-//      "apps"` does;
+//   1. the `apps` OTLP receiver (gRPC :4317, HTTP :4318) — `otelcol.receiver.otlp
+//      "apps"` — with its `transform "apps"` vocabulary translation (the pusher
+//      marks its own data: `telemetry_source` fills the indexed `log_source`
+//      when that is absent, and `client` in either key wins in both), then
+//      traces to Tempo and logs to Loki's OTLP ingest. The collector stamps NO
+//      marker of its own: a pusher that sets none lands unmarked, which is why
+//      the server sets `telemetry_source = "otlp"` on its resource;
 //   2. the Docker log scrape, stamping `log_source = "docker"` and taking
 //      `service_name` / `deployment_environment` from the container's
-//      `observability.*` labels — as config.alloy's `loki.source.docker
-//      "docker_logs"` does. Narrowed to this compose project's `app` container,
-//      because on a CI host the socket sees every container on the machine.
+//      `observability.*` labels — `loki.source.docker "docker_logs"`. Narrowed
+//      to this compose project's `app` container, because on a CI host the
+//      socket sees every container on the machine.
 //
-// PLUS ONE THING config.alloy DOES NOT HAVE YET: a logs pipeline on the `apps`
-// receiver, stamping `log_source = "otlp"` and exporting to Loki's OTLP ingest.
-// On mini-config master the `apps` receiver outputs traces only, so OTLP logs
-// sent there are dropped; adding the logs half is a separate mini-config ticket
-// that #417's dev acceptance waits on. This fixture is written the way that
-// ticket is expected to land it (`log_source` set by the collector, never by
-// the server — the same convention client-telemetry.alloy follows with
-// `client`). If it lands differently, change this file to match it.
+// Not mirrored: the metrics half of the `apps` pipeline (the server does not
+// push metrics, #417 deviation 1) and everything unrelated to v-note.
 //
 // MIRROR DRIFT IS THE RISK. Nothing checks this file against config.alloy. A
-// green e2e run proves the *server* exports correct OTLP logs and traces to a
-// collector of this shape; it does not prove the shared Alloy is configured to
-// receive them. Dev is the proof of that. When config.alloy changes the `apps`
-// receiver or the Docker scrape, change this file in the same breath.
+// green e2e run proves the *server* exports correct OTLP to a collector of this
+// shape; it does not prove the shared Alloy still has that shape. Dev is the
+// proof of that. When config.alloy changes the `apps` pipeline or the Docker
+// scrape, change this file in the same breath.
 //
 // Endpoints are the e2e service names (`tempo`, `loki`), where config.alloy
 // names `monitor-tempo` and `loki` on proxy-backend.
@@ -47,26 +45,39 @@ otelcol.receiver.otlp "apps" {
 	}
 
 	output {
-		traces = [otelcol.processor.batch.apps.input]
-		logs   = [otelcol.processor.transform.apps_logs.input]
+		traces = [otelcol.processor.transform.apps.input]
+		logs   = [otelcol.processor.transform.apps.input]
 	}
 }
 
-// The path marker. Traces carry none here, as in config.alloy: the server's
-// spans are told from client spans by the client ingest's `client`, not by a
-// marker of their own.
-otelcol.processor.transform "apps_logs" {
-	error_mode = "propagate"
+// Verbatim from config.alloy (traces and logs; its metric statements are not
+// mirrored, see above).
+otelcol.processor.transform "apps" {
+	error_mode = "ignore"
+
+	trace_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["log_source"], "client") where attributes["telemetry_source"] == "client"`,
+			`set(attributes["telemetry_source"], "client") where attributes["log_source"] == "client"`,
+			`set(attributes["log_source"], attributes["telemetry_source"]) where attributes["log_source"] == nil and attributes["telemetry_source"] != nil`,
+			`set(attributes["deployment.environment"], attributes["deployment.environment.name"]) where attributes["deployment.environment.name"] != nil`,
+		]
+	}
 
 	log_statements {
 		context    = "resource"
 		statements = [
-			`set(resource.attributes["log_source"], "otlp")`,
+			`set(attributes["log_source"], "client") where attributes["telemetry_source"] == "client"`,
+			`set(attributes["telemetry_source"], "client") where attributes["log_source"] == "client"`,
+			`set(attributes["log_source"], attributes["telemetry_source"]) where attributes["log_source"] == nil and attributes["telemetry_source"] != nil`,
+			`set(attributes["deployment.environment"], attributes["deployment.environment.name"]) where attributes["deployment.environment.name"] != nil`,
 		]
 	}
 
 	output {
-		logs = [otelcol.processor.batch.apps.input]
+		traces = [otelcol.processor.batch.apps.input]
+		logs   = [otelcol.processor.batch.apps.input]
 	}
 }
 

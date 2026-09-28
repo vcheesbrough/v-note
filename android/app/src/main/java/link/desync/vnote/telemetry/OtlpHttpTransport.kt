@@ -19,6 +19,8 @@ private const val EXPORT_CALL_TIMEOUT_SECONDS = 10L
 private const val EXPIRY_MARGIN_SECONDS = 30L
 
 private const val HTTP_OK = 200
+private const val HTTP_NO_CONTENT = 204
+private const val HTTP_NOT_FOUND = 404
 
 // The network side of client telemetry (#439):
 //
@@ -64,7 +66,7 @@ internal class OtlpHttpTransport(
     override fun credentialId(): Int? = usableToken()?.hashCode()
 
     override fun fetchConfig(): ConfigFetch {
-        val token = usableToken() ?: return ConfigFetch.Absent
+        val token = usableToken() ?: return ConfigFetch.NotYet
         val request =
             Request
                 .Builder()
@@ -74,11 +76,14 @@ internal class OtlpHttpTransport(
                 .build()
         return try {
             http.newCall(request).execute().use { response ->
-                if (response.code != HTTP_OK) return ConfigFetch.Absent
-                parseConfig(response.body.string())
+                when (response.code) {
+                    HTTP_OK -> parseConfig(response.body.string())
+                    HTTP_NO_CONTENT, HTTP_NOT_FOUND -> ConfigFetch.Absent
+                    else -> ConfigFetch.NotYet
+                }
             }
         } catch (_: IOException) {
-            ConfigFetch.Absent
+            ConfigFetch.NotYet
         }
     }
 
@@ -122,17 +127,18 @@ internal class OtlpHttpTransport(
 }
 
 // The config route's `200` body. Android uses the endpoint only: it holds its
-// own token, so the one in the body is ignored.
+// own token, so the one in the body is ignored. A body it cannot read is "not
+// answered yet", not "no configuration".
 internal fun parseConfig(body: String): ConfigFetch =
     try {
         val endpoint = JSONObject(body).optString("endpoint")
         if (endpoint.startsWith("https://") || endpoint.startsWith("http://")) {
             ConfigFetch.Configured(endpoint.trimEnd('/'))
         } else {
-            ConfigFetch.Absent
+            ConfigFetch.NotYet
         }
     } catch (_: JSONException) {
-        ConfigFetch.Absent
+        ConfigFetch.NotYet
     }
 
 internal fun gzip(body: String): ByteArray {

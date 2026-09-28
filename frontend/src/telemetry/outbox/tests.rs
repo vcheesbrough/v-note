@@ -86,26 +86,130 @@ fn nothing_is_configured_until_the_server_says_so() {
     assert!(!lifecycle.is_off());
 }
 
-/// `204`, `404`, any other status and no response all arrive as `Absent`, and
-/// every one of them means OTLP is never initialised.
-#[test]
-fn absent_configuration_turns_telemetry_off_for_the_page() {
-    let mut lifecycle = Lifecycle::new(0.0);
-    lifecycle.on_config(ConfigFetch::Absent);
-    assert_eq!(lifecycle, Lifecycle::Off(OffReason::NotConfigured));
+const NOW: f64 = 1_000.0;
 
-    // "Off" is final: a later configuration does not revive it.
-    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)));
-    assert_eq!(lifecycle.credentials(), None);
+/// `204` or `404` is the server's "no configuration", and a `401` is no
+/// session: either means OTLP is never initialised.
+#[test]
+fn absent_configuration_or_no_session_turns_telemetry_off_for_the_page() {
+    for (fetch, reason) in [
+        (ConfigFetch::Absent, OffReason::NotConfigured),
+        (ConfigFetch::SignedOut, OffReason::SignedOut),
+    ] {
+        let mut lifecycle = Lifecycle::new(0.0);
+        assert_eq!(lifecycle.on_config(fetch, NOW), ConfigOutcome::Off(reason));
+        assert_eq!(lifecycle, Lifecycle::Off(reason));
+
+        // "Off" is final: a later configuration does not revive it.
+        assert_eq!(
+            lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+            ConfigOutcome::Off(reason)
+        );
+        assert_eq!(lifecycle.credentials(), None);
+    }
+}
+
+/// A server that did not answer the first fetch is asked again: the page keeps
+/// waiting (bounded by `expire`), and a later answer still turns it on.
+#[test]
+fn an_unanswered_first_fetch_is_not_a_no() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Unavailable, NOW),
+        ConfigOutcome::Wait
+    );
+    assert!(lifecycle.is_awaiting());
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+        ConfigOutcome::Configured
+    );
 }
 
 #[test]
 fn configuration_turns_telemetry_on() {
     let mut lifecycle = Lifecycle::new(0.0);
-    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)));
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+        ConfigOutcome::Configured
+    );
     assert_eq!(
         lifecycle.credentials().map(|c| c.access_token.as_str()),
         Some("t")
+    );
+}
+
+/// Once configured, an unanswered refresh keeps the credentials and is asked
+/// again — up to the give-up bound, never forever.
+#[test]
+fn an_unanswered_refresh_keeps_the_credentials_then_gives_up() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
+    for _ in 1..MAX_CONSECUTIVE_FAILURES {
+        assert_eq!(
+            lifecycle.on_config(ConfigFetch::Unavailable, NOW),
+            ConfigOutcome::Wait
+        );
+        assert!(lifecycle.credentials().is_some(), "still configured");
+    }
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Unavailable, NOW),
+        ConfigOutcome::Off(OffReason::GaveUp)
+    );
+}
+
+/// A refresh that is answered resets the count of unanswered ones.
+#[test]
+fn an_answered_refresh_resets_the_failure_count() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
+    for _ in 0..(MAX_CONSECUTIVE_FAILURES * 3) {
+        lifecycle.on_config(ConfigFetch::Unavailable, NOW);
+        assert_eq!(
+            lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW),
+            ConfigOutcome::Refreshed
+        );
+    }
+}
+
+/// The SPA cannot renew its token: the config route hands back the cookie's
+/// own. So a refresh that returns a token already at its expiry ends telemetry
+/// — once, with the true reason — instead of re-asking every tick.
+#[test]
+fn a_refresh_that_cannot_renew_an_expiring_token_ends_it() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 2_000.0)), NOW);
+    let near_expiry = 2_000.0 - EXPIRY_MARGIN_S;
+    assert_eq!(
+        lifecycle.on_config(
+            ConfigFetch::Configured(credentials("t", 2_000.0)),
+            near_expiry
+        ),
+        ConfigOutcome::Off(OffReason::SessionExpired)
+    );
+    assert!(lifecycle.is_off());
+}
+
+/// …and so does the session itself lapsing (`401`), or the server switching
+/// telemetry off since the page loaded: the newest configuration wins.
+#[test]
+fn a_refresh_answered_no_ends_it_with_the_true_reason() {
+    for (fetch, reason) in [
+        (ConfigFetch::SignedOut, OffReason::SessionExpired),
+        (ConfigFetch::Absent, OffReason::NotConfigured),
+    ] {
+        let mut lifecycle = Lifecycle::new(0.0);
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
+        assert_eq!(lifecycle.on_config(fetch, NOW), ConfigOutcome::Off(reason));
+    }
+}
+
+/// A first configuration whose token is already unusable is not "on".
+#[test]
+fn an_expired_first_configuration_is_off() {
+    let mut lifecycle = Lifecycle::new(0.0);
+    assert_eq!(
+        lifecycle.on_config(ConfigFetch::Configured(credentials("t", NOW)), NOW),
+        ConfigOutcome::Off(OffReason::SessionExpired)
     );
 }
 
@@ -123,7 +227,7 @@ fn waiting_for_configuration_times_out() {
 #[test]
 fn configured_telemetry_does_not_expire() {
     let mut lifecycle = Lifecycle::new(0.0);
-    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)));
+    lifecycle.on_config(ConfigFetch::Configured(credentials("t", 1e12)), NOW);
     assert!(!lifecycle.expire(1e12));
     assert!(lifecycle.credentials().is_some());
 }
@@ -151,7 +255,7 @@ fn urls_are_the_bare_endpoint_plus_the_otlp_path() {
 #[test]
 fn the_token_is_read_per_request_and_follows_a_refresh() {
     let mut lifecycle = Lifecycle::new(0.0);
-    lifecycle.on_config(ConfigFetch::Configured(credentials("first", 10_000.0)));
+    lifecycle.on_config(ConfigFetch::Configured(credentials("first", 10_000.0)), NOW);
     let token = |lifecycle: &Lifecycle| {
         lifecycle
             .credentials()
@@ -160,7 +264,13 @@ fn the_token_is_read_per_request_and_follows_a_refresh() {
     };
     assert_eq!(token(&lifecycle).as_deref(), Some("first"));
 
-    lifecycle.on_config(ConfigFetch::Configured(credentials("second", 10_000.0)));
+    assert_eq!(
+        lifecycle.on_config(
+            ConfigFetch::Configured(credentials("second", 10_000.0)),
+            NOW
+        ),
+        ConfigOutcome::Refreshed
+    );
     assert_eq!(token(&lifecycle).as_deref(), Some("second"));
 }
 

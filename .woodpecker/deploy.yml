@@ -267,7 +267,10 @@ steps:
     # Two layers (#439): the environment's compose values, then the client
     # telemetry ingest's own (OIDC_ISSUER_URL, OIDC_AUDIENCE — aliases of the
     # app's oidc leaves — and ALLOWED_SERVICE_NAMES). Its own layer so it is
-    # listed, reviewed and revoked apart from the database password.
+    # listed and reviewed apart from the database password. Both are required:
+    # the deploy fails closed without either (deploy/docker-compose.yml says
+    # why); telemetry is switched off by `client-telemetry/endpoint`, not by
+    # dropping this layer.
     commands: &deploy-commands
       - sovereign-config render /v-note/devops/dev/compose /v-note/devops/dev/otlp-collector-oidc -- ./scripts/deploy-v-note.sh
 

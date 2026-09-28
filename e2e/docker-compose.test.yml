@@ -50,6 +50,27 @@ services:
                 },
                 {
                   "requestParam": "client_id",
+                  "match": "v-note-other-app-test",
+                  "claims": {
+                    "sub": "other-app-user",
+                    "aud": ["some-other-app"],
+                    "scope": "openid profile email telemetry:write",
+                    "preferred_username": "other-app-user"
+                  }
+                },
+                {
+                  "requestParam": "client_id",
+                  "match": "v-note-expired-test",
+                  "claims": {
+                    "sub": "expired-user",
+                    "aud": ["v-note-test"],
+                    "scope": "openid profile email v-note:test:access telemetry:write",
+                    "preferred_username": "expired-user",
+                    "exp": 1000000000
+                  }
+                },
+                {
+                  "requestParam": "client_id",
                   "match": "v-note-no-username-test",
                   "claims": {
                     "sub": "no-username-user",
@@ -329,12 +350,8 @@ services:
       # Distinctive on purpose: `dev` would also be what an ingest that ignored
       # its config produced.
       CLIENT_RESOURCE_ATTRIBUTES: deployment.environment.name=e2e-ingest,telemetry_source=client
-      # Traces through the shared-Alloy stand-in, as deployed.
+      # Every signal through the shared-Alloy stand-in, as deployed.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://monitor-alloy:4317
-      # Logs straight to Loki's OTLP ingest, as deployed until the shared Alloy
-      # forwards logs (see deploy/docker-compose.yml).
-      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://loki:3100/otlp/v1/logs
-      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
       OTEL_SERVICE_NAME: v-note-otlp-collector-oidc
       OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=e2e-ingest,telemetry_source=otlp
       # stdout too: this stack has no Docker log scrape for it, and a failing CI

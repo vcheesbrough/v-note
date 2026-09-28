@@ -64,16 +64,17 @@ class OtlpHttpTransportTest {
     }
 
     // Without a session the config route cannot be asked, and nothing is sent
-    // to find out: absent, not an error.
+    // to find out: not yet, rather than no.
     @Test
-    fun noTokenMeansNoConfiguration() {
-        assertEquals(ConfigFetch.Absent, transport(null, null).fetchConfig())
+    fun noTokenMeansNotYet() {
+        assertEquals(ConfigFetch.NotYet, transport(null, null).fetchConfig())
     }
 
-    // Port 9 refuses at once: a transport failure is "no configuration" too.
+    // Port 9 refuses at once: a transport failure is "not answered yet", asked
+    // again on a later tick — never the server's "no configuration".
     @Test
-    fun anUnreachableServerMeansNoConfiguration() {
-        assertEquals(ConfigFetch.Absent, transport("token", null).fetchConfig())
+    fun anUnreachableServerMeansNotYet() {
+        assertEquals(ConfigFetch.NotYet, transport("token", null).fetchConfig())
     }
 
     @Test

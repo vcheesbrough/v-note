@@ -220,6 +220,8 @@ assert_recorded "release tag reaches compose as both image tag and APP_VERSION" 
   "tag=9.9.9 version=9.9.9"
 assert_recorded "both the compose up and the explicit recreate run" \
   "compose up -d --force-recreate --no-deps v-note"
+assert_recorded "the first up reaps services deleted from the compose files (#439)" \
+  "compose up -d --remove-orphans"
 
 assert_succeeds "'disabled' deploys with scraping off" "V_NOTE_METRICS_ADDR=disabled"
 assert_recorded "'disabled' turns scraping off, keeping a placeholder port" \

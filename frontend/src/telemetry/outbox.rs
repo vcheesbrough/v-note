@@ -145,11 +145,29 @@ impl<T> Outbox<T> {
 pub(crate) enum ConfigFetch {
     /// `200`: where to send, and the credential to send with.
     Configured(Credentials),
-    /// `204` (ingest off here), `404` (a server that predates the route),
-    /// any other status, or no response. All the same thing to a client:
-    /// "no configuration" (`client-export.md`: a failed fetch is absence,
-    /// not an error).
+    /// `204` (ingest off here) or `404` (a server that predates the route):
+    /// the server's answer is "no configuration".
     Absent,
+    /// `401`: there is no session to be configured for.
+    SignedOut,
+    /// No response, a `5xx`, any other status, or a body that did not parse:
+    /// the server has not answered yet. Asked again on a later tick — before
+    /// the first configuration within [`PRE_CONFIG_MAX_MS`], after it within
+    /// [`MAX_CONSECUTIVE_FAILURES`] attempts.
+    Unavailable,
+}
+
+/// What applying a [`ConfigFetch`] did, for the exporter to act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigOutcome {
+    /// The first configuration: telemetry is on.
+    Configured,
+    /// A later fetch replaced the credential: resume.
+    Refreshed,
+    /// Nothing decided yet; ask again on a later tick.
+    Wait,
+    /// Telemetry is off for the page load, for this reason.
+    Off(OffReason),
 }
 
 /// The endpoint and the bearer it is sent with, as the config route returned
@@ -202,8 +220,12 @@ pub(crate) enum Lifecycle {
     /// No answer from the server yet. `since_ms` is when the page started
     /// waiting; past [`PRE_CONFIG_MAX_MS`] the wait is over.
     AwaitingConfig { since_ms: f64 },
-    /// Configured: exporting.
-    Configured(Credentials),
+    /// Configured: exporting. `failed_refreshes` counts consecutive refresh
+    /// fetches the server did not answer.
+    Configured {
+        credentials: Credentials,
+        failed_refreshes: u32,
+    },
     /// Off for the rest of the page load, and why. Final.
     Off(OffReason),
 }
@@ -211,15 +233,18 @@ pub(crate) enum Lifecycle {
 /// Why telemetry is off. Each is said once, locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OffReason {
-    /// The server gave no configuration: ingest is off here, or the fetch failed.
+    /// The server's answer was "no configuration": ingest is off here.
     NotConfigured,
     /// No session to fetch configuration with.
     SignedOut,
     /// Configuration did not arrive within [`PRE_CONFIG_MAX_MS`].
     ConfigTimedOut,
+    /// The session's access token expired. The SPA cannot renew it — its
+    /// session is the cookie login set — so there is nothing to refresh to.
+    SessionExpired,
     /// A refreshed token was refused too: a `401` that will not change.
     Unauthorized,
-    /// [`MAX_CONSECUTIVE_FAILURES`] in a row.
+    /// [`MAX_CONSECUTIVE_FAILURES`] in a row, of exports or of refreshes.
     GaveUp,
 }
 
@@ -229,8 +254,9 @@ impl OffReason {
             Self::NotConfigured => "the server gave no telemetry configuration",
             Self::SignedOut => "there is no signed-in session",
             Self::ConfigTimedOut => "no telemetry configuration arrived in time",
+            Self::SessionExpired => "the session's access token expired",
             Self::Unauthorized => "the ingest refused a refreshed token (401)",
-            Self::GaveUp => "exports kept failing",
+            Self::GaveUp => "the ingest or the server kept failing",
         }
     }
 }
@@ -240,16 +266,58 @@ impl Lifecycle {
         Self::AwaitingConfig { since_ms: now_ms }
     }
 
-    /// Applies a config fetch. A fetch never turns telemetry back *on* once it
-    /// is off — the newest configuration wins, but "off" is final for the page.
-    pub(crate) fn on_config(&mut self, fetch: ConfigFetch) {
-        if matches!(self, Self::Off(_)) {
-            return;
-        }
-        *self = match fetch {
-            ConfigFetch::Configured(credentials) => Self::Configured(credentials),
-            ConfigFetch::Absent => Self::Off(OffReason::NotConfigured),
+    /// Applies a config fetch made at `now_s` (Unix seconds).
+    ///
+    /// The first fetch decides whether telemetry is on at all: only a `200`
+    /// turns it on, "no configuration" or no session turn it off, and a server
+    /// that did not answer is asked again (bounded by [`Lifecycle::expire`]).
+    ///
+    /// A later fetch is a refresh. The newest configuration wins, including
+    /// "off"; a token that is no longer usable ends it, since the SPA has no
+    /// way to renew one; and an unanswered refresh keeps the old credentials
+    /// until it has failed [`MAX_CONSECUTIVE_FAILURES`] times.
+    pub(crate) fn on_config(&mut self, fetch: ConfigFetch, now_s: f64) -> ConfigOutcome {
+        let configured = match self {
+            Self::Off(reason) => return ConfigOutcome::Off(*reason),
+            Self::AwaitingConfig { .. } => false,
+            Self::Configured { .. } => true,
         };
+        let outcome = match fetch {
+            ConfigFetch::Configured(credentials) if credentials.usable_token(now_s).is_some() => {
+                *self = Self::Configured {
+                    credentials,
+                    failed_refreshes: 0,
+                };
+                return if configured {
+                    ConfigOutcome::Refreshed
+                } else {
+                    ConfigOutcome::Configured
+                };
+            }
+            ConfigFetch::Configured(_) => ConfigOutcome::Off(OffReason::SessionExpired),
+            ConfigFetch::Absent => ConfigOutcome::Off(OffReason::NotConfigured),
+            ConfigFetch::SignedOut if configured => ConfigOutcome::Off(OffReason::SessionExpired),
+            ConfigFetch::SignedOut => ConfigOutcome::Off(OffReason::SignedOut),
+            ConfigFetch::Unavailable => {
+                if let Self::Configured {
+                    failed_refreshes, ..
+                } = self
+                {
+                    *failed_refreshes += 1;
+                    if *failed_refreshes >= MAX_CONSECUTIVE_FAILURES {
+                        ConfigOutcome::Off(OffReason::GaveUp)
+                    } else {
+                        ConfigOutcome::Wait
+                    }
+                } else {
+                    ConfigOutcome::Wait
+                }
+            }
+        };
+        if let ConfigOutcome::Off(reason) = outcome {
+            *self = Self::Off(reason);
+        }
+        outcome
     }
 
     /// Called every tick: a wait for configuration that has gone on too long
@@ -274,9 +342,13 @@ impl Lifecycle {
         matches!(self, Self::Off(_))
     }
 
+    pub(crate) fn is_awaiting(&self) -> bool {
+        matches!(self, Self::AwaitingConfig { .. })
+    }
+
     pub(crate) fn credentials(&self) -> Option<&Credentials> {
         match self {
-            Self::Configured(credentials) => Some(credentials),
+            Self::Configured { credentials, .. } => Some(credentials),
             _ => None,
         }
     }
