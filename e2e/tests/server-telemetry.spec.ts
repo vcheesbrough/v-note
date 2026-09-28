@@ -155,6 +155,9 @@ test.describe('the server exports its own logs, trace-correlated', () => {
       `{service_name="v-note", log_source="otlp"} | page_id="${pageId}" |= "page created"`,
     );
     expect(otlp.values[0][1]).toBe('page created');
+    // The server marks its own push; the collector only copies the marker into
+    // the indexed `log_source` the selector above matched on.
+    expect(otlp.stream.telemetry_source).toBe('otlp');
     expect(otlp.stream.deployment_environment).toBe(EXPECTED_ENV);
     expect(otlp.stream.service_version).toBe(version);
     const traceId = normalise(otlp.stream.trace_id);

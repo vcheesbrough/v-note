@@ -208,7 +208,7 @@ if run_alloy validate "$STANDIN" > "$WORK/standin-validate.out" 2>&1; then
 else
   fail "the stand-in does not validate: $(cat "$WORK/standin-validate.out")"
 fi
-sed 's/otelcol\.processor\.transform\.apps_logs\.input/otelcol.processor.transform.no_such_component.input/' \
+sed 's/otelcol\.processor\.transform\.apps\.input/otelcol.processor.transform.no_such_component.input/' \
   "$STANDIN" > "$WORK/standin-broken.alloy"
 if cmp -s "$STANDIN" "$WORK/standin-broken.alloy"; then
   fail "stand-in negative control did not change the file — update its sed pattern"
@@ -231,21 +231,26 @@ for port in 4317 4318; do
   fi
 done
 # Without a logs output the receiver accepts OTLP logs and drops them — which is
-# exactly what the real shared Alloy does today, and what this fixture exists to
-# not do.
-if grep -Eq '^[[:space:]]*logs[[:space:]]*=[[:space:]]*\[otelcol\.processor\.transform\.apps_logs\.input\]' "$STANDIN_CODE"; then
-  pass "the apps receiver routes logs through the marker"
+# what the real shared Alloy did before mini-config #47.
+if grep -Eq '^[[:space:]]*logs[[:space:]]*=[[:space:]]*\[otelcol\.processor\.transform\.apps\.input\]' "$STANDIN_CODE"; then
+  pass "the apps receiver routes logs through the vocabulary translation"
 else
-  fail "the apps receiver does not route logs through otelcol.processor.transform.apps_logs"
+  fail "the apps receiver does not route logs through otelcol.processor.transform.apps"
 fi
-# The server's own push is `otlp` and nothing else: `client` is the client
-# ingest's, `docker`/`file` the platform's scrapes.
-otlp_marker="$(grep -c 'set(resource\.attributes\["log_source"\], "otlp")' "$STANDIN_CODE" || true)"
-other_standin_marker="$(grep 'set(resource\.attributes\["log_source"\]' "$STANDIN_CODE" | grep -v '"otlp")' || true)"
-if [ "$otlp_marker" -eq 1 ] && [ -z "$other_standin_marker" ]; then
-  pass "OTLP logs are marked log_source=otlp, and only that"
+# The shared Alloy (mini-config #47) stamps no marker of its own: the pusher
+# marks its data, and `telemetry_source` fills the indexed `log_source`. A
+# stand-in that stamped `otlp` itself would let e2e pass on a server that sets
+# no marker — the exact fault dev would then show.
+if grep -q 'set(attributes\["log_source"\], attributes\["telemetry_source"\]) where attributes\["log_source"\] == nil' "$STANDIN_CODE"; then
+  pass "telemetry_source fills log_source where absent, as in the shared Alloy"
 else
-  fail "expected exactly one set(resource.attributes[\"log_source\"], \"otlp\") and no other value, found $otlp_marker: $other_standin_marker"
+  fail "the stand-in does not translate telemetry_source into log_source as config.alloy does"
+fi
+stamped="$(grep -E 'set\((resource\.)?attributes\["(log_source|telemetry_source)"\], "(otlp|docker|file)"\)' "$STANDIN_CODE" || true)"
+if [ -z "$stamped" ]; then
+  pass "the collector stamps no server-side marker of its own"
+else
+  fail "the stand-in stamps a marker the pusher should set: $stamped"
 fi
 if grep -q '"log_source" = "docker"' "$STANDIN_CODE"; then
   pass "the Docker scrape marks its lines log_source=docker"

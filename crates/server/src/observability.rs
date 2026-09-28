@@ -822,6 +822,10 @@ pub async fn run_metrics_server(
 /// What `init_tracing` installs when `RUST_LOG` is unset. `opentelemetry` at
 /// `warn` is where the SDK reports a failed export, so a collector that is down
 /// shows up in `docker logs` rather than nowhere.
+/// The estate's path-marker key (observability contract §4): a bare
+/// snake_case name, deliberately outside any semconv namespace.
+pub(crate) const TELEMETRY_SOURCE: &str = "telemetry_source";
+
 pub(crate) const DEFAULT_LOG_FILTER: &str =
     "server=info,tower_http=info,axum=info,opentelemetry=warn";
 
@@ -1161,6 +1165,13 @@ fn insert_trace_fields(line: &mut String, context: &TraceLogContext) {
 /// `deployment.environment`, not semconv's `deployment.environment.name`: the
 /// dashboard filter, the client Alloy fixture and stored queries all use this
 /// name (see the telemetry deviation record in `AGENTS.md`).
+///
+/// `telemetry_source = "otlp"` is the estate's path marker for a server's push
+/// of its own telemetry, in the contract's key. The shared Alloy stamps no
+/// marker itself: it copies `telemetry_source` into the indexed `log_source`
+/// (mini-config #47), so without this the server's logs land in Loki unmarked
+/// and `{log_source="otlp"}` finds nothing. On the shared resource, so spans
+/// carry it too.
 pub(crate) fn telemetry_resource(observability: &ObservabilityConfig) -> Resource {
     Resource::builder()
         .with_service_name(observability.service_name.clone())
@@ -1168,6 +1179,7 @@ pub(crate) fn telemetry_resource(observability: &ObservabilityConfig) -> Resourc
             KeyValue::new("deployment.environment", observability.environment.clone()),
             KeyValue::new("service.version", crate::app_version()),
             KeyValue::new("vnote.protocol", PROTOCOL_VERSION),
+            KeyValue::new(TELEMETRY_SOURCE, "otlp"),
         ])
         .build()
 }

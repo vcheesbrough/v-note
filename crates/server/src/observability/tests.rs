@@ -684,6 +684,9 @@ mod otlp_logs {
         assert_eq!(attribute("service.version"), crate::app_version());
         assert_eq!(attribute("deployment.environment"), "unit-test");
         assert_eq!(attribute("vnote.protocol"), PROTOCOL_VERSION);
+        // The path marker: the shared Alloy copies it into the indexed
+        // `log_source`, and sets none of its own.
+        assert_eq!(attribute("telemetry_source"), "otlp");
     }
 
     #[test]

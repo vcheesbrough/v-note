@@ -148,11 +148,13 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
      #417 added. Closing it means reading the standard variables instead; a
      per-signal log filter has no standard variable, so that one key stays
      whatever happens.
-  3. **The path marker is `log_source`, not the contract's `telemetry_source`.**
-     Values match the contract (`docker`, `file`, `otlp` for the server's own
-     push, `client` for the client ingest since #418). Renaming the key is
-     cross-repo: mini-config's Loki stream-label index and shared Alloy, both
-     v-note Alloy configs, and the e2e specs.
+  3. **The platform selects on `log_source`, not the contract's
+     `telemetry_source`.** The server stamps the contract's key
+     (`telemetry_source = "otlp"`, #417) and the shared Alloy copies it into
+     the indexed `log_source` (mini-config #47); the client sidecar still
+     stamps `log_source = "client"` directly (#418). Values match the contract.
+     Closing it means mini-config's Loki indexing `telemetry_source` and every
+     selector, dashboard and e2e spec moving to it.
   4. **`deployment.environment`, not `deployment.environment.name`**, on every
      signal. The rename reaches the dashboard's `deployment_environment`
      filter, the client Alloy config and stored queries.
