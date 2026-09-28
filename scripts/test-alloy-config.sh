@@ -221,8 +221,8 @@ fi
 echo "==> e2e shared-Alloy stand-in: what the server-telemetry spec relies on"
 STANDIN_CODE="$WORK/standin-code.alloy"
 grep -v '^[[:space:]]*//' "$STANDIN" > "$STANDIN_CODE"
-# The server exports OTLP/gRPC to :4317; #439 adopts the same stand-in for
-# OTLP/HTTP on :4318. Both are the shared Alloy's `apps` receiver ports.
+# The shared Alloy's `apps` receiver listens on both OTLP ports (config.alloy),
+# so the stand-in does too; the server exports OTLP/gRPC to :4317.
 for port in 4317 4318; do
   if grep -q "endpoint = \"0\.0\.0\.0:$port\"" "$STANDIN_CODE"; then
     pass "the apps receiver listens on :$port"

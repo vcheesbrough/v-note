@@ -825,18 +825,17 @@ pub async fn run_metrics_server(
 pub(crate) const DEFAULT_LOG_FILTER: &str =
     "server=info,tower_http=info,axum=info,opentelemetry=warn";
 
-/// Appended to whatever filter the OTLP log layer runs, so that exporting a
-/// batch can never itself produce a record to export: the SDK's own reports and
-/// the gRPC stack under the exporter stay on stdout only. A crate name matches
-/// the crate and its modules, never a longer crate name (`tower`, not
-/// `tower_http`).
+/// The transport under the OTLP exporter, besides the `opentelemetry*` crates
+/// themselves: their events stay on stdout only, so that exporting a batch can
+/// never itself produce a record to export. A crate name matches the crate and
+/// its modules, never a longer crate name (`tower`, not `tower_http`).
 const EXPORTER_INTERNAL_CRATES: [&str; 5] = ["tonic", "h2", "hyper", "hyper_util", "tower"];
 
 /// Whether `target` belongs to the OpenTelemetry SDK or the transport under the
-/// OTLP exporter. Applied to the OTLP log layer as a filter of its own, ANDed
-/// with `otlp-log-filter`, so no directive an operator writes — however
-/// specific, e.g. `opentelemetry_sdk=debug` — can let a failing export produce a
-/// record to export.
+/// OTLP exporter. Checked by [`WithoutExporterInternals`], independently of
+/// `otlp-log-filter`, so no directive an operator writes — however specific,
+/// e.g. `opentelemetry_sdk=debug` — can let a failing export produce a record
+/// to export.
 pub(crate) fn is_exporter_internal(target: &str) -> bool {
     let crate_name = target.split("::").next().unwrap_or(target);
     crate_name.starts_with("opentelemetry") || EXPORTER_INTERNAL_CRATES.contains(&crate_name)
@@ -884,13 +883,13 @@ impl Drop for TelemetryGuard {
 /// the OTLP log layer takes `observability.otlp-log-filter` when it is set, so
 /// Loki can be quieter or louder than `docker logs` without touching either.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LogFilters {
+pub struct LogFilters {
     pub(crate) stdout: String,
     pub(crate) otlp_logs: String,
 }
 
 impl LogFilters {
-    pub(crate) fn new(rust_log: Option<&str>, otlp_log_filter: Option<&str>) -> Self {
+    pub fn new(rust_log: Option<&str>, otlp_log_filter: Option<&str>) -> Self {
         let stdout = rust_log
             .map(str::trim)
             .filter(|value| !value.is_empty() && EnvFilter::try_new(value).is_ok())
@@ -946,7 +945,10 @@ pub fn init_tracing(observability: &ObservabilityConfig) -> TelemetryGuard {
 ///
 /// Each layer carries its own filter rather than one global one, because the
 /// log bridge is filtered independently (`otlp-log-filter`).
-pub(crate) fn telemetry_subscriber<W>(
+/// Public so `tests/telemetry_global.rs` can install exactly this stack as the
+/// process-wide subscriber, the way `init_tracing` does. Not an API.
+#[doc(hidden)]
+pub fn telemetry_subscriber<W>(
     filters: &LogFilters,
     make_writer: W,
     tracer_provider: Option<&SdkTracerProvider>,
@@ -984,11 +986,21 @@ where
 }
 
 /// The OTLP log bridge, minus every event from the SDK or the transport under
-/// the exporter ([`is_exporter_internal`]). A layer wrapper rather than a filter
-/// combinator: the exclusion must hold whatever `otlp-log-filter` says, and an
-/// `And` of per-layer filters silently dropped unrelated events on every layer
-/// in a deployed build (PR #59, pipeline 417) — this keeps the per-layer filter
-/// a plain `EnvFilter`, the shape that is known to work.
+/// the exporter ([`is_exporter_internal`]). A layer wrapper, so the exclusion
+/// holds whatever `otlp-log-filter` says and the per-layer filter stays a plain
+/// `EnvFilter`.
+///
+/// Why not a filter combinator: with `EnvFilter.and(filter_fn(..))` on this
+/// layer, pipeline 417's e2e lost `page created` and `stroke batch committed`
+/// from stdout and OTLP alike, reproducibly (CI and a local run of the same
+/// build), and this wrapper restored them (pipeline 419). The mechanism is not
+/// understood: `tests/telemetry_global.rs`, which installs this stack the
+/// production way, passes with either shape. It stays as the guard for this
+/// class of fault, and the e2e remains the proof.
+///
+/// Every `Layer` callback is forwarded; only `on_event` is gated, so a bridge
+/// feature that needs span callbacks (e.g. `experimental_span_attributes`)
+/// keeps working.
 pub(crate) struct WithoutExporterInternals<L>(L);
 
 impl<S, L> tracing_subscriber::Layer<S> for WithoutExporterInternals<L>
@@ -996,10 +1008,89 @@ where
     S: tracing::Subscriber,
     L: tracing_subscriber::Layer<S>,
 {
+    fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
+        self.0.on_register_dispatch(subscriber);
+    }
+
+    fn on_layer(&mut self, subscriber: &mut S) {
+        self.0.on_layer(subscriber);
+    }
+
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        self.0.register_callsite(metadata)
+    }
+
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        self.0.enabled(metadata, ctx)
+    }
+
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_new_span(attrs, id, ctx);
+    }
+
+    fn on_record(
+        &self,
+        span: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_record(span, values, ctx);
+    }
+
+    fn on_follows_from(
+        &self,
+        span: &tracing::span::Id,
+        follows: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_follows_from(span, follows, ctx);
+    }
+
+    fn event_enabled(
+        &self,
+        event: &tracing::Event<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        self.0.event_enabled(event, ctx)
+    }
+
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         if !is_exporter_internal(event.metadata().target()) {
             self.0.on_event(event, ctx);
         }
+    }
+
+    fn on_enter(&self, id: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.on_enter(id, ctx);
+    }
+
+    fn on_exit(&self, id: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.on_exit(id, ctx);
+    }
+
+    fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.on_close(id, ctx);
+    }
+
+    fn on_id_change(
+        &self,
+        old: &tracing::span::Id,
+        new: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_id_change(old, new, ctx);
     }
 }
 
