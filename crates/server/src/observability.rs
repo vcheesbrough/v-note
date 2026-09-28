@@ -25,7 +25,6 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer as _;
-use tracing_subscriber::filter::FilterExt as _;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -973,19 +972,35 @@ where
             .with_filter(filters.stdout_filter())
     });
     let log_layer = logger_provider.map(|provider| {
-        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(provider)
-            .with_filter(
-                filters
-                    .otlp_log_filter()
-                    .and(tracing_subscriber::filter::filter_fn(|metadata| {
-                        !is_exporter_internal(metadata.target())
-                    })),
-            )
+        WithoutExporterInternals(
+            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(provider),
+        )
+        .with_filter(filters.otlp_log_filter())
     });
     tracing_subscriber::registry()
         .with(fmt_layer)
         .with(span_layer)
         .with(log_layer)
+}
+
+/// The OTLP log bridge, minus every event from the SDK or the transport under
+/// the exporter ([`is_exporter_internal`]). A layer wrapper rather than a filter
+/// combinator: the exclusion must hold whatever `otlp-log-filter` says, and an
+/// `And` of per-layer filters silently dropped unrelated events on every layer
+/// in a deployed build (PR #59, pipeline 417) — this keeps the per-layer filter
+/// a plain `EnvFilter`, the shape that is known to work.
+pub(crate) struct WithoutExporterInternals<L>(L);
+
+impl<S, L> tracing_subscriber::Layer<S> for WithoutExporterInternals<L>
+where
+    S: tracing::Subscriber,
+    L: tracing_subscriber::Layer<S>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if !is_exporter_internal(event.metadata().target()) {
+            self.0.on_event(event, ctx);
+        }
+    }
 }
 
 /// Wraps the JSON event format and appends the active OpenTelemetry

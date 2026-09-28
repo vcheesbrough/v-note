@@ -136,6 +136,11 @@ function uniqueTitle(prefix: string): string {
 }
 
 test.describe('the server exports its own logs, trace-correlated', () => {
+  // Three backends to poll in turn (Loki over OTLP, Tempo, Loki over the Docker
+  // scrape), each with its own ingest delay: a cold Tempo alone has taken ~20s
+  // locally, which the 30s default leaves too little room for.
+  test.describe.configure({ timeout: 120_000 });
+
   test('a page mutation reaches Loki over OTLP and pivots to its trace', async ({ request }) => {
     const meta = await request.get('/api/meta');
     expect(meta.ok()).toBeTruthy();
