@@ -192,7 +192,7 @@ pub async fn get_page(
         WHERE p.id = $1 AND p.owner_id = $2
         "#,
     )
-    .bind(page_id)
+    .bind(&page_id)
     .bind(claims.sub)
     .fetch_optional(metered(&state.db))
     .instrument(db_query_span!("SELECT", "get_page"))
@@ -209,7 +209,10 @@ pub async fn get_page(
         None => {
             // Not found and not-yours are one answer on purpose (a 403 either
             // way), so the line does not distinguish them either.
-            tracing::warn!("page read rejected: not found or not owned by the caller");
+            tracing::warn!(
+                page_id = %page_id,
+                "page read rejected: not found or not owned by the caller"
+            );
             Err(ApiError::PAGE_NOT_FOUND)
         }
     }
@@ -233,7 +236,11 @@ pub async fn get_thumbnail(
             .await
             .map_err(server_error)?;
     if !owned {
-        tracing::warn!("thumbnail read rejected: page not found or not owned by the caller");
+        tracing::warn!(
+            page_id = %page_id,
+            source_seq,
+            "thumbnail read rejected: page not found or not owned by the caller"
+        );
         return Err(ApiError::PAGE_NOT_FOUND);
     }
     let png = sqlx::query_scalar::<_, Vec<u8>>(
@@ -263,7 +270,11 @@ pub async fn get_thumbnail(
         None => {
             // A superseded or still-generating revision: the client asked for an
             // artifact that retention (or a newer commit) has moved past.
-            tracing::warn!("thumbnail read rejected: revision not available");
+            tracing::warn!(
+                page_id = %page_id,
+                source_seq,
+                "thumbnail read rejected: revision not available"
+            );
             Err(ApiError::THUMBNAIL_GONE)
         }
     }

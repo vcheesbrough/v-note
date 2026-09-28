@@ -25,6 +25,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer as _;
+use tracing_subscriber::filter::FilterExt as _;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -827,8 +828,20 @@ pub(crate) const DEFAULT_LOG_FILTER: &str =
 
 /// Appended to whatever filter the OTLP log layer runs, so that exporting a
 /// batch can never itself produce a record to export: the SDK's own reports and
-/// the gRPC stack under the exporter stay on stdout only.
-const OTLP_LOG_SELF_EXCLUSION: &str = "opentelemetry=off,tonic=off,h2=off,hyper=off";
+/// the gRPC stack under the exporter stay on stdout only. A crate name matches
+/// the crate and its modules, never a longer crate name (`tower`, not
+/// `tower_http`).
+const EXPORTER_INTERNAL_CRATES: [&str; 5] = ["tonic", "h2", "hyper", "hyper_util", "tower"];
+
+/// Whether `target` belongs to the OpenTelemetry SDK or the transport under the
+/// OTLP exporter. Applied to the OTLP log layer as a filter of its own, ANDed
+/// with `otlp-log-filter`, so no directive an operator writes — however
+/// specific, e.g. `opentelemetry_sdk=debug` — can let a failing export produce a
+/// record to export.
+pub(crate) fn is_exporter_internal(target: &str) -> bool {
+    let crate_name = target.split("::").next().unwrap_or(target);
+    crate_name.starts_with("opentelemetry") || EXPORTER_INTERNAL_CRATES.contains(&crate_name)
+}
 
 /// Holds the OTLP providers for the life of the process. Dropping it shuts both
 /// down, which flushes whatever spans and log records are still buffered.
@@ -906,9 +919,7 @@ impl LogFilters {
     fn otlp_log_filter(&self) -> EnvFilter {
         // Config validation has already rejected a malformed directive; the
         // fallback only covers a filter built outside `load_group`.
-        EnvFilter::try_new(format!("{},{OTLP_LOG_SELF_EXCLUSION}", self.otlp_logs)).unwrap_or_else(
-            |_| EnvFilter::new(format!("{},{OTLP_LOG_SELF_EXCLUSION}", self.stdout)),
-        )
+        EnvFilter::try_new(&self.otlp_logs).unwrap_or_else(|_| self.stdout_filter())
     }
 }
 
@@ -963,7 +974,13 @@ where
     });
     let log_layer = logger_provider.map(|provider| {
         opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(provider)
-            .with_filter(filters.otlp_log_filter())
+            .with_filter(
+                filters
+                    .otlp_log_filter()
+                    .and(tracing_subscriber::filter::filter_fn(|metadata| {
+                        !is_exporter_internal(metadata.target())
+                    })),
+            )
     });
     tracing_subscriber::registry()
         .with(fmt_layer)

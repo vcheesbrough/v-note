@@ -135,7 +135,7 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
             Ok(()) => {
                 // Size and duration are this span's `png_bytes` and the
                 // thumbnail histograms; the line is the outcome.
-                tracing::info!("thumbnail rendered");
+                tracing::info!(page_id = %page_id, source_seq, "thumbnail rendered");
                 crate::observability::metrics()
                     .record_page_mutation("generate_thumbnail", "success");
                 crate::observability::metrics()

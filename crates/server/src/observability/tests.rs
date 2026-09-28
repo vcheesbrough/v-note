@@ -395,14 +395,19 @@ mod otlp_logs {
         stdout: Stdout,
         filters: LogFilters,
         logs: InMemoryLogExporter,
+        spans: InMemorySpanExporter,
     }
 
     impl Harness {
         fn new(filters: LogFilters) -> Self {
             let logs = InMemoryLogExporter::default();
+            let spans = InMemorySpanExporter::default();
             let guard = build_providers(
                 &observability(Some(ENDPOINT)),
-                |_: &Url| Ok(InMemorySpanExporter::default()),
+                {
+                    let spans = spans.clone();
+                    |_: &Url| Ok(spans)
+                },
                 {
                     let logs = logs.clone();
                     |_: &Url| Ok(logs)
@@ -413,7 +418,20 @@ mod otlp_logs {
                 stdout: Stdout::default(),
                 filters,
                 logs,
+                spans,
             }
+        }
+
+        fn exported_spans(&self) -> Vec<opentelemetry_sdk::trace::SpanData> {
+            self.guard
+                .tracer_provider
+                .as_ref()
+                .expect("tracer provider")
+                .force_flush()
+                .expect("spans should flush");
+            self.spans
+                .get_finished_spans()
+                .expect("spans should export")
         }
 
         fn run<T>(&self, check: impl FnOnce() -> T) -> T {
@@ -424,7 +442,13 @@ mod otlp_logs {
                 self.guard.tracer_provider.as_ref(),
                 self.guard.logger_provider.as_ref(),
             );
-            tracing::subscriber::with_default(subscriber, check)
+            tracing::subscriber::with_default(subscriber, || {
+                // Production callsites (the request-completed line) may have
+                // been first reached by a parallel test with no subscriber, and
+                // cached as uninteresting; recompute with this one installed.
+                tracing::callsite::rebuild_interest_cache();
+                check()
+            })
         }
 
         fn exported_logs(&self) -> Vec<LogDataWithResource> {
@@ -680,6 +704,60 @@ mod otlp_logs {
         assert_eq!(context.span_id.to_string(), span_id);
     }
 
+    /// The real middleware, not a synthetic event: its request-completed line
+    /// used to write `trace_id` / `span_id` by hand, and now takes them from
+    /// the active context like every other line. Both paths must still name
+    /// the exported `http.request` span.
+    #[test]
+    fn the_request_completed_line_names_its_http_request_span_on_both_paths() {
+        use tower::ServiceExt as _;
+
+        let harness = Harness::new(default_filters());
+        harness.run(|| {
+            let app = axum::Router::new()
+                .route("/health", axum::routing::get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn(
+                    super::super::request_observability_middleware,
+                ));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime should build");
+            let response = runtime
+                .block_on(
+                    app.oneshot(
+                        axum::http::Request::builder()
+                            .uri("/health")
+                            .body(axum::body::Body::empty())
+                            .expect("request should build"),
+                    ),
+                )
+                .expect("request should succeed");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        });
+
+        let spans = harness.exported_spans();
+        let request = spans
+            .iter()
+            .find(|span| span.name == "http.request")
+            .expect("an exported http.request span");
+        let trace_id = request.span_context.trace_id().to_string();
+        let span_id = request.span_context.span_id().to_string();
+
+        let log = harness.exported_log("http request completed");
+        let context = log
+            .record
+            .trace_context()
+            .expect("the OTLP record is correlated");
+        assert_eq!(context.trace_id.to_string(), trace_id);
+        assert_eq!(context.span_id.to_string(), span_id);
+
+        let line = harness.stdout.line("http request completed");
+        assert_eq!(line["trace_id"], trace_id.as_str());
+        assert_eq!(line["span_id"], span_id.as_str());
+        assert_eq!(line["route"], "/health");
+    }
+
     #[test]
     fn an_exported_log_outside_any_span_carries_no_trace_context() {
         let harness = Harness::new(default_filters());
@@ -759,17 +837,56 @@ mod otlp_logs {
     }
 
     /// Exporting a batch must never produce a record to export: the SDK's own
-    /// reports stay on stdout even when the OTLP filter would admit everything.
+    /// reports and the transport's stay on stdout — even when the OTLP filter
+    /// would admit everything, and even when an operator names them more
+    /// specifically than any built-in directive could.
     #[test]
-    fn the_sdks_own_events_never_reach_the_otlp_layer() {
-        let harness = Harness::new(LogFilters::new(Some("trace"), Some("trace")));
-        harness.run(|| {
-            tracing::warn!(target: "opentelemetry_sdk", "export failed");
-            tracing::warn!(target: "server::probe", "product line");
-        });
-        let exported = harness.exported_bodies();
-        assert!(exported.contains(&text("product line")));
-        assert!(!exported.contains(&text("export failed")));
-        harness.stdout.line("export failed");
+    fn the_exporters_own_events_never_reach_the_otlp_layer() {
+        for otlp_filter in [
+            "trace",
+            "server=info,opentelemetry_sdk=debug,opentelemetry_otlp=trace,tonic=trace,tower=trace",
+        ] {
+            let harness = Harness::new(LogFilters::new(Some("trace"), Some(otlp_filter)));
+            harness.run(|| {
+                tracing::warn!(target: "opentelemetry_sdk", "sdk: export failed");
+                tracing::warn!(target: "opentelemetry_otlp::exporter", "otlp: export failed");
+                tracing::warn!(target: "tonic::transport", "tonic: connect failed");
+                tracing::warn!(target: "tower::buffer", "tower: overloaded");
+                tracing::warn!(target: "server::probe", "product line");
+            });
+            let exported = harness.exported_bodies();
+            assert!(exported.contains(&text("product line")), "{otlp_filter}");
+            for internal in [
+                "sdk: export failed",
+                "otlp: export failed",
+                "tonic: connect failed",
+                "tower: overloaded",
+            ] {
+                assert!(
+                    !exported.contains(&text(internal)),
+                    "{otlp_filter}: {internal}"
+                );
+                harness.stdout.line(internal);
+            }
+        }
+    }
+
+    #[test]
+    fn exporter_internal_targets_are_matched_by_crate_not_prefix() {
+        for target in [
+            "opentelemetry",
+            "opentelemetry_sdk::logs",
+            "opentelemetry-otlp",
+            "tonic::transport",
+            "h2::proto",
+            "hyper",
+            "hyper_util::client",
+            "tower::buffer",
+        ] {
+            assert!(super::super::is_exporter_internal(target), "{target}");
+        }
+        for target in ["tower_http::trace", "server::observability", "h2o", "axum"] {
+            assert!(!super::super::is_exporter_internal(target), "{target}");
+        }
     }
 }

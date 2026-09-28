@@ -353,7 +353,10 @@ pub async fn page_socket(
     match store.page_belongs_to_owner(&page_id, &owner_id).await {
         Ok(true) => {}
         Ok(false) => {
-            tracing::warn!("page socket rejected: page not found or not owned by the caller");
+            tracing::warn!(
+                page_id = %page_id,
+                "page socket rejected: page not found or not owned by the caller"
+            );
             return (StatusCode::FORBIDDEN, "page not found").into_response();
         }
         Err(error) => {
@@ -389,13 +392,14 @@ async fn handle_page_socket(
     crate::observability::metrics().record_realtime_event("page", "connected");
     let session_id = format!("session_{}", random_hex(16));
     tracing::Span::current().record("session_id", session_id.as_str());
-    // `page_id` and `session_id` are on the enclosing connection span.
-    tracing::info!("page socket connected");
+    // Repeated from the connection span: the OTLP log bridge carries an
+    // event's own fields only.
+    tracing::info!(page_id = %page_id, session_id = %session_id, "page socket connected");
     let mut receiver = state.realtime.subscribe_page(&page_id);
     let (mut sender, mut inbound) = socket.split();
 
     if let Err(reason) = send_welcome(&state, &store, &page_id, &session_id, &mut sender).await {
-        tracing::info!(reason, "page socket closed");
+        tracing::info!(page_id = %page_id, session_id = %session_id, reason, "page socket closed");
         return;
     }
 
@@ -426,7 +430,11 @@ async fn handle_page_socket(
                         // The counter says how often; this names the session that
                         // missed fan-out and why. Not the skipped count: the
                         // connection stays open and will gap-fill on resubscribe.
-                        tracing::warn!("page subscriber lagged; fan-out messages were skipped");
+                        tracing::warn!(
+                            page_id = %page_id,
+                            session_id = %session_id,
+                            "page subscriber lagged; fan-out messages were skipped"
+                        );
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break "page channel closed",
@@ -464,7 +472,7 @@ async fn handle_page_socket(
             }
         }
     };
-    tracing::info!(reason, "page socket closed");
+    tracing::info!(page_id = %page_id, session_id = %session_id, reason, "page socket closed");
 
     // Release the lease on disconnect so a sibling session can take over.
     if state.realtime.release_lease(&page_id, &session_id) {
@@ -553,6 +561,8 @@ async fn handle_page_client_message(
             // The category and position only: serde's message can quote the
             // offending value, and the payload may be ink.
             tracing::warn!(
+                page_id,
+                session_id,
                 category = ?error.classify(),
                 column = error.column(),
                 "page-channel message rejected: could not parse"

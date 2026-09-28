@@ -257,16 +257,18 @@ pub async fn validate_jwt(
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
     let data = decode::<Claims>(token, &key, &validation).map_err(|error| {
-        if matches!(
-            error.kind(),
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature
-        ) {
-            // A session reaching its end, not an attack: the lifecycle event
-            // the rejection below would otherwise hide among bad tokens.
-            tracing::info!("access token expired");
-        } else {
-            tracing::debug!(error = %error, "JWT validation failed");
-        }
+        // `debug`: this runs per request, so a tab left open on an expired
+        // session would repeat it on every poll. `expired` tells a session
+        // reaching its end apart from a bad token when the level is raised;
+        // the rejection itself is logged (and counted) by the caller.
+        tracing::debug!(
+            error = %error,
+            expired = matches!(
+                error.kind(),
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature
+            ),
+            "JWT validation failed"
+        );
         TokenValidationError::Invalid("JWT validation failed")
     })?;
 
