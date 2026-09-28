@@ -230,6 +230,126 @@ services:
       - observability.deployment.environment=${APP_ENV:-dev}
       - observability.release=${APP_VERSION:-unknown}
 
+  # Client telemetry ingest (#439): the estate's reference image,
+  # otlp-collector-oidc, one instance per environment. It authenticates every
+  # export as a user of this environment's OIDC provider (bearer only, scope
+  # `telemetry:write`, `preferred_username` required), stamps `user.*` and the
+  # environment over whatever the client claimed, bounds `service.name` and
+  # timestamps, caps the decompressed body, and forwards plain OTLP upstream.
+  # Clients learn where it is from `GET /api/telemetry/config`, which hands out
+  # `client-telemetry/endpoint` (this environment's own origin): Traefik routes
+  # OTLP's own paths on the app's host here, so the SPA's export is same-origin.
+  #
+  # Unproven upstream — v-note is its first real deployment — so it is pinned by
+  # tag and digest, never `:edge`, and every behaviour v-note relies on is
+  # asserted against this exact build in e2e/tests/client-telemetry.spec.ts. A
+  # gap is fixed in vcheesbrough/otlp-collector-oidc and re-pinned, never worked
+  # around here. Bump the pin in e2e/docker-compose.test.yml with this one.
+  #
+  # 🚫 Not in deploy-v-note.sh's health gate, and nothing `depends_on` it:
+  # telemetry must never fail a deploy of the product. Its own HEALTHCHECK says
+  # the process works, nothing about the provider or the upstream.
+  otlp-collector-oidc:
+    image: ghcr.io/vcheesbrough/otlp-collector-oidc:0.13.0@sha256:2db8a527da487c9091b74ee3a537785153b26f914e9e6f3ca2f1684793f02666
+    # Per environment, like the app's: `proxy-backend` is shared by every
+    # environment on the host, and a bare service name would resolve to all of
+    # them once a second one exists (#388).
+    container_name: ${V_NOTE_CONTAINER_NAME}-otlp-collector-oidc
+    restart: unless-stopped
+    environment:
+      # Rendered from /v-note/devops/<env>/otlp-collector-oidc by the deploy
+      # step (sovereign-config `render`), where the first two are aliases of the
+      # app's own /v-note/<env>/server/oidc/{issuer-url,client-id} — one stored
+      # value each, so the ingest and the app cannot disagree about the
+      # provider. The audience check is what keeps other applications' tokens
+      # out; the issuer keeps its trailing slash.
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?OIDC_ISSUER_URL is required (/v-note/devops/<env>/otlp-collector-oidc)}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?OIDC_AUDIENCE is required (/v-note/devops/<env>/otlp-collector-oidc)}
+      # A regular expression over the whole `service.name`: a resource that does
+      # not match is dropped and counted. `service.name` becomes a stream label
+      # downstream, so this is the cardinality guard on client-stated names.
+      ALLOWED_SERVICE_NAMES: ${ALLOWED_SERVICE_NAMES:?ALLOWED_SERVICE_NAMES is required (/v-note/devops/<env>/otlp-collector-oidc)}
+      # Stamped onto every client resource over what the client sent: the
+      # environment (by the contract's name) and the estate's path marker.
+      CLIENT_RESOURCE_ATTRIBUTES: deployment.environment.name=${APP_ENV:-dev},telemetry_source=client
+      # Upstream: the shared Alloy, over gRPC — which forwards traces to Tempo.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://monitor-alloy:4317
+      # …but NOT logs, yet: monitor-alloy's `apps` receiver outputs traces only
+      # (mini-config monitoring-stack/config.alloy), so logs sent there would be
+      # dropped. Until the shared Alloy forwards logs (mini-config card, linked
+      # from #439), logs go straight to Loki's OTLP ingest by the image's own
+      # per-signal override. Delete these two lines when it does.
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://monitor-loki:3100/otlp/v1/logs
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
+      # The ingest's OWN identity, on its own logs and `:8888` metrics. Named per
+      # product, because two products' ingests are otherwise indistinguishable
+      # in the shared Prometheus and Loki.
+      OTEL_SERVICE_NAME: v-note-otlp-collector-oidc
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${APP_ENV:-dev},telemetry_source=otlp
+      # Its own logs over OTLP only: Alloy also ships every container's stdout
+      # to Loki, and `both` would store each line twice.
+      LOG_OUTPUT: otlp
+      # MAX_PAST_AGE stays at its 48h default: Tempo and Loki here keep 7 days,
+      # and Loki accepts samples up to its reject_old_samples_max_age (7d), so
+      # 48h is the tighter bound — enough for an Android offline buffer, which
+      # is retried within the process and never persisted across launches.
+    networks:
+      - proxy-backend
+    # The hardening the image supports (docs/proxies/traefik.md upstream): its
+    # own non-root user, the one that can read the embedded TLS key.
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      # The rendered collector configuration is written here.
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Above MEMORY_LIMIT_MIB (64) plus its spike (16), so the image's memory
+    # limiter refuses data before the OOM killer acts.
+    mem_limit: 128m
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy-backend
+      # OTLP's own paths on the app's host, unprefixed: `/v1/…` for OTLP/HTTP
+      # and the gRPC method paths. The app lives under `/api`, `/auth` and the
+      # SPA, so `/v1/` is free; the explicit priority keeps the app's bare
+      # `Host(…)` router from ever answering these with the SPA's index.html.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-otlp.entrypoints=websecure
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-otlp.rule=Host(`${V_NOTE_HOST}`) && (PathPrefix(`/v1/`) || PathPrefix(`/opentelemetry.proto.collector`))
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-otlp.priority=100
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-otlp.tls=true
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-otlp.tls.certresolver=myresolver
+      # The same network gate as the app (the same users send to it), plus a
+      # rate limit of its own by source IP: the image has none. Its own rather
+      # than the shared `rate-limit@docker` so that telemetry and the app never
+      # spend one budget. A healthy SPA sends two requests per 5 s tick, Android
+      # two per 30 s; this leaves a household behind one NAT ample headroom and a
+      # runaway client throttled.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-otlp.middlewares=lan-vpn-only@docker,${V_NOTE_CONTAINER_NAME}-otlp-ratelimit@docker
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-otlp-ratelimit.ratelimit.average=10
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-otlp-ratelimit.ratelimit.burst=40
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-otlp-ratelimit.ratelimit.period=1s
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-otlp-ratelimit.ratelimit.sourcecriterion.ipstrategy.depth=0
+      # The one TLS port, re-encrypted to the image's embedded self-signed
+      # certificate — accepted by Traefik's global `serversTransport`
+      # (`insecureSkipVerify`), exactly as for the app's own container. HTTP/2
+      # to the backend is negotiated by ALPN, which gRPC needs.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}-otlp.service=${V_NOTE_CONTAINER_NAME}-otlp
+      - traefik.http.services.${V_NOTE_CONTAINER_NAME}-otlp.loadbalancer.server.port=4318
+      - traefik.http.services.${V_NOTE_CONTAINER_NAME}-otlp.loadbalancer.server.scheme=https
+      # Its own metrics (accepted, refused by reason, dropped) on `:8888`,
+      # scraped by the shared Alloy like the app's and charted on the
+      # dashboard's Client telemetry row. The ingest-volume alert reads them.
+      - observability.metrics.scrape=true
+      - observability.metrics.port=8888
+      - observability.metrics.path=/metrics
+      - observability.metrics.scheme=http
+      - observability.service.name=v-note-otlp-collector-oidc
+      - observability.deployment.environment=${APP_ENV:-dev}
+      - observability.release=0.13.0
+
   # Client telemetry sidecar (#354): receives the SPA's (and, from #406, the
   # Android app's) OTLP traces and logs, rewrites what they claim about their
   # origin, and exports to Tempo and Loki. See deploy/alloy/client-telemetry.alloy

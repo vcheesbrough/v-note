@@ -51,10 +51,10 @@ services:
       # which correctly leaves trace export disabled.
       VNOTE__OBSERVABILITY__OTLP-ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       VNOTE__ANDROID__ASSETLINKS-JSON: ${ASSETLINKS_JSON:-}
-      # Client telemetry (#354): off unless asked for, like the deployed default.
-      # `CLIENT_TELEMETRY_ENABLED=true just run-compose` turns the ingress on;
-      # the sidecar below is always running, so there is nothing else to start.
-      # See docs/DEV.md → Client telemetry for where the exports then go.
+      # Client telemetry (#439): unset, clients are told nothing and send
+      # nothing. See the otlp-collector-oidc service below.
+      VNOTE__CLIENT-TELEMETRY__ENDPOINT: ${CLIENT_TELEMETRY_ENDPOINT:-}
+      # The old ingress (#354), removed with the sidecar at the end of #439.
       VNOTE__CLIENT-TELEMETRY__ENABLED: ${CLIENT_TELEMETRY_ENABLED:-false}
       VNOTE__CLIENT-TELEMETRY__SPA-ENDPOINT: http://${V_NOTE_CONTAINER_NAME:-v-note-local}-alloy:4318
       VNOTE__CLIENT-TELEMETRY__ANDROID-ENDPOINT: http://${V_NOTE_CONTAINER_NAME:-v-note-local}-alloy:4319
@@ -70,6 +70,29 @@ services:
   # to see the output.
   v-note-alloy:
     container_name: ${V_NOTE_CONTAINER_NAME:-v-note-local}-alloy
+    networks: !override
+      - v-note-net
+    labels: !override
+      - traefik.enable=false
+
+  # The client telemetry ingest (#439), reached directly on :4318 — there is no
+  # Traefik here to route `/v1/` on the app's host to it, so the SPA's export is
+  # cross-origin locally (CORS below) where it is same-origin when deployed.
+  # Off for clients unless asked for: `CLIENT_TELEMETRY_ENDPOINT=https://localhost:4318
+  # just run-compose` makes the app hand that endpoint out (accept the ingest's
+  # self-signed certificate in the browser once by opening it). With no
+  # monitoring stack locally its exports fail and are dropped, which is the
+  # right behaviour for "no backend here"; point OTEL_EXPORTER_OTLP_ENDPOINT at
+  # your own collector to see the output.
+  otlp-collector-oidc:
+    container_name: ${V_NOTE_CONTAINER_NAME:-v-note-local}-otlp-collector-oidc
+    ports:
+      - "${OTLP_INGEST_PORT:-4318}:4318"
+    environment:
+      OIDC_AUDIENCE: ${OIDC_CLIENT_ID:?Set OIDC_CLIENT_ID (deploy/compose.env)}
+      OIDC_DISCOVERY_RETRY: 5s
+      CORS_ALLOWED_ORIGINS: https://localhost:${V_NOTE_PORT:-8443}
+      LOG_OUTPUT: stdout
     networks: !override
       - v-note-net
     labels: !override

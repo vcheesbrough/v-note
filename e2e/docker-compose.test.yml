@@ -32,9 +32,29 @@ services:
                   "claims": {
                     "sub": "v-note-test-service-account",
                     "aud": ["v-note-test"],
-                    "scope": "openid profile email v-note:test:access",
+                    "scope": "openid profile email v-note:test:access telemetry:write",
                     "preferred_username": "test-user",
-                    "email": "test@example.com"
+                    "email": "test@example.com",
+                    "name": "Test User"
+                  }
+                },
+                {
+                  "requestParam": "client_id",
+                  "match": "v-note-no-telemetry-test",
+                  "claims": {
+                    "sub": "no-telemetry-user",
+                    "aud": ["v-note-test"],
+                    "scope": "openid profile email v-note:test:access",
+                    "preferred_username": "no-telemetry-user"
+                  }
+                },
+                {
+                  "requestParam": "client_id",
+                  "match": "v-note-no-username-test",
+                  "claims": {
+                    "sub": "no-username-user",
+                    "aud": ["v-note-test"],
+                    "scope": "openid email v-note:test:access telemetry:write"
                   }
                 },
                 {
@@ -102,13 +122,18 @@ services:
       # for #342 is that a real browser negotiates and then works. The off path
       # is the pre-#342 wire and is covered by the config unit tests.
       VNOTE__REALTIME__COMPRESSION: "true"
-      # #354: client telemetry ingest on, pointed at the sidecar below. Ships
-      # **off** (the kill switch defaults to false); e2e runs it on for the same
-      # reason compression is on above — the acceptance is that the real path
-      # works. The off path is covered by the ingress's Rust tests.
-      VNOTE__CLIENT-TELEMETRY__ENABLED: "true"
-      VNOTE__CLIENT-TELEMETRY__SPA-ENDPOINT: http://alloy:4318
-      VNOTE__CLIENT-TELEMETRY__ANDROID-ENDPOINT: http://alloy:4319
+      # #439: clients are told to send to the otlp-collector-oidc service
+      # below. Unset ships "off" (the config route answers 204); e2e runs it on
+      # because the acceptance is that the real path works. The off path is
+      # `crates/server/tests/telemetry_config.rs`, and the SPA's handling of it
+      # is in client-telemetry.spec.ts.
+      #
+      # A second origin, not the app's: this stack has no Traefik to route
+      # `/v1/` on the app's host to the ingest, as the deployed stack does. So
+      # the SPA's export is cross-origin here (the ingest's CORS_ALLOWED_ORIGINS
+      # admits it) where it is same-origin in dev. The client code is the same
+      # either way; the routing is checked on dev.
+      VNOTE__CLIENT-TELEMETRY__ENDPOINT: https://otlp-collector-oidc:4318
       # The server's OWN spans, exported straight to Tempo. Without this the
       # browser's trace would arrive with nothing beneath it, and "one trace
       # spans browser → server → Postgres" could not be asserted at all.
@@ -278,51 +303,84 @@ services:
     networks:
       - e2e-net
 
-  # Client telemetry (#354). Three services, and the point of all three is that
-  # none of them is a stand-in:
+  # Client telemetry (#439). The ingest is the published image, pinned — the
+  # thing that ships, not a stand-in — and the backends behind it are real:
   #
-  #   alloy   the sidecar, running deploy/alloy/client-telemetry.alloy — the file
-  #           that ships, not a test copy of it
-  #   tempo   a real Tempo for it to export traces to
-  #   loki    a real Loki for it to export logs to
+  #   otlp-collector-oidc  the estate's reference ingest, as deploy/ runs it
+  #   monitor-alloy        a stand-in for the SHARED Alloy the ingest forwards
+  #                        traces to (e2e/alloy/monitor-alloy.alloy; shared with
+  #                        #417, same name and shape)
+  #   tempo, loki          real stores, at the digests mini-config runs
   #
-  # so client-telemetry.spec.ts asserts on what the backends actually stored. A
-  # mock collector would happily "receive" a span whose forged service.name the
-  # real pipeline was supposed to have overwritten; Tempo and Loki are where that
-  # either happened or did not.
-  #
-  # Tempo and Loki are pinned to the digests mini-config's monitoring stack runs,
-  # so "Loki accepts OTLP at /otlp" is a fact about the Loki we deploy against.
-  alloy:
-    image: v-note-e2e-alloy:${OCI_IMAGE_VERSION:-local}
-    # Baked in rather than bind-mounted, like every other fixture in this file:
-    # in CI this stack is started from inside a container against the host's
-    # docker socket, where a bind-mount source path does not exist. The deployed
-    # stack solves the same problem with a compose `configs:` entry; here there
-    # is already a build step, so COPY is the smaller thing.
+  # so client-telemetry.spec.ts asserts on what the backends actually stored.
+  # A mock collector would happily "receive" a span carrying the forged
+  # identity the ingest was supposed to have overwritten.
+  otlp-collector-oidc:
+    # Pinned by tag and digest: the image is unproven, and every behaviour the
+    # spec asserts is a fact about exactly this build (#439). Same pin as
+    # deploy/docker-compose.yml; bump them together.
+    image: ghcr.io/vcheesbrough/otlp-collector-oidc:0.13.0@sha256:2db8a527da487c9091b74ee3a537785153b26f914e9e6f3ca2f1684793f02666
+    environment:
+      OIDC_ISSUER_URL: http://mock-oidc:8080/default
+      OIDC_AUDIENCE: v-note-test
+      # The mock IdP starts alongside; do not wait the default 30s to retry.
+      OIDC_DISCOVERY_RETRY: 1s
+      ALLOWED_SERVICE_NAMES: ^v-note-(spa|android)$
+      # Distinctive on purpose: `dev` would also be what an ingest that ignored
+      # its config produced.
+      CLIENT_RESOURCE_ATTRIBUTES: deployment.environment.name=e2e-ingest,telemetry_source=client
+      # Traces through the shared-Alloy stand-in, as deployed.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://monitor-alloy:4317
+      # Logs straight to Loki's OTLP ingest, as deployed until the shared Alloy
+      # forwards logs (see deploy/docker-compose.yml).
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://loki:3100/otlp/v1/logs
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
+      OTEL_SERVICE_NAME: v-note-otlp-collector-oidc
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=e2e-ingest,telemetry_source=otlp
+      # stdout too: this stack has no Docker log scrape for it, and a failing CI
+      # run wants the ingest's refusals in the compose output.
+      LOG_OUTPUT: both
+      # The SPA's origin here. Not set in deploy/, where the export is
+      # same-origin behind Traefik.
+      # An Origin header omits the scheme's default port, so this is
+      # `https://app`, not the `https://app:443` BASE_URL spells.
+      CORS_ALLOWED_ORIGINS: https://app
+    healthcheck:
+      interval: 1s
+      start_period: 2s
+      retries: 60
+    depends_on:
+      mock-oidc:
+        condition: service_started
+      monitor-alloy:
+        condition: service_healthy
+    networks:
+      - e2e-net
+
+  monitor-alloy:
+    image: v-note-e2e-monitor-alloy:${OCI_IMAGE_VERSION:-local}
     build:
       context: .
-      additional_contexts:
-        alloy-config: ../deploy/alloy
       dockerfile_inline: |
         FROM grafana/alloy:v1.17.1@sha256:4f6ddc56ffdcf8a6316748fc5162972e20cb301523cac1bb4a31957df733ae9b
-        COPY --from=alloy-config client-telemetry.alloy /etc/alloy/client-telemetry.alloy
+        COPY alloy/monitor-alloy.alloy /etc/alloy/monitor-alloy.alloy
     command:
       - run
-      - /etc/alloy/client-telemetry.alloy
+      - /etc/alloy/monitor-alloy.alloy
       - --server.http.listen-addr=0.0.0.0:12345
       - --storage.path=/tmp/alloy
     environment:
-      # Distinctive on purpose: the spec asserts these exact values arrive, and
-      # `dev`/`unknown` — the deployed defaults — would also be what a pipeline
-      # that ignored its environment produced.
-      APP_ENV: e2e-sidecar
-      APP_VERSION: 0.0.0-e2e
-      CLIENT_TELEMETRY_TEMPO_ENDPOINT: tempo:4317
-      CLIENT_TELEMETRY_LOKI_ENDPOINT: http://loki:3100/otlp
-    # Same probe as the deployed service: the receiver ports, not /-/ready.
+      # Narrows the Docker scrape to this stack's `app`. A CI host's socket sees
+      # every container on the machine; compose's own default project name is
+      # the directory, `e2e`.
+      E2E_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-e2e}
+    volumes:
+      # The Docker scrape, exactly as the shared Alloy is given it. The one bind
+      # mount in this file that works when compose runs inside a CI container:
+      # the source is the daemon's own socket, which exists on the host.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/4318 && exec 4<>/dev/tcp/127.0.0.1/4319"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/4317 && exec 4<>/dev/tcp/127.0.0.1/4318"]
       interval: 1s
       timeout: 5s
       retries: 60
@@ -363,12 +421,17 @@ services:
     image: v-note-e2e-playwright:${OCI_IMAGE_VERSION:-local}
     build:
       context: .
+      # #439: the ingest metric names the dashboard charts, so the spec can
+      # prove the pinned image exports every one of them.
+      additional_contexts:
+        grafana: ../deploy/grafana
       dockerfile_inline: |
         FROM mcr.microsoft.com/playwright:v1.54.2-jammy@sha256:948dc1e8601eeb152b31ef57959a74c2170be6fe875c33518bf33aea424d8940
         WORKDIR /e2e
         COPY package.json package-lock.json ./
         RUN npm ci
         COPY . .
+        COPY --from=grafana otlp-collector-oidc-metrics.txt /e2e/fixtures/otlp-collector-oidc-metrics.txt
         CMD ["npx", "playwright", "test"]
       labels:
         org.opencontainers.image.title: v-note-e2e-playwright
@@ -397,14 +460,16 @@ services:
       SQL_CONSOLE_URL: http://sqltool:8081/dbconsole
       SQL_CONSOLE_AUTH_USER: console
       SQL_CONSOLE_AUTH_PASS: console-test-password
-      # #354 — where client-telemetry.spec.ts reads back what the sidecar
-      # exported. Absent means the spec skips, as with the console above. The
-      # expected values are the alloy service's APP_ENV / APP_VERSION, passed
-      # here so the spec asserts against the stack's config, not a copy of it.
+      # #439 — the ingest the spec drives directly (as a simulated Android
+      # client, and to prove each refusal), its own metrics, and where it reads
+      # back what was stored. The expected environment is the ingest's
+      # CLIENT_RESOURCE_ATTRIBUTES value, passed here so the spec asserts
+      # against the stack's config, not a copy of it.
+      INGEST_URL: https://otlp-collector-oidc:4318
+      INGEST_METRICS_URL: http://otlp-collector-oidc:8888/metrics
       TEMPO_URL: http://tempo:3200
       LOKI_URL: http://loki:3100
-      CLIENT_TELEMETRY_EXPECTED_ENV: e2e-sidecar
-      CLIENT_TELEMETRY_EXPECTED_VERSION: 0.0.0-e2e
+      CLIENT_TELEMETRY_EXPECTED_ENV: e2e-ingest
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
@@ -416,7 +481,7 @@ services:
         condition: service_healthy
       sqltool:
         condition: service_healthy
-      alloy:
+      otlp-collector-oidc:
         condition: service_healthy
       # `service_started`, not healthy: neither image can run a healthcheck.
       tempo:

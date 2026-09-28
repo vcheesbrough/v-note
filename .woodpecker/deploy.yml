@@ -263,8 +263,13 @@ steps:
     # image (`&deploy-image` above). The in-pipeline installer pinned a version
     # the server later retired (its download 404'd and failed every deploy), and
     # was removed on PR #55.
+    #
+    # Two layers (#439): the environment's compose values, then the client
+    # telemetry ingest's own (OIDC_ISSUER_URL, OIDC_AUDIENCE — aliases of the
+    # app's oidc leaves — and ALLOWED_SERVICE_NAMES). Its own layer so it is
+    # listed, reviewed and revoked apart from the database password.
     commands: &deploy-commands
-      - sovereign-config render /v-note/devops/dev/compose -- ./scripts/deploy-v-note.sh
+      - sovereign-config render /v-note/devops/dev/compose /v-note/devops/dev/otlp-collector-oidc -- ./scripts/deploy-v-note.sh
 
   # Also every push: dev and the blueprint move together, and the blueprint is
   # applied on any branch above. Deploying a branch build against a master-era
@@ -382,7 +387,7 @@ steps:
       github_token:
         from_secret: github_token
 
-  # Publishes deploy/grafana/v-note-overview.json to Grafana (Applications / v-note)
+  # Publishes deploy/grafana/v-note-overview.json and v-note-alerts.json to Grafana (Applications / v-note)
   # over the HTTP API — the dashboard counterpart of apply-authentik-blueprint.
   # Every push, on any branch, right after auto-deploy-dev: the dashboard tracks
   # whatever is deployed to dev, so a branch's panels go live with the metrics
@@ -407,6 +412,9 @@ steps:
     commands:
       - apk add --no-cache curl jq
       - GRAFANA_MESSAGE_PREFIX="v-note $$CI_COMMIT_BRANCH" RELEASE_TAG="$$(cat .release-tag)" COMMIT_SHA="$$CI_COMMIT_SHA" ./scripts/publish-grafana-dashboard.sh deploy/grafana/v-note-overview.json
+      # The alert rules beside it (#439), into the same folder by the same
+      # token: the ruler API is governed by folder permissions.
+      - ./scripts/publish-grafana-alerts.sh deploy/grafana/v-note-alerts.json
 
   tag-release-dev:
     when:

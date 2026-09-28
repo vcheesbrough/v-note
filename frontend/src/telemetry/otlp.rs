@@ -5,7 +5,7 @@
 //! Hand-written rather than the OpenTelemetry SDK for a reason: the Rust SDK's
 //! exporters need tonic or a Tokio runtime and do not build for `wasm32`, and the
 //! JS SDK would cost bundle size and a `wasm-bindgen` shim. OTLP defines a JSON
-//! encoding, the sidecar's receiver accepts it, and `serde_json` is already in
+//! encoding, the ingest accepts it, and `serde_json` is already in
 //! the bundle — so the whole exporter is the structs below.
 //!
 //! Three rules of that encoding are easy to get wrong, and each produces a
@@ -290,30 +290,43 @@ impl Serialize for LogRecord {
     }
 }
 
-/// What the SPA says about itself. **Every identity attribute is absent on
-/// purpose**: the sidecar drops whatever a client claims for `service.name`,
-/// `deployment.environment` and `service.version` and writes its own, so sending
-/// them would only be sending something to be ignored. What is here is what the
-/// sidecar's allow-list lets through.
-fn resource(sdk_version: &str) -> serde_json::Value {
+/// This exporter's own version, reported as `telemetry.sdk.version`. Bump when
+/// the encoding changes, not when the app does — `service.version` is the app's.
+pub(crate) const SDK_VERSION: &str = "2";
+
+/// The `service.name` every SPA export carries. The ingest bounds it with
+/// `ALLOWED_SERVICE_NAMES=^v-note-(spa|android)$` and drops a resource that
+/// does not match, so this is a value the deployment has registered, not a
+/// free choice.
+pub(crate) const SERVICE_NAME: &str = "v-note-spa";
+
+/// What the SPA says about itself: which of v-note's services it is and which
+/// build (#439). Since `otlp-collector-oidc` both are the client's to state and
+/// are kept as sent — the old sidecar overwrote `service.version` with the
+/// *server's*, which was the bug. What the client never states is identity:
+/// `deployment.environment.name`, `telemetry_source` and every `user.*` are
+/// stamped by the ingest from its own config and the token, over anything sent.
+fn resource(service_version: &str) -> serde_json::Value {
     serde_json::json!({
         "attributes": [
+            KeyValue { key: "service.name", value: SERVICE_NAME.into() },
+            KeyValue { key: "service.version", value: service_version.into() },
             KeyValue { key: "telemetry.sdk.name", value: "v-note-spa-otlp".into() },
             KeyValue { key: "telemetry.sdk.language", value: "rust".into() },
-            KeyValue { key: "telemetry.sdk.version", value: sdk_version.into() },
+            KeyValue { key: "telemetry.sdk.version", value: SDK_VERSION.into() },
         ]
     })
 }
 
 const SCOPE_NAME: &str = "v-note-spa";
 
-/// An `ExportTraceServiceRequest` body.
-pub(crate) fn traces_request(spans: &[Span], sdk_version: &str) -> String {
+/// An `ExportTraceServiceRequest` body, from build `service_version`.
+pub(crate) fn traces_request(spans: &[Span], service_version: &str) -> String {
     serde_json::json!({
         "resourceSpans": [{
-            "resource": resource(sdk_version),
+            "resource": resource(service_version),
             "scopeSpans": [{
-                "scope": { "name": SCOPE_NAME, "version": sdk_version },
+                "scope": { "name": SCOPE_NAME, "version": SDK_VERSION },
                 "spans": spans,
             }],
         }],
@@ -322,12 +335,12 @@ pub(crate) fn traces_request(spans: &[Span], sdk_version: &str) -> String {
 }
 
 /// An `ExportLogsServiceRequest` body.
-pub(crate) fn logs_request(records: &[LogRecord], sdk_version: &str) -> String {
+pub(crate) fn logs_request(records: &[LogRecord], service_version: &str) -> String {
     serde_json::json!({
         "resourceLogs": [{
-            "resource": resource(sdk_version),
+            "resource": resource(service_version),
             "scopeLogs": [{
-                "scope": { "name": SCOPE_NAME, "version": sdk_version },
+                "scope": { "name": SCOPE_NAME, "version": SDK_VERSION },
                 "logRecords": records,
             }],
         }],

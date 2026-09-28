@@ -2,6 +2,7 @@ package link.desync.vnote.ink
 
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.telemetry.ConfigFetch
 import link.desync.vnote.telemetry.ExportOutcome
 import link.desync.vnote.telemetry.Signal
 import link.desync.vnote.telemetry.TelemetryRuntime
@@ -17,7 +18,12 @@ class StrokeSpansTest {
             object : Transport {
                 override fun isReady() = true
 
+                override fun credentialId() = 1
+
+                override fun fetchConfig() = ConfigFetch.Configured("https://ingest.example")
+
                 override fun send(
+                    endpoint: String,
                     signal: Signal,
                     body: String,
                 ): ExportOutcome {

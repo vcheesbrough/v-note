@@ -1193,3 +1193,75 @@ fn client_telemetry_switch_is_read_from_sovereign_and_env_overrides_it() {
         "env should be able to kill it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// client-telemetry.endpoint (#439)
+// ---------------------------------------------------------------------------
+
+/// Unset is off: no leaf anywhere means clients are told nothing and never
+/// initialise OTLP.
+#[test]
+fn ingest_endpoint_is_absent_with_no_leaf() {
+    let telemetry: ClientTelemetryConfig =
+        load_group(&cfg(&[]), "client-telemetry").expect("group defaults");
+    assert_eq!(telemetry.ingest_endpoint(), None);
+}
+
+/// Blank is how deploy tooling renders "unset", so it must read as off, not fail.
+#[test]
+fn blank_ingest_endpoint_is_off() {
+    let telemetry: ClientTelemetryConfig = load_group(
+        &cfg(&[("VNOTE__CLIENT_TELEMETRY__ENDPOINT", "  ")]),
+        "client-telemetry",
+    )
+    .expect("blank loads");
+    assert_eq!(telemetry.ingest_endpoint(), None);
+}
+
+/// Read from sovereign-config, where the deployed value lives, and needs no
+/// separate switch: the endpoint being there is what turns clients on.
+#[test]
+fn ingest_endpoint_is_read_from_sovereign() {
+    let telemetry: ClientTelemetryConfig = load_group(
+        &cfg_with_sovereign(
+            &[(
+                "client-telemetry.endpoint",
+                "https://v-notes-dev.desync.link",
+            )],
+            &[],
+        ),
+        "client-telemetry",
+    )
+    .expect("loads");
+    assert_eq!(
+        telemetry.ingest_endpoint().map(Url::as_str),
+        Some("https://v-notes-dev.desync.link/")
+    );
+}
+
+/// Clients append `/v1/<signal>` and send the user's access token there, so
+/// only an https bare origin is accepted — and a bad one fails startup naming
+/// the leaf, never the value.
+#[test]
+fn ingest_endpoint_must_be_an_https_bare_origin() {
+    for (value, expected) in [
+        ("http://v-notes-dev.desync.link", "https"),
+        ("https://v-notes-dev.desync.link/otlp", "bare origin"),
+        ("https://v-notes-dev.desync.link/?x=1", "bare origin"),
+        ("https://v-notes-dev.desync.link/#frag", "bare origin"),
+        ("https://user:pw@v-notes-dev.desync.link", "bare origin"),
+    ] {
+        let error = load_group::<ClientTelemetryConfig>(
+            &cfg(&[("VNOTE__CLIENT_TELEMETRY__ENDPOINT", value)]),
+            "client-telemetry",
+        )
+        .expect_err("rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("client-telemetry.endpoint"),
+            "{value}: {message}"
+        );
+        assert!(message.contains(expected), "{value}: {message}");
+        assert!(!message.contains("pw@"), "{value}: leaked: {message}");
+    }
+}

@@ -135,6 +135,28 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   whether the change needs updates to **metrics, logs, spans/traces,
   trace-log correlation, labels, dashboards, alerts, or runbook/docs**. "No
   change needed" must be an intentional decision, not an omission.
+- **Client telemetry (#439) goes through `otlp-collector-oidc`**, the estate's
+  reference ingest image, one instance per environment (`deploy/docker-compose.yml`,
+  routed by Traefik on OTLP's own `/v1/` paths of the app's host). The app does
+  not proxy telemetry; it only tells signed-in clients where to send it
+  (`GET /api/telemetry/config`, from `client-telemetry/endpoint` — unset is off).
+  Two things to know before touching it:
+  - **The SPA now holds an OIDC access token in JavaScript.** The image accepts
+    only a bearer, and the SPA's session is an `HttpOnly` cookie, so the config
+    route hands the cookie's token to the page. That is the deliberate cost of
+    adopting the reference ingest: script injection in the page can now read a
+    token it could previously only cause to be sent. **CSP review (#439): there
+    is no script CSP today** — `security-headers@docker` (mini-config) sets only
+    `frame-ancestors 'self'` — so what bounds the exposure is that the SPA loads
+    no third-party script and renders no HTML from data. Adding a real policy
+    (`script-src 'self' 'wasm-unsafe-eval'`, `connect-src 'self'`) is follow-up
+    card #444; until it lands, treat any new script source or `inner_html` as a
+    token-exposure review.
+  - **The image is pinned and unproven.** v-note is its first real deployment.
+    Every behaviour v-note relies on is asserted against the pinned tag in
+    `e2e/tests/client-telemetry.spec.ts`; a gap is fixed upstream in
+    `vcheesbrough/otlp-collector-oidc` and re-pinned, **never** worked around
+    here (no proxy, no rewriting in the app). Bump the pin in both compose files.
 - Until push CI exists, run **local** sanity checks when you touch code
   (`cargo check`, `trunk build`, Gradle tasks) — only after those trees exist.
 

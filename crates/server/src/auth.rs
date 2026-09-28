@@ -266,6 +266,18 @@ pub async fn validate_jwt(
     Ok(data.claims)
 }
 
+/// The access token a request authenticated with — bearer or session cookie —
+/// after [`validate_jwt`] accepted it. A request extension set by
+/// [`auth_middleware`] alongside [`Claims`].
+#[derive(Clone)]
+pub struct AccessToken(pub String);
+
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AccessToken(<redacted>)")
+    }
+}
+
 pub async fn auth_middleware(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
@@ -290,6 +302,10 @@ pub async fn auth_middleware(
     {
         Ok(claims) => {
             req.extensions_mut().insert(claims);
+            // The validated token itself, for the one handler that must hand it
+            // back (`GET /api/telemetry/config`, #439). Request-scoped, never
+            // logged: `AccessToken`'s `Debug` is redacted.
+            req.extensions_mut().insert(AccessToken(token));
             next.run(req).await
         }
         Err(TokenValidationError::MissingScope) => {

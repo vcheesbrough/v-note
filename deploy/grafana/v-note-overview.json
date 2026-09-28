@@ -1560,14 +1560,14 @@
     {
       "id": 30,
       "type": "timeseries",
-      "title": "Client telemetry exports per second by client and outcome",
+      "title": "Client telemetry accepted per second",
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 8,
         "x": 0,
         "y": 78
       },
@@ -1578,8 +1578,83 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum by (client, outcome) (rate(v_note_client_telemetry_requests_total{deployment_environment=\"$env\"}[$__rate_interval]))",
-          "legendFormat": "{{client}} {{outcome}}",
+          "expr": "sum (rate(otelcol_receiver_accepted_spans{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "spans",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum (rate(otelcol_receiver_accepted_log_records{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "log records",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "What the otlp-collector-oidc ingest (#439) accepted from signed-in clients. The ingest-volume alert watches the sum of these; an unexpected rise is someone else spending the store."
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Client telemetry refused per second by reason",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 78
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum by (reason) (rate(otelcol_oidcclientauth_rejections{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "token: {{reason}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum by (reason) (rate(otelcol_otlpsingleport_requests_refused{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "request: {{reason}}",
           "range": true
         }
       ],
@@ -1598,7 +1673,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*(unreachable|rejected|too_large|body_error).*"
+              "options": ".*(missing_scope|missing_claim|not_ready).*"
             },
             "properties": [
               {
@@ -1630,12 +1705,117 @@
           "sort": "desc"
         }
       },
-      "description": "Exports reaching the /otlp ingress (#354). `forwarded` is healthy. `sidecar_unreachable` means the v-note-alloy container is down and client telemetry is being dropped \u2014 the product is unaffected. `sidecar_rejected` is the sidecar refusing data (malformed, or its memory limiter shedding load). No alert by design: losing telemetry is not user-facing."
+      "description": "Every token refusal is a 401 to the client with the reason in the body; `missing_scope` or `missing_claim` sustained means the provider's scope mapping changed (the ingest's runbook: OTLPCollectorOIDCTokensRefused). `not_ready` means the OIDC provider is unreachable. Request refusals are the body cap, the content type and the method."
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Client telemetry dropped per second",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 78
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum (rate(otelcol_processor_filter_spans_filtered{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "spans dropped by the bounds",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum (rate(otelcol_processor_filter_logs_filtered{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "log records dropped by the bounds",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "sum (rate(otelcol_processor_filter_datapoints_filtered{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "client metric points dropped (by design)",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "max (otelcol_exporter_queue_size{service_name=\"v-note-otlp-collector-oidc\", deployment_environment=\"$env\"})",
+          "legendFormat": "upstream queue",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*bounds.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Dropped after the client was told 200: a `service.name` outside ALLOWED_SERVICE_NAMES, or a timestamp older than MAX_PAST_AGE. Client metrics are always dropped (the allowlists are empty on purpose). A growing upstream queue means monitor-alloy or Loki is not keeping up. No alert: the fix is a client author's."
     },
     {
       "id": 31,
       "type": "logs",
-      "title": "SPA errors and warnings",
+      "title": "Client errors and warnings",
       "datasource": {
         "type": "loki",
         "uid": "P8E80F9AEF21F6940"
@@ -1653,7 +1833,7 @@
             "type": "loki",
             "uid": "P8E80F9AEF21F6940"
           },
-          "expr": "{service_name=\"v-note-spa\", deployment_environment=\"$env\"} | severity_text=~\"ERROR|WARN\"",
+          "expr": "{service_name=~\"v-note-(spa|android)\", deployment_environment_name=\"$env\"} | telemetry_source=\"client\" | severity_text=~\"ERROR|WARN\"",
           "legendFormat": "",
           "range": true,
           "queryType": "range"
@@ -1665,7 +1845,7 @@
         "sortOrder": "Descending",
         "enableLogDetails": true
       },
-      "description": "Logs the browser sent (#354), labelled by the sidecar rather than by the client. Each line carries trace_id/span_id as structured metadata, which links it to the trace in Tempo."
+      "description": "Logs the browser and the Android app sent through otlp-collector-oidc (#439). The ingest stamps `deployment.environment.name`, `telemetry_source=client` and `user.id`/`user.name` over whatever the client claimed; each line carries trace_id/span_id as structured metadata, which links it to the trace in Tempo."
     },
     {
       "collapsed": false,

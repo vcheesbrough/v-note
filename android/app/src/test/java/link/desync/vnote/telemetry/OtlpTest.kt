@@ -66,7 +66,7 @@ class OtlpTest {
                 error = "HTTP 500",
             )
         val encoded =
-            JSONObject(tracesRequest(listOf(span)))
+            JSONObject(tracesRequest(listOf(span), VERSION))
                 .getJSONArray("resourceSpans")
                 .getJSONObject(0)
                 .getJSONArray("scopeSpans")
@@ -100,7 +100,7 @@ class OtlpTest {
     fun aRootSpanWithoutErrorOmitsParentAndStatus() {
         val root = FinishedSpan(context, null, "screen.library", SpanKind.Internal, 1, 1)
         val encoded =
-            JSONObject(tracesRequest(listOf(root)))
+            JSONObject(tracesRequest(listOf(root), VERSION))
                 .getJSONArray("resourceSpans")
                 .getJSONObject(0)
                 .getJSONArray("scopeSpans")
@@ -117,7 +117,7 @@ class OtlpTest {
     fun logRecordsCarrySeverityAndTraceCorrelation() {
         val record = LogRecord(42, Severity.Warn, "page channel error", context = context)
         val encoded =
-            JSONObject(logsRequest(listOf(record)))
+            JSONObject(logsRequest(listOf(record), VERSION))
                 .getJSONArray("resourceLogs")
                 .getJSONObject(0)
                 .getJSONArray("scopeLogs")
@@ -137,24 +137,39 @@ class OtlpTest {
         assertEquals(listOf(5, 9, 13, 17), Severity.entries.map { it.number })
     }
 
-    // The sidecar keeps exactly these three and overwrites identity; the app
-    // sends nothing that would only be thrown away (or, worse, not).
+    // The app states which service and which build it is (#439) — the ingest
+    // keeps both — and never identity or environment, which the ingest stamps.
     @Test
-    fun resourceCarriesOnlyTheSidecarsAllowList() {
-        for (body in listOf(tracesRequest(emptyList()), logsRequest(emptyList()))) {
+    fun resourceNamesTheServiceAndBuildButNoIdentity() {
+        for (body in listOf(tracesRequest(emptyList(), VERSION), logsRequest(emptyList(), VERSION))) {
             val root = JSONObject(body)
             val resource =
                 (root.optJSONArray("resourceSpans") ?: root.getJSONArray("resourceLogs"))
                     .getJSONObject(0)
                     .getJSONObject("resource")
                     .getJSONArray("attributes")
-            val keys = (0 until resource.length()).map { resource.getJSONObject(it).getString("key") }.toSet()
-            assertEquals(setOf("telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"), keys)
+            val attributes =
+                (0 until resource.length()).associate {
+                    resource.getJSONObject(it).getString("key") to
+                        resource.getJSONObject(it).getJSONObject("value").optString("stringValue")
+                }
+            assertEquals("v-note-android", attributes["service.name"])
+            assertEquals(VERSION, attributes["service.version"])
+            assertEquals(
+                setOf(
+                    "service.name",
+                    "service.version",
+                    "telemetry.sdk.name",
+                    "telemetry.sdk.language",
+                    "telemetry.sdk.version",
+                ),
+                attributes.keys,
+            )
         }
     }
 
     // What MAX_BATCH relies on: a full batch of realistic spans is well under the
-    // ingress's 1 MiB cap before gzip, and gzip then takes it far lower.
+    // ingest's 4 MiB decompressed cap, and gzip then takes it far lower.
     @Test
     fun aFullBatchStaysWellUnderTheIngressCap() {
         val spans =
@@ -172,12 +187,13 @@ class OtlpTest {
                     ),
                 )
             }
-        val body = tracesRequest(spans)
-        assertTrue("uncompressed ${body.length} bytes", body.length < INGRESS_CAP_BYTES / 2)
+        val body = tracesRequest(spans, VERSION)
+        assertTrue("uncompressed ${body.length} bytes", body.length < INGRESS_CAP_BYTES / 8)
         assertTrue("gzipped ${gzip(body).size} bytes", gzip(body).size < body.length / 4)
     }
 
     private companion object {
-        const val INGRESS_CAP_BYTES = 1024 * 1024
+        const val INGRESS_CAP_BYTES = 4 * 1024 * 1024
+        const val VERSION = "0.58.0"
     }
 }

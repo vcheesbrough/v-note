@@ -23,6 +23,7 @@ import okio.buffer
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -80,7 +81,9 @@ class TelemetryInstrumentedTest {
     fun theApplicationInstallsTheExporterForThisFlavor() {
         val application = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
         assertTrue("manifest names the Application subclass", application is VNoteApplication)
-        assertEquals(BuildConfig.TELEMETRY_EXPORT, Telemetry.isExporting)
+        // Nothing exports until the server has configured it (#439), and this
+        // process has no session to ask with.
+        assertFalse(Telemetry.isExporting)
     }
 
     @Test
@@ -124,7 +127,17 @@ class TelemetryInstrumentedTest {
     }
 
     @Test
-    fun anExportIsGzippedJsonToTheAndroidIngressWithTheBearerToken() {
+    fun anExportIsGzippedJsonToTheConfiguredIngestWithTheBearerToken() {
+        // The configuration, then the two exports — to the endpoint the server
+        // named, which here is the same mock server.
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(200)
+                .body("""{"endpoint":"${baseUrl()}","access_token":"ignored","expires_at":4102444800}""")
+                .addHeader("Content-Type", "application/json")
+                .build(),
+        )
         server.enqueue(MockResponse(code = 200))
         server.enqueue(MockResponse(code = 200))
         val runtime = TelemetryRuntime(OtlpHttpTransport(baseUrl(), accessToken = tokenStore::accessToken))
@@ -134,9 +147,14 @@ class TelemetryInstrumentedTest {
 
         runtime.exportNow()
 
+        val config = server.takeRequest(5, TimeUnit.SECONDS)!!
+        assertEquals("GET", config.method)
+        assertEquals("/api/telemetry/config", config.target)
+        assertEquals("Bearer access-token", config.headers["Authorization"])
+
         val traces = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", traces.method)
-        assertEquals("/otlp/android/v1/traces", traces.target)
+        assertEquals("/v1/traces", traces.target)
         assertEquals("Bearer access-token", traces.headers["Authorization"])
         assertEquals("gzip", traces.headers["Content-Encoding"])
         assertTrue(traces.headers["Content-Type"].orEmpty().startsWith("application/json"))
@@ -153,7 +171,7 @@ class TelemetryInstrumentedTest {
         assertNull(traces.headers["traceparent"])
 
         val logs = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("/otlp/android/v1/logs", logs.target)
+        assertEquals("/v1/logs", logs.target)
         assertEquals("Bearer access-token", logs.headers["Authorization"])
         val record =
             logs

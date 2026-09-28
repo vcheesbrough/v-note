@@ -26,6 +26,7 @@ use crate::realtime::{RealtimeHub, page_socket, realtime_socket, realtime_ticket
 use crate::routes::auth::{assetlinks, callback, login, logout, me, mobile_callback};
 use crate::routes::pages::{create_page, delete_page, get_page, get_thumbnail, list_pages};
 use crate::routes::telemetry::ClientTelemetryIngress;
+use crate::routes::telemetry_config::telemetry_config;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -48,6 +49,10 @@ pub struct AppState {
     /// switch (`client-telemetry.enabled`): with no upstreams there is nothing
     /// to forward to, and every `/otlp` request is a 404.
     pub client_telemetry: Option<Arc<ClientTelemetryIngress>>,
+    /// Where signed-in clients send their OTLP (#439): this environment's
+    /// `otlp-collector-oidc` ingest, as `GET /api/telemetry/config` hands it
+    /// out. `None` is "client telemetry off" — the route answers `204`.
+    pub telemetry_endpoint: Option<Arc<str>>,
 }
 
 /// The build version: the release tag baked in at compile time (`V_NOTE_RELEASE`,
@@ -145,6 +150,7 @@ pub async fn build_app_router(
         coalesce_replay: realtime.coalesce_replay,
         realtime_compression: realtime.compression,
         client_telemetry: client_telemetry_ingress(client_telemetry.upstreams()),
+        telemetry_endpoint: telemetry_endpoint(client_telemetry.ingest_endpoint()),
     };
     // Startup work, not router construction: resume thumbnail jobs a restart
     // interrupted. Kept out of `router` so tests, whose pool never connects,
@@ -175,6 +181,22 @@ fn client_telemetry_ingress(
     }
 }
 
+/// Logged once at startup, like the ingress above: whether clients will be
+/// told to send telemetry is what someone reading a quiet log wants to confirm.
+fn telemetry_endpoint(endpoint: Option<&url::Url>) -> Option<Arc<str>> {
+    match endpoint {
+        Some(endpoint) => {
+            let endpoint = routes::telemetry_config::client_endpoint(endpoint);
+            tracing::info!(endpoint = %endpoint, "client telemetry configured for clients");
+            Some(Arc::from(endpoint))
+        }
+        None => {
+            tracing::info!("client telemetry not configured; /api/telemetry/config answers 204");
+            None
+        }
+    }
+}
+
 fn database_connect_options(database: &DatabaseConfig) -> PgConnectOptions {
     PgConnectOptions::new()
         .host(&database.host)
@@ -196,6 +218,46 @@ pub fn build_router(
     build_router_with_client_telemetry(app_version, auth, jwks_cache, db, None)
 }
 
+/// As [`build_router`], with `client-telemetry.endpoint` set to `endpoint`
+/// (#439) — or unset, which is what [`build_router`] gets.
+pub fn build_router_with_telemetry_endpoint(
+    app_version: String,
+    auth: Arc<AuthConfig>,
+    jwks_cache: Arc<JwksCache>,
+    db: PgPool,
+    endpoint: Option<url::Url>,
+) -> Router {
+    router(
+        AppState {
+            telemetry_endpoint: telemetry_endpoint(endpoint.as_ref()),
+            ..test_state(app_version, auth, jwks_cache, db)
+        },
+        None,
+    )
+}
+
+/// The state the integration-test routers share: no asset links, realtime
+/// defaults, and client telemetry off.
+fn test_state(
+    app_version: String,
+    auth: Arc<AuthConfig>,
+    jwks_cache: Arc<JwksCache>,
+    db: PgPool,
+) -> AppState {
+    AppState {
+        app_version,
+        auth,
+        jwks_cache,
+        db,
+        realtime: Arc::new(RealtimeHub::default()),
+        assetlinks_json: None,
+        coalesce_replay: RealtimeConfig::default().coalesce_replay,
+        realtime_compression: RealtimeConfig::default().compression,
+        client_telemetry: None,
+        telemetry_endpoint: None,
+    }
+}
+
 /// As [`build_router`], with the `/otlp` ingress pointed at `upstreams` — or
 /// switched off, which is what [`build_router`] gets. A sibling rather than a
 /// fifth parameter so the tests that have nothing to do with telemetry do not
@@ -209,16 +271,9 @@ pub fn build_router_with_client_telemetry(
 ) -> Router {
     router(
         AppState {
-            app_version,
-            auth,
-            jwks_cache,
-            db,
-            realtime: Arc::new(RealtimeHub::default()),
-            assetlinks_json: None,
-            coalesce_replay: RealtimeConfig::default().coalesce_replay,
-            realtime_compression: RealtimeConfig::default().compression,
             client_telemetry: upstreams
                 .map(|upstreams| Arc::new(ClientTelemetryIngress::new(upstreams))),
+            ..test_state(app_version, auth, jwks_cache, db)
         },
         None,
     )
@@ -238,6 +293,7 @@ fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             get(get_thumbnail),
         )
         .route("/realtime-ticket", post(realtime_ticket))
+        .route("/telemetry/config", get(telemetry_config))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -354,6 +410,7 @@ impl AppState {
             coalesce_replay: RealtimeConfig::default().coalesce_replay,
             realtime_compression: RealtimeConfig::default().compression,
             client_telemetry: None,
+            telemetry_endpoint: None,
         }
     }
 }

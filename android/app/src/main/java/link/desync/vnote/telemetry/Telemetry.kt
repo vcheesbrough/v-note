@@ -7,18 +7,24 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 // Client telemetry for the Android app (#406): spans and levelled logs, exported
-// as OTLP/JSON to `{BASE_URL}/otlp/android` with the app's bearer token. The
-// Android half of #354, over the same ingress and sidecar, and deliberately the
-// same shape as the SPA's `frontend/src/telemetry.rs`.
+// as OTLP/JSON to this environment's `otlp-collector-oidc` ingest with the app's
+// bearer token (#439). Deliberately the same shape as the SPA's
+// `frontend/src/telemetry.rs`.
+//
+// **No configuration, no telemetry.** The endpoint is not compiled in: the app
+// asks its server (`GET /api/telemetry/config`) once it has a session, and with
+// no answer — ingest off, a failed fetch, an older server — OTLP is never
+// initialised and whatever waited in the small pre-config buffer is discarded.
 //
 // Three rules hold everywhere in this package, because telemetry that costs the
 // product anything is worse than no telemetry:
 //
-// 1. **Nothing here can fail loudly.** Every entry point swallows its errors.
+// 1. **Nothing here can fail loudly.** Every entry point swallows its errors,
+//    and failures are said once, to Logcat, on a change of state only.
 // 2. **Nothing here blocks the caller.** Exports run on one background thread;
 //    the crash handler is the only caller that waits, and only briefly.
-// 3. **Nothing here is unbounded.** Queues are capped and the send rate is
-//    capped, whatever the app does.
+// 3. **Nothing here is unbounded.** Queues are capped, retries are capped, and
+//    repeated failure stops telemetry for the process.
 //
 // No Android API is used in this file, so screens and sessions that call it stay
 // unit-testable on the JVM: before [Telemetry.install] every call is a cheap
@@ -47,26 +53,40 @@ enum class Signal(
     Logs("logs"),
 }
 
-// Where a batch goes. [OtlpHttpTransport] in the app; a fake in tests.
+// The network side. [OtlpHttpTransport] in the app; a fake in tests.
 internal interface Transport {
-    // Whether an export could be authorised now. The ingress needs the bearer
-    // token, so a signed-out app can only get a 401 — cheaper to know first.
+    // Whether a request could be authorised now: a token that is present and
+    // not about to expire. A signed-out app can only collect 401s.
     fun isReady(): Boolean
 
+    // Identifies the token a request would carry now, without exposing it, so
+    // a refresh after a 401 can be recognised. Null when there is none.
+    fun credentialId(): Int?
+
+    // `GET {server}/api/telemetry/config` with the bearer.
+    fun fetchConfig(): ConfigFetch
+
+    // `POST {endpoint}/v1/{signal}` with the bearer, the token read now.
     fun send(
+        endpoint: String,
         signal: Signal,
         body: String,
     ): ExportOutcome
 }
 
 // One process's telemetry: the current screen, span and log collection, and
-// the export loop. [transport] null means export is off (the `devLocal`
-// flavor, and every unit test): spans and logs are accepted and discarded.
+// the export loop. [transport] null means export is off (every unit test that
+// does not care): spans and logs are accepted and discarded.
 class TelemetryRuntime internal constructor(
     transport: Transport?,
+    serviceVersion: String = "unknown",
+    // Where the state-change lines go: Logcat in the app, a list in tests.
+    localLog: (String) -> Unit = {},
+    jitter: () -> Double = { kotlin.random.Random.nextDouble() },
+    // Last, so a test's trailing lambda is the clock.
     private val clock: () -> Long = ::nowUnixNanos,
 ) {
-    private val queue = transport?.let { ExportQueue(it, clock) }
+    private val queue = transport?.let { ExportQueue(it, clock, serviceVersion, localLog, jitter) }
     private var scheduler: ScheduledExecutorService? = null
 
     // The span enclosing everything the current screen does. Read only by
@@ -74,11 +94,11 @@ class TelemetryRuntime internal constructor(
     @Volatile
     private var screenRoot = SpanContext(TraceId.random(), SpanId.random())
 
-    val isExporting: Boolean get() = queue?.isSwitchedOff == false
+    val isExporting: Boolean get() = queue?.isExporting == true
 
     fun now(): Long = clock()
 
-    // Starts the export loop. Idempotent.
+    // Starts the export loop, fetching configuration first. Idempotent.
     @Synchronized
     fun start(intervalMs: Long = EXPORT_INTERVAL_MS) {
         val queue = queue ?: return
@@ -88,7 +108,8 @@ class TelemetryRuntime internal constructor(
                 .newSingleThreadScheduledExecutor { runnable ->
                     Thread(runnable, "vnote-telemetry").apply { isDaemon = true }
                 }.also { executor ->
-                    executor.scheduleWithFixedDelay(queue::exportOnce, intervalMs, intervalMs, TimeUnit.MILLISECONDS)
+                    executor.execute(queue::tick)
+                    executor.scheduleWithFixedDelay(queue::tick, intervalMs, intervalMs, TimeUnit.MILLISECONDS)
                 }
     }
 
@@ -135,7 +156,7 @@ class TelemetryRuntime internal constructor(
     // the radio is likely still up from whatever the user just did.
     fun flush() {
         val queue = queue ?: return
-        runCatching { scheduler?.execute(queue::exportOnce) }
+        runCatching { scheduler?.execute(queue::tick) }
     }
 
     // Sends [crash] now, by itself, and waits up to [timeoutMs]. Only for the
@@ -155,86 +176,181 @@ class TelemetryRuntime internal constructor(
         }
     }
 
-    // One export attempt, on the calling thread. For tests.
+    // One tick — configure if needed, then export — on the calling thread. For tests.
     internal fun exportNow() {
-        queue?.exportOnce()
+        queue?.tick()
     }
 }
 
-// The two outboxes, the send policy, and one export attempt at a time.
+// A batch that failed retryably, kept to be sent again.
+private class Pending(
+    val body: String,
+    val items: Int,
+    val attempts: Int,
+)
+
+// The two outboxes, configuration, the send policy, and one export at a time.
 private class ExportQueue(
     private val transport: Transport,
     private val clock: () -> Long,
+    private val serviceVersion: String,
+    private val localLog: (String) -> Unit,
+    private val jitter: () -> Double,
 ) {
-    private val spans = Outbox<FinishedSpan>()
-    private val logs = Outbox<LogRecord>()
+    private val spans = Outbox<FinishedSpan>(PRE_CONFIG_CAPACITY)
+    private val logs = Outbox<LogRecord>(PRE_CONFIG_CAPACITY)
     private val policy = ExportPolicy()
-    private var reportedDrops = 0L
+    private val startedAtMs = nowMs
 
-    val isSwitchedOff: Boolean get() = policy.isSwitchedOff
+    // The ingest origin once configured; null while waiting.
+    @Volatile
+    private var endpoint: String? = null
+
+    @Volatile
+    private var off: OffReason? = null
+
+    private var refusedCredential: Int? = null
+    private val retries = HashMap<Signal, Pending>()
+    private var droppedAfterSend = 0L
+    private var overflowReported = false
+
+    val isExporting: Boolean get() = endpoint != null && off == null
+
+    private val nowMs: Long get() = clock() / NANOS_PER_MILLI
+
+    private val dropped: Long get() = spans.dropped + logs.dropped + droppedAfterSend
 
     fun push(span: FinishedSpan) {
-        if (!isSwitchedOff) spans.push(span)
+        if (off == null) spans.push(span)
     }
 
     fun push(record: LogRecord) {
-        if (!isSwitchedOff) logs.push(record)
+        if (off == null) logs.push(record)
     }
 
-    // One export attempt: traces, then logs. Never throws.
+    // One tick: configure if not yet configured, wait out a refresh, then send
+    // traces and logs. Never throws.
     @Synchronized
-    fun exportOnce() {
+    fun tick() {
         runCatching {
-            if (!policy.shouldExport() || !transport.isReady()) return
-            reportDrops()
+            if (off != null) return
+            reportOverflow()
+            if (endpoint == null && !configure()) return
+            if (policy.needsRefresh) {
+                val current = transport.credentialId() ?: return
+                if (current == refusedCredential) return
+                policy.refreshed()
+            }
+            if (!transport.isReady() || !policy.shouldExport(nowMs)) return
             for (signal in Signal.entries) {
-                val body = takeBody(signal) ?: continue
-                val outcome = transport.send(signal, body)
-                policy.record(outcome)
-                if (outcome == ExportOutcome.SwitchedOff) {
-                    spans.clear()
-                    logs.clear()
-                }
-                if (outcome == ExportOutcome.SwitchedOff || outcome == ExportOutcome.Unavailable) return
+                if (!exportSignal(signal)) break
+            }
+            policy.stopped?.let(::turnOff)
+        }
+    }
+
+    // Fetches configuration once a session exists. `true` when configured.
+    private fun configure(): Boolean {
+        if (nowMs - startedAtMs >= PRE_CONFIG_MAX_MS) {
+            turnOff(OffReason.ConfigTimedOut)
+            return false
+        }
+        // No session yet: keep waiting (and buffering) until the deadline.
+        if (!transport.isReady()) return false
+        when (val fetch = transport.fetchConfig()) {
+            is ConfigFetch.Configured -> {
+                endpoint = fetch.endpoint.trimEnd('/')
+                spans.setCapacity(OUTBOX_CAPACITY)
+                logs.setCapacity(OUTBOX_CAPACITY)
+                localLog("client telemetry: exporting to ${fetch.endpoint}")
+                return true
+            }
+            ConfigFetch.Absent -> {
+                turnOff(OffReason.NotConfigured)
+                return false
             }
         }
     }
 
+    // Sends one signal's batch — a retry first, else fresh items. `false` when
+    // the answer was not "accepted": the other signal waits for the policy.
+    private fun exportSignal(signal: Signal): Boolean {
+        val endpoint = endpoint ?: return false
+        val retry = retries.remove(signal)
+        val (body, items, attempts) =
+            if (retry != null) {
+                Triple(retry.body, retry.items, retry.attempts + 1)
+            } else {
+                val encoded = takeBody(signal) ?: return true
+                Triple(encoded.first, encoded.second, 1)
+            }
+        val credential = transport.credentialId()
+        val outcome = transport.send(endpoint, signal, body)
+        val decision = policy.record(outcome, attempts, nowMs, jitter())
+        if (decision.retryBatch) {
+            retries[signal] = Pending(body, items, attempts)
+        } else if (outcome != ExportOutcome.Accepted) {
+            droppedAfterSend += items
+        }
+        if (decision.refreshToken) refusedCredential = credential
+        report(decision.transition, outcome, "$endpoint/v1/${signal.path}")
+        return outcome == ExportOutcome.Accepted
+    }
+
     // The crash record, in a logs request of its own. Not the ordinary export:
-    // backoff protects a collector from a process that will keep sending, and
-    // this one is about to stop; and in the queue the crash would be the
-    // newest log, behind a traces request and up to a full batch of older
-    // lines. A server that has said "off", or no session, still wins. Not
-    // under the queue's lock, so an export already in flight cannot hold it up.
+    // backoff protects an ingest from a process that will keep sending, and
+    // this one is about to stop; and in the queue the crash would be the newest
+    // log, behind a traces request and up to a full batch of older lines. No
+    // configuration, a stopped policy, or no session still wins. Not under the
+    // queue's lock, so an export already in flight cannot hold it up.
     fun exportCrash(crash: LogRecord) {
         runCatching {
-            if (isSwitchedOff || !transport.isReady()) return
-            policy.record(transport.send(Signal.Logs, logsRequest(listOf(crash))))
+            val endpoint = endpoint ?: return
+            if (off != null || policy.stopped != null || !transport.isReady()) return
+            transport.send(endpoint, Signal.Logs, logsRequest(listOf(crash), serviceVersion))
         }
     }
 
-    private fun takeBody(signal: Signal): String? =
+    private fun takeBody(signal: Signal): Pair<String, Int>? =
         when (signal) {
-            Signal.Traces -> spans.takeBatch().takeIf { it.isNotEmpty() }?.let(::tracesRequest)
-            Signal.Logs -> logs.takeBatch().takeIf { it.isNotEmpty() }?.let(::logsRequest)
+            Signal.Traces ->
+                spans.takeBatch().takeIf { it.isNotEmpty() }?.let { tracesRequest(it, serviceVersion) to it.size }
+            Signal.Logs ->
+                logs.takeBatch().takeIf { it.isNotEmpty() }?.let { logsRequest(it, serviceVersion) to it.size }
         }
 
-    // Items dropped for lack of room are reported once per new loss, as a log
-    // line of their own — the queue says what it lost rather than losing it
-    // silently.
-    private fun reportDrops() {
-        val dropped = spans.dropped + logs.dropped
-        if (dropped > reportedDrops) {
-            logs.push(
-                LogRecord(
-                    clock(),
-                    Severity.Warn,
-                    "telemetry outbox full; items dropped",
-                    listOf(Attribute("vnote.telemetry.dropped", dropped - reportedDrops)),
-                ),
-            )
-            reportedDrops = dropped
+    // The first time a queue overflows, say so locally. Not into the telemetry
+    // queue: that is the channel that is failing.
+    private fun reportOverflow() {
+        if (overflowReported || spans.dropped + logs.dropped == 0L) return
+        overflowReported = true
+        localLog("client telemetry queue full; $dropped item(s) dropped so far")
+    }
+
+    private fun report(
+        transition: Transition?,
+        outcome: ExportOutcome,
+        url: String,
+    ) {
+        when (transition) {
+            Transition.StartedFailing ->
+                localLog("client telemetry export failing: ${outcome.describe()} from $url; $dropped item(s) dropped so far")
+            Transition.Recovered ->
+                localLog("client telemetry export recovered at $url; $dropped item(s) dropped while failing")
+            is Transition.Stopped, null -> Unit
         }
+    }
+
+    // Off for the rest of the process: discard everything and say why, once.
+    private fun turnOff(reason: OffReason) {
+        if (off != null) return
+        off = reason
+        policy.stop(reason)
+        val lost = dropped + spans.size + logs.size + retries.values.sumOf { it.items }
+        spans.clear()
+        logs.clear()
+        retries.clear()
+        localLog("client telemetry off for this process: ${reason.description}; $lost item(s) dropped")
     }
 }
 

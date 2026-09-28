@@ -291,6 +291,27 @@ async fn login_no_longer_sends_a_client_secret_and_scopes_the_verifier_cookie() 
         !location.contains("client_secret"),
         "the authorize URL must never carry a secret: {location}"
     );
+    // #439: the ingest refuses any token without `telemetry:write` or without
+    // `preferred_username` (which `profile` supplies), so login asks for both.
+    let scope = url::Url::parse(location)
+        .expect("location should be a URL")
+        .query_pairs()
+        .find(|(key, _)| key == "scope")
+        .map(|(_, value)| value.into_owned())
+        .expect("scope parameter");
+    let scopes: Vec<&str> = scope.split(' ').collect();
+    for expected in [
+        "openid",
+        "profile",
+        "email",
+        "v-note:test:access",
+        "telemetry:write",
+    ] {
+        assert!(
+            scopes.contains(&expected),
+            "{expected} missing from {scope}"
+        );
+    }
 
     let pkce_cookie = response
         .headers()

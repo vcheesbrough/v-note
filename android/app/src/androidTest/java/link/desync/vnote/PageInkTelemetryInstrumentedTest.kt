@@ -11,6 +11,7 @@ import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.telemetry.ConfigFetch
 import link.desync.vnote.telemetry.ExportOutcome
 import link.desync.vnote.telemetry.Signal
 import link.desync.vnote.telemetry.Telemetry
@@ -46,7 +47,12 @@ class PageInkTelemetryInstrumentedTest {
             object : Transport {
                 override fun isReady() = true
 
+                override fun credentialId() = 1
+
+                override fun fetchConfig() = ConfigFetch.Configured("https://ingest.example")
+
                 override fun send(
+                    endpoint: String,
                     signal: Signal,
                     body: String,
                 ): ExportOutcome {

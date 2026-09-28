@@ -21,8 +21,13 @@ import kotlin.random.Random
 
 // Version of this hand-rolled exporter, reported as `telemetry.sdk.version`. Bump
 // when the encoding changes, not when the app does — `service.version` is the
-// app's, and the sidecar supplies it.
-internal const val SDK_VERSION = "1"
+// app's build.
+internal const val SDK_VERSION = "2"
+
+// The `service.name` every Android export carries. The ingest bounds it with
+// `ALLOWED_SERVICE_NAMES=^v-note-(spa|android)$` and drops a resource that does
+// not match, so it is a value the deployment has registered.
+internal const val SERVICE_NAME = "v-note-android"
 
 private const val SDK_NAME = "v-note-android-otlp"
 private const val SCOPE_NAME = "v-note-android"
@@ -127,13 +132,16 @@ data class LogRecord(
 )
 
 // An `ExportTraceServiceRequest` body.
-fun tracesRequest(spans: List<FinishedSpan>): String =
+fun tracesRequest(
+    spans: List<FinishedSpan>,
+    serviceVersion: String,
+): String =
     JSONObject()
         .put(
             "resourceSpans",
             JSONArray().put(
                 JSONObject()
-                    .put("resource", resource())
+                    .put("resource", resource(serviceVersion))
                     .put(
                         "scopeSpans",
                         JSONArray().put(
@@ -146,13 +154,16 @@ fun tracesRequest(spans: List<FinishedSpan>): String =
         ).toString()
 
 // An `ExportLogsServiceRequest` body.
-fun logsRequest(records: List<LogRecord>): String =
+fun logsRequest(
+    records: List<LogRecord>,
+    serviceVersion: String,
+): String =
     JSONObject()
         .put(
             "resourceLogs",
             JSONArray().put(
                 JSONObject()
-                    .put("resource", resource())
+                    .put("resource", resource(serviceVersion))
                     .put(
                         "scopeLogs",
                         JSONArray().put(
@@ -164,15 +175,17 @@ fun logsRequest(records: List<LogRecord>): String =
             ),
         ).toString()
 
-// What the app says about itself. **Every identity attribute is absent on
-// purpose**: the sidecar drops whatever a client claims for `service.name`,
-// `deployment.environment` and `service.version` and writes its own. What is here
-// is exactly the sidecar's allow-list.
-private fun resource(): JSONObject =
+// What the app says about itself: which of v-note's services it is and which
+// build (#439). `otlp-collector-oidc` keeps both as sent. What the app never
+// states is identity: `deployment.environment.name`, `telemetry_source` and every
+// `user.*` are stamped by the ingest from its config and the token.
+private fun resource(serviceVersion: String): JSONObject =
     JSONObject().put(
         "attributes",
         encodeAttributes(
             listOf(
+                Attribute("service.name", SERVICE_NAME),
+                Attribute("service.version", serviceVersion),
                 Attribute("telemetry.sdk.name", SDK_NAME),
                 Attribute("telemetry.sdk.language", "kotlin"),
                 Attribute("telemetry.sdk.version", SDK_VERSION),

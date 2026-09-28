@@ -100,6 +100,11 @@ base_env() {
   export DB_VOLUME=v-note-test-db
   export APP_ENV=test
   export V_NOTE_IMAGE_TAG=9.9.9
+  # #439: the client telemetry ingest's layer, rendered from
+  # /v-note/devops/<env>/otlp-collector-oidc in a real deploy.
+  export OIDC_ISSUER_URL=https://auth.example/application/o/v-note-test/
+  export OIDC_AUDIENCE=v-note-test
+  export ALLOWED_SERVICE_NAMES='^v-note-(spa|android)$'
 }
 
 # Run the deploy script with `$1` applied to the base environment. Echoes the
@@ -197,7 +202,11 @@ echo "==> parameters compose guards, caught by the pre-flight before any side ef
 # login and the image pull. Without that pre-flight they would not surface until
 # `up`, so "exited with no docker call" is precisely the property under test.
 if [ -n "$REAL_DOCKER" ]; then
-  for name in V_NOTE_CONTAINER_NAME V_NOTE_HOST DB_VOLUME POSTGRES_PASSWORD; do
+  # The ingest's three are here too (#439): a deploy whose render lost the
+  # otlp-collector-oidc layer fails before it touches anything, rather than
+  # starting an ingest that refuses every token or admits any service name.
+  for name in V_NOTE_CONTAINER_NAME V_NOTE_HOST DB_VOLUME POSTGRES_PASSWORD \
+    OIDC_ISSUER_URL OIDC_AUDIENCE ALLOWED_SERVICE_NAMES; do
     assert_fails_untouched "$name unset (compose :? guard, before login)" "unset $name" \
       "$name"
   done

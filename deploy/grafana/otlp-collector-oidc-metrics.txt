@@ -1,0 +1,17 @@
+# Metric names the otlp-collector-oidc ingest (#439) exports on :8888, as the
+# shared Prometheus stores them — the ones deploy/grafana/ charts and alerts on.
+#
+# Not a copy of anything upstream: e2e/tests/client-telemetry.spec.ts scrapes
+# the PINNED image (e2e/docker-compose.test.yml) after driving each event and
+# fails unless every name below is exported, and
+# scripts/test-grafana-dashboard.sh fails unless every `otelcol_*` name the
+# dashboard or the alert rules query is listed here. So a rename in a new image
+# breaks a test rather than a panel. One name per line.
+otelcol_exporter_queue_size
+otelcol_oidcclientauth_rejections
+otelcol_otlpsingleport_requests_refused
+otelcol_processor_filter_datapoints_filtered
+otelcol_processor_filter_logs_filtered
+otelcol_processor_filter_spans_filtered
+otelcol_receiver_accepted_log_records
+otelcol_receiver_accepted_spans

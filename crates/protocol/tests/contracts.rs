@@ -8,7 +8,7 @@ use protocol::{
     MIN_PRESSURE_WIDTH, MeResponse, MetaResponse, PROTOCOL_VERSION, PageClientMessage, PageReplay,
     PageServerMessage, PageSummary, Paper, RULE_COLOR, RULE_LINE_WIDTH, RULE_SPACING_NARROW,
     RULE_SPACING_WIDE, RealtimeTicketResponse, SOLID_ROUND_PRESSURE_STYLE_VERSION, Stroke,
-    StrokeBatch, StrokePoint, StrokeStyle, WorldViewport, paper_marks,
+    StrokeBatch, StrokePoint, StrokeStyle, TelemetryConfigResponse, WorldViewport, paper_marks,
 };
 
 fn fixture_path(path: &str) -> std::path::PathBuf {
@@ -45,6 +45,15 @@ fn deserializes_me_fixture() {
         serde_json::from_str(&fixture("me.json")).expect("me fixture should parse");
     assert_eq!(parsed.sub, "v-note-test-service-account");
     assert_eq!(parsed.email.as_deref(), Some("test@example.com"));
+}
+
+#[test]
+fn deserializes_telemetry_config_fixture() {
+    let parsed: TelemetryConfigResponse = serde_json::from_str(&fixture("telemetry-config.json"))
+        .expect("telemetry config fixture should parse");
+    assert_eq!(parsed.endpoint, "https://v-notes-dev.desync.link");
+    assert!(!parsed.access_token.is_empty());
+    assert_eq!(parsed.expires_at, 1_790_000_000);
 }
 
 #[test]

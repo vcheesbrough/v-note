@@ -559,6 +559,13 @@ pub struct ClientTelemetryConfig {
     /// in deploy config beside the `.alloy` file and the server knows none of it.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub android_endpoint: Option<Url>,
+    /// The **public** origin of this environment's `otlp-collector-oidc` ingest
+    /// (#439), handed to signed-in clients by `GET /api/telemetry/config`.
+    /// Unset is "client telemetry off": the route answers `204` and clients never
+    /// initialise OTLP. Never derived from the app's own origin — an environment
+    /// without the ingest must not have clients guessing where it would be.
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub endpoint: Option<Url>,
 }
 
 /// Where each client kind's exports are forwarded. Only obtainable from an
@@ -571,6 +578,11 @@ pub struct ClientTelemetryUpstreams {
 }
 
 impl ClientTelemetryConfig {
+    /// The ingest origin clients are told to send to (#439), when there is one.
+    pub fn ingest_endpoint(&self) -> Option<&Url> {
+        self.endpoint.as_ref()
+    }
+
     /// The upstreams when ingest is on, else `None`.
     pub fn upstreams(&self) -> Option<ClientTelemetryUpstreams> {
         if !self.enabled {
@@ -613,6 +625,29 @@ impl ValidatedConfig for ClientTelemetryConfig {
                 return Err(ConfigError::invalid(
                     path,
                     "must be a bare origin (`http://host:port`) with no path or query",
+                ));
+            }
+        }
+        if let Some(endpoint) = &self.endpoint {
+            // Handed to browsers and phones, and every request to it carries the
+            // user's access token, so it is TLS or nothing.
+            if endpoint.scheme() != "https" {
+                return Err(ConfigError::invalid(
+                    "client-telemetry.endpoint",
+                    "must be an https URL",
+                ));
+            }
+            // Clients append `/v1/<signal>`: the ingest serves OTLP on its own
+            // paths, unprefixed, so anything but a bare origin is a mistake.
+            if endpoint.path() != "/"
+                || endpoint.query().is_some()
+                || endpoint.fragment().is_some()
+                || !endpoint.username().is_empty()
+                || endpoint.password().is_some()
+            {
+                return Err(ConfigError::invalid(
+                    "client-telemetry.endpoint",
+                    "must be a bare origin (`https://host[:port]`) with no path, query or credentials",
                 ));
             }
         }

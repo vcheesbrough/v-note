@@ -21,6 +21,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DASHBOARD="$ROOT/deploy/grafana/v-note-overview.json"
 PUBLISH="$ROOT/scripts/publish-grafana-dashboard.sh"
 OBSERVABILITY_RS="$ROOT/crates/server/src/observability.rs"
+# #439: the client telemetry ingest's metrics, as the pinned image exports them
+# (proved by e2e/tests/client-telemetry.spec.ts), and the alert rules on them.
+INGEST_METRICS="$ROOT/deploy/grafana/otlp-collector-oidc-metrics.txt"
+ALERTS="$ROOT/deploy/grafana/v-note-alerts.json"
+PUBLISH_ALERTS="$ROOT/scripts/publish-grafana-alerts.sh"
+INGEST_SERVICE=v-note-otlp-collector-oidc
 PROMETHEUS_UID=PBFA97CFB590B2093
 FAKE_TOKEN="fake-token-for-tests-3c9e1d"
 
@@ -104,11 +110,21 @@ dash_check "no datasource template variable" \
 # selector covers both. Anchored so it is not satisfied by a longer label that
 # merely ends in the same letters, and so a leftover bare `env=` fails.
 dash_check "every Prometheus metric selector filters deployment_environment=\"\$env\"" \
-  'prom_exprs | length > 0 and all([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length > 0 and all(test("[{,[:space:]]deployment_environment=\"\\$env\"")))' \
-  'prom_exprs | map(select([scan("v_note_[a-z_]+(?:\\{[^}]*\\})?")] | length == 0 or any(test("[{,[:space:]]deployment_environment=\"\\$env\"") | not)))'
-dash_check "every Loki query filters deployment_environment=\"\$env\"" \
-  'loki_exprs | all(test("[{,[:space:]]deployment_environment=\"\\$env\""))' \
-  'loki_exprs | map(select(test("[{,[:space:]]deployment_environment=\"\\$env\"") | not))'
+  'prom_exprs | length > 0 and all([scan("(?:v_note|otelcol)_[a-z_]+(?:\\{[^}]*\\})?")] | length > 0 and all(test("[{,[:space:]]deployment_environment=\"\\$env\"")))' \
+  'prom_exprs | map(select([scan("(?:v_note|otelcol)_[a-z_]+(?:\\{[^}]*\\})?")] | length == 0 or any(test("[{,[:space:]]deployment_environment=\"\\$env\"") | not)))'
+# The ingest's `otelcol_*` names are every collector's names: without the
+# service filter a panel would sum another product's ingest (or the shared
+# Alloy's own collector metrics) into v-note's.
+dash_check "every otelcol_* selector is scoped to service_name=\"$INGEST_SERVICE\"" \
+  'prom_exprs | all([scan("otelcol_[a-z_]+(?:\\{[^}]*\\})?")] | all(test("[{,[:space:]]service_name=\"'"$INGEST_SERVICE"'\"")))' \
+  'prom_exprs | map(select([scan("otelcol_[a-z_]+(?:\\{[^}]*\\})?")] | any(test("service_name=\"'"$INGEST_SERVICE"'\"") | not)))'
+# Client streams arrive over OTLP from the ingest, which stamps the contract's
+# `deployment.environment.name` (Loki: `deployment_environment_name`); the
+# server's arrive by the Docker scrape as `deployment_environment`. Either names
+# the environment; one of them must be there.
+dash_check "every Loki query filters deployment_environment(_name)=\"\$env\"" \
+  'loki_exprs | all(test("[{,[:space:]]deployment_environment(_name)?=\"\\$env\""))' \
+  'loki_exprs | map(select(test("[{,[:space:]]deployment_environment(_name)?=\"\\$env\"") | not))'
 dash_check "no query filters the retired env label" \
   '(prom_exprs + loki_exprs) | all(test("[{,[:space:]]env=") | not)' \
   '(prom_exprs + loki_exprs) | map(select(test("[{,[:space:]]env=")))'
@@ -128,7 +144,9 @@ for metric in \
   v_note_http_requests_total v_note_http_request_duration_seconds_bucket \
   v_note_thumbnail_artifact_bytes_bucket v_note_thumbnail_generation_duration_seconds_bucket \
   v_note_thumbnail_generation_duration_seconds_count v_note_thumbnail_queue_depth \
-  v_note_thumbnail_recoveries_total v_note_client_telemetry_requests_total; do
+  v_note_thumbnail_recoveries_total \
+  otelcol_receiver_accepted_spans otelcol_receiver_accepted_log_records \
+  otelcol_oidcclientauth_rejections otelcol_processor_filter_spans_filtered; do
   dash_check "charts $metric" "prom_exprs | any(test(\"$metric\\\\b\"))"
 done
 dash_check "lagged and *_error results are called out" \
@@ -146,6 +164,68 @@ while read -r metric; do
     fail "$metric is charted but not registered in crates/server/src/observability.rs"
   fi
 done < "$WORK/metrics"
+
+echo "==> every charted or alerted ingest metric is one the pinned image exports"
+{
+  jq -r "$JQ_DEFS"' prom_exprs[] | scan("otelcol_[a-z_]+")' "$DASHBOARD"
+  jq -r '.. | .expr? // empty | scan("otelcol_[a-z_]+")' "$ALERTS"
+} | sort -u > "$WORK/ingest-metrics"
+if [ ! -s "$WORK/ingest-metrics" ]; then
+  fail "no otelcol_* metric is charted or alerted on — the Client telemetry row is gone"
+fi
+while read -r metric; do
+  if grep -qx "$metric" "$INGEST_METRICS"; then
+    pass "$metric is in otlp-collector-oidc-metrics.txt"
+  else
+    fail "$metric is queried but not in deploy/grafana/otlp-collector-oidc-metrics.txt (which e2e proves against the pinned image)"
+  fi
+done < "$WORK/ingest-metrics"
+
+echo "==> alert rules (#439)"
+if ! jq empty "$ALERTS" >/dev/null 2>&1; then
+  fail "$ALERTS does not parse"
+else
+  pass "alert rules parse"
+  alert_check() {
+    if jq -e "$2" "$ALERTS" >/dev/null 2>&1; then pass "$1"; else fail "$1: $(jq -c "${3:-.}" "$ALERTS" 2>&1 | head -c 400)"; fi
+  }
+  alert_check "a named group with at least one rule" '(.name | length) > 0 and (.rules | length) > 0'
+  alert_check "every rule has a stable uid, a title and a unique uid" \
+    '[.rules[].grafana_alert.uid] | all(type == "string" and length > 0) and length == (unique | length)'
+  alert_check "every rule has a runbook link" \
+    'all(.rules[]; (.annotations.runbook_url // "") | startswith("https://"))' '[.rules[].annotations]'
+  alert_check "every rule has a severity" 'all(.rules[]; (.labels.severity // "") | test("^(critical|warning)$"))'
+  alert_check "every Prometheus query uses the one Prometheus datasource" \
+    '[.rules[].grafana_alert.data[] | select(.datasourceUid != "__expr__") | .datasourceUid] | unique == ["'"$PROMETHEUS_UID"'"]'
+  alert_check "every Prometheus query is pinned to deployment_environment=\"dev\" and the ingest's service" \
+    'all(.rules[].grafana_alert.data[] | select(.datasourceUid != "__expr__") | .model.expr; test("deployment_environment=\"dev\"") and test("service_name=\"'"$INGEST_SERVICE"'\""))'
+  alert_check "the ingest-volume alert exists (client-ingest.md, Operating it)" \
+    'any(.rules[]; .grafana_alert.uid == "v-note-client-ingest-volume" and (.grafana_alert.data[0].model.expr | test("otelcol_receiver_accepted_spans") and test("otelcol_receiver_accepted_log_records")))'
+fi
+
+echo "==> alert publish script"
+rc=0
+( unset GRAFANA_URL GRAFANA_TOKEN; GRAFANA_FOLDER_UID=v-note "$PUBLISH_ALERTS" --dry-run "$ALERTS" ) > "$WORK/alerts-dry" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && jq -e --slurpfile file "$ALERTS" '. == $file[0]' "$WORK/alerts-dry" >/dev/null 2>&1; then
+  pass "alert dry run needs no URL or token, and its body is the file"
+else
+  fail "alert dry run: rc=$rc $(head -c 300 "$WORK/alerts-dry")"
+fi
+echo '{"name":"g","rules":[{"grafana_alert":{"title":"no uid"}}]}' > "$WORK/no-uid-rules.json"
+rc=0
+GRAFANA_FOLDER_UID=v-note "$PUBLISH_ALERTS" --dry-run "$WORK/no-uid-rules.json" > "$WORK/alerts-out" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "uid on every rule" "$WORK/alerts-out"; then
+  pass "a rule without a uid is refused"
+else
+  fail "a rule without a uid: rc=$rc $(cat "$WORK/alerts-out")"
+fi
+rc=0
+( unset GRAFANA_FOLDER_UID; "$PUBLISH_ALERTS" --dry-run "$ALERTS" ) > "$WORK/alerts-out" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "GRAFANA_FOLDER_UID is required" "$WORK/alerts-out"; then
+  pass "the folder is required"
+else
+  fail "folder guard: rc=$rc $(cat "$WORK/alerts-out")"
+fi
 
 echo "==> publish script"
 # A stub curl records its argv, its stdin (the Authorization header) and the
@@ -321,6 +401,38 @@ if [ "$rc" -ne 0 ] && grep -qF "failed before Grafana answered" "$OUT" && ! grep
   pass "a transport failure fails the publish without leaking the token"
 else
   fail "transport failure: rc=$rc $(cat "$OUT")"
+fi
+
+# The alert publish, live against the same stub curl.
+: > "$CALLS"
+rc=0
+(
+  export PATH="$WORK/bin:$PATH"
+  export CURL_CALLS="$CALLS" CURL_STDIN="$WORK/curl-stdin" CURL_PAYLOAD="$WORK/curl-payload"
+  export STUB_CURL_EXIT=0 STUB_CURL_STATUS=202 STUB_CURL_BODY='{"message":"rule group updated successfully"}'
+  export GRAFANA_URL=https://grafana.example.test/ GRAFANA_TOKEN="$FAKE_TOKEN" GRAFANA_FOLDER_UID=v-note
+  "$PUBLISH_ALERTS" "$ALERTS"
+) > "$OUT" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && grep -qF "https://grafana.example.test/api/ruler/grafana/api/v1/rules/v-note" "$CALLS" \
+  && jq -e --slurpfile file "$ALERTS" '. == $file[0]' "$WORK/curl-payload" >/dev/null 2>&1 \
+  && ! grep -qF "$FAKE_TOKEN" "$CALLS" "$OUT" \
+  && grep -qxF "Authorization: Bearer $FAKE_TOKEN" "$WORK/curl-stdin"; then
+  pass "alerts POST to the folder's ruler group, the file as body, the token on stdin only"
+else
+  fail "alert publish: rc=$rc calls=$(cat "$CALLS") out=$(cat "$OUT")"
+fi
+rc=0
+(
+  export PATH="$WORK/bin:$PATH"
+  export CURL_CALLS="$CALLS" CURL_STDIN="$WORK/curl-stdin" CURL_PAYLOAD="$WORK/curl-payload"
+  export STUB_CURL_EXIT=0 STUB_CURL_STATUS=403 STUB_CURL_BODY='{"message":"stub forbidden"}'
+  export GRAFANA_URL=https://grafana.example.test GRAFANA_TOKEN="$FAKE_TOKEN" GRAFANA_FOLDER_UID=v-note
+  "$PUBLISH_ALERTS" "$ALERTS"
+) > "$OUT" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "HTTP 403" "$OUT" && grep -qF "stub forbidden" "$OUT" && ! grep -qF "$FAKE_TOKEN" "$OUT"; then
+  pass "an alert publish refusal fails loudly with Grafana's body and no token"
+else
+  fail "alert publish refusal: rc=$rc $(cat "$OUT")"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then

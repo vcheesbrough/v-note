@@ -1,6 +1,7 @@
 package link.desync.vnote
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BuildConfigTest {
@@ -17,16 +18,13 @@ class BuildConfigTest {
         assertEquals("BASE_URL for flavor '${BuildConfig.FLAVOR}'", expected, BuildConfig.BASE_URL)
     }
 
-    // #406: `devLocal` talks to a laptop and must never export to the dev
-    // environment's collector — its telemetry is off, not redirected.
+    // #439: every flavor asks for the scope the client-telemetry ingest
+    // requires, and `profile` for the `preferred_username` it also requires.
     @Test
-    fun telemetryExportMatchesFlavor() {
-        val expected =
-            when (BuildConfig.FLAVOR) {
-                "dev" -> true
-                "devLocal" -> false
-                else -> error("Untested flavor: ${BuildConfig.FLAVOR}")
-            }
-        assertEquals("TELEMETRY_EXPORT for flavor '${BuildConfig.FLAVOR}'", expected, BuildConfig.TELEMETRY_EXPORT)
+    fun scopesIncludeWhatTheTelemetryIngestRequires() {
+        val scopes = BuildConfig.OIDC_SCOPES.split(' ')
+        for (required in listOf("openid", "profile", "offline_access", "telemetry:write")) {
+            assertTrue("$required in '${BuildConfig.OIDC_SCOPES}'", required in scopes)
+        }
     }
 }
