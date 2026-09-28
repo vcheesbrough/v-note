@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "console_error_panic_hook",
  "futures-util",
@@ -2289,6 +2289,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c0080f0dc1d7c786f467cd85a4e395fcab11ee852004f39a29a18ab7c25d837"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "opentelemetry-http"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2754,7 +2766,7 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "protocol"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "jsonschema",
  "serde",
@@ -3458,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "axum 0.8.9",
  "axum-extra",
@@ -3472,6 +3484,7 @@ dependencies = [
  "jsonwebtoken",
  "once_cell",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "prometheus",
@@ -4114,7 +4127,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

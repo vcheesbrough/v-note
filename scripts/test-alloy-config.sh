@@ -1,5 +1,7 @@
 #!/bin/sh
-# Offline checks for the client telemetry sidecar's Alloy config (#354).
+# Offline checks for the Alloy configs this repo carries: the client telemetry
+# sidecar (#354), which ships, and the e2e stand-in for the shared monitoring
+# Alloy (#417), which does not — see the stand-in section at the end.
 #
 # deploy/alloy/client-telemetry.alloy is applied by CI to a running environment
 # and is the only thing standing between a client's claims about itself and what
@@ -23,6 +25,7 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$ROOT/deploy/alloy/client-telemetry.alloy"
+STANDIN="$ROOT/e2e/alloy/monitor-alloy.alloy"
 DEPLOY_COMPOSE="$ROOT/deploy/docker-compose.yml"
 
 WORK="$(mktemp -d)"
@@ -66,6 +69,7 @@ elif command -v docker >/dev/null 2>&1; then
     docker run --rm \
       -e APP_ENV -e APP_VERSION \
       -e CLIENT_TELEMETRY_TEMPO_ENDPOINT -e CLIENT_TELEMETRY_LOKI_ENDPOINT \
+      -e E2E_COMPOSE_PROJECT \
       -v "$file:/config.alloy:ro" "$IMAGE" "$sub" /config.alloy
   }
 else
@@ -78,6 +82,7 @@ fi
 export APP_ENV=validation APP_VERSION=0.0.0
 export CLIENT_TELEMETRY_TEMPO_ENDPOINT=tempo.invalid:4317
 export CLIENT_TELEMETRY_LOKI_ENDPOINT=http://loki.invalid:3100/otlp
+export E2E_COMPOSE_PROJECT=validation
 
 echo "==> alloy fmt"
 if run_alloy fmt "$CONFIG" > "$WORK/formatted.alloy" 2> "$WORK/fmt.err"; then
@@ -176,6 +181,76 @@ if grep -Eq '^[[:space:]]*metrics[[:space:]]*=' "$CODE"; then
   fail "a metrics output is wired — client metrics are out of scope and have no exporter"
 else
   pass "no metrics output is wired, so /v1/metrics stays a 404"
+fi
+
+# ---------------------------------------------------------------------------
+# The e2e stand-in for the shared monitoring Alloy (#417)
+# ---------------------------------------------------------------------------
+# e2e/alloy/monitor-alloy.alloy is a fixture: it mirrors mini-config's shared
+# Alloy so the server's own OTLP export is tested against the collector shape it
+# is deployed against. It is validated here so a broken fixture fails in
+# seconds rather than as an e2e timeout, and so the properties the e2e
+# assertions depend on cannot quietly change under them.
+echo "==> e2e shared-Alloy stand-in: alloy fmt"
+if run_alloy fmt "$STANDIN" > "$WORK/standin-formatted.alloy" 2> "$WORK/standin-fmt.err"; then
+  if diff -u "$STANDIN" "$WORK/standin-formatted.alloy" > "$WORK/standin-fmt.diff"; then
+    pass "already formatted"
+  else
+    fail "not formatted — apply this diff: $(cat "$WORK/standin-fmt.diff")"
+  fi
+else
+  fail "alloy fmt failed: $(cat "$WORK/standin-fmt.err")"
+fi
+
+echo "==> e2e shared-Alloy stand-in: alloy validate"
+if run_alloy validate "$STANDIN" > "$WORK/standin-validate.out" 2>&1; then
+  pass "the stand-in validates"
+else
+  fail "the stand-in does not validate: $(cat "$WORK/standin-validate.out")"
+fi
+sed 's/otelcol\.processor\.transform\.apps_logs\.input/otelcol.processor.transform.no_such_component.input/' \
+  "$STANDIN" > "$WORK/standin-broken.alloy"
+if cmp -s "$STANDIN" "$WORK/standin-broken.alloy"; then
+  fail "stand-in negative control did not change the file — update its sed pattern"
+elif run_alloy validate "$WORK/standin-broken.alloy" > "$WORK/standin-broken.out" 2>&1; then
+  fail "a stand-in wired to a nonexistent component validated — validate is not validating"
+else
+  pass "a stand-in wired to a nonexistent component is rejected"
+fi
+
+echo "==> e2e shared-Alloy stand-in: what the server-telemetry spec relies on"
+STANDIN_CODE="$WORK/standin-code.alloy"
+grep -v '^[[:space:]]*//' "$STANDIN" > "$STANDIN_CODE"
+# The server exports OTLP/gRPC to :4317; #439 adopts the same stand-in for
+# OTLP/HTTP on :4318. Both are the shared Alloy's `apps` receiver ports.
+for port in 4317 4318; do
+  if grep -q "endpoint = \"0\.0\.0\.0:$port\"" "$STANDIN_CODE"; then
+    pass "the apps receiver listens on :$port"
+  else
+    fail "the apps receiver does not listen on :$port"
+  fi
+done
+# Without a logs output the receiver accepts OTLP logs and drops them — which is
+# exactly what the real shared Alloy does today, and what this fixture exists to
+# not do.
+if grep -Eq '^[[:space:]]*logs[[:space:]]*=[[:space:]]*\[otelcol\.processor\.transform\.apps_logs\.input\]' "$STANDIN_CODE"; then
+  pass "the apps receiver routes logs through the marker"
+else
+  fail "the apps receiver does not route logs through otelcol.processor.transform.apps_logs"
+fi
+# The server's own push is `otlp` and nothing else: `client` is the client
+# ingest's, `docker`/`file` the platform's scrapes.
+otlp_marker="$(grep -c 'set(resource\.attributes\["log_source"\], "otlp")' "$STANDIN_CODE" || true)"
+other_standin_marker="$(grep 'set(resource\.attributes\["log_source"\]' "$STANDIN_CODE" | grep -v '"otlp")' || true)"
+if [ "$otlp_marker" -eq 1 ] && [ -z "$other_standin_marker" ]; then
+  pass "OTLP logs are marked log_source=otlp, and only that"
+else
+  fail "expected exactly one set(resource.attributes[\"log_source\"], \"otlp\") and no other value, found $otlp_marker: $other_standin_marker"
+fi
+if grep -q '"log_source" = "docker"' "$STANDIN_CODE"; then
+  pass "the Docker scrape marks its lines log_source=docker"
+else
+  fail "the Docker scrape does not set log_source=docker"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then

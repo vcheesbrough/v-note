@@ -317,3 +317,459 @@ fn the_otlp_route_label_does_not_capture_other_paths() {
     assert_eq!(normalized_route("/assets/otlp/app.js"), "/static/*");
     assert_eq!(normalized_route("/api/pages"), "/api/pages");
 }
+
+// ---------------------------------------------------------------------------
+// OTLP logs and trace correlation (#417)
+// ---------------------------------------------------------------------------
+
+mod otlp_logs {
+    use std::sync::{Arc, Mutex};
+
+    use opentelemetry::Key;
+    use opentelemetry::logs::AnyValue;
+    use opentelemetry::trace::TraceContextExt as _;
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::logs::InMemoryLogExporter;
+    use opentelemetry_sdk::logs::in_memory_exporter::LogDataWithResource;
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    use url::Url;
+
+    use super::super::{
+        DEFAULT_LOG_FILTER, LogFilters, PROTOCOL_VERSION, TelemetryGuard, build_providers,
+        request_span, telemetry_resource, telemetry_subscriber,
+    };
+    use crate::config::ObservabilityConfig;
+
+    fn observability(endpoint: Option<&str>) -> ObservabilityConfig {
+        ObservabilityConfig {
+            environment: "unit-test".to_string(),
+            otlp_endpoint: endpoint.map(|value| Url::parse(value).expect("test endpoint")),
+            otlp_protocol: "grpc".to_string(),
+            otlp_timeout_ms: 2000,
+            service_name: "v-note".to_string(),
+            metrics_addr: "disabled".to_string(),
+            otlp_log_filter: None,
+        }
+    }
+
+    const ENDPOINT: &str = "http://collector.invalid:4317";
+
+    /// Stdout as the `fmt` layer writes it: one JSON object per line.
+    #[derive(Clone, Default)]
+    struct Stdout(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Stdout {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("stdout lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Stdout {
+        fn lines(&self) -> Vec<serde_json::Value> {
+            let bytes = self.0.lock().expect("stdout lock").clone();
+            String::from_utf8(bytes)
+                .expect("stdout is utf-8")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("every stdout line is JSON"))
+                .collect()
+        }
+
+        fn line(&self, message: &str) -> serde_json::Value {
+            self.lines()
+                .into_iter()
+                .find(|line| line["message"] == message)
+                .unwrap_or_else(|| panic!("no stdout line {message:?}"))
+        }
+    }
+
+    /// The production stack (`telemetry_subscriber`) over in-memory exporters.
+    struct Harness {
+        guard: TelemetryGuard,
+        stdout: Stdout,
+        filters: LogFilters,
+        logs: InMemoryLogExporter,
+    }
+
+    impl Harness {
+        fn new(filters: LogFilters) -> Self {
+            let logs = InMemoryLogExporter::default();
+            let guard = build_providers(
+                &observability(Some(ENDPOINT)),
+                |_: &Url| Ok(InMemorySpanExporter::default()),
+                {
+                    let logs = logs.clone();
+                    |_: &Url| Ok(logs)
+                },
+            );
+            Self {
+                guard,
+                stdout: Stdout::default(),
+                filters,
+                logs,
+            }
+        }
+
+        fn run<T>(&self, check: impl FnOnce() -> T) -> T {
+            let stdout = self.stdout.clone();
+            let subscriber = telemetry_subscriber(
+                &self.filters,
+                move || stdout.clone(),
+                self.guard.tracer_provider.as_ref(),
+                self.guard.logger_provider.as_ref(),
+            );
+            tracing::subscriber::with_default(subscriber, check)
+        }
+
+        fn exported_logs(&self) -> Vec<LogDataWithResource> {
+            self.guard
+                .logger_provider
+                .as_ref()
+                .expect("logger provider")
+                .force_flush()
+                .expect("logs should flush");
+            self.logs.get_emitted_logs().expect("logs should export")
+        }
+
+        fn exported_bodies(&self) -> Vec<AnyValue> {
+            self.exported_logs()
+                .into_iter()
+                .filter_map(|log| log.record.body().cloned())
+                .collect()
+        }
+
+        fn exported_log(&self, message: &str) -> LogDataWithResource {
+            self.exported_logs()
+                .into_iter()
+                .find(|log| log.record.body() == Some(&text(message)))
+                .unwrap_or_else(|| panic!("no exported log record {message:?}"))
+        }
+    }
+
+    fn text(message: &str) -> AnyValue {
+        AnyValue::String(message.to_string().into())
+    }
+
+    fn default_filters() -> LogFilters {
+        LogFilters::new(None, None)
+    }
+
+    fn ids(span: &tracing::Span) -> (String, String) {
+        let context = span.context();
+        let span_context = context.span().span_context().clone();
+        (
+            span_context.trace_id().to_string(),
+            span_context.span_id().to_string(),
+        )
+    }
+
+    fn a_request_span() -> tracing::Span {
+        request_span(
+            &axum::http::Method::POST,
+            "/api/pages",
+            "req_417",
+            &axum::http::HeaderMap::new(),
+        )
+    }
+
+    #[test]
+    fn no_endpoint_builds_neither_provider() {
+        let guard = build_providers(
+            &observability(None),
+            |_: &Url| -> Result<InMemorySpanExporter, String> {
+                panic!("no span exporter without an endpoint")
+            },
+            |_: &Url| -> Result<InMemoryLogExporter, String> {
+                panic!("no log exporter without an endpoint")
+            },
+        );
+        assert!(!guard.exports_traces());
+        assert!(!guard.exports_logs());
+    }
+
+    #[test]
+    fn an_endpoint_builds_both_providers() {
+        let harness = Harness::new(default_filters());
+        assert!(harness.guard.exports_traces());
+        assert!(harness.guard.exports_logs());
+    }
+
+    /// A log exporter that cannot be built costs the logs and nothing else: the
+    /// trace exporter still exports and stdout still logs.
+    #[test]
+    fn a_failed_log_exporter_leaves_traces_and_stdout_working() {
+        let spans = InMemorySpanExporter::default();
+        let guard = build_providers(
+            &observability(Some(ENDPOINT)),
+            {
+                let spans = spans.clone();
+                |_: &Url| Ok(spans)
+            },
+            |_: &Url| -> Result<InMemoryLogExporter, String> {
+                Err("collector said no".to_string())
+            },
+        );
+        assert!(guard.exports_traces());
+        assert!(!guard.exports_logs());
+
+        let stdout = Stdout::default();
+        let subscriber = telemetry_subscriber(
+            &default_filters(),
+            {
+                let stdout = stdout.clone();
+                move || stdout.clone()
+            },
+            guard.tracer_provider.as_ref(),
+            guard.logger_provider.as_ref(),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("work");
+            span.in_scope(|| tracing::info!("still logging"));
+        });
+
+        assert_eq!(stdout.line("still logging")["level"], "INFO");
+        guard
+            .tracer_provider
+            .as_ref()
+            .expect("tracer provider")
+            .force_flush()
+            .expect("spans should flush");
+        let spans = spans.get_finished_spans().expect("spans should export");
+        assert!(spans.iter().any(|span| span.name == "work"));
+    }
+
+    /// …and the reverse: a span exporter that fails does not take logs down.
+    #[test]
+    fn a_failed_span_exporter_leaves_logs_working() {
+        let guard = build_providers(
+            &observability(Some(ENDPOINT)),
+            |_: &Url| -> Result<InMemorySpanExporter, String> { Err("no".to_string()) },
+            |_: &Url| Ok(InMemoryLogExporter::default()),
+        );
+        assert!(!guard.exports_traces());
+        assert!(guard.exports_logs());
+    }
+
+    #[test]
+    fn dropping_the_guard_shuts_down_both_providers() {
+        let spans = InMemorySpanExporter::default();
+        let logs = InMemoryLogExporter::default();
+        let guard = build_providers(
+            &observability(Some(ENDPOINT)),
+            {
+                let spans = spans.clone();
+                |_: &Url| Ok(spans)
+            },
+            {
+                let logs = logs.clone();
+                |_: &Url| Ok(logs)
+            },
+        );
+        drop(guard);
+        assert!(spans.is_shutdown_called(), "span provider not shut down");
+        assert!(logs.is_shutdown_called(), "log provider not shut down");
+    }
+
+    /// Records the resource each provider hands its exporter, so the test can
+    /// see what the SDK would put on the wire for *both* signals.
+    #[derive(Clone, Debug, Default)]
+    struct ResourceProbe(Arc<Mutex<Option<Resource>>>);
+
+    impl ResourceProbe {
+        fn resource(&self) -> Option<Resource> {
+            self.0.lock().expect("probe lock").clone()
+        }
+    }
+
+    impl opentelemetry_sdk::trace::SpanExporter for ResourceProbe {
+        async fn export(&self, _batch: Vec<opentelemetry_sdk::trace::SpanData>) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            *self.0.lock().expect("probe lock") = Some(resource.clone());
+        }
+    }
+
+    impl opentelemetry_sdk::logs::LogExporter for ResourceProbe {
+        async fn export(&self, _batch: opentelemetry_sdk::logs::LogBatch<'_>) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            *self.0.lock().expect("probe lock") = Some(resource.clone());
+        }
+    }
+
+    #[test]
+    fn tracer_and_logger_share_one_resource() {
+        let config = observability(Some(ENDPOINT));
+        let span_probe = ResourceProbe::default();
+        let log_probe = ResourceProbe::default();
+        let guard = build_providers(
+            &config,
+            {
+                let probe = span_probe.clone();
+                |_: &Url| Ok(probe)
+            },
+            {
+                let probe = log_probe.clone();
+                |_: &Url| Ok(probe)
+            },
+        );
+        // The batch processors hand the resource over on their own threads; a
+        // flush is a round trip through each, so it has arrived by the time
+        // this returns.
+        guard
+            .tracer_provider
+            .as_ref()
+            .expect("tracer provider")
+            .force_flush()
+            .expect("spans should flush");
+        guard
+            .logger_provider
+            .as_ref()
+            .expect("logger provider")
+            .force_flush()
+            .expect("logs should flush");
+        assert_eq!(span_probe.resource(), Some(telemetry_resource(&config)));
+        assert_eq!(log_probe.resource(), span_probe.resource());
+    }
+
+    /// Asserted on the exported record, not on config: this is what a
+    /// collector receives.
+    #[test]
+    fn exported_log_records_carry_the_resource_attributes() {
+        let harness = Harness::new(default_filters());
+        harness.run(|| tracing::info!("resource probe"));
+        let log = harness.exported_log("resource probe");
+
+        let attribute = |key: &'static str| {
+            log.resource
+                .get(&Key::from_static_str(key))
+                .unwrap_or_else(|| panic!("missing resource attribute {key}"))
+                .to_string()
+        };
+        assert_eq!(attribute("service.name"), "v-note");
+        assert_eq!(attribute("service.version"), crate::app_version());
+        assert_eq!(attribute("deployment.environment"), "unit-test");
+        assert_eq!(attribute("vnote.protocol"), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn an_exported_log_inside_a_request_span_carries_its_trace_and_span_ids() {
+        let harness = Harness::new(default_filters());
+        let (trace_id, span_id) = harness.run(|| {
+            let span = a_request_span();
+            span.in_scope(|| tracing::info!("inside the request"));
+            ids(&span)
+        });
+
+        let log = harness.exported_log("inside the request");
+        let context = log
+            .record
+            .trace_context()
+            .expect("a record written inside a span carries its context");
+        assert_eq!(context.trace_id.to_string(), trace_id);
+        assert_eq!(context.span_id.to_string(), span_id);
+    }
+
+    #[test]
+    fn an_exported_log_outside_any_span_carries_no_trace_context() {
+        let harness = Harness::new(default_filters());
+        harness.run(|| tracing::info!("outside any span"));
+        let log = harness.exported_log("outside any span");
+        assert!(log.record.trace_context().is_none());
+    }
+
+    /// The stdout copy is a different pipeline from the OTLP one, so it gets
+    /// its own proof: the same two cases against the JSON line.
+    #[test]
+    fn a_stdout_line_inside_a_request_span_carries_its_trace_and_span_ids() {
+        let harness = Harness::new(default_filters());
+        let (trace_id, span_id) = harness.run(|| {
+            let span = a_request_span();
+            span.in_scope(|| tracing::info!(page_id = "page_1", "inside the request"));
+            ids(&span)
+        });
+
+        let line = harness.stdout.line("inside the request");
+        assert_eq!(line["trace_id"], trace_id.as_str());
+        assert_eq!(line["span_id"], span_id.as_str());
+        // Still a flat object: the event's own fields and the span's
+        // `request_id` survive the injection.
+        assert_eq!(line["page_id"], "page_1");
+        assert_eq!(line["span"]["request_id"], "req_417");
+    }
+
+    #[test]
+    fn a_stdout_line_outside_any_span_carries_no_trace_ids() {
+        let harness = Harness::new(default_filters());
+        harness.run(|| tracing::info!("outside any span"));
+        let line = harness.stdout.line("outside any span");
+        assert!(line.get("trace_id").is_none(), "{line}");
+        assert!(line.get("span_id").is_none(), "{line}");
+    }
+
+    /// `otlp-log-filter` governs the OTLP layer alone: Loki at `warn` while
+    /// stdout stays at `info`, and the reverse.
+    #[test]
+    fn the_otlp_log_filter_is_independent_of_stdout() {
+        let quieter = Harness::new(LogFilters::new(None, Some("server=warn")));
+        quieter.run(|| {
+            tracing::info!("routine");
+            tracing::warn!("notable");
+        });
+        let exported = quieter.exported_bodies();
+        assert!(exported.contains(&text("notable")));
+        assert!(!exported.contains(&text("routine")));
+        quieter.stdout.line("routine");
+        quieter.stdout.line("notable");
+
+        let louder = Harness::new(LogFilters::new(Some("server=info"), Some("server=debug")));
+        louder.run(|| tracing::debug!("detail"));
+        assert!(louder.exported_bodies().contains(&text("detail")));
+        assert!(
+            louder
+                .stdout
+                .lines()
+                .iter()
+                .all(|line| line["message"] != "detail")
+        );
+    }
+
+    #[test]
+    fn log_filters_default_to_the_stdout_filter() {
+        let defaults = LogFilters::new(None, None);
+        assert_eq!(defaults.stdout, DEFAULT_LOG_FILTER);
+        assert_eq!(defaults.otlp_logs, defaults.stdout);
+
+        let from_rust_log = LogFilters::new(Some("server=debug"), Some("  "));
+        assert_eq!(from_rust_log.stdout, "server=debug");
+        assert_eq!(from_rust_log.otlp_logs, "server=debug");
+
+        let split = LogFilters::new(Some("server=debug"), Some("server=warn"));
+        assert_eq!(split.otlp_logs, "server=warn");
+    }
+
+    /// Exporting a batch must never produce a record to export: the SDK's own
+    /// reports stay on stdout even when the OTLP filter would admit everything.
+    #[test]
+    fn the_sdks_own_events_never_reach_the_otlp_layer() {
+        let harness = Harness::new(LogFilters::new(Some("trace"), Some("trace")));
+        harness.run(|| {
+            tracing::warn!(target: "opentelemetry_sdk", "export failed");
+            tracing::warn!(target: "server::probe", "product line");
+        });
+        let exported = harness.exported_bodies();
+        assert!(exported.contains(&text("product line")));
+        assert!(!exported.contains(&text("export failed")));
+        harness.stdout.line("export failed");
+    }
+}

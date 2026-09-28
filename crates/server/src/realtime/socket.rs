@@ -199,6 +199,10 @@ pub async fn realtime_socket(
             Ok(caller) => caller,
             Err(status) => {
                 crate::observability::metrics().record_auth_failure("realtime_auth");
+                tracing::warn!(
+                    status = status.as_u16(),
+                    "realtime upgrade rejected: authentication failed"
+                );
                 return (status, "realtime authentication failed").into_response();
             }
         };
@@ -256,10 +260,11 @@ async fn authenticate_realtime(
 async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWebSocket) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
     crate::observability::metrics().record_realtime_event("library", "connected");
+    tracing::info!(owner_id = %owner_id, "library socket connected");
     let mut receiver = state.realtime.subscribe_library(&owner_id);
     let (mut sender, mut inbound) = socket.split();
 
-    loop {
+    let reason = loop {
         tokio::select! {
             event = receiver.recv() => {
                 let Fanout { message: event, origin } = match event {
@@ -268,9 +273,9 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWe
                     // Counted here so it is visible; recovery is #279.
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         crate::observability::metrics().record_realtime_event("library", "lagged");
-                        break;
+                        break "lagged: the subscriber fell behind the library channel";
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => break "library channel closed",
                 };
                 let message_type = event.message_type();
                 let Ok(payload) = serde_json::to_string(&event) else {
@@ -286,7 +291,7 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWe
                     .is_err()
                 {
                     crate::observability::metrics().record_realtime_event("library", "send_error");
-                    break;
+                    break "send failed";
                 }
                 crate::observability::metrics().observe_realtime_message_bytes(
                     "library",
@@ -298,7 +303,7 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWe
                 match message {
                     Some(frame) if frame.opcode() == OpCode::Close => {
                         crate::observability::metrics().record_realtime_event("library", "closed");
-                        break;
+                        break "client closed";
                     }
                     // The library channel is server→client only; anything else
                     // the peer sends (including its `ping`/`pong`, which `yawc`
@@ -306,12 +311,13 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWe
                     Some(_) => {}
                     None => {
                         record_stream_end("library");
-                        break;
+                        break "stream ended without a close frame";
                     }
                 }
             }
         }
-    }
+    };
+    tracing::info!(owner_id = %owner_id, reason, "library socket closed");
 }
 
 // ---- Page channel (per-`page_id` ink WSS) --------------------------------
@@ -334,6 +340,10 @@ pub async fn page_socket(
             Ok(caller) => caller,
             Err(status) => {
                 crate::observability::metrics().record_auth_failure("realtime_auth");
+                tracing::warn!(
+                    status = status.as_u16(),
+                    "realtime upgrade rejected: authentication failed"
+                );
                 return (status, "realtime authentication failed").into_response();
             }
         };
@@ -342,7 +352,10 @@ pub async fn page_socket(
 
     match store.page_belongs_to_owner(&page_id, &owner_id).await {
         Ok(true) => {}
-        Ok(false) => return (StatusCode::FORBIDDEN, "page not found").into_response(),
+        Ok(false) => {
+            tracing::warn!("page socket rejected: page not found or not owned by the caller");
+            return (StatusCode::FORBIDDEN, "page not found").into_response();
+        }
         Err(error) => {
             tracing::error!(error = %error, "page ownership check failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "ownership check failed").into_response();
@@ -376,50 +389,17 @@ async fn handle_page_socket(
     crate::observability::metrics().record_realtime_event("page", "connected");
     let session_id = format!("session_{}", random_hex(16));
     tracing::Span::current().record("session_id", session_id.as_str());
+    // `page_id` and `session_id` are on the enclosing connection span.
+    tracing::info!("page socket connected");
     let mut receiver = state.realtime.subscribe_page(&page_id);
     let (mut sender, mut inbound) = socket.split();
 
-    let last_seq = store.max_seq(&page_id).await.unwrap_or(0);
-    let lease_holder = state.realtime.current_lease_holder(&page_id);
-    // Carrying paper here makes the page channel self-sufficient: a reconnecting
-    // client gets the authoritative value without a second REST round trip, which
-    // is also what self-corrects a stale `PageSummary.paper` in an open library.
-    //
-    // A read failure closes the connection rather than degrading to `none`.
-    // Unlike `last_seq` above — where a wrong value is repaired by the next
-    // gap-fill — nothing downstream re-reads paper: `Subscribe` replays only ink
-    // and tombstones, so a synthesized blank would render as a blank page for as
-    // long as the socket stayed open. Failing loudly is recoverable; rendering
-    // the wrong page silently is not.
-    let paper = match store.current_paper(&page_id).await {
-        Ok(paper) => paper,
-        Err(error) => {
-            tracing::error!(error = %error, %page_id, "could not read page paper");
-            crate::observability::metrics().record_realtime_event("page", "paper_read_error");
-            send_page(
-                &mut sender,
-                PageServerMessage::Error {
-                    code: "welcome_failed".to_string(),
-                    message: "could not load the page".to_string(),
-                    client_mutation_id: None,
-                },
-            )
-            .await;
-            return;
-        }
-    };
-    let welcome = PageServerMessage::Welcome {
-        session_id: session_id.clone(),
-        last_seq,
-        lease_holder,
-        paper,
-    };
-    if !send_page(&mut sender, welcome).await {
-        crate::observability::metrics().record_realtime_event("page", "send_error");
+    if let Err(reason) = send_welcome(&state, &store, &page_id, &session_id, &mut sender).await {
+        tracing::info!(reason, "page socket closed");
         return;
     }
 
-    loop {
+    let reason = loop {
         tokio::select! {
             event = receiver.recv() => {
                 match event {
@@ -435,7 +415,7 @@ async fn handle_page_socket(
                             }
                             None => {
                                 crate::observability::metrics().record_realtime_event("page", "send_error");
-                                break;
+                                break "send failed";
                             }
                         }
                     }
@@ -443,9 +423,13 @@ async fn handle_page_socket(
                     // no longer silently.
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         crate::observability::metrics().record_realtime_event("page", "lagged");
+                        // The counter says how often; this names the session that
+                        // missed fan-out and why. Not the skipped count: the
+                        // connection stays open and will gap-fill on resubscribe.
+                        tracing::warn!("page subscriber lagged; fan-out messages were skipped");
                         continue;
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => break "page channel closed",
                 }
             }
             inbound_message = inbound.next() => {
@@ -457,29 +441,30 @@ async fn handle_page_socket(
                         // not UTF-8 is a protocol violation, not a message.
                         let Ok(text) = std::str::from_utf8(frame.payload()) else {
                             crate::observability::metrics().record_realtime_event("page", "recv_error");
-                            break;
+                            break "text frame was not UTF-8";
                         };
                         if !handle_page_client_message(
                             &state, &store, &page_id, &session_id, &mut sender, text,
                         )
                         .await
                         {
-                            break;
+                            break "send failed";
                         }
                     }
                     Some(frame) if frame.opcode() == OpCode::Close => {
                         crate::observability::metrics().record_realtime_event("page", "closed");
-                        break;
+                        break "client closed";
                     }
                     Some(_) => {}
                     None => {
                         record_stream_end("page");
-                        break;
+                        break "stream ended without a close frame";
                     }
                 }
             }
         }
-    }
+    };
+    tracing::info!(reason, "page socket closed");
 
     // Release the lease on disconnect so a sibling session can take over.
     if state.realtime.release_lease(&page_id, &session_id) {
@@ -487,6 +472,57 @@ async fn handle_page_socket(
             .realtime
             .publish_page(&page_id, PageServerMessage::LeaseChanged { holder: None });
     }
+}
+
+/// The first frame of a page connection: the session, the head `seq`, the lease
+/// holder and the paper. `Err` is the reason the connection closes instead.
+async fn send_welcome(
+    state: &AppState,
+    store: &PgPageStore,
+    page_id: &str,
+    session_id: &str,
+    sender: &mut PageSender,
+) -> Result<(), &'static str> {
+    let last_seq = store.max_seq(page_id).await.unwrap_or(0);
+    let lease_holder = state.realtime.current_lease_holder(page_id);
+    // Carrying paper here makes the page channel self-sufficient: a reconnecting
+    // client gets the authoritative value without a second REST round trip, which
+    // is also what self-corrects a stale `PageSummary.paper` in an open library.
+    //
+    // A read failure closes the connection rather than degrading to `none`.
+    // Unlike `last_seq` above — where a wrong value is repaired by the next
+    // gap-fill — nothing downstream re-reads paper: `Subscribe` replays only ink
+    // and tombstones, so a synthesized blank would render as a blank page for as
+    // long as the socket stayed open. Failing loudly is recoverable; rendering
+    // the wrong page silently is not.
+    let paper = match store.current_paper(page_id).await {
+        Ok(paper) => paper,
+        Err(error) => {
+            tracing::error!(error = %error, %page_id, "could not read page paper");
+            crate::observability::metrics().record_realtime_event("page", "paper_read_error");
+            send_page(
+                sender,
+                PageServerMessage::Error {
+                    code: "welcome_failed".to_string(),
+                    message: "could not load the page".to_string(),
+                    client_mutation_id: None,
+                },
+            )
+            .await;
+            return Err("page paper could not be read");
+        }
+    };
+    let welcome = PageServerMessage::Welcome {
+        session_id: session_id.to_string(),
+        last_seq,
+        lease_holder,
+        paper,
+    };
+    if !send_page(sender, welcome).await {
+        crate::observability::metrics().record_realtime_event("page", "send_error");
+        return Err("welcome send failed");
+    }
+    Ok(())
 }
 
 /// Parses, dispatches and times one inbound page-channel message. Returns false
@@ -513,7 +549,14 @@ async fn handle_page_client_message(
     let received = Instant::now();
     let message: PageClientMessage = match serde_json::from_str(text) {
         Ok(message) => message,
-        Err(_) => {
+        Err(error) => {
+            // The category and position only: serde's message can quote the
+            // offending value, and the payload may be ink.
+            tracing::warn!(
+                category = ?error.classify(),
+                column = error.column(),
+                "page-channel message rejected: could not parse"
+            );
             return send_page(
                 sender,
                 PageServerMessage::Error {

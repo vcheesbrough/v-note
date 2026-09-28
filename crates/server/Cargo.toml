@@ -34,7 +34,8 @@ http-body-util = "0.1"
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 once_cell = "1.21.4"
 opentelemetry = "0.32.0"
-opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic", "trace"] }
+opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic", "trace", "logs"] }
+opentelemetry-appender-tracing = "0.32.0"
 opentelemetry_sdk = "0.32.1"
 prometheus = "0.14.0"
 protocol = { path = "../protocol" }
@@ -71,7 +72,7 @@ axum-extra = { version = "0.12", features = ["cookie"] }
 flate2 = "1.1.10"
 # Same backend as [dependencies]: enabling a second one makes jsonwebtoken panic.
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
-# `testing` adds the in-memory span exporter the span-attribute tests read back.
-opentelemetry_sdk = { version = "0.32.1", features = ["testing"] }
+# `testing` adds the in-memory span and log exporters the tests read back.
+opentelemetry_sdk = { version = "0.32.1", features = ["testing", "logs"] }
 serde = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

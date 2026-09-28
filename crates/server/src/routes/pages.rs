@@ -91,7 +91,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, fields(owner_id = %claims.sub))]
 pub async fn list_pages(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -115,12 +115,14 @@ pub async fn list_pages(
     .await
     .map_err(server_error)?;
 
+    // The count is the `db.query` span's `db.response.returned_rows`.
+    tracing::debug!("pages listed");
     Ok(Json(ListPagesResponse {
         pages: rows.into_iter().map(PageSummary::from).collect(),
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, fields(owner_id = %claims.sub, page_id))]
 pub async fn create_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -133,6 +135,7 @@ pub async fn create_page(
         .filter(|value| !value.is_empty())
         .unwrap_or("");
     let page_id = format!("page_{}", Uuid::new_v4().simple());
+    tracing::Span::current().record("page_id", page_id.as_str());
 
     // A page is born with its paper — one round trip, no revision bump, and no
     // thumbnail job (a page with no ink has nothing to preview yet). Serde has
@@ -157,6 +160,12 @@ pub async fn create_page(
     })?;
 
     let page = PageSummary::from(row);
+    tracing::info!(
+        page_id = %page.id,
+        paper = page.paper.wire_value(),
+        titled = !page.title.is_empty(),
+        "page created",
+    );
     state.realtime.publish_library_event(
         &claims.sub,
         LibraryEvent::PageCreated { page: page.clone() },
@@ -165,7 +174,7 @@ pub async fn create_page(
     Ok((StatusCode::CREATED, Json(PageResponse { page })))
 }
 
-#[tracing::instrument(skip_all, fields(page_id = %page_id))]
+#[tracing::instrument(skip_all, fields(page_id = %page_id, owner_id = %claims.sub))]
 pub async fn get_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -191,14 +200,25 @@ pub async fn get_page(
     .map_err(server_error)?;
 
     match row {
-        Some(row) => Ok(Json(PageResponse {
-            page: PageSummary::from(row),
-        })),
-        None => Err(ApiError::PAGE_NOT_FOUND),
+        Some(row) => {
+            tracing::debug!("page read");
+            Ok(Json(PageResponse {
+                page: PageSummary::from(row),
+            }))
+        }
+        None => {
+            // Not found and not-yours are one answer on purpose (a 403 either
+            // way), so the line does not distinguish them either.
+            tracing::warn!("page read rejected: not found or not owned by the caller");
+            Err(ApiError::PAGE_NOT_FOUND)
+        }
     }
 }
 
-#[tracing::instrument(skip_all, fields(page_id = %page_id, source_seq = source_seq))]
+#[tracing::instrument(
+    skip_all,
+    fields(page_id = %page_id, source_seq = source_seq, owner_id = %claims.sub)
+)]
 pub async fn get_thumbnail(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -213,6 +233,7 @@ pub async fn get_thumbnail(
             .await
             .map_err(server_error)?;
     if !owned {
+        tracing::warn!("thumbnail read rejected: page not found or not owned by the caller");
         return Err(ApiError::PAGE_NOT_FOUND);
     }
     let png = sqlx::query_scalar::<_, Vec<u8>>(
@@ -225,22 +246,30 @@ pub async fn get_thumbnail(
     .await
     .map_err(server_error)?;
     match png {
-        Some(bytes) => Ok((
-            [
-                (header::CONTENT_TYPE, "image/png"),
-                (
-                    header::CACHE_CONTROL,
-                    "private, max-age=31536000, immutable",
-                ),
-            ],
-            bytes,
-        )
-            .into_response()),
-        None => Err(ApiError::THUMBNAIL_GONE),
+        Some(bytes) => {
+            tracing::debug!("thumbnail served");
+            Ok((
+                [
+                    (header::CONTENT_TYPE, "image/png"),
+                    (
+                        header::CACHE_CONTROL,
+                        "private, max-age=31536000, immutable",
+                    ),
+                ],
+                bytes,
+            )
+                .into_response())
+        }
+        None => {
+            // A superseded or still-generating revision: the client asked for an
+            // artifact that retention (or a newer commit) has moved past.
+            tracing::warn!("thumbnail read rejected: revision not available");
+            Err(ApiError::THUMBNAIL_GONE)
+        }
     }
 }
 
-#[tracing::instrument(skip_all, fields(page_id = %page_id))]
+#[tracing::instrument(skip_all, fields(page_id = %page_id, owner_id = %claims.sub))]
 pub async fn delete_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -263,10 +292,15 @@ pub async fn delete_page(
     })?;
 
     if result.rows_affected() == 0 {
+        tracing::warn!(
+            page_id = %page_id,
+            "page delete rejected: not found or not owned by the caller"
+        );
         crate::observability::metrics().record_page_mutation("delete_page", "not_found");
         return Err(ApiError::PAGE_NOT_FOUND);
     }
 
+    tracing::info!(page_id = %page_id, "page deleted");
     state
         .realtime
         .publish_library_event(&claims.sub, LibraryEvent::PageDeleted { page_id });

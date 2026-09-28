@@ -1,0 +1,164 @@
+// e2e stand-in for the SHARED monitoring Alloy (`monitor-alloy`) (#417).
+//
+// An e2e FIXTURE, not a deployed artifact. The real one is
+// mini-config/monitoring-stack/config.alloy, which v-note does not own and does
+// not ship. This file mirrors the two parts of it the server's own telemetry
+// goes through, so e2e exercises the server against the collector shape it is
+// deployed against:
+//
+//   1. the `apps` OTLP receiver (gRPC :4317, HTTP :4318) the server exports to,
+//      with traces batched to Tempo — as config.alloy's `otelcol.receiver.otlp
+//      "apps"` does;
+//   2. the Docker log scrape, stamping `log_source = "docker"` and taking
+//      `service_name` / `deployment_environment` from the container's
+//      `observability.*` labels — as config.alloy's `loki.source.docker
+//      "docker_logs"` does. Narrowed to this compose project's `app` container,
+//      because on a CI host the socket sees every container on the machine.
+//
+// PLUS ONE THING config.alloy DOES NOT HAVE YET: a logs pipeline on the `apps`
+// receiver, stamping `log_source = "otlp"` and exporting to Loki's OTLP ingest.
+// On mini-config master the `apps` receiver outputs traces only, so OTLP logs
+// sent there are dropped; adding the logs half is a separate mini-config ticket
+// that #417's dev acceptance waits on. This fixture is written the way that
+// ticket is expected to land it (`log_source` set by the collector, never by
+// the server — the same convention client-telemetry.alloy follows with
+// `client`). If it lands differently, change this file to match it.
+//
+// MIRROR DRIFT IS THE RISK. Nothing checks this file against config.alloy. A
+// green e2e run proves the *server* exports correct OTLP logs and traces to a
+// collector of this shape; it does not prove the shared Alloy is configured to
+// receive them. Dev is the proof of that. When config.alloy changes the `apps`
+// receiver or the Docker scrape, change this file in the same breath.
+//
+// Endpoints are the e2e service names (`tempo`, `loki`), where config.alloy
+// names `monitor-tempo` and `loki` on proxy-backend.
+
+// ---------------------------------------------------------------------------
+// OTLP from applications — config.alloy `otelcol.receiver.otlp "apps"`
+// ---------------------------------------------------------------------------
+
+otelcol.receiver.otlp "apps" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		traces = [otelcol.processor.batch.apps.input]
+		logs   = [otelcol.processor.transform.apps_logs.input]
+	}
+}
+
+// The path marker. Traces carry none here, as in config.alloy: the server's
+// spans are told from client spans by the client ingest's `client`, not by a
+// marker of their own.
+otelcol.processor.transform "apps_logs" {
+	error_mode = "propagate"
+
+	log_statements {
+		context    = "resource"
+		statements = [
+			`set(resource.attributes["log_source"], "otlp")`,
+		]
+	}
+
+	output {
+		logs = [otelcol.processor.batch.apps.input]
+	}
+}
+
+otelcol.processor.batch "apps" {
+	output {
+		traces = [otelcol.exporter.otlp.tempo.input]
+		logs   = [otelcol.exporter.otlphttp.loki.input]
+	}
+}
+
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = "tempo:4317"
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+// Loki's native OTLP ingest. A base URL: the exporter appends /v1/logs.
+otelcol.exporter.otlphttp "loki" {
+	client {
+		endpoint = "http://loki:3100/otlp"
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Docker log scrape — config.alloy `loki.source.docker "docker_logs"`
+// ---------------------------------------------------------------------------
+
+discovery.docker "app" {
+	host = "unix:///var/run/docker.sock"
+
+	// Both labels must match (Docker ANDs label filters): this project's `app`.
+	filter {
+		name   = "label"
+		values = [
+			string.format("com.docker.compose.project=%s", sys.env("E2E_COMPOSE_PROJECT")),
+			"com.docker.compose.service=app",
+		]
+	}
+}
+
+discovery.relabel "app_logs" {
+	targets = []
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?(.*)$"
+		target_label  = "service_name"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?(.*)$"
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		regex         = "(.+)"
+		target_label  = "compose_service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_observability_service_name"]
+		regex         = "(.+)"
+		target_label  = "service_name"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_observability_deployment_environment"]
+		regex         = "(.+)"
+		target_label  = "deployment_environment"
+	}
+}
+
+loki.source.docker "app_logs" {
+	host          = "unix:///var/run/docker.sock"
+	targets       = discovery.docker.app.targets
+	labels        = {"log_source" = "docker"}
+	relabel_rules = discovery.relabel.app_logs.rules
+	forward_to    = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
