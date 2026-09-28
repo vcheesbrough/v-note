@@ -14,6 +14,8 @@
 #   3. `alloy validate` accepts it — and rejects a deliberately broken copy, so
 #      a validate that has quietly stopped validating is caught here rather than
 #      believed.
+#   4. The properties the server-telemetry and client-telemetry specs rely on
+#      (#417, #439) cannot quietly change under them.
 #
 # POSIX sh. Runs in the `alloy-config-validation` step on the Alloy image itself,
 # which has `alloy` on PATH; locally it falls back to running that same image
@@ -86,7 +88,7 @@ else
 fi
 # Negative control: route the receiver's traces to a component that does not
 # exist. If this passes, `validate` is not checking the graph.
-sed 's/otelcol\.processor\.batch\.apps\.input/otelcol.processor.batch.no_such_component.input/' \
+sed 's/otelcol\.processor\.transform\.apps\.input/otelcol.processor.transform.no_such_component.input/' \
   "$CONFIG" > "$WORK/broken.alloy"
 if cmp -s "$CONFIG" "$WORK/broken.alloy"; then
   fail "negative control did not change the file — update its sed pattern"
@@ -94,6 +96,46 @@ elif run_alloy validate "$WORK/broken.alloy" > "$WORK/broken.out" 2>&1; then
   fail "a config wired to a nonexistent component validated — validate is not validating"
 else
   pass "a config wired to a nonexistent component is rejected"
+fi
+
+echo "==> e2e shared-Alloy stand-in: what the server-telemetry spec relies on"
+CODE="$WORK/standin-code.alloy"
+grep -v '^[[:space:]]*//' "$CONFIG" > "$CODE"
+# The shared Alloy's `apps` receiver listens on both OTLP ports (config.alloy),
+# so the stand-in does too; the server exports OTLP/gRPC to :4317.
+for port in 4317 4318; do
+  if grep -q "endpoint = \"0\.0\.0\.0:$port\"" "$CODE"; then
+    pass "the apps receiver listens on :$port"
+  else
+    fail "the apps receiver does not listen on :$port"
+  fi
+done
+# Without a logs output the receiver accepts OTLP logs and drops them — which is
+# what the real shared Alloy did before mini-config #47.
+if grep -Eq '^[[:space:]]*logs[[:space:]]*=[[:space:]]*\[otelcol\.processor\.transform\.apps\.input\]' "$CODE"; then
+  pass "the apps receiver routes logs through the vocabulary translation"
+else
+  fail "the apps receiver does not route logs through otelcol.processor.transform.apps"
+fi
+# The shared Alloy (mini-config #47) stamps no marker of its own: the pusher
+# marks its data, and `telemetry_source` fills the indexed `log_source`. A
+# stand-in that stamped `otlp` itself would let e2e pass on a server that sets
+# no marker — the exact fault dev would then show.
+if grep -q 'set(attributes\["log_source"\], attributes\["telemetry_source"\]) where attributes\["log_source"\] == nil' "$CODE"; then
+  pass "telemetry_source fills log_source where absent, as in the shared Alloy"
+else
+  fail "the stand-in does not translate telemetry_source into log_source as config.alloy does"
+fi
+stamped="$(grep -E 'set\((resource\.)?attributes\["(log_source|telemetry_source)"\], "(otlp|docker|file)"\)' "$CODE" || true)"
+if [ -z "$stamped" ]; then
+  pass "the collector stamps no server-side marker of its own"
+else
+  fail "the stand-in stamps a marker the pusher should set: $stamped"
+fi
+if grep -q '"log_source" = "docker"' "$CODE"; then
+  pass "the Docker scrape marks its lines log_source=docker"
+else
+  fail "the Docker scrape does not set log_source=docker"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then

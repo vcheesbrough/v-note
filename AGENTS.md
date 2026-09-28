@@ -157,6 +157,40 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
     `e2e/tests/client-telemetry.spec.ts`; a gap is fixed upstream in
     `vcheesbrough/otlp-collector-oidc` and re-pinned, **never** worked around
     here (no proxy, no rewriting in the app). Bump the pin in both compose files.
+- **Telemetry deviations from the cross-repo `observability` contract**
+  (recorded per its §2, "Deviations are recorded"; written down by #417, which
+  changed none of them). v-note predates the contract; this list is what
+  grandfathers it, and each line says what closing it would take:
+  1. **Metrics are scraped, not pushed.** `/metrics` on `:9090` plus the shared
+     Prometheus label contract (Docker `observability.*` labels). Closing it
+     needs an OTLP metric exporter, a stable `service.instance.id` (absent
+     today), and the collector promoting the resource to series labels.
+  2. **Telemetry is configured by product keys, not the standard `OTEL_*`
+     variables** — `VNOTE__OBSERVABILITY__OTLP-*`, and the `otlp-log-filter`
+     #417 added. Closing it means reading the standard variables instead; a
+     per-signal log filter has no standard variable, so that one key stays
+     whatever happens.
+  3. **The platform selects on `log_source`, not the contract's
+     `telemetry_source`.** The server stamps the contract's key
+     (`telemetry_source = "otlp"`, #417) and the shared Alloy copies it into
+     the indexed `log_source` (mini-config #47); client data is stamped
+     `telemetry_source = "client"` by the otlp-collector-oidc ingest (#439)
+     and translated the same way. Values match the contract.
+     Closing it means mini-config's Loki indexing `telemetry_source` and every
+     selector, dashboard and e2e spec moving to it.
+  4. **`deployment.environment`, not `deployment.environment.name`**, on every
+     signal from the server (client data already carries the contract's
+     `deployment.environment.name`, which the shared Alloy copies into
+     `deployment.environment`, #439). The rename reaches the dashboard's
+     `deployment_environment` filter and stored queries.
+  5. **Stdout is a second egress** alongside OTLP: every server log line
+     reaches Loki twice, as `log_source="docker"` and `"otlp"`. Deliberate —
+     stdout is crash-safe and carries pre-init and post-shutdown output.
+     Dropping the Docker copy at the collector is the aligned end state.
+  6. **Nothing counts dropped telemetry.** The Rust SDK exports nothing about
+     itself; a failed or dropped batch shows only as a `warn` on the
+     `opentelemetry*` targets on stdout. Closing it means wrapping the
+     exporters to count what they drop and exporting that counter.
 - Until push CI exists, run **local** sanity checks when you touch code
   (`cargo check`, `trunk build`, Gradle tasks) — only after those trees exist.
 

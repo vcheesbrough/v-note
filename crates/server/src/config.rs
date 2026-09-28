@@ -386,6 +386,11 @@ pub struct ObservabilityConfig {
     pub service_name: String,
     /// `host:port`, or `disabled`/empty to turn the metrics listener off.
     pub metrics_addr: String,
+    /// `EnvFilter` directives for the OTLP log layer only (#417), so what
+    /// reaches Loki can differ from what `RUST_LOG` sends to stdout. Absent or
+    /// blank means the same filter as stdout.
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub otlp_log_filter: Option<String>,
 }
 
 impl ObservabilityConfig {
@@ -401,6 +406,27 @@ impl ObservabilityConfig {
 
     pub fn otlp_timeout(&self) -> Duration {
         Duration::from_millis(self.otlp_timeout_ms)
+    }
+
+    /// One startup line recording what telemetry resolved to, so "why is there
+    /// nothing in Tempo/Loki" has an answer in `docker logs`. Emitted after the
+    /// subscriber is installed, which is why it is not logged during loading.
+    /// Nothing in this group is a secret; the endpoint is an internal address.
+    /// `exports_traces` / `exports_logs` say whether each OTLP provider was
+    /// actually built, which an endpoint alone does not guarantee.
+    pub fn log_resolved(&self, exports_traces: bool, exports_logs: bool) {
+        tracing::info!(
+            environment = %self.environment,
+            service_name = %self.service_name,
+            otlp_endpoint = self.otlp_endpoint.as_ref().map_or("", Url::as_str),
+            exports_traces,
+            exports_logs,
+            otlp_protocol = %self.otlp_protocol,
+            otlp_timeout_ms = self.otlp_timeout_ms,
+            otlp_log_filter = self.otlp_log_filter.as_deref().unwrap_or(""),
+            metrics_addr = %self.metrics_addr,
+            "observability config resolved",
+        );
     }
 }
 
@@ -425,6 +451,14 @@ impl ValidatedConfig for ObservabilityConfig {
             return Err(ConfigError::invalid(
                 "observability.metrics-addr",
                 "must be `host:port` or `disabled`",
+            ));
+        }
+        if let Some(directives) = &self.otlp_log_filter
+            && let Err(error) = tracing_subscriber::EnvFilter::try_new(directives)
+        {
+            return Err(ConfigError::invalid(
+                "observability.otlp-log-filter",
+                format!("not a valid log filter: {error}"),
             ));
         }
         Ok(())

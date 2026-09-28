@@ -30,7 +30,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_telemetry = load_group::<ClientTelemetryConfig>(&cfg, "client-telemetry")?;
     drop(cfg);
 
-    let _telemetry_guard = init_tracing(&observability);
+    let telemetry_guard = init_tracing(&observability);
+    observability.log_resolved(
+        telemetry_guard.exports_traces(),
+        telemetry_guard.exports_logs(),
+    );
     let metrics_addr = observability.metrics_socket_addr();
 
     let app = build_app_router(

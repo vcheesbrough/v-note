@@ -111,6 +111,8 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     let jar = jar
         .add(transient_auth_cookie(STATE_COOKIE, nonce))
         .add(transient_auth_cookie(PKCE_COOKIE, code_verifier));
+    // Neither the nonce nor the verifier: both are the flow's secrets.
+    tracing::info!("login started; redirecting to the IdP");
 
     (jar, Redirect::to(authorize.as_str())).into_response()
 }
@@ -227,55 +229,36 @@ pub async fn callback(
         return abort_flow(jar, StatusCode::BAD_REQUEST, "missing code");
     };
 
-    let http = reqwest::Client::new();
-    let token_response: TokenResponse = match http
-        .post(auth.token_url())
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", &auth.redirect_uri),
-            ("client_id", &auth.client_id),
-            ("code_verifier", &code_verifier),
-        ])
-        .send()
-        .instrument(tracing::info_span!(
-            "http.client",
-            http.method = "POST",
-            url = %auth.token_url(),
-        ))
-        .await
-    {
-        Ok(resp) => match resp.error_for_status() {
-            Ok(ok) => match ok.json().await {
-                Ok(token) => token,
-                Err(error) => {
-                    tracing::error!(error = %error, "failed to parse token response");
-                    return abort_flow(jar, StatusCode::BAD_GATEWAY, "token parse failed");
-                }
-            },
-            Err(error) => {
-                tracing::error!(error = %error, "token endpoint returned error");
-                return abort_flow(jar, StatusCode::BAD_GATEWAY, "token exchange failed");
-            }
-        },
-        Err(error) => {
-            tracing::error!(error = %error, "token endpoint unreachable");
-            return abort_flow(jar, StatusCode::BAD_GATEWAY, "token endpoint unreachable");
-        }
+    let token_response = match exchange_code(auth, &code, &code_verifier).await {
+        Ok(token) => token,
+        Err(message) => return abort_flow(jar, StatusCode::BAD_GATEWAY, message),
     };
 
-    if let Err(error) =
-        crate::auth::validate_jwt(&token_response.access_token, auth, &state.jwks_cache).await
+    let claims = match crate::auth::validate_jwt(
+        &token_response.access_token,
+        auth,
+        &state.jwks_cache,
+    )
+    .await
     {
-        let message = match error {
-            crate::auth::TokenValidationError::MissingScope => {
-                "issued token missing required scope"
-            }
-            crate::auth::TokenValidationError::Invalid(reason) => reason,
-        };
-        tracing::warn!(reason = message, "issued access token failed validation");
-        return abort_flow(jar, StatusCode::FORBIDDEN, "issued token failed validation");
-    }
+        Ok(claims) => claims,
+        Err(error) => {
+            let message = match error {
+                crate::auth::TokenValidationError::MissingScope => {
+                    "issued token missing required scope"
+                }
+                crate::auth::TokenValidationError::Invalid(reason) => reason,
+            };
+            tracing::warn!(reason = message, "issued access token failed validation");
+            return abort_flow(jar, StatusCode::FORBIDDEN, "issued token failed validation");
+        }
+    };
+    // The subject id only — never the token, which is the session.
+    tracing::info!(
+        subject = %claims.sub,
+        max_age_secs = AUTH_COOKIE_MAX_AGE_SECS,
+        "session created"
+    );
 
     let session = Cookie::build((AUTH_COOKIE, token_response.access_token))
         .path("/")
@@ -285,6 +268,43 @@ pub async fn callback(
         .max_age(time::Duration::seconds(AUTH_COOKIE_MAX_AGE_SECS))
         .build();
     (clear_flow_cookies(jar).add(session), Redirect::to("/")).into_response()
+}
+
+/// The authorization-code exchange at the IdP's token endpoint. `Err` is the
+/// body of the 502 the callback answers with; the cause is logged here.
+async fn exchange_code(
+    auth: &crate::auth::AuthConfig,
+    code: &str,
+    code_verifier: &str,
+) -> Result<TokenResponse, &'static str> {
+    let response = reqwest::Client::new()
+        .post(auth.token_url())
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", &auth.redirect_uri),
+            ("client_id", &auth.client_id),
+            ("code_verifier", code_verifier),
+        ])
+        .send()
+        .instrument(tracing::info_span!(
+            "http.client",
+            http.method = "POST",
+            url = %auth.token_url(),
+        ))
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "token endpoint unreachable");
+            "token endpoint unreachable"
+        })?;
+    let response = response.error_for_status().map_err(|error| {
+        tracing::error!(error = %error, "token endpoint returned error");
+        "token exchange failed"
+    })?;
+    response.json().await.map_err(|error| {
+        tracing::error!(error = %error, "failed to parse token response");
+        "token parse failed"
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -303,6 +323,10 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
         .end_session_url
         .clone()
         .unwrap_or_else(|| "/".to_string());
+    tracing::info!(
+        idp_end_session = state.auth.end_session_url.is_some(),
+        "session ended"
+    );
 
     (jar, Redirect::to(&target)).into_response()
 }

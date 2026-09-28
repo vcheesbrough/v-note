@@ -12,6 +12,8 @@ use opentelemetry::KeyValue;
 use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use prometheus::{
@@ -22,6 +24,7 @@ use rand::Rng;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -473,8 +476,6 @@ pub async fn request_observability_middleware(mut req: Request, next: Next) -> R
     let elapsed = started.elapsed().as_secs_f64();
     let status = response.status();
     metrics().record_http(method.as_str(), &route, status, elapsed);
-    let trace_context = trace_context_from_span(&span);
-
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response
             .headers_mut()
@@ -484,22 +485,19 @@ pub async fn request_observability_middleware(mut req: Request, next: Next) -> R
             .insert(HeaderName::from_static(CORRELATION_ID_HEADER), value);
     }
 
-    tracing::info!(
-        method = %method,
-        route = %route,
-        status = status.as_u16(),
-        latency_ms = (elapsed * 1000.0),
-        request_id = %request_id,
-        trace_id = trace_context
-            .as_ref()
-            .map(|context| context.trace_id.as_str())
-            .unwrap_or(""),
-        span_id = trace_context
-            .as_ref()
-            .map(|context| context.span_id.as_str())
-            .unwrap_or(""),
-        "http request completed",
-    );
+    // Emitted inside the request span, so `trace_id` / `span_id` come from the
+    // active context like every other line's (`WithTraceContext` on stdout, the
+    // SDK on the OTLP record) rather than being written out here by hand.
+    span.in_scope(|| {
+        tracing::info!(
+            method = %method,
+            route = %route,
+            status = status.as_u16(),
+            latency_ms = (elapsed * 1000.0),
+            request_id = %request_id,
+            "http request completed",
+        );
+    });
 
     response
 }
@@ -754,6 +752,7 @@ struct TraceLogContext {
     span_id: String,
 }
 
+#[cfg(test)]
 fn trace_context_from_span(span: &tracing::Span) -> Option<TraceLogContext> {
     let context = span.context();
     let span_context = context.span().span_context().clone();
@@ -793,88 +792,445 @@ pub async fn run_metrics_server(
     Ok(())
 }
 
+/// The estate's path-marker key (observability contract §4): a bare
+/// snake_case name, deliberately outside any semconv namespace.
+pub(crate) const TELEMETRY_SOURCE: &str = "telemetry_source";
+
+/// What `init_tracing` installs when `RUST_LOG` is unset. `opentelemetry` at
+/// `warn` is where the SDK reports a failed export, so a collector that is down
+/// shows up in `docker logs` rather than nowhere.
+pub(crate) const DEFAULT_LOG_FILTER: &str =
+    "server=info,tower_http=info,axum=info,opentelemetry=warn";
+
+/// The transport under the OTLP exporter, besides the `opentelemetry*` crates
+/// themselves: their events stay on stdout only, so that exporting a batch can
+/// never itself produce a record to export. A crate name matches the crate and
+/// its modules, never a longer crate name (`tower`, not `tower_http`).
+const EXPORTER_INTERNAL_CRATES: [&str; 5] = ["tonic", "h2", "hyper", "hyper_util", "tower"];
+
+/// Whether `target` belongs to the OpenTelemetry SDK or the transport under the
+/// OTLP exporter. Checked by [`WithoutExporterInternals`], independently of
+/// `otlp-log-filter`, so no directive an operator writes — however specific,
+/// e.g. `opentelemetry_sdk=debug` — can let a failing export produce a record
+/// to export.
+pub(crate) fn is_exporter_internal(target: &str) -> bool {
+    let crate_name = target.split("::").next().unwrap_or(target);
+    crate_name.starts_with("opentelemetry") || EXPORTER_INTERNAL_CRATES.contains(&crate_name)
+}
+
+/// Holds the OTLP providers for the life of the process. Dropping it shuts both
+/// down, which flushes whatever spans and log records are still buffered.
 pub struct TelemetryGuard {
-    provider: Option<SdkTracerProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
+}
+
+impl TelemetryGuard {
+    /// Whether spans are exported over OTLP.
+    pub fn exports_traces(&self) -> bool {
+        self.tracer_provider.is_some()
+    }
+
+    /// Whether log records are exported over OTLP.
+    pub fn exports_logs(&self) -> bool {
+        self.logger_provider.is_some()
+    }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(provider) = self.provider.take()
+        // Logs first, so a record written while the spans flush is not the one
+        // that misses the boat.
+        if let Some(provider) = self.logger_provider.take()
             && let Err(error) = provider.shutdown()
         {
-            eprintln!("OpenTelemetry shutdown failed: {error}");
+            eprintln!("OpenTelemetry log shutdown failed: {error}");
         }
+        if let Some(provider) = self.tracer_provider.take()
+            && let Err(error) = provider.shutdown()
+        {
+            eprintln!("OpenTelemetry trace shutdown failed: {error}");
+        }
+    }
+}
+
+/// The level filters of the three layers, as `EnvFilter` directives.
+///
+/// Stdout and the span layer share one (`RUST_LOG`, or [`DEFAULT_LOG_FILTER`]);
+/// the OTLP log layer takes `observability.otlp-log-filter` when it is set, so
+/// Loki can be quieter or louder than `docker logs` without touching either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogFilters {
+    pub(crate) stdout: String,
+    pub(crate) otlp_logs: String,
+}
+
+impl LogFilters {
+    pub fn new(rust_log: Option<&str>, otlp_log_filter: Option<&str>) -> Self {
+        let stdout = rust_log
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && EnvFilter::try_new(value).is_ok())
+            .unwrap_or(DEFAULT_LOG_FILTER)
+            .to_string();
+        let otlp_logs = otlp_log_filter
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| stdout.clone(), str::to_string);
+        Self { stdout, otlp_logs }
+    }
+
+    fn from_env(observability: &ObservabilityConfig) -> Self {
+        let rust_log = std::env::var(EnvFilter::DEFAULT_ENV).ok();
+        Self::new(
+            rust_log.as_deref(),
+            observability.otlp_log_filter.as_deref(),
+        )
+    }
+
+    fn stdout_filter(&self) -> EnvFilter {
+        EnvFilter::try_new(&self.stdout).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER))
+    }
+
+    fn otlp_log_filter(&self) -> EnvFilter {
+        // Config validation has already rejected a malformed directive; the
+        // fallback only covers a filter built outside `load_group`.
+        EnvFilter::try_new(&self.otlp_logs).unwrap_or_else(|_| self.stdout_filter())
     }
 }
 
 pub fn init_tracing(observability: &ObservabilityConfig) -> TelemetryGuard {
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("server=info,tower_http=info,axum=info"))
-        .expect("default tracing filter should be valid");
+    let filters = LogFilters::from_env(observability);
+    let guard = build_otlp_providers(observability);
+    telemetry_subscriber(
+        &filters,
+        std::io::stdout,
+        guard.tracer_provider.as_ref(),
+        guard.logger_provider.as_ref(),
+    )
+    .init();
+    guard
+}
+
+/// The whole subscriber stack, shared by [`init_tracing`] and the tests so they
+/// assert on what production installs:
+///
+/// - the JSON `fmt` layer to `make_writer` (stdout in production), with the
+///   active `trace_id` / `span_id` added to every line — see [`WithTraceContext`];
+/// - the span layer, when a tracer provider exists;
+/// - the OTLP log bridge, when a logger provider exists. The SDK attaches the
+///   active trace context to each record itself.
+///
+/// Each layer carries its own filter rather than one global one, because the
+/// log bridge is filtered independently (`otlp-log-filter`).
+/// Public so `tests/telemetry_global.rs` can install exactly this stack as the
+/// process-wide subscriber, the way `init_tracing` does. Not an API.
+#[doc(hidden)]
+pub fn telemetry_subscriber<W>(
+    filters: &LogFilters,
+    make_writer: W,
+    tracer_provider: Option<&SdkTracerProvider>,
+    logger_provider: Option<&SdkLoggerProvider>,
+) -> impl tracing::Subscriber + Send + Sync + for<'a> tracing_subscriber::registry::LookupSpan<'a>
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()
-        .flatten_event(true)
-        .with_current_span(true)
-        .with_span_list(false);
+        .event_format(WithTraceContext(
+            tracing_subscriber::fmt::format()
+                .json()
+                .flatten_event(true)
+                .with_current_span(true)
+                .with_span_list(false),
+        ))
+        .with_writer(make_writer)
+        .with_filter(filters.stdout_filter());
+    let span_layer = tracer_provider.map(|provider| {
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("v-note"))
+            .with_filter(filters.stdout_filter())
+    });
+    let log_layer = logger_provider.map(|provider| {
+        WithoutExporterInternals(
+            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(provider),
+        )
+        .with_filter(filters.otlp_log_filter())
+    });
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(span_layer)
+        .with(log_layer)
+}
 
-    match build_tracer_provider(observability) {
-        Ok(Some(provider)) => {
-            let tracer = provider.tracer("v-note");
-            let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(fmt_layer)
-                .with(otel_layer)
-                .init();
-            TelemetryGuard {
-                provider: Some(provider),
-            }
+/// The OTLP log bridge, minus every event from the SDK or the transport under
+/// the exporter ([`is_exporter_internal`]). A layer wrapper, so the exclusion
+/// holds whatever `otlp-log-filter` says and the per-layer filter stays a plain
+/// `EnvFilter`.
+///
+/// Why not a filter combinator: with `EnvFilter.and(filter_fn(..))` on this
+/// layer, pipeline 417's e2e lost `page created` and `stroke batch committed`
+/// from stdout and OTLP alike, reproducibly (CI and a local run of the same
+/// build), and this wrapper restored them (pipeline 419). The mechanism is not
+/// understood: `tests/telemetry_global.rs`, which installs this stack the
+/// production way, passes with either shape. It stays as the guard for this
+/// class of fault, and the e2e remains the proof.
+///
+/// Every `Layer` callback is forwarded; only `on_event` is gated, so a bridge
+/// feature that needs span callbacks (e.g. `experimental_span_attributes`)
+/// keeps working.
+pub(crate) struct WithoutExporterInternals<L>(L);
+
+impl<S, L> tracing_subscriber::Layer<S> for WithoutExporterInternals<L>
+where
+    S: tracing::Subscriber,
+    L: tracing_subscriber::Layer<S>,
+{
+    fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
+        self.0.on_register_dispatch(subscriber);
+    }
+
+    fn on_layer(&mut self, subscriber: &mut S) {
+        self.0.on_layer(subscriber);
+    }
+
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        self.0.register_callsite(metadata)
+    }
+
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        self.0.enabled(metadata, ctx)
+    }
+
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_new_span(attrs, id, ctx);
+    }
+
+    fn on_record(
+        &self,
+        span: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_record(span, values, ctx);
+    }
+
+    fn on_follows_from(
+        &self,
+        span: &tracing::span::Id,
+        follows: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_follows_from(span, follows, ctx);
+    }
+
+    fn event_enabled(
+        &self,
+        event: &tracing::Event<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        self.0.event_enabled(event, ctx)
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if !is_exporter_internal(event.metadata().target()) {
+            self.0.on_event(event, ctx);
         }
-        Ok(None) => {
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(fmt_layer)
-                .init();
-            TelemetryGuard { provider: None }
-        }
-        Err(error) => {
-            eprintln!("OpenTelemetry disabled: {error}");
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(fmt_layer)
-                .init();
-            TelemetryGuard { provider: None }
-        }
+    }
+
+    fn on_enter(&self, id: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.on_enter(id, ctx);
+    }
+
+    fn on_exit(&self, id: &tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.on_exit(id, ctx);
+    }
+
+    fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.on_close(id, ctx);
+    }
+
+    fn on_id_change(
+        &self,
+        old: &tracing::span::Id,
+        new: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.on_id_change(old, new, ctx);
     }
 }
 
-fn build_tracer_provider(
-    observability: &ObservabilityConfig,
-) -> Result<Option<SdkTracerProvider>, String> {
-    // No OTLP endpoint configured → tracing export stays off.
-    let Some(endpoint) = observability.otlp_endpoint.as_ref() else {
-        return Ok(None);
-    };
+/// Wraps the JSON event format and appends the active OpenTelemetry
+/// `trace_id` / `span_id` as top-level body fields, so a stdout line carries
+/// the same correlation the OTLP record does and Grafana's derived field can
+/// turn it into a Tempo link. Never labels: a trace id is unbounded.
+///
+/// The active context is the one the span layer attaches on span entry — the
+/// same one the SDK reads for an exported log record — so both paths name the
+/// same span. With no span layer installed, or outside any span, nothing is
+/// added.
+pub(crate) struct WithTraceContext<F>(F);
 
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint.to_string())
-        .with_timeout(observability.otlp_timeout())
-        .build()
-        .map_err(|error| error.to_string())?;
-    let resource = opentelemetry_sdk::Resource::builder()
+impl<S, N, F> tracing_subscriber::fmt::FormatEvent<S, N> for WithTraceContext<F>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+    F: tracing_subscriber::fmt::FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let mut line = String::new();
+        self.0.format_event(
+            ctx,
+            tracing_subscriber::fmt::format::Writer::new(&mut line),
+            event,
+        )?;
+        if let Some(context) = active_trace_context() {
+            insert_trace_fields(&mut line, &context);
+        }
+        writer.write_str(&line)
+    }
+}
+
+fn active_trace_context() -> Option<TraceLogContext> {
+    opentelemetry::Context::map_current(|context| {
+        let span_context = context.span().span_context().clone();
+        span_context.is_valid().then(|| TraceLogContext {
+            trace_id: span_context.trace_id().to_string(),
+            span_id: span_context.span_id().to_string(),
+        })
+    })
+}
+
+/// Adds the two fields just inside the object's closing brace. Both values are
+/// lowercase hex, so they need no escaping.
+fn insert_trace_fields(line: &mut String, context: &TraceLogContext) {
+    if let Some(close) = line.rfind('}') {
+        line.insert_str(
+            close,
+            &format!(
+                r#","trace_id":"{}","span_id":"{}""#,
+                context.trace_id, context.span_id
+            ),
+        );
+    }
+}
+
+/// One `Resource` for every signal the server exports, so `service.name`,
+/// `deployment.environment`, `service.version` and `vnote.protocol` cannot
+/// drift between a span and the log line written inside it.
+///
+/// `deployment.environment`, not semconv's `deployment.environment.name`: the
+/// dashboard filter, the client Alloy fixture and stored queries all use this
+/// name (see the telemetry deviation record in `AGENTS.md`).
+///
+/// `telemetry_source = "otlp"` is the estate's path marker for a server's push
+/// of its own telemetry, in the contract's key. The shared Alloy stamps no
+/// marker itself: it copies `telemetry_source` into the indexed `log_source`
+/// (mini-config #47), so without this the server's logs land in Loki unmarked
+/// and `{log_source="otlp"}` finds nothing. On the shared resource, so spans
+/// carry it too.
+pub(crate) fn telemetry_resource(observability: &ObservabilityConfig) -> Resource {
+    Resource::builder()
         .with_service_name(observability.service_name.clone())
         .with_attributes([
             KeyValue::new("deployment.environment", observability.environment.clone()),
             KeyValue::new("service.version", crate::app_version()),
             KeyValue::new("vnote.protocol", PROTOCOL_VERSION),
+            KeyValue::new(TELEMETRY_SOURCE, "otlp"),
         ])
-        .build();
-    let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(resource)
-        .build();
-    Ok(Some(provider))
+        .build()
+}
+
+/// The OTLP providers for `observability`: both absent when no endpoint is
+/// configured, and each built independently otherwise, so a log exporter that
+/// fails to build costs the logs and nothing else. A failure is printed and
+/// never fails startup.
+fn build_otlp_providers(observability: &ObservabilityConfig) -> TelemetryGuard {
+    build_providers(
+        observability,
+        |endpoint| {
+            opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint.to_string())
+                .with_timeout(observability.otlp_timeout())
+                .build()
+                .map_err(|error| error.to_string())
+        },
+        |endpoint| {
+            opentelemetry_otlp::LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint.to_string())
+                .with_timeout(observability.otlp_timeout())
+                .build()
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+/// [`build_otlp_providers`] with the exporters injected, so the tests can hand
+/// it in-memory ones, or a builder that fails.
+pub(crate) fn build_providers<SE, LE>(
+    observability: &ObservabilityConfig,
+    span_exporter: impl FnOnce(&url::Url) -> Result<SE, String>,
+    log_exporter: impl FnOnce(&url::Url) -> Result<LE, String>,
+) -> TelemetryGuard
+where
+    SE: opentelemetry_sdk::trace::SpanExporter + 'static,
+    LE: opentelemetry_sdk::logs::LogExporter + 'static,
+{
+    // No OTLP endpoint configured → both signals stay off.
+    let Some(endpoint) = observability.otlp_endpoint.as_ref() else {
+        return TelemetryGuard {
+            tracer_provider: None,
+            logger_provider: None,
+        };
+    };
+    let resource = telemetry_resource(observability);
+
+    let tracer_provider = match span_exporter(endpoint) {
+        Ok(exporter) => Some(
+            SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_resource(resource.clone())
+                .build(),
+        ),
+        Err(error) => {
+            eprintln!("OpenTelemetry trace export disabled: {error}");
+            None
+        }
+    };
+    let logger_provider = match log_exporter(endpoint) {
+        Ok(exporter) => Some(
+            SdkLoggerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_resource(resource)
+                .build(),
+        ),
+        Err(error) => {
+            eprintln!("OpenTelemetry log export disabled: {error}");
+            None
+        }
+    };
+    TelemetryGuard {
+        tracer_provider,
+        logger_provider,
+    }
 }
 
 fn request_id_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -937,3 +1293,122 @@ fn normalized_route(path: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Captures the log events a test emits, so a test can assert that a code path
+/// *says* something — the density regressions of #417 — without parsing stdout.
+#[cfg(test)]
+pub(crate) mod log_capture {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    /// One captured event: its level and every field as text, `message`
+    /// included.
+    #[derive(Clone, Debug)]
+    pub(crate) struct Event {
+        pub(crate) level: tracing::Level,
+        pub(crate) fields: BTreeMap<String, String>,
+    }
+
+    impl Event {
+        pub(crate) fn field(&self, name: &str) -> Option<&str> {
+            self.fields.get(name).map(String::as_str)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub(crate) struct Captured(Arc<Mutex<Vec<Event>>>);
+
+    impl Captured {
+        /// The events whose message is `message`.
+        pub(crate) fn with_message(&self, message: &str) -> Vec<Event> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .iter()
+                .filter(|event| event.field("message") == Some(message))
+                .cloned()
+                .collect()
+        }
+
+        /// The one event whose message is `message`.
+        pub(crate) fn only(&self, message: &str) -> Event {
+            let events = self.with_message(message);
+            let [event] = events.as_slice() else {
+                panic!("expected one {message:?} event, got {}", events.len());
+            };
+            event.clone()
+        }
+    }
+
+    thread_local! {
+        /// The capture the current test thread installed, if any.
+        static ACTIVE: std::cell::RefCell<Option<Captured>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Forwards every event to the capturing test on the thread it fired on.
+    struct Layer;
+
+    struct Visitor<'a>(&'a mut BTreeMap<String, String>);
+
+    impl tracing::field::Visit for Visitor<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Layer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let Some(captured) = ACTIVE.with(|active| active.borrow().clone()) else {
+                return;
+            };
+            let mut fields = BTreeMap::new();
+            event.record(&mut Visitor(&mut fields));
+            captured.0.lock().expect("capture lock").push(Event {
+                level: *event.metadata().level(),
+                fields,
+            });
+        }
+    }
+
+    /// Stops capturing on this thread when dropped.
+    pub(crate) struct CaptureGuard(());
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| active.borrow_mut().take());
+        }
+    }
+
+    /// Captures the events this test thread emits until the guard drops. Hold
+    /// it across the whole test: `#[tokio::test]` polls on the test's own
+    /// thread, so awaits stay inside it.
+    ///
+    /// The subscriber is the process-wide *global* one, installed once, rather
+    /// than a thread-local default. A thread-local default loses a race: a
+    /// production callsite first reached by a parallel test while no subscriber
+    /// was listening caches "never interested", and the line then never reaches
+    /// the capture — a flake that looks exactly like the line being missing.
+    /// The global subscriber is always interested, so no callsite is ever
+    /// cached as disabled; events go to the capture of the thread they fired on.
+    pub(crate) fn capture() -> (CaptureGuard, Captured) {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Layer))
+                .expect("no other test installs a global subscriber");
+        });
+        let captured = Captured::default();
+        ACTIVE.with(|active| *active.borrow_mut() = Some(captured.clone()));
+        (CaptureGuard(()), captured)
+    }
+}

@@ -67,6 +67,12 @@ steps:
     commands:
       - |
         RELEASE_TAG=$$(cat .release-tag)
+        # One compose project per pipeline. The default (the directory, `e2e`)
+        # is shared by every pipeline on the agent, so two branches' e2e runs
+        # recreated and removed each other's containers mid-test (#417,
+        # pipeline 422). Exported rather than `-p` so the file can interpolate
+        # it: monitor-alloy narrows its Docker scrape to this project.
+        export COMPOSE_PROJECT_NAME="v-note-e2e-$$CI_PIPELINE_NUMBER"
         export OCI_IMAGE_VERSION="$$RELEASE_TAG"
         export OCI_IMAGE_REVISION="$$CI_COMMIT_SHA"
         export OCI_IMAGE_CREATED="$$(git -c safe.directory='*' log -1 --format=%cI)"

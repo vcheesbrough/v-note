@@ -89,7 +89,10 @@ impl AuthConfig {
             {
                 Ok(resp) => match resp.error_for_status() {
                     Ok(resp) => match resp.json::<DiscoveryDoc>().await {
-                        Ok(doc) => return Ok(doc),
+                        Ok(doc) => {
+                            tracing::info!(url = %url, attempt, "OIDC discovery complete");
+                            return Ok(doc);
+                        }
                         Err(error) => last_err = format!("parsing JSON: {error}"),
                     },
                     Err(error) => last_err = format!("non-success status: {error}"),
@@ -173,6 +176,9 @@ impl JwksCache {
                 new_keys.insert(kid, key);
             }
         }
+        // Key ids are public (they are in the JWKS document); the keys are too,
+        // but there is no reason to log more than how many were usable.
+        tracing::info!(keys = new_keys.len(), "JWKS refreshed");
         *self.keys.write().await = new_keys;
         Ok(())
     }
@@ -251,7 +257,18 @@ pub async fn validate_jwt(
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
     let data = decode::<Claims>(token, &key, &validation).map_err(|error| {
-        tracing::debug!(error = %error, "JWT validation failed");
+        // `debug`: this runs per request, so a tab left open on an expired
+        // session would repeat it on every poll. `expired` tells a session
+        // reaching its end apart from a bad token when the level is raised;
+        // the rejection itself is logged (and counted) by the caller.
+        tracing::debug!(
+            error = %error,
+            expired = matches!(
+                error.kind(),
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature
+            ),
+            "JWT validation failed"
+        );
         TokenValidationError::Invalid("JWT validation failed")
     })?;
 
@@ -263,6 +280,7 @@ pub async fn validate_jwt(
         return Err(TokenValidationError::MissingScope);
     }
 
+    tracing::debug!(subject = %data.claims.sub, "access token validated");
     Ok(data.claims)
 }
 
@@ -292,6 +310,9 @@ pub async fn auth_middleware(
             .map(|cookie| cookie.value().to_string())
     });
     let Some(token) = token else {
+        // `debug`, not `warn`: a signed-out browser asking `/api/me` is the
+        // normal way into the login flow, not a rejected caller.
+        tracing::debug!("request without a token rejected");
         crate::observability::metrics().record_auth_failure("missing_token");
         return (StatusCode::UNAUTHORIZED, "missing token").into_response();
     };
