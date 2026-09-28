@@ -330,14 +330,10 @@ test.describe('otlp-collector-oidc (pinned) as v-note deploys it', () => {
       // The audience check is what keeps every other application's tokens out:
       // the issuer and the `telemetry:write` mapping are shared estate-wide.
       ['another application\'s token', await mintToken('v-note-other-app-test'), 'invalid token: wrong aud'],
-      // Same provider and client, but a different issuer (the mock's second
-      // issuer path stands in for another provider).
-      [
-        'another issuer\'s token',
-        await mintToken('v-note-test', OIDC_TOKEN_URL!.replace('/default/', '/other/')),
-        'invalid token',
-      ],
-      ['an expired token', await mintToken('v-note-expired-test'), 'invalid token'],
+      // Signed by the provider's own key, but naming another issuer: reaches
+      // the issuer check itself rather than failing earlier on an unknown key.
+      ['another issuer\'s token', await mintToken('v-note-wrong-issuer-test'), 'invalid token: wrong iss'],
+      ['an expired token', await mintToken('v-note-expired-test'), 'invalid token: expired'],
       ['no telemetry:write', await mintToken('v-note-no-telemetry-test'), 'missing scope: telemetry:write'],
       ['no preferred_username', await mintToken('v-note-no-username-test'), 'missing claim: preferred_username'],
     ];
@@ -438,15 +434,24 @@ test.describe('otlp-collector-oidc (pinned) as v-note deploys it', () => {
     // Grafana turns into a link from the log line to the trace.
     expect(stream.trace_id).toBe(traceId);
     expect(stream.span_id).toBe(spanId);
-    // …and never stored under the environment the client claimed.
-    const forged = await backends.get(`${LOKI_URL}/loki/api/v1/query_range`, {
-      params: {
-        query: `{deployment_environment_name="forged-env"} |= "${marker}"`,
-        start: `${(Date.now() - 15 * 60 * 1000) * 1e6}`,
-        end: `${Date.now() * 1e6}`,
-      },
-    });
-    expect(((await forged.json()).data?.result ?? []).length).toBe(0);
+    expect(stream.deployment_environment).toBe(EXPECTED_ENV);
+    expect(stream.log_source).toBe('client');
+    // …and never stored under what the client claimed — by every label the
+    // dashboard and the platform select on, not only the contract's name.
+    for (const query of [
+      `{deployment_environment_name="forged-env"} |= "${marker}"`,
+      `{deployment_environment="forged-env"} |= "${marker}"`,
+      `{log_source="otlp"} |= "${marker}"`,
+    ]) {
+      const forged = await backends.get(`${LOKI_URL}/loki/api/v1/query_range`, {
+        params: {
+          query,
+          start: `${(Date.now() - 15 * 60 * 1000) * 1e6}`,
+          end: `${Date.now() * 1e6}`,
+        },
+      });
+      expect(((await forged.json()).data?.result ?? []).length, query).toBe(0);
+    }
   });
 
   /**
@@ -874,6 +879,39 @@ test.describe('the SPA in a real browser', () => {
       await page.waitForTimeout(11_000);
       expect(exports).toBe(0);
       expect(console.filter((line) => line.includes('client telemetry off')).length, 'said once').toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  /**
+   * A server that does not answer the first config fetch (a `503` during a
+   * deploy, say) is not a "no": the SPA asks again on a later tick, within the
+   * pre-config window, and telemetry comes on — with what waited in the buffer.
+   */
+  test('an unanswered first config fetch is asked again, and telemetry comes on', async ({ browser }) => {
+    test.setTimeout(60_000);
+    const context = await browser.newContext({ baseURL: process.env.BASE_URL, ignoreHTTPSErrors: true });
+    try {
+      const page = await context.newPage();
+      let configFetches = 0;
+      let exports = 0;
+      page.on('request', (req) => {
+        if (isExport(req.url()) && req.method() === 'POST') exports += 1;
+      });
+      await page.route('**/api/telemetry/config', async (route) => {
+        configFetches += 1;
+        if (configFetches === 1) {
+          await route.fulfill({ status: 503, body: 'deploying' });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.goto('/', { waitUntil: 'load' });
+      await expect(page.locator(MENU)).toBeVisible({ timeout: 15_000 });
+      await expect.poll(() => exports, { timeout: 30_000 }).toBeGreaterThan(0);
+      expect(configFetches, 'the 503, then the retry that configured it').toBe(2);
     } finally {
       await context.close();
     }

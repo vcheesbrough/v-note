@@ -60,6 +60,17 @@ services:
                 },
                 {
                   "requestParam": "client_id",
+                  "match": "v-note-wrong-issuer-test",
+                  "claims": {
+                    "sub": "wrong-issuer-user",
+                    "aud": ["v-note-test"],
+                    "iss": "http://mock-oidc:8080/other",
+                    "scope": "openid profile email v-note:test:access telemetry:write",
+                    "preferred_username": "wrong-issuer-user"
+                  }
+                },
+                {
+                  "requestParam": "client_id",
                   "match": "v-note-expired-test",
                   "claims": {
                     "sub": "expired-user",
@@ -341,8 +352,8 @@ services:
   #
   #   otlp-collector-oidc  the estate's reference ingest, as deploy/ runs it
   #   monitor-alloy        a stand-in for the SHARED Alloy the ingest forwards
-  #                        traces to (e2e/alloy/monitor-alloy.alloy; shared with
-  #                        #417, same name and shape)
+  #                        every signal to (e2e/alloy/monitor-alloy.alloy;
+  #                        #417's, mirroring mini-config #47)
   #   tempo, loki          real stores, at the digests mini-config runs
   #
   # so client-telemetry.spec.ts asserts on what the backends actually stored.
