@@ -71,11 +71,18 @@ otelcol.receiver.otlp "android" {
 // else. The allow-list is SDK self-description only — harmless, bounded, and
 // useful when two client builds disagree.
 //
-// Logs also get `log_source = "otlp"`, which mini-config's Loki indexes as a
-// stream label. Every other path into that Loki sets it too (the Docker stdout
-// of this same stack arrives as `log_source = "docker"`), so each source is
-// selectable by a positive match rather than by a label's absence. Traces don't
-// need it, so they don't get it.
+// Both signals also get the estate's path marker, `log_source = "client"`: one
+// key whose value says how the data reached the store. The platform sets
+// `docker` and `file` on what it scrapes, a server sets `otlp` on its own push,
+// and this ingest sets `client` on everything that comes through it — so
+// client-origin telemetry is selectable by a positive match rather than by a
+// label's absence, and is never confused with what the server vouches for.
+// mini-config's Loki indexes it as a stream label; Tempo stores it as a
+// searchable resource attribute. Traces carry it too, and they are the reason
+// it matters: a client chooses its own trace ids, so it can drop a span into a
+// trace the server is also writing to, and the marker is what tells a reader
+// which spans the server actually emitted. (The key is the estate's older
+// spelling of the contract's `telemetry_source`; renaming it is cross-repo.)
 //
 // `error_mode = "propagate"` is deliberate. The default (`ignore`) would log a
 // failed statement and forward the record *unmodified*, i.e. with the client's
@@ -94,6 +101,7 @@ otelcol.processor.transform "spa" {
 		statements = [
 			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
 			`set(resource.attributes["service.name"], "v-note-spa")`,
+			`set(resource.attributes["log_source"], "client")`,
 			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
 			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
 		]
@@ -104,7 +112,7 @@ otelcol.processor.transform "spa" {
 		statements = [
 			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
 			`set(resource.attributes["service.name"], "v-note-spa")`,
-			`set(resource.attributes["log_source"], "otlp")`,
+			`set(resource.attributes["log_source"], "client")`,
 			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
 			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
 		]
@@ -124,6 +132,7 @@ otelcol.processor.transform "android" {
 		statements = [
 			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
 			`set(resource.attributes["service.name"], "v-note-android")`,
+			`set(resource.attributes["log_source"], "client")`,
 			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
 			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
 		]
@@ -134,7 +143,7 @@ otelcol.processor.transform "android" {
 		statements = [
 			`keep_keys(resource.attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])`,
 			`set(resource.attributes["service.name"], "v-note-android")`,
-			`set(resource.attributes["log_source"], "otlp")`,
+			`set(resource.attributes["log_source"], "client")`,
 			string.format(`set(resource.attributes["deployment.environment"], "%s")`, sys.env("APP_ENV")),
 			string.format(`set(resource.attributes["service.version"], "%s")`, sys.env("APP_VERSION")),
 		]

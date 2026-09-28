@@ -1,5 +1,6 @@
 # Tempo for the e2e stack (#354): just enough to accept OTLP and answer
-# `GET /api/traces/<id>`, which is what client-telemetry.spec.ts asserts on.
+# `GET /api/traces/<id>` and, from #418, a TraceQL `GET /api/search` over what
+# the ingester holds — which is what client-telemetry.spec.ts asserts on.
 #
 # Deliberately not a copy of mini-config's tempo.yaml. The thing under test is
 # v-note's sidecar config, which IS the production file; this is only somewhere

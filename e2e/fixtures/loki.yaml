@@ -1,0 +1,53 @@
+# The e2e Loki's config (#418). Baked into the loki image by docker-compose.test.yml.
+#
+# Loki's stock config would do for accepting OTLP, and did until #418 — but under
+# it `log_source` is structured metadata, not a stream label, so a selector like
+# `{log_source="client"}` matches nothing and the assertions that the marker is
+# *selectable* would time out (or, worse, a negative on `{log_source="otlp"}`
+# would pass for the wrong reason). This mirrors what mini-config's
+# monitoring-stack/loki-config.yaml does on the Loki we deploy against: index
+# `log_source` on OTLP ingest, in addition to Loki's default indexed resource
+# attributes (service.name, deployment.environment, …). Everything else is the
+# single-binary, filesystem-storage shape of the stock config; retention and the
+# compactor are left out because this store lives for one test run.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://localhost:9093
+
+limits_config:
+  # As in production: every path into Loki sets `log_source` (docker | file |
+  # otlp | client), and indexing it is what makes each one selectable by a
+  # positive match. Adds to the defaults rather than replacing them.
+  otlp_config:
+    resource_attributes:
+      attributes_config:
+        - action: index_label
+          attributes:
+            - log_source

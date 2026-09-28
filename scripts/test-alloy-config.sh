@@ -151,6 +151,24 @@ else
   pass "no client pipeline can be labelled as the server"
 fi
 
+# The estate's path marker, `client` on every signal, is what lets a reader tell
+# a span or line a user's device sent from one the server vouches for. `otlp` is
+# the server's own value, and `docker`/`file` are the platform's: writing any of
+# them here is the forgery this pipeline exists to prevent, made by the config
+# instead of the client. Four blocks, as for keep_keys.
+marker_count="$(grep -c 'set(resource\.attributes\["log_source"\], "client")' "$CODE" || true)"
+if [ "$marker_count" -eq 4 ]; then
+  pass "every statement block marks the record as client-origin"
+else
+  fail "expected 4 set(resource.attributes[\"log_source\"], \"client\") statements (2 clients x traces+logs), found $marker_count"
+fi
+other_marker="$(grep 'set(resource\.attributes\["log_source"\]' "$CODE" | grep -v '"client")' || true)"
+if [ -z "$other_marker" ]; then
+  pass "no statement block passes client telemetry off as another source"
+else
+  fail "a statement block sets log_source to something other than \"client\": $other_marker"
+fi
+
 # Client metrics were dropped from #354. With no metrics output the receiver
 # answers 404 on /v1/metrics; wiring one makes it accept data this pipeline then
 # has nowhere to send.

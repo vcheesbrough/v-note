@@ -114,17 +114,21 @@ function statusForDeclaredLengthOnly(
  * A resource that claims to be something else entirely, including a unique
  * `service.instance.id` — which Loki's OTLP ingest promotes to an index label,
  * so it is a stream-cardinality attack and not merely a lie.
+ *
+ * `claimedSource` is what the payload says about how it reached the store —
+ * the estate's path marker, which the sidecar must overwrite to `client` on
+ * every signal. `docker` would pass client logs off as a container's stdout;
+ * `otlp` is the server's own value, and the claim that actually buys something:
+ * a span wearing the server's provenance, in a trace the server also writes to.
  */
-function forgedResource(marker: string) {
+function forgedResource(marker: string, claimedSource = 'docker') {
   return {
     attributes: [
       { key: 'service.name', value: { stringValue: 'totally-not-v-note' } },
       { key: 'deployment.environment', value: { stringValue: 'forged-env' } },
       { key: 'service.version', value: { stringValue: '9.9.9-forged' } },
       { key: 'service.instance.id', value: { stringValue: `cardinality-bomb-${marker}` } },
-      // Loki indexes `log_source`; claiming `docker` would pass client logs
-      // off as a container's stdout.
-      { key: 'log_source', value: { stringValue: 'docker' } },
+      { key: 'log_source', value: { stringValue: claimedSource } },
       // Allow-listed, so this one is expected to survive untouched — which is
       // what shows the pipeline is filtering rather than simply dropping
       // everything it did not write itself.
@@ -133,11 +137,11 @@ function forgedResource(marker: string) {
   };
 }
 
-function traceBody(marker: string, traceId: string, spanId: string) {
+function traceBody(marker: string, traceId: string, spanId: string, claimedSource?: string) {
   return {
     resourceSpans: [
       {
-        resource: forgedResource(marker),
+        resource: forgedResource(marker, claimedSource),
         scopeSpans: [
           {
             scope: { name: 'e2e' },
@@ -158,11 +162,17 @@ function traceBody(marker: string, traceId: string, spanId: string) {
   };
 }
 
-function logBody(marker: string, traceId: string, spanId: string, body: string) {
+function logBody(
+  marker: string,
+  traceId: string,
+  spanId: string,
+  body: string,
+  claimedSource?: string,
+) {
   return {
     resourceLogs: [
       {
-        resource: forgedResource(marker),
+        resource: forgedResource(marker, claimedSource),
         scopeLogs: [
           {
             scope: { name: 'e2e' },
@@ -271,6 +281,28 @@ async function lokiStreams(query: string, match?: (line: string) => boolean) {
   });
 }
 
+/** How many streams a Loki query matches right now — no polling; for negatives. */
+async function lokiStreamCount(query: string): Promise<number> {
+  const end = Date.now() * 1e6;
+  const res = await backends.get(`${LOKI_URL}/loki/api/v1/query_range`, {
+    params: { query, start: `${end - 15 * 60 * 1e9}`, end: `${end}`, limit: '100' },
+  });
+  expect(res.ok(), `loki query ${query}`).toBe(true);
+  return ((await res.json()).data.result as unknown[]).length;
+}
+
+/**
+ * How many traces a TraceQL search finds right now. No start/end, so Tempo
+ * searches what its ingesters hold — the recent data every test here writes.
+ */
+async function tempoSearchCount(traceql: string): Promise<number> {
+  const res = await backends.get(`${TEMPO_URL}/api/search`, {
+    params: { q: traceql, limit: '100' },
+  });
+  expect(res.ok(), `tempo search ${traceql}`).toBe(true);
+  return (((await res.json()).traces ?? []) as unknown[]).length;
+}
+
 // ---------------------------------------------------------------------------
 // Resource-attribute integrity — the reason the sidecar exists
 // ---------------------------------------------------------------------------
@@ -289,6 +321,10 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
     expect(resource['service.name']).toBe('v-note-spa');
     expect(resource['deployment.environment']).toBe(EXPECTED_ENV);
     expect(resource['service.version']).toBe(EXPECTED_VERSION);
+    // The path marker, on a *span*: the client claimed `docker`, and it comes
+    // out as `client` — the value that says a user's device sent it. This is
+    // what separates a client's span from the server's in a trace both write to.
+    expect(resource['log_source']).toBe('client');
     // Not overwritten — *dropped*. An overwrite-only pipeline would leave this
     // one through, and it is the one that costs Loki a stream per request.
     expect(resource['service.instance.id']).toBeUndefined();
@@ -313,7 +349,10 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
     ).toBe(200);
 
     expect((await tempoResource(spaTrace))['service.name']).toBe('v-note-spa');
-    expect((await tempoResource(androidTrace))['service.name']).toBe('v-note-android');
+    const android = await tempoResource(androidTrace);
+    expect(android['service.name']).toBe('v-note-android');
+    // Distinct identities, the same provenance: both are client-origin.
+    expect(android['log_source']).toBe('client');
   });
 
   test('a forged identity on a log is replaced before Loki indexes it', async ({ request }) => {
@@ -332,7 +371,8 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
     const stream = streams[0].stream;
     expect(stream.service_name).toBe('v-note-spa');
     expect(stream.deployment_environment).toBe(EXPECTED_ENV);
-    expect(stream.log_source).toBe('otlp');
+    // The path marker: claimed `docker`, stored as `client`.
+    expect(stream.log_source).toBe('client');
     // Trace correlation is the whole point of shipping logs over OTLP: this is
     // what Grafana turns into a link from the log line to the trace.
     expect(stream.trace_id).toBe(traceId);
@@ -340,17 +380,10 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
     expect(stream.severity_text).toBe('ERROR');
 
     // …and nothing was ever stored under the name the client claimed.
-    const res2 = await backends.get(`${LOKI_URL}/loki/api/v1/query_range`, {
-      params: {
-        query: '{service_name="totally-not-v-note"}',
-        start: `${Date.now() * 1e6 - 15 * 60 * 1e9}`,
-        end: `${Date.now() * 1e6}`,
-      },
-    });
-    expect((await res2.json()).data.result).toHaveLength(0);
+    expect(await lokiStreamCount('{service_name="totally-not-v-note"}')).toBe(0);
   });
 
-  test('an Android log reaches Loki as an OTLP-sourced v-note-android stream', async ({ request }) => {
+  test('an Android log reaches Loki as a client-origin v-note-android stream', async ({ request }) => {
     const marker = `android-log-${hex(4)}`;
 
     const res = await request.post('/otlp/android/v1/logs', {
@@ -363,7 +396,58 @@ test.describe('the sidecar owns what client telemetry says about itself', () => 
     );
     const stream = streams[0].stream;
     expect(stream.deployment_environment).toBe(EXPECTED_ENV);
-    expect(stream.log_source).toBe('otlp');
+    expect(stream.log_source).toBe('client');
+  });
+
+  /**
+   * The claim the marker exists to defeat. A client chooses its own trace ids,
+   * so it can put a span into a trace the server is also writing to, and
+   * `log_source` is what lets a reader tell which spans the server vouches for.
+   * So the forgery worth testing is the server's own value, `otlp` — and it is
+   * not merely dropped but rewritten to `client` on both signals, because an
+   * absent label is not selectable and `{log_source="otlp"}` must never return
+   * a client's data.
+   */
+  test("a client claiming the server's own provenance is re-marked as client-origin on both signals", async ({
+    request,
+  }) => {
+    const marker = `provenance-forgery-${hex(4)}`;
+    const traceId = hex(16);
+    const spanId = hex(8);
+
+    expect(
+      (
+        await request.post('/otlp/spa/v1/traces', {
+          data: traceBody(marker, traceId, spanId, 'otlp'),
+        })
+      ).status(),
+    ).toBe(200);
+    expect(
+      (
+        await request.post('/otlp/spa/v1/logs', {
+          data: logBody(marker, traceId, spanId, `forged provenance: ${marker}`, 'otlp'),
+        })
+      ).status(),
+    ).toBe(200);
+
+    expect((await tempoResource(traceId))['log_source']).toBe('client');
+    // …and a *search* separates client spans from the server's by the marker
+    // alone. The span name is unique to this run, so "found under client" and
+    // "not found under otlp" are about this one span; the positive comes first
+    // so the negative cannot pass merely because search returned nothing.
+    const clientSpan = `{ resource.log_source = "client" && name = "${marker}" }`;
+    const forgedSpan = `{ resource.log_source = "otlp" && name = "${marker}" }`;
+    await eventually(`tempo search ${clientSpan}`, async () =>
+      (await tempoSearchCount(clientSpan)) > 0 ? true : null,
+    );
+    expect(await tempoSearchCount(forgedSpan)).toBe(0);
+
+    // Selectable by the marker alone, without `service_name` doing the work.
+    const streams = await lokiStreams('{log_source="client"}', (line) => line.includes(marker));
+    expect(streams[0].stream.service_name).toBe('v-note-spa');
+    expect(streams[0].stream.trace_id).toBe(traceId);
+    // …and never indexed under the value it claimed.
+    expect(await lokiStreamCount(`{log_source="otlp"} |= "${marker}"`)).toBe(0);
   });
 });
 
