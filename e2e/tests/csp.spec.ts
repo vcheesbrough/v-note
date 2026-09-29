@@ -77,7 +77,15 @@ test('the SPA boots under the policy and injected inline script is refused', asy
     script.textContent = 'window.__injected = true;';
     document.head.appendChild(script);
   });
-  await expect.poll(() => cspViolations.length).toBeGreaterThan(0);
+  // One refusal reaches the guard twice, from the violation event and from the
+  // console, on independent channels. Wait for both before clearing, or the
+  // later one lands after the clear and fails this test in teardown.
+  await expect
+    .poll(() => ({
+      event: cspViolations.some((report) => !report.startsWith('console:')),
+      console: cspViolations.some((report) => report.startsWith('console:')),
+    }))
+    .toEqual({ event: true, console: true });
   expect(await page.evaluate(() => (window as any).__injected)).toBeUndefined();
   expect(cspViolations.join('\n')).toMatch(/script-src/);
 
