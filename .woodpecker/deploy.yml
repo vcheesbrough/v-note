@@ -1,9 +1,11 @@
 # Deploy workflow.
 #   Push:       after checks, web and android all pass → verify-release-images →
-#               apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
-#               ∥ publish-grafana-dashboard
+#               apply-authentik-blueprint-auto-dev → auto-deploy-dev →
+#               smoke-oidc-login ∥ smoke-sql-console ∥ smoke-web-live (#179) →
+#               tag-release-auto-dev ∥ publish-grafana-dashboard
 #   Deployment: validate-deployment ∥ compute-version → apply-authentik-blueprint-dev
-#               → deploy-dev → smoke-oidc-login-dev, tag-release-dev
+#               → deploy-dev → smoke-oidc-login-dev, smoke-sql-console-dev,
+#               smoke-web-live-dev (gates tag-release-dev)
 # Dev is the only deploy target (#392); a production environment is deferred to
 # #388, which re-adds the steps for it.
 # The push path runs on every branch: dev is the pre-merge environment, so a
@@ -102,8 +104,15 @@ steps:
       # overwrite the other's stored content on every apply.
       instance_name: v-note-dev
       timeout_seconds: 900
-      # No `vars`: #274 made the provider public (PKCE), so the blueprint no
-      # longer interpolates a client secret.
+      # #274 made the provider public (PKCE), so the blueprint interpolates no
+      # client secret. Its one placeholder is the live smoke user's password
+      # (#179): the same secret smoke-web-live-* signs in with, so the account
+      # and the smoke can never disagree about it. A missing secret fails this
+      # step (the plugin refuses unresolved placeholders) before anything is
+      # applied.
+      vars:
+        V_NOTE_DEV_SMOKE_PASSWORD:
+          from_secret: v_note_dev_smoke_password
 
   # The push gates (checks, web, android) are enforced by the workflow-level
   # depends_on above, not by step dependencies.
@@ -365,6 +374,49 @@ steps:
     environment: *smoke-sql-console-environment
     commands: *smoke-sql-console-commands
 
+  # The authenticated half of the post-deploy smoke (#179). smoke-oidc-login
+  # stops at Authentik's login page on purpose; this one goes through it. A real
+  # browser signs in to the dev host as the blueprint's smoke user through the
+  # real Authentik flow, then checks /api/me, creates a page, commits a stroke
+  # over the page channel, proves both survive a reload, deletes the page and
+  # signs out (e2e/live/, its own Playwright config — the mock-IdP suite in
+  # e2e/tests/ is untouched and still runs pre-deploy in web.yml).
+  #
+  # Every branch, like the other smokes: dev is shared and last-push-wins, so a
+  # branch that breaks signing in or inking on dev must turn its own pipeline
+  # red. It gates the release tag — a tag claims the deployed product works.
+  #
+  # Same image and digest as the e2e stack's runner (e2e/docker-compose.test.yml),
+  # so the live spec runs on exactly the Playwright the suite is pinned to.
+  # The password arrives as from_secret, so Woodpecker masks it in the log;
+  # nothing in the script or spec prints it.
+  smoke-web-live-auto-dev:
+    when:
+      - event: push
+    depends_on:
+      - auto-deploy-dev
+    image: &playwright-image mcr.microsoft.com/playwright:v1.54.2-jammy@sha256:948dc1e8601eeb152b31ef57959a74c2170be6fe875c33518bf33aea424d8940
+    environment: &smoke-web-live-dev-environment
+      V_NOTE_HOST: v-notes-dev.desync.link
+      # Identity, written here like V_NOTE_HOST; the blueprint's user entry must
+      # carry the same two values (scripts/test-authentik-blueprints.sh).
+      V_NOTE_SMOKE_USERNAME: v-note-smoke-dev
+      V_NOTE_SMOKE_EMAIL: v-note-smoke-dev@smoke.invalid
+      V_NOTE_SMOKE_PASSWORD:
+        from_secret: v_note_dev_smoke_password
+    commands: &smoke-web-live-commands
+      - ./scripts/smoke-web-live.sh
+
+  smoke-web-live-dev:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - deploy-dev
+    image: *playwright-image
+    environment: *smoke-web-live-dev-environment
+    commands: *smoke-web-live-commands
+
   # Follows auto-deploy-dev, as every step in this chain must: Woodpecker prunes
   # steps whose `when` does not match, so a dependent gated more loosely than the
   # step it depends on would reference a step that no longer exists and fail the
@@ -382,6 +434,9 @@ steps:
       # readable by anyone who can reach the host is not a release, and this is
       # the only step that can tell.
       - smoke-sql-console-auto-dev
+      # And the authenticated smoke (#179): a build nobody can sign in to and
+      # ink on, through the real IdP, is not a release either.
+      - smoke-web-live-auto-dev
     pull: true
     image: *version-plugin
     settings:
@@ -428,6 +483,9 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - deploy-dev
+      # #179: the manual path is gated by the authenticated smoke too, so a
+      # manual deploy cannot tag a release the push path would have refused.
+      - smoke-web-live-dev
     pull: true
     image: *version-plugin
     settings:
