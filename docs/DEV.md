@@ -495,7 +495,7 @@ just rust-ci test                                 # CI `rust-test`: every crate 
 DATABASE_URL=postgres://v_note:<password>@127.0.0.1:5432/v_note \
   cargo test -p server --features postgres-tests  # host run of the database tests against your own Postgres
 docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITHUB_TOKEN .  # add --build-arg OCI_IMAGE_* for a labelled image (see DEPLOY.md)
-./scripts/test-container-health.sh v-note:local   # HEALTHCHECK config + a real unhealthy transition
+./scripts/test-container-health.sh v-note:local   # runs ./v-note-server + HEALTHCHECK config + a real unhealthy transition
 ./scripts/test-deploy-v-note.sh                   # deploy parameter guards + health gate (no docker socket needed)
 ./scripts/test-local-compose-env.sh               # CI `deploy-script-validation`: local deploy/.env generated once, then kept
 ./scripts/test-grafana-dashboard.sh               # CI `grafana-dashboard-validation`: dashboard JSON + publish payload (needs jq)
@@ -504,7 +504,8 @@ docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITH
 V_NOTE_HOST=v-notes-dev.desync.link \
   ./scripts/smoke-oidc-login.sh                   # the smoke check itself, against a live environment (read-only, no credentials)
 ./scripts/check-android-build-box-image.sh        # CI `android-build-box-pin`
-TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
+TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml \
+  -f e2e/docker-compose.android-apk.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright
 ```
 

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Verify the HEALTHCHECK baked into the web image by Dockerfile.web.
+# Verify the runtime contract baked into the web image by Dockerfile.web: the
+# command it runs and the HEALTHCHECK.
 #
 # Three things depend on that healthcheck and none of them can tell you it is
 # wrong: the deploy gate (scripts/deploy-v-note.sh polls the container's status
@@ -22,6 +23,9 @@ EXPECTED_START_INTERVAL=1000000000 #  1s
 EXPECTED_TIMEOUT=3000000000        #  3s
 EXPECTED_START_PERIOD=60000000000  # 60s
 EXPECTED_RETRIES=3
+# The process name is what shows in `ps` / `docker top` on mini (#379).
+EXPECTED_CMD='[./v-note-server]'
+EXPECTED_BINARY=/app/v-note-server
 
 FAILURES=0
 pass() { echo "  ok   — $1"; }
@@ -53,6 +57,18 @@ json_field() {
   docker image inspect --format '{{json .Config.Healthcheck}}' "$IMAGE" \
     | sed -n 's/.*[,{]"'"$1"'":\([0-9]*\).*/\1/p'
 }
+
+echo "==> command on $IMAGE"
+
+assert_eq "runs the server as ./v-note-server" "$(field '.Config.Cmd')" "$EXPECTED_CMD"
+# The command naming a file the image does not have would only surface as a
+# container that exits at start, so check the binary itself is there. Run with
+# `test` as the entrypoint: the server never starts, and no config is needed.
+if docker run --rm --entrypoint test "$IMAGE" -x "$EXPECTED_BINARY"; then
+  pass "$EXPECTED_BINARY exists and is executable"
+else
+  fail "$EXPECTED_BINARY is missing or not executable"
+fi
 
 echo "==> HEALTHCHECK config on $IMAGE"
 

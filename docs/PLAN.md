@@ -277,7 +277,7 @@ The authoritative definition is the four workflow files in **[`.woodpecker/`](..
 | **checks** | **deploy-script-validation** | `scripts/test-deploy-v-note.sh` — the deploy script's parameter guards |
 | **checks** | **android-build-box-pin** | `scripts/check-android-build-box-image.sh` — every file naming the build-box image agrees with the `.ref` |
 | **web**, **android**, **deploy** | **compute-version** | Release-versions plugin, `major_minor_source: cargo` → **`.release-tag`**. Each workflow computes its own (workflows share nothing); a commit's tag is reused, so they agree |
-| **web** | **build-web** | `Dockerfile.web` — **Trunk** SPA build + server; image metadata and container-health checks; push `registry.desync.link/v-note:{release}` |
+| **web** | **build-web** | `Dockerfile.web` — **Trunk** SPA build + server, run as `./v-note-server` (#379); image metadata and container-health checks; push `registry.desync.link/v-note:{release}` |
 | **web** | **e2e-web** | `e2e/docker-compose.test.yml` (+ the android-apk overlay) — Playwright against the pushed image |
 | **android** | **build-android** | `Dockerfile.android --target apk` — **Gradle** APK + unit tests; image metadata check; push `registry.desync.link/v-note-android:{release}` |
 | **android** | **android-instrumented-api-29 / -36** | `Dockerfile.android --target instrumented` — emulator instrumented tests on API 29 and 36. The Gradle `builder` stage is shared with **build-android**, so the app is built once |

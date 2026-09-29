@@ -8,6 +8,13 @@ license.workspace = true
 [lints]
 workspace = true
 
+# The executable is `v-note-server` so it reads as v-note in `ps`, `docker top`
+# and the container's command (#379). Only the binary is renamed. The package
+# stays `server`, so `-p server` and the `server::` library path are unchanged.
+[[bin]]
+name = "v-note-server"
+path = "src/main.rs"
+
 [features]
 # Compiles the tests that need a real Postgres: `#[sqlx::test]` connects to
 # `DATABASE_URL` and gives each test its own freshly migrated database. CI enables
