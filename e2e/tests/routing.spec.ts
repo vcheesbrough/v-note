@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '../csp-guard';
 
 // #189: the SPA used to keep the open page in a signal and nowhere else, so the
 // browser's Back button had no entry of ours to pop and walked out of v-note,

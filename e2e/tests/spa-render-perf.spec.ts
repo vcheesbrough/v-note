@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '../csp-guard';
 
 // SPA viewer render performance on a dense page (#271). The viewer used to
 // repaint the whole page for every pointer, wheel and replayed batch event,

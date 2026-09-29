@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../csp-guard';
 
 test('health endpoint returns ok', async ({ request }) => {
   const res = await request.get('/health');

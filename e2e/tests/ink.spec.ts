@@ -1,4 +1,4 @@
-import { expect, request, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, request, test, type APIRequestContext, type Page } from '../csp-guard';
 
 // Ink (page channel) e2e. Drives the per-page WSS from a real browser context
 // using a short-lived realtime ticket (the SPA auth path) — no extra npm deps.

@@ -325,6 +325,13 @@ Production build (also runs in Docker):
 cd frontend && trunk build --release
 ```
 
+**Content-Security-Policy (#444).** The server, not Trunk, sends the SPA's CSP,
+so `trunk serve` runs without one — check anything that loads script, fetches a
+new origin or sets inline handlers through `just run-compose` or the e2e suite,
+which fails any spec whose page trips the policy (`e2e/csp-guard.ts`; import
+`test`/`expect` from there, never from `@playwright/test`). The policy and why
+each directive is there: [`DEPLOY.md`](DEPLOY.md) → SPA Content-Security-Policy.
+
 ---
 
 ## Android (chosen local workflow)
@@ -493,7 +500,7 @@ docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITH
 ./scripts/test-local-compose-env.sh               # CI `deploy-script-validation`: local deploy/.env generated once, then kept
 ./scripts/test-grafana-dashboard.sh               # CI `grafana-dashboard-validation`: dashboard JSON + publish payload (needs jq)
 ./scripts/test-authentik-blueprints.sh            # CI `authentik-blueprint-validation`: both blueprints, without an Authentik
-./scripts/test-smoke-oidc-login.sh                # CI `oidc-login-smoke-validation`: the post-deploy login smoke check, against a stub IdP
+./scripts/test-smoke-oidc-login.sh                # CI `oidc-login-smoke-validation`: the post-deploy login (and SPA CSP, #444) smoke check, against a stub IdP
 V_NOTE_HOST=v-notes-dev.desync.link \
   ./scripts/smoke-oidc-login.sh                   # the smoke check itself, against a live environment (read-only, no credentials)
 ./scripts/check-android-build-box-image.sh        # CI `android-build-box-pin`

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../csp-guard';
 
 test('spa loads and renders metadata', async ({ page, request }) => {
   await page.goto('/');

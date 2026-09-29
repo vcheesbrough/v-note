@@ -55,7 +55,24 @@ services:
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.rule=Host(`${V_NOTE_HOST:?V_NOTE_HOST is required}`)
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls=true
       - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.tls.certresolver=myresolver
-      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,security-headers@docker
+      # Not mini-config's `security-headers@docker` (#444): it sets
+      # `Content-Security-Policy: frame-ancestors 'self'`, and a Traefik headers
+      # middleware *replaces* the backend's header of the same name (checked
+      # against the pinned traefik:v3), so it would silently erase the SPA's
+      # own policy (crates/server/src/csp.rs), which carries frame-ancestors
+      # itself. This local copy is that middleware minus its CSP — keep the
+      # rest in step with mini-config's infra-stack definition.
+      # scripts/smoke-oidc-login.sh checks after every deploy that the app's
+      # policy reaches the browser.
+      - traefik.http.routers.${V_NOTE_CONTAINER_NAME}.middlewares=lan-vpn-only@docker,rate-limit@docker,${V_NOTE_CONTAINER_NAME}-security-headers@docker
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.stsSeconds=31536000
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.stsPreload=true
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.frameDeny=true
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.browserXssFilter=true
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.referrerPolicy=strict-origin-when-cross-origin
+      - traefik.http.middlewares.${V_NOTE_CONTAINER_NAME}-security-headers.headers.permissionsPolicy=camera=(), microphone=(), geolocation=(), payment=()
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${V_NOTE_CONTAINER_NAME}.loadbalancer.server.scheme=https
       # Derived by deploy-v-note.sh from the one `observability/metrics-addr`

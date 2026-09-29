@@ -1,4 +1,4 @@
-import { expect, request, test, type APIRequestContext } from '@playwright/test';
+import { expect, request, test, type APIRequestContext } from '../csp-guard';
 import * as path from 'path';
 
 const storageState = path.resolve(__dirname, '..', '.auth-state.json');

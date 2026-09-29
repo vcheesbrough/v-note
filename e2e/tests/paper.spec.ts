@@ -1,4 +1,4 @@
-import { expect, request, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, request, test, type APIRequestContext, type Page } from '../csp-guard';
 
 // Page paper (rule lines) e2e. Covers the create-with-paper round trip through
 // every read path, the lease gate, thumbnail regeneration with old-URL

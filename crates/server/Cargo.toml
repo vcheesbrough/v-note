@@ -46,7 +46,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "for
 rustls = { version = "0.23", features = ["ring"] }
 serde.workspace = true
 serde_json.workspace = true
-# PKCE S256 challenge only (RFC 7636) — not a general crypto dependency.
+# PKCE S256 challenge (RFC 7636) and the SPA's CSP script hashes (#444) —
+# not a general crypto dependency.
 sha2 = "0.11"
 sovereign-config-provider = { git = "https://github.com/vcheesbrough/sovereign-config", tag = "2.30.2", features = ["config"] }
 # 0.9 deleted the combined runtime+TLS features; `runtime-tokio` + `tls-rustls-ring`
@@ -56,7 +57,7 @@ sqlx = { version = "0.9", default-features = false, features = ["chrono", "deriv
 time = "0.3"
 tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.7", features = ["fs", "trace"] }
+tower-http = { version = "0.7", features = ["fs", "set-header", "trace"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
