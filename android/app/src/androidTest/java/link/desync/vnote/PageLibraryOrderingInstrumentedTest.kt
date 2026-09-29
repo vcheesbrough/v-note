@@ -289,14 +289,16 @@ class PageLibraryOrderingInstrumentedTest {
      * cannot be lost across recreation, only delayed.
      *
      * That is why the old single 10 s wait was split rather than just raised.
-     * Each phase covers exactly one request of that chain and gets
-     * [REQUEST_BUDGET_MS], which is OkHttp's default connect/read timeout —
-     * the app's own limit for that request (`OkHttpApiClient` sets none).
-     * A shorter wait would call the app broken while it is still, by its own
-     * rules, waiting on a reply — and the old wait gave two sequential
-     * requests a single request's budget between them. Healthy runs need 0.3–0.8 s for
-     * the whole chain on API 29, and 1.7 s with the emulator throttled to
-     * 1.5 CPUs, so this is headroom for a stall, not the expected time.
+     * The first phase covers the session check and the library request going
+     * out; the second covers the library reply and the grid drawing. Each gets
+     * [REQUEST_BUDGET_MS], chosen to match OkHttp's default connect and
+     * per-read timeouts (`OkHttpApiClient` sets none). That is headroom sized
+     * to the client's own timeouts, not a limit the app enforces: OkHttp has
+     * no overall call timeout, so one request can legitimately take longer.
+     * The old wait gave two sequential requests a single such budget between
+     * them. Healthy runs need 0.3–0.8 s for the whole chain on API 29, and
+     * 1.7 s with the emulator throttled to 1.5 CPUs, so this is headroom for
+     * a stall, not the expected time.
      *
      * The server-side request log is the check for the first phase, not a
      * counter snapshot: the old instance's refetch can reach the server
