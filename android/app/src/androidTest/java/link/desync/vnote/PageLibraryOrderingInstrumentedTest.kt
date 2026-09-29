@@ -1,6 +1,7 @@
 package link.desync.vnote
 
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
@@ -35,6 +36,7 @@ import org.junit.rules.RuleChain
 import org.junit.rules.TestRule
 import org.junit.runner.RunWith
 import java.net.InetAddress
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -51,6 +53,9 @@ class PageLibraryOrderingInstrumentedTest {
     private val librarySocket = AtomicReference<WebSocket>()
     private val realtimeUpgrades = AtomicInteger(0)
     private val leaseGranted = CountDownLatch(1)
+
+    // Every path the fake server was asked for, in arrival order.
+    private val requestPaths: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
     private val environmentRule =
         object : ExternalResource() {
@@ -263,17 +268,85 @@ class PageLibraryOrderingInstrumentedTest {
         openPaletteAndAssertSelectedStyle("#C62828", "8.5")
 
         closePaletteAndReturnToLibrary()
+        val requestsBeforeRecreate = requestPaths.size
         composeRule.activityRule.scenario.recreate()
-        composeRule.waitUntil(timeoutMillis = 10_000) {
+        awaitLibraryReloadAfterRecreation(requestsBeforeRecreate)
+        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
+        openPaletteAndAssertSelectedStyle("#C62828", "8.5")
+    }
+
+    /**
+     * Waits for the recreated activity to show the library again, one request
+     * at a time, and says which step stalled if it does not (#364).
+     *
+     * Nothing survives recreation: `MainActivity` keeps its session and
+     * `LibraryStateHolder` in plain fields, not a ViewModel, so the new
+     * instance starts from an empty list and re-runs the cold path —
+     * `GET /api/me`, then (only once that succeeds) `GET /api/pages`, then the
+     * grid. No channel event is involved, and the one fetch that can overlap
+     * it — the old instance's library refetch from the Back tap just before —
+     * is written into the destroyed holder, never the new one. So the tile
+     * cannot be lost across recreation, only delayed.
+     *
+     * That is why the old single 10 s wait was split rather than just raised.
+     * The first phase covers the session check and the library request going
+     * out; the second covers the library reply and the grid drawing. Each gets
+     * [REQUEST_BUDGET_MS], chosen to match OkHttp's default connect and
+     * per-read timeouts (`OkHttpApiClient` sets none). That is headroom sized
+     * to the client's own timeouts, not a limit the app enforces: OkHttp has
+     * no overall call timeout, so one request can legitimately take longer.
+     * The old wait gave two sequential requests a single such budget between
+     * them. Healthy runs need 0.3–0.8 s for the whole chain on API 29, and
+     * 1.7 s with the emulator throttled to 1.5 CPUs, so this is headroom for
+     * a stall, not the expected time.
+     *
+     * The server-side request log is the check for the first phase, not a
+     * counter snapshot: the old instance's refetch can reach the server
+     * after `recreate()` begins, so "one more `/api/pages`" would be satisfied
+     * by the wrong activity. Only the new instance sends `/api/me`.
+     */
+    private fun awaitLibraryReloadAfterRecreation(requestsBeforeRecreate: Int) {
+        fun requestsSinceRecreate() = requestPaths.drop(requestsBeforeRecreate)
+
+        fun reloadedLibraryRequested(): Boolean {
+            val since = requestsSinceRecreate()
+            val me = since.indexOf("/api/me")
+            return me >= 0 && since.subList(me + 1, since.size).contains("/api/pages")
+        }
+        waitUntilOrFail(
+            step = "the recreated activity to sign in and refetch the library",
+            observed = { "requests since recreate: ${requestsSinceRecreate()}" },
+        ) { reloadedLibraryRequested() }
+
+        val lastCheck = AtomicReference("none")
+        waitUntilOrFail(
+            step = "page-tile-page_old to be displayed after the refetch",
+            observed = { "last check: ${lastCheck.get()}" },
+        ) {
             runCatching {
                 composeRule
                     .onNodeWithTag("page-tile-page_old", useUnmergedTree = true)
                     .assertIsDisplayed()
                 true
-            }.getOrDefault(false)
+            }.getOrElse { error ->
+                lastCheck.set(error.message?.lineSequence()?.firstOrNull() ?: error.javaClass.simpleName)
+                false
+            }
         }
-        composeRule.onNodeWithTag("page-tile-page_old", useUnmergedTree = true).performClick()
-        openPaletteAndAssertSelectedStyle("#C62828", "8.5")
+    }
+
+    // `waitUntil`, but a timeout names the step and what was observed, so a CI
+    // failure carries its own diagnosis rather than "condition not satisfied".
+    private fun waitUntilOrFail(
+        step: String,
+        observed: () -> String,
+        condition: () -> Boolean,
+    ) {
+        try {
+            composeRule.waitUntil(timeoutMillis = REQUEST_BUDGET_MS, condition = condition)
+        } catch (timeout: ComposeTimeoutException) {
+            throw AssertionError("Timed out after $REQUEST_BUDGET_MS ms waiting for $step; ${observed()}", timeout)
+        }
     }
 
     private fun openPage(pageId: String) {
@@ -323,8 +396,9 @@ class PageLibraryOrderingInstrumentedTest {
 
     private fun testDispatcher(): Dispatcher =
         object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                when (request.url.encodedPath) {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                requestPaths.add(request.url.encodedPath)
+                return when (request.url.encodedPath) {
                     "/api/me" -> jsonResponse("""{"sub":"test-user","email":"test@example.com"}""")
                     "/api/pages" -> {
                         pageListRequests.incrementAndGet()
@@ -360,6 +434,7 @@ class PageLibraryOrderingInstrumentedTest {
                     -> pageSocketResponse()
                     else -> MockResponse(code = 404)
                 }
+            }
         }
 
     private fun pageSocketResponse(): MockResponse =
@@ -414,6 +489,10 @@ class PageLibraryOrderingInstrumentedTest {
         updatedAt: String,
     ): String = """{"id":"$id","title":"$title","created_at":"2026-07-15T07:00:00Z","updated_at":"$updatedAt"}"""
 }
+
+// OkHttp's default connect and read timeout, which `OkHttpApiClient` keeps:
+// how long the app itself waits on one request before calling it failed.
+private const val REQUEST_BUDGET_MS = 10_000L
 
 private fun DpRect.precedes(other: DpRect): Boolean = top < other.top || (top == other.top && left < other.left)
 
