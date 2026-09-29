@@ -124,7 +124,7 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   [`docs/DEV.md`](docs/DEV.md):
   - `just rust-ci lint` / `just rust-ci test` (`Dockerfile.rust-ci`, as the `lint` / `rust-test` steps)
   - `docker build -f Dockerfile.web -t v-note:ci-local --secret id=github_token,env=GITHUB_TOKEN .`
-  - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
+  - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
   - **All push workflows, including `e2e-web` and both Android lanes, must be green** before an iteration is done.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see

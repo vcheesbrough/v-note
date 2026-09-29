@@ -504,7 +504,8 @@ docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITH
 V_NOTE_HOST=v-notes-dev.desync.link \
   ./scripts/smoke-oidc-login.sh                   # the smoke check itself, against a live environment (read-only, no credentials)
 ./scripts/check-android-build-box-image.sh        # CI `android-build-box-pin`
-TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml up \
+TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml \
+  -f e2e/docker-compose.android-apk.test.yml up \
   --build --force-recreate --abort-on-container-exit --exit-code-from playwright
 ```
 
