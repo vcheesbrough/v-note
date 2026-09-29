@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod csp;
 pub mod observability;
 mod realtime;
 mod routes;
@@ -8,6 +9,7 @@ mod thumbnails;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::http::header::CONTENT_SECURITY_POLICY;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -15,6 +17,7 @@ use protocol::{HealthResponse, MetaResponse, PROTOCOL_VERSION};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::auth::{AuthConfig, JwksCache, auth_middleware};
 use crate::config::{
@@ -208,6 +211,25 @@ pub fn build_router_with_telemetry_endpoint(
     )
 }
 
+/// As [`build_router_with_telemetry_endpoint`], also serving the SPA from
+/// `static_dir` the way the image does — what the CSP tests (#444) drive.
+pub fn build_router_with_spa(
+    app_version: String,
+    auth: Arc<AuthConfig>,
+    jwks_cache: Arc<JwksCache>,
+    db: PgPool,
+    endpoint: Option<url::Url>,
+    static_dir: PathBuf,
+) -> Router {
+    router(
+        AppState {
+            telemetry_endpoint: telemetry_endpoint(endpoint.as_ref()),
+            ..test_state(app_version, auth, jwks_cache, db)
+        },
+        Some(static_dir),
+    )
+}
+
 /// The state the integration-test routers share: no asset links, realtime
 /// defaults, and client telemetry off.
 fn test_state(
@@ -277,13 +299,49 @@ fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
 
     if let Some(static_dir) = static_dir {
         let index = static_dir.join("index.html");
+        let policy = spa_content_security_policy(&index, state.telemetry_endpoint.as_deref());
         let spa_service = axum::routing::get_service(
             ServeDir::new(static_dir).not_found_service(ServeFile::new(index)),
-        );
+        )
+        .layer(SetResponseHeaderLayer::overriding(
+            CONTENT_SECURITY_POLICY,
+            policy,
+        ));
         router = router.fallback_service(spa_service);
     }
 
     router.layer(middleware::from_fn(request_observability_middleware))
+}
+
+/// The SPA's CSP (#444), for every response the static service sends —
+/// `index.html` under any deep link, and the assets it loads. Built once from
+/// the `index.html` this process will serve, so the bootstrap hash always
+/// matches the build in the image; and from the telemetry endpoint, whose
+/// origin the page must be allowed to `fetch`.
+fn spa_content_security_policy(
+    index: &std::path::Path,
+    telemetry_endpoint: Option<&str>,
+) -> axum::http::HeaderValue {
+    let script_hashes = match std::fs::read_to_string(index) {
+        Ok(html) => csp::inline_script_hashes(&html),
+        Err(error) => {
+            // Not fatal: without an index.html there is no SPA to protect, and
+            // the static service already answers 404 for it.
+            tracing::warn!(path = %index.display(), %error, "SPA index.html unreadable; CSP allows no inline script");
+            Vec::new()
+        }
+    };
+    let connect_origins: Vec<String> = telemetry_endpoint
+        .and_then(|endpoint| url::Url::parse(endpoint).ok())
+        .map(|endpoint| endpoint.origin().ascii_serialization())
+        .into_iter()
+        .collect();
+    tracing::info!(
+        inline_scripts = script_hashes.len(),
+        connect_origins = ?connect_origins,
+        "SPA content security policy built"
+    );
+    csp::spa_policy_header(&script_hashes, &connect_origins)
 }
 
 #[tracing::instrument(skip_all)]

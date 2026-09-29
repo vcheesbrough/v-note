@@ -22,6 +22,9 @@
 # IdP rejects redirects to the app's own callback carrying `?error=...`, which the
 # server then renders as the bare `authentication denied: ...` page users saw.
 #
+#   3. GET https://$V_NOTE_HOST/            → expect the app's own CSP (#444),
+#      not one a proxy substituted.
+#
 # No credentials and no session: this deliberately stops at the login page rather
 # than authenticating, so it needs no test user and is safe to run against any
 # live environment.
@@ -114,6 +117,25 @@ case "$location" in
   *)
     fail "unexpected IdP response, neither a login flow nor a known rejection: $location"
     ;;
+esac
+
+# The SPA's own Content-Security-Policy (#444) must reach the browser. The app
+# builds it (script hashes, telemetry origin); a proxy headers middleware that
+# sets `Content-Security-Policy` replaces it wholesale — mini-config's shared
+# `security-headers` does exactly that — and nothing else would notice, because
+# the SPA still works without it. Checked here, after the login hop has shown
+# the app is up, since the e2e stack has no proxy in front of the app.
+csp=$(curl -sS -o /dev/null -D - --max-time 15 "$SCHEME://$HOST/" 2>/dev/null \
+  | tr -d '\r' \
+  | awk 'tolower($0) ~ /^content-security-policy:/ { sub(/^[^:]*:[ \t]*/, ""); print }' || true)
+
+echo "==> the SPA is served with the app's Content-Security-Policy"
+echo "    ${csp:-(none)}"
+
+case "$csp" in
+  *"script-src 'self' 'wasm-unsafe-eval' 'sha256-"*) echo "  ok   — script-src admits only the app and its hashed bootstrap" ;;
+  "") fail "$SCHEME://$HOST/ carries no Content-Security-Policy" ;;
+  *) fail "$SCHEME://$HOST/ carries a Content-Security-Policy that is not the app's (replaced by a proxy?): $csp" ;;
 esac
 
 echo

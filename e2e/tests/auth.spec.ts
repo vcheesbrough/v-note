@@ -1,4 +1,4 @@
-import { test, expect, request } from '@playwright/test';
+import { test, expect, request } from '../csp-guard';
 
 test.describe('auth — happy path', () => {
   test('GET /api/me returns the test service account identity', async ({ request }) => {

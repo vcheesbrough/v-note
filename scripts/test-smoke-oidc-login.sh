@@ -19,6 +19,8 @@
 #   no-pkce      → app omits the PKCE challenge                       → fails
 #   not-idp      → app redirects somewhere other than the IdP         → fails
 #   app-down     → app never redirects at all                         → fails
+#   csp-replaced → `/` carries a proxy's CSP, not the app's (#444)    → fails
+#   csp-missing  → `/` carries no CSP at all                          → fails
 #
 # Each mode gets its own stub port, so the check under test is driven with exactly
 # the URL shape it uses in production — no test-only parameters threaded through
@@ -33,7 +35,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PORT="${TEST_PORT:-18372}"
-MODES=(healthy rejected bounced unknown no-pkce not-idp app-down)
+MODES=(healthy rejected bounced unknown no-pkce not-idp app-down csp-replaced csp-missing)
 STUB_PID=""
 
 cleanup() {
@@ -101,6 +103,20 @@ def make_handler(mode, base):
                 responses = idp_responses(base)
                 self.send_response(302)
                 self.send_header("Location", responses.get(mode, responses["healthy"]))
+                self.end_headers()
+                return
+
+            # The SPA document, with the app's CSP unless the mode says otherwise.
+            if path == "/":
+                self.send_response(200)
+                if mode == "csp-replaced":
+                    self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
+                elif mode != "csp-missing":
+                    self.send_header(
+                        "Content-Security-Policy",
+                        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' "
+                        "'sha256-abc='; connect-src 'self'",
+                    )
                 self.end_headers()
                 return
 
@@ -181,6 +197,8 @@ run_case unknown  fail "an unrecognised IdP response fails rather than passing s
 run_case no-pkce  fail "an authorize request without a PKCE challenge fails"
 run_case not-idp  fail "a redirect somewhere other than the IdP fails"
 run_case app-down fail "an app that never redirects fails"
+run_case csp-replaced fail "a CSP replaced by a proxy's fails (#444)"
+run_case csp-missing  fail "an SPA served without a CSP fails (#444)"
 
 if [ "$failures" -ne 0 ]; then
   echo

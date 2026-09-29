@@ -1,4 +1,4 @@
-import { expect, request, test, type APIRequestContext } from '@playwright/test';
+import { expect, request, test, type APIRequestContext } from '../csp-guard';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';

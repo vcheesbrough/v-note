@@ -1,4 +1,4 @@
-import { expect, request, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, request, test, type APIRequestContext, type Page } from '../csp-guard';
 
 /**
  * #417 — the server's OWN logs, end to end.

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../csp-guard';
 
 const APK_BASE = process.env.ANDROID_APK_BASE_URL ?? 'http://v-note-android-apk';
 

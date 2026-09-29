@@ -145,13 +145,16 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
     only a bearer, and the SPA's session is an `HttpOnly` cookie, so the config
     route hands the cookie's token to the page. That is the deliberate cost of
     adopting the reference ingest: script injection in the page can now read a
-    token it could previously only cause to be sent. **CSP review (#439): there
-    is no script CSP today** — `security-headers@docker` (mini-config) sets only
-    `frame-ancestors 'self'` — so what bounds the exposure is that the SPA loads
-    no third-party script and renders no HTML from data. Adding a real policy
-    (`script-src 'self' 'wasm-unsafe-eval'`, `connect-src 'self'`) is follow-up
-    card #444; until it lands, treat any new script source or `inner_html` as a
-    token-exposure review.
+    token it could previously only cause to be sent. **What bounds that is the
+    SPA's Content-Security-Policy (#444)**, served by the app itself
+    (`crates/server/src/csp.rs`; `docs/DEPLOY.md` → SPA Content-Security-Policy):
+    `script-src 'self' 'wasm-unsafe-eval'` plus the hash of Trunk's inline
+    bootstrap, `connect-src 'self'` plus the telemetry endpoint's origin. Every
+    e2e spec imports `test` from `e2e/csp-guard.ts`, which fails the test on any
+    violation — a new script, `fetch` target or inline handler must fit the
+    policy, and widening the policy is a token-exposure review. **Never put
+    `security-headers@docker` (or any Traefik middleware that sets a CSP) back
+    on the app router**: Traefik replaces the app's header, silently.
   - **The image is pinned and unproven.** v-note is its first real deployment.
     Every behaviour v-note relies on is asserted against the pinned tag in
     `e2e/tests/client-telemetry.spec.ts`; a gap is fixed upstream in
