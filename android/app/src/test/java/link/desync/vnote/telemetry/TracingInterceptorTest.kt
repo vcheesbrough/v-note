@@ -95,6 +95,17 @@ class TracingInterceptorTest {
         assertEquals("GET", span.attribute("http.request.method").getString("stringValue"))
         assertEquals("200", span.attribute("http.response.status_code").get("intValue"))
         assertFalse(span.has("status"))
+        // No app frame on this stack (the caller is a test in this package), so
+        // the span is located at the interceptor that opened it, never deeper
+        // in the runtime or out in OkHttp (#453).
+        assertEquals(
+            "link.desync.vnote.telemetry.TracingInterceptor.intercept",
+            span.attribute(CODE_FUNCTION_NAME).getString("stringValue"),
+        )
+        assertEquals(
+            "link/desync/vnote/telemetry/TracingInterceptor.kt",
+            span.attribute(CODE_FILE_PATH).getString("stringValue"),
+        )
     }
 
     @Test

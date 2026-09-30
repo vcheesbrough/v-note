@@ -655,6 +655,26 @@ test.describe('the SPA in a real browser', () => {
     expect(resource['deployment.environment.name']).toBe(EXPECTED_ENV);
     const attributes = flattenAttributes(spa.scopeSpans[0].spans[0].attributes);
     expect(attributes['user.name']).toBe(USER.name);
+
+    // #453: every browser span names the line of SPA code that opened it — the
+    // caller, never the telemetry module (`#[track_caller]` all the way down).
+    const spaSpans = batches
+      .filter((batch: any) => flattenAttributes(batch.resource?.attributes)['service.name'] === 'v-note-spa')
+      .flatMap((batch: any) => (batch.scopeSpans ?? []).flatMap((scope: any) => scope.spans ?? []));
+    expect(spaSpans.length).toBeGreaterThan(0);
+    const expectedFile: Record<string, RegExp> = {
+      'http.client': /(^|\/)src\/api\.rs$/,
+      'screen.library': /(^|\/)src\/main\.rs$/,
+      'realtime.connect': /(^|\/)src\/realtime\.rs$/,
+      'realtime.subscribe': /(^|\/)src\/realtime\.rs$/,
+    };
+    for (const span of spaSpans) {
+      const located = flattenAttributes(span.attributes);
+      const file = located['code.file.path'];
+      expect(file, `${span.name} code.file.path`).toMatch(expectedFile[span.name] ?? /(^|\/)src\/.+\.rs$/);
+      expect(file, `${span.name} is not located in the telemetry module`).not.toMatch(/telemetry(\.rs|\/)/);
+      expect(Number(located['code.line.number']), `${span.name} code.line.number`).toBeGreaterThan(0);
+    }
   });
 
   /** The browser's span must be the root, or the trace is not the user's. */
@@ -721,6 +741,9 @@ test.describe('the SPA in a real browser', () => {
     // The SPA's own build, which is the server's here — the same image.
     expect(stream.service_version).toBe(version);
     expect(stream.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    // #453: located at the `telemetry::log` call in main.rs, not inside it.
+    expect(stream.code_file_path).toMatch(/(^|\/)src\/main\.rs$/);
+    expect(Number(stream.code_line_number)).toBeGreaterThan(0);
   });
 
   /**

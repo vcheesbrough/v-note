@@ -24,7 +24,9 @@ internal class CrashHandler(
                     telemetry.now(),
                     Severity.Error,
                     "uncaught exception",
-                    listOf(Attribute("thread.name", thread.name)) +
+                    // The source location is where it was thrown (#453), not
+                    // this handler, which only the JVM's dispatch calls.
+                    callSiteAttributes(throwable.stackTrace, thread) +
                         throwableAttributes(throwable, withStackTrace = true),
                     telemetry.screen(),
                 ),

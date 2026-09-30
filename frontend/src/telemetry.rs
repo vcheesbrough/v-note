@@ -30,6 +30,7 @@ pub(crate) mod outbox;
 pub(crate) mod span;
 
 use std::cell::RefCell;
+use std::panic::Location;
 
 use gloo_timers::future::TimeoutFuture;
 use protocol::TelemetryConfigResponse;
@@ -323,25 +324,30 @@ pub(crate) fn screen() -> Parent {
     })
 }
 
-/// Opens a span under `parent`.
+/// Opens a span under `parent`, located at the caller (#453).
+#[track_caller]
 pub(crate) fn span(name: &'static str, parent: Parent) -> SpanHandle {
-    open(name, SpanKind::Internal, parent)
+    open(name, SpanKind::Internal, parent, Location::caller())
 }
 
 /// Opens a span for an outbound request under `parent`. `Client` kind is what
 /// makes a backend render it as the caller of the server's span rather than a
 /// sibling.
+#[track_caller]
 pub(crate) fn client_span(name: &'static str, parent: Parent) -> SpanHandle {
-    open(name, SpanKind::Client, parent)
+    open(name, SpanKind::Client, parent, Location::caller())
 }
 
-fn open(name: &'static str, kind: SpanKind, parent: Parent) -> SpanHandle {
+/// The location is a parameter, not `#[track_caller]`, so it is taken in the
+/// function the caller named and cannot silently become this line.
+fn open(name: &'static str, kind: SpanKind, parent: Parent, location: &Location<'_>) -> SpanHandle {
     SpanHandle(OpenSpan::open(
         parent,
         SpanId::from_random(random_bytes()),
         name,
         kind,
         now_unix_nanos(),
+        location,
     ))
 }
 
@@ -350,7 +356,9 @@ fn open(name: &'static str, kind: SpanKind, parent: Parent) -> SpanHandle {
 /// One trace per screen rather than per page load: a session left open all day
 /// would otherwise build a single unboundedly deep trace, which no backend
 /// renders usefully.
+#[track_caller]
 pub(crate) fn start_screen(name: &'static str, route: &str) {
+    let location = Location::caller();
     let trace_id = TraceId::from_random(random_bytes());
     let root = SpanId::from_random(random_bytes());
     let start = now_unix_nanos();
@@ -370,10 +378,13 @@ pub(crate) fn start_screen(name: &'static str, route: &str) {
             kind: SpanKind::Internal,
             start_time_unix_nano: start,
             end_time_unix_nano: start,
-            attributes: vec![KeyValue {
-                key: "vnote.route",
-                value: route.to_string().into(),
-            }],
+            attributes: span::code_location(location)
+                .into_iter()
+                .chain([KeyValue {
+                    key: "vnote.route",
+                    value: route.to_string().into(),
+                }])
+                .collect(),
             status: None,
         });
     });
@@ -389,13 +400,41 @@ pub(crate) fn start_screen(name: &'static str, route: &str) {
 /// counts, statuses and our own error strings are not. This goes to a server
 /// the user does not control, so the rule is the same as the server's own. The
 /// one deliberate exception is the panic hook — see [`install_panic_hook`].
+///
+/// Located at the caller (#453), as is every logging function below.
+#[track_caller]
 pub(crate) fn log(severity: Severity, message: impl Into<String>, attributes: Vec<KeyValue>) {
-    log_in(screen(), severity, message, attributes);
+    log_at(Location::caller(), screen(), severity, message, attributes);
 }
 
 /// As [`log`], correlated with `context` — the span the line is about, so Loki
 /// links it to that request rather than to the screen as a whole.
+#[track_caller]
 pub(crate) fn log_in(
+    context: Parent,
+    severity: Severity,
+    message: impl Into<String>,
+    attributes: Vec<KeyValue>,
+) {
+    log_at(Location::caller(), context, severity, message, attributes);
+}
+
+/// A log record located at `location`, the caller of a public logging
+/// function.
+fn log_at(
+    location: &Location<'_>,
+    context: Parent,
+    severity: Severity,
+    message: impl Into<String>,
+    mut attributes: Vec<KeyValue>,
+) {
+    attributes.extend(span::code_location(location));
+    push_log(context, severity, message, attributes);
+}
+
+/// Queues a record with the attributes as given — location included — and
+/// echoes it to the console.
+fn push_log(
     context: Parent,
     severity: Severity,
     message: impl Into<String>,
@@ -428,16 +467,37 @@ pub(crate) fn attr(key: &'static str, value: impl Into<otlp::AnyValue>) -> KeyVa
     }
 }
 
+#[track_caller]
 pub(crate) fn info_in(context: Parent, message: impl Into<String>) {
-    log_in(context, Severity::Info, message, Vec::new());
+    log_at(
+        Location::caller(),
+        context,
+        Severity::Info,
+        message,
+        Vec::new(),
+    );
 }
 
+#[track_caller]
 pub(crate) fn warn_in(context: Parent, message: impl Into<String>) {
-    log_in(context, Severity::Warn, message, Vec::new());
+    log_at(
+        Location::caller(),
+        context,
+        Severity::Warn,
+        message,
+        Vec::new(),
+    );
 }
 
+#[track_caller]
 pub(crate) fn error_in(context: Parent, message: impl Into<String>) {
-    log_in(context, Severity::Error, message, Vec::new());
+    log_at(
+        Location::caller(),
+        context,
+        Severity::Error,
+        message,
+        Vec::new(),
+    );
 }
 
 fn console(severity: Severity, message: &str) {
@@ -464,13 +524,15 @@ pub(crate) fn install_panic_hook() {
         // which may be user data. Kept anyway (decided on PR #55) because a
         // panic is the rarest and most valuable thing this module reports, and
         // the location alone rarely says which of several `expect`s fired.
-        log(
+        //
+        //
+        // Located at the panic, not at this hook (#453): see
+        // `span::panic_attributes`, which is tested on the host.
+        push_log(
+            screen(),
             Severity::Error,
             format!("wasm panic: {info}"),
-            vec![KeyValue {
-                key: "exception.type",
-                value: "panic".into(),
-            }],
+            span::panic_attributes(info),
         );
         // Flushed immediately: a panic usually means this page load is over, and
         // the next tick may never come.

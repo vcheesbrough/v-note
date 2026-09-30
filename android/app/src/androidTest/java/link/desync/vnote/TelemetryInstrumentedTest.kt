@@ -9,10 +9,14 @@ import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.model.LibraryEvent
+import link.desync.vnote.telemetry.ConfigFetch
+import link.desync.vnote.telemetry.ExportOutcome
 import link.desync.vnote.telemetry.OtlpHttpTransport
 import link.desync.vnote.telemetry.Severity
+import link.desync.vnote.telemetry.Signal
 import link.desync.vnote.telemetry.Telemetry
 import link.desync.vnote.telemetry.TelemetryRuntime
+import link.desync.vnote.telemetry.Transport
 import link.desync.vnote.telemetry.parseTraceparent
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -104,6 +108,76 @@ class TelemetryInstrumentedTest {
         assertTrue("traceparent '$header'", traceparent.matches(header))
         assertNotNull("parses as a real, non-zero context", parseTraceparent(header))
         assertTrue("X-Request-Id is kept", request.headers["X-Request-Id"].orEmpty().startsWith("android_"))
+    }
+
+    // #453, on a real stack: a request and the failure log written for it are
+    // located at the API method that made the request (its `withContext`
+    // body), not at the shared helper that ran it or the one that logged it.
+    @Test
+    fun aRequestAndItsFailureLogAreLocatedAtTheApiMethod() {
+        val exported = java.util.Collections.synchronizedList(mutableListOf<Pair<Signal, JSONObject>>())
+        val recording =
+            TelemetryRuntime(
+                object : Transport {
+                    override fun isReady() = true
+
+                    override fun credentialId() = 1
+
+                    override fun fetchConfig() = ConfigFetch.Configured("https://ingest.example")
+
+                    override fun send(
+                        endpoint: String,
+                        signal: Signal,
+                        body: String,
+                    ): ExportOutcome {
+                        exported += signal to JSONObject(body)
+                        return ExportOutcome.Accepted
+                    }
+                },
+            )
+        val installed = Telemetry.runtime
+        Telemetry.install(recording)
+        try {
+            server.enqueue(MockResponse(code = 500))
+            runBlocking { assertTrue(client().deletePage("p1").isFailure) }
+            recording.exportNow()
+        } finally {
+            Telemetry.install(installed)
+        }
+
+        fun items(
+            signal: Signal,
+            outer: String,
+            scope: String,
+            list: String,
+        ) = synchronized(exported) { exported.filter { it.first == signal }.map { it.second } }.flatMap { body ->
+            val array =
+                body
+                    .getJSONArray(outer)
+                    .getJSONObject(0)
+                    .getJSONArray(scope)
+                    .getJSONObject(0)
+                    .getJSONArray(list)
+            (0 until array.length()).map(array::getJSONObject)
+        }
+
+        fun JSONObject.attribute(key: String): String {
+            val attributes = getJSONArray("attributes")
+            return (0 until attributes.length())
+                .map(attributes::getJSONObject)
+                .single { it.getString("key") == key }
+                .getJSONObject("value")
+                .let { it.optString("stringValue", it.optString("intValue")) }
+        }
+
+        val span = items(Signal.Traces, "resourceSpans", "scopeSpans", "spans").single { it.getString("name") == "http.client" }
+        val log = items(Signal.Logs, "resourceLogs", "scopeLogs", "logRecords").single()
+        for ((what, item) in listOf("span" to span, "log" to log)) {
+            val function = item.attribute("code.function.name")
+            assertTrue("$what located at deletePage, was $function", function.contains("OkHttpApiClient\$deletePage"))
+            assertEquals("link/desync/vnote/api/OkHttpApiClient.kt", item.attribute("code.file.path"))
+            assertTrue(item.attribute("code.line.number").toInt() > 0)
+        }
     }
 
     // Unlike a browser, OkHttp can put headers on a WebSocket upgrade, which is
