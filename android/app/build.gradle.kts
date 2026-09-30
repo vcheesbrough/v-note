@@ -123,6 +123,9 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
+            // Client telemetry's `code.*` attributes (#453, telemetry/CallSite.kt)
+            // read class names and line numbers off stack frames. Turning R8 on
+            // makes them obfuscated until retraced with the build's mapping file.
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

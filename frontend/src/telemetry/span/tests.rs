@@ -2,6 +2,8 @@
 //! mis-parenting each other, and a span crossing a screen change switching
 //! trace. Both were invisible to the e2e suite's "one trace, one root" checks.
 
+use std::panic::Location;
+
 use super::*;
 
 fn trace(byte: u8) -> TraceId {
@@ -20,7 +22,14 @@ fn screen(trace_byte: u8, root_byte: u8) -> Parent {
 }
 
 fn open(parent: Parent, id: u8, name: &'static str) -> OpenSpan {
-    OpenSpan::open(parent, span_id(id), name, SpanKind::Client, UnixNanos(1))
+    OpenSpan::open(
+        parent,
+        span_id(id),
+        name,
+        SpanKind::Client,
+        UnixNanos(1),
+        Location::caller(),
+    )
 }
 
 /// The page-load case exactly: two requests start under the screen, and end in
@@ -94,7 +103,205 @@ fn attributes_and_status_survive_to_the_finished_span() {
     span.attr("http.response.status_code", AnyValue::Int(500));
 
     let finished = span.finish(UnixNanos(9), Some(ErrorStatus::new("HTTP 500")));
-    assert_eq!(finished.attributes.len(), 1);
+    // The two location attributes, then the caller's own.
+    assert_eq!(finished.attributes.len(), 3);
+    assert_eq!(finished.attributes[2].key, "http.response.status_code");
     assert_eq!(finished.status, Some(ErrorStatus::new("HTTP 500")));
     assert_eq!(finished.end_time_unix_nano, UnixNanos(9));
+}
+
+// ---------------------------------------------------------------------------
+// Source location (#453)
+// ---------------------------------------------------------------------------
+
+fn string_attr(attributes: &[KeyValue], key: &str) -> Option<String> {
+    attributes
+        .iter()
+        .find(|kv| kv.key == key)
+        .map(|kv| match &kv.value {
+            AnyValue::String(value) => value.clone(),
+            other => panic!("{key} is not a string: {other:?}"),
+        })
+}
+
+fn int_attr(attributes: &[KeyValue], key: &str) -> Option<i64> {
+    attributes
+        .iter()
+        .find(|kv| kv.key == key)
+        .map(|kv| match kv.value {
+            AnyValue::Int(value) => value,
+            ref other => panic!("{key} is not an int: {other:?}"),
+        })
+}
+
+/// The semconv keys, typed as OTLP expects: the file a string, the line an int.
+#[test]
+fn a_location_becomes_code_file_path_and_code_line_number() {
+    let here = Location::caller();
+    let attributes = code_location(here);
+
+    assert_eq!(
+        string_attr(&attributes, "code.file.path").as_deref(),
+        Some(here.file())
+    );
+    assert_eq!(
+        int_attr(&attributes, "code.line.number"),
+        Some(i64::from(here.line()))
+    );
+    assert!(
+        here.file().ends_with("telemetry/span/tests.rs"),
+        "{}",
+        here.file()
+    );
+}
+
+/// The shape every entry point in `telemetry.rs` has: a `#[track_caller]`
+/// function taking `Location::caller()` and handing it down.
+#[track_caller]
+fn entry_point(parent: Parent) -> OpenSpan {
+    OpenSpan::open(
+        parent,
+        span_id(0x30),
+        "realtime.connect",
+        SpanKind::Internal,
+        UnixNanos(1),
+        Location::caller(),
+    )
+}
+
+/// And the shape of a helper that wraps one, like `api::start`.
+#[track_caller]
+fn wrapper(parent: Parent) -> OpenSpan {
+    entry_point(parent)
+}
+
+/// A span is located where application code asked for it — through any number
+/// of `#[track_caller]` layers — not inside the telemetry module.
+#[test]
+fn a_span_is_located_at_the_outermost_caller() {
+    let (span, line) = (wrapper(screen(0xa1, 0x01)), line!());
+    let finished = span.finish(UnixNanos(2), None);
+
+    assert_eq!(
+        string_attr(&finished.attributes, "code.file.path").as_deref(),
+        Some(file!())
+    );
+    assert_eq!(
+        int_attr(&finished.attributes, "code.line.number"),
+        Some(i64::from(line))
+    );
+}
+
+/// What makes the above true for the real functions: they need a browser, so
+/// cannot run here, and dropping `#[track_caller]` from one compiles fine and
+/// silently locates every caller at the telemetry module. So the attribute is
+/// checked on the source: every public function that opens a span or writes a
+/// log line, and the one helper that wraps them (`api::start`). The e2e suite
+/// checks the result on what Tempo and Loki stored.
+#[test]
+fn every_entry_point_that_records_is_track_caller() {
+    let entry_points: [(&str, &str, &[&str]); 2] = [
+        (
+            "telemetry.rs",
+            include_str!("../../telemetry.rs"),
+            &[
+                "span",
+                "client_span",
+                "start_screen",
+                "log",
+                "log_in",
+                "info_in",
+                "warn_in",
+                "error_in",
+            ],
+        ),
+        ("api.rs", include_str!("../../api.rs"), &["start"]),
+    ];
+    for (file, source, functions) in entry_points {
+        for function in functions {
+            let signature = source
+                .lines()
+                .position(|line| {
+                    line.starts_with(&format!("pub(crate) fn {function}("))
+                        || line.starts_with(&format!("fn {function}("))
+                })
+                .unwrap_or_else(|| panic!("{file}: no fn {function}"));
+            let attribute = source.lines().nth(signature.saturating_sub(1));
+            assert_eq!(
+                attribute,
+                Some("#[track_caller]"),
+                "{file}: fn {function} must be #[track_caller] (#453)"
+            );
+        }
+    }
+}
+
+/// The panic hook's attributes name where the panic happened, not the hook.
+/// Our real hook cannot run on the host (it logs through browser APIs), so a
+/// stand-in hook runs the same `panic_attributes` on a real panic. It only
+/// records its own panic, by message, so a concurrent test failing elsewhere
+/// cannot be mistaken for it; the previous hook is put back either way.
+#[test]
+fn a_panic_is_located_where_it_panicked_not_at_the_hook() {
+    use std::sync::{Arc, Mutex};
+
+    const MESSAGE: &str = "telemetry span tests: located panic";
+    let captured: Arc<Mutex<Option<Vec<KeyValue>>>> = Arc::default();
+    let sink = Arc::clone(&captured);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.payload().downcast_ref::<&str>() == Some(&MESSAGE) {
+            *sink.lock().unwrap() = Some(panic_attributes(info));
+        }
+    }));
+    let line = line!() + 1;
+    let result = std::panic::catch_unwind(|| std::panic::panic_any(MESSAGE));
+    std::panic::set_hook(previous);
+
+    assert!(result.is_err());
+    let attributes = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the hook saw the panic");
+    assert_eq!(
+        string_attr(&attributes, "exception.type").as_deref(),
+        Some("panic")
+    );
+    assert_eq!(
+        string_attr(&attributes, "code.file.path").as_deref(),
+        Some(file!())
+    );
+    assert_eq!(
+        int_attr(&attributes, "code.line.number"),
+        Some(i64::from(line))
+    );
+}
+
+/// A dependency's location is reported from its crate directory, whatever
+/// the build host's `CARGO_HOME`; our own and std's paths pass through.
+#[test]
+fn dependency_paths_drop_the_build_hosts_cargo_home() {
+    let cases = [
+        (
+            "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos-0.8.20/src/lib.rs",
+            "leptos-0.8.20/src/lib.rs",
+        ),
+        (
+            "/home/builder/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde_json-1.0.140/src/de.rs",
+            "serde_json-1.0.140/src/de.rs",
+        ),
+        (
+            "/root/.cargo/git/checkouts/sovereign-config-0123abcd/4f5e6a7/src/lib.rs",
+            "sovereign-config-0123abcd/4f5e6a7/src/lib.rs",
+        ),
+        ("frontend/src/api.rs", "frontend/src/api.rs"),
+        (
+            "/rustc/0123456789abcdef/library/core/src/option.rs",
+            "/rustc/0123456789abcdef/library/core/src/option.rs",
+        ),
+    ];
+    for (built, reported) in cases {
+        assert_eq!(stable_path(built), reported, "{built}");
+    }
 }
