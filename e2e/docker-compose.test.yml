@@ -517,6 +517,13 @@ services:
       TEMPO_URL: http://tempo:3200
       LOKI_URL: http://loki:3100
       CLIENT_TELEMETRY_EXPECTED_ENV: e2e-ingest
+    # #279: cap the browser's TCP receive window (namespaced to this container,
+    # so the app is untouched). The page-lag spec stalls the server's fan-out
+    # by freezing a tab; without a cap the kernel would buffer ~6 MiB on the
+    # tab's behalf before the server noticed. 256 KiB still moves the largest
+    # download here (the APK) at several GB/s on the bridge's RTT.
+    sysctls:
+      net.ipv4.tcp_rmem: "4096 131072 262144"
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:

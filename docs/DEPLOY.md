@@ -592,7 +592,7 @@ The WebSocket channels carry all the ink traffic, so they get size and latency, 
 | `v_note_realtime_replay_bytes` / `_frames` | histogram | — | one observation per completed `Subscribe` replay: every `stroke-batch` + `tombstone-batch` + the closing `synced` |
 | `v_note_realtime_replay_duration_seconds` | histogram | — | `Subscribe` received → `synced` sent |
 | `v_note_realtime_message_handling_seconds` | histogram | `message_type` | server-side handling of one inbound page message. **Not end-to-end freshness** (that needs client timestamps — #154) |
-| `v_note_realtime_events_total` | counter | `channel`, `result` | now includes `lagged`: a subscriber fell behind its broadcast channel (page skips the dropped fan-out, library closes; recovery is #279) |
+| `v_note_realtime_events_total` | counter | `channel`, `result` | now includes `lagged`: a subscriber fell behind its broadcast channel (page: 256 messages, library: 64). Since #279 both channels **close** that socket with `1013 Try Again Later` / `lagged` and the client recovers by reconnecting (fresh `welcome`, then `subscribe` from its cursor; the library refetches its list). A `warn` log line names the session and how many messages it skipped. A sustained rate means a client whose socket stops draining — a frozen tab, a stalled mobile link — and each one costs a reconnect and a gap-fill replay |
 
 `message_type` is the frame's serde `type` tag, derived by an exhaustive `match` in `crates/protocol`, so the label set is bounded by the protocol enums. **Cardinality rule:** no metric is ever labelled by `page_id`, `session_id`, `owner_id` or `client_batch_id`. `crates/server/tests/health.rs` scrapes `/metrics` and fails if any series carries one.
 

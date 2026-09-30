@@ -1100,6 +1100,165 @@ test.describe('ink page channel', () => {
     expect(result.bWelcomeHolderPresent).toBeTruthy();
   });
 
+  // #279. The SPA viewer is made a genuinely slow subscriber: its renderer's
+  // main thread is blocked, so the browser stops draining the page socket, the
+  // server's send to it stalls once the socket buffers fill (the playwright
+  // container runs a small `tcp_rmem` for this), and a flood of commits from a
+  // second browser context overflows the page channel behind it. The server
+  // must close that socket rather than leave a hole in it, and the SPA must
+  // come back — fresh welcome, resubscribe — to exactly the server's page:
+  // the ink it missed, an erasure of ink it had already drawn, and a paper
+  // change, all three of which were among what it was never sent.
+  test('a viewer that falls behind the page channel is closed and converges on reconnect', async ({ page, request, browser }) => {
+    test.setTimeout(240_000);
+    const title = uniqueTitle('ink-lag');
+    const pageId = await createPage(request, title);
+
+    const openPage = page.getByRole('button', { name: `Open ${title}`, exact: true });
+    await openPage.waitFor({ state: 'visible', timeout: 5_000 }).catch(async () => {
+      await page.reload({ waitUntil: 'load' });
+      await expect(openPage).toBeVisible({ timeout: 5_000 });
+    });
+    await openPage.click();
+    await expect(page.getByText(/Synced · seq 0|Live · seq 0/)).toBeVisible({ timeout: 5_000 });
+
+    // The publisher lives in its own browser context, so its own renderer —
+    // blocking the viewer's main thread must not block the flood.
+    const publisherContext = await browser.newContext({ baseURL: process.env.BASE_URL, ignoreHTTPSErrors: true });
+    const publisher = await publisherContext.newPage();
+    await publisher.goto('/health');
+
+    // Seed one batch the viewer does draw, so erasing it later is an erasure
+    // of ink already on screen.
+    const seeded = await driveSocket(publisher, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [
+        { delayMs: 50, message: { type: 'acquire-lease' } },
+        { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'lag-seed', strokes: sampleViewerStrokes('lag-seed-stroke') } },
+      ],
+      settleMs: 250,
+    });
+    expect(seeded.messages.some((m) => m.type === 'stroke-batch' && m.client_batch_id === 'lag-seed')).toBeTruthy();
+    await expect(page.getByText(/Live · seq 1/)).toBeVisible({ timeout: 5_000 });
+    await expect.poll(() => page.evaluate(() => (window as any).__vNoteInkStrokeCount)).toBe(1);
+
+    const before = await scrapeMetrics(request);
+    const laggedBefore = metricValue(before, 'v_note_realtime_events_total', { channel: 'page', result: 'lagged' });
+
+    // Freeze the viewer. `setTimeout` so this evaluate returns before the
+    // loop starts; nothing below touches `page` until the loop is over.
+    // Long enough for the whole flood (~15 s locally) to land while frozen.
+    // Only the viewer's socket can lag here — the publisher drains its own —
+    // so the `lagged` counter asserted at the end is what proves it did.
+    const BLOCK_MS = 35_000;
+    await page.evaluate((blockMs) => {
+      setTimeout(() => {
+        const end = performance.now() + blockMs;
+        while (performance.now() < end) {
+          /* a frozen tab */
+        }
+      }, 0);
+    }, BLOCK_MS);
+
+    const flood = await publisher.evaluate(
+      async ({ pageId, ticket, largeBatches, largePoints, smallBatches }) => {
+        const url = `${location.origin.replace(/^http/, 'ws')}/api/pages/${pageId}/realtime?ticket=${encodeURIComponent(ticket)}`;
+        const ws = new WebSocket(url);
+        const echoed = new Set<string>();
+        let granted = false;
+        ws.addEventListener('message', (event) => {
+          const message = JSON.parse(event.data);
+          if (message.type === 'stroke-batch') echoed.add(message.client_batch_id);
+          if (message.type === 'lease-granted') granted = true;
+        });
+        await new Promise((resolve, reject) => {
+          ws.addEventListener('open', resolve);
+          ws.addEventListener('error', reject);
+        });
+        const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+        ws.send(JSON.stringify({ type: 'acquire-lease' }));
+        while (!granted) await wait(10);
+
+        const style = {
+          tool_kind: 'solid_round',
+          style_version: 2,
+          parameters: { color: '#006400', width: 2.0, cap_style: 'round', join_style: 'round' },
+        };
+        // Stylus-like but not trivially compressible: permessage-deflate is on
+        // in this stack, and it is wire bytes that fill the socket.
+        const stroke = (id: string, count: number) => {
+          let x = 700;
+          let y = 1000;
+          const points = [];
+          for (let t = 0; t < count; t += 1) {
+            x = Math.min(1400, Math.max(0, x + (Math.random() - 0.5) * 9));
+            y = Math.min(2000, Math.max(0, y + (Math.random() - 0.5) * 9));
+            points.push({ x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100, t });
+          }
+          return { id, style, points };
+        };
+        const batchIds: string[] = [];
+        const commit = (index: number, points: number) => {
+          const id = `lag-batch-${index}`;
+          batchIds.push(id);
+          ws.send(JSON.stringify({ type: 'commit-batch', client_batch_id: id, strokes: [stroke(`lag-stroke-${index}`, points)] }));
+        };
+        // Enough bytes to fill every buffer between the server and the
+        // frozen viewer, so the server's send to it blocks…
+        for (let i = 0; i < largeBatches; i += 1) commit(i, largePoints);
+        // …then an erasure of ink the viewer has drawn, and a paper change,
+        // queued first behind the stall so they are among what is dropped…
+        ws.send(JSON.stringify({ type: 'commit-tombstones', client_mutation_id: 'lag-erase', stroke_ids: ['lag-seed-stroke'] }));
+        ws.send(JSON.stringify({ type: 'set-paper', client_mutation_id: 'lag-paper', paper: 'ruled-wide' }));
+        // …then more messages than the page channel holds (256).
+        for (let i = largeBatches; i < largeBatches + smallBatches; i += 1) commit(i, 2);
+
+        const deadline = performance.now() + 60_000;
+        while (batchIds.some((id) => !echoed.has(id)) && performance.now() < deadline) await wait(50);
+        ws.close();
+        return { committed: batchIds.length, echoed: batchIds.filter((id) => echoed.has(id)).length };
+      },
+      { pageId, ticket: await realtimeTicket(request), largeBatches: 24, largePoints: 12_000, smallBatches: 300 },
+    );
+    expect(flood.echoed, 'every flood commit was persisted and fanned out').toBe(flood.committed);
+
+    // The server's page, read fresh.
+    const truth = await driveSocket(publisher, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
+      settleMs: 3_000,
+    });
+    const serverPaper = truth.messages.find((m) => m.type === 'welcome')?.paper;
+    const serverReplay = replay(truth.messages);
+    const serverStrokes = serverReplay.batches.reduce((sum: number, batch: any) => sum + batch.strokes.length, 0);
+    expect(serverPaper).toBe('ruled-wide');
+    expect(serverReplay.lastSeq).toBe(1 + flood.committed);
+    expect(serverStrokes, 'the seed stroke is erased').toBe(flood.committed);
+    await publisherContext.close();
+
+    // The viewer thaws, is closed as lagged, reconnects and catches up — with
+    // no reload and no click.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => ({
+            strokes: (window as any).__vNoteInkStrokeCount,
+            paper: (window as any).__vNoteInkPaper,
+            status: document.querySelector('.live-status')?.textContent ?? '',
+          })),
+        { timeout: BLOCK_MS + 60_000, intervals: [1_000] },
+      )
+      .toEqual({ strokes: serverStrokes, paper: serverPaper, status: expect.stringMatching(new RegExp(`· seq ${serverReplay.lastSeq}$`)) });
+
+    const after = await scrapeMetrics(request);
+    expect(
+      metricValue(after, 'v_note_realtime_events_total', { channel: 'page', result: 'lagged' }),
+      'the viewer lagged, and the server counted it',
+    ).toBeGreaterThan(laggedBefore);
+  });
+
   test('another owner cannot open the page channel', async ({ page, request }) => {
     const pageId = await createPage(request, uniqueTitle('ink-isolation'));
 
