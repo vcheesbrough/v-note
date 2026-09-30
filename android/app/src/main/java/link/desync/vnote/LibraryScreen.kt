@@ -24,10 +24,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -37,7 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.library.PageTile
-import link.desync.vnote.library.ServerHealth
+import link.desync.vnote.library.ServerHealthMonitor
 import link.desync.vnote.library.ServerHealthProbe
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.telemetry.AppLog
@@ -78,12 +79,13 @@ internal fun AppScreen(
     }
 
     val health = rememberServerHealth(healthProbe)
+    val healthState by health.state.collectAsState()
 
     Column(modifier = Modifier.fillMaxSize()) {
         LibraryTopBar(
             sessionState = sessionState,
-            health = health.state.label,
-            onMenuOpened = health::recheck,
+            health = healthState.label,
+            onMenuOpened = health::check,
             onSignIn = onSignIn,
             onSignOut = onSignOut,
             onCreatePage = onCreatePage,
@@ -297,35 +299,20 @@ private fun DeletePageDialog(
     )
 }
 
-// The `/health` status the menu reports (#186). Probed when the library first
-// composes and again each time the menu opens, so the line is never a stale
-// snapshot from app start. A re-check that follows a healthy result keeps
-// showing it until the new result is in; one after a failure shows
-// "Checking…" rather than the old failure.
-private class ServerHealthState(
-    initial: ServerHealth,
-) {
-    var state by mutableStateOf(initial)
-    var generation by mutableIntStateOf(0)
-        private set
-
-    fun recheck() {
-        if (state != ServerHealth.Checking) generation++
-    }
-}
-
+// The `/health` line the menu reports (#186) — see [ServerHealthMonitor].
+// Probed on first composition; the menu re-checks on every open. The probe
+// runs in this composition's scope, so it stops when the library leaves.
 @Composable
-private fun rememberServerHealth(probe: ServerHealthProbe): ServerHealthState {
-    val health = remember { ServerHealthState(ServerHealth.Checking) }
-    LaunchedEffect(health.generation) {
-        if (health.state !is ServerHealth.Healthy) health.state = ServerHealth.Checking
-        val result = probe.probe()
-        if (result is ServerHealth.Unhealthy) {
-            AppLog.w(HEALTH_LOG_TAG, "server health check failed after retries: ${result.reason}")
+private fun rememberServerHealth(probe: ServerHealthProbe): ServerHealthMonitor {
+    val scope = rememberCoroutineScope()
+    val monitor =
+        remember(probe) {
+            ServerHealthMonitor(probe, scope) { reason ->
+                AppLog.w(HEALTH_LOG_TAG, "server health check failed after retries: $reason")
+            }
         }
-        health.state = result
-    }
-    return health
+    LaunchedEffect(monitor) { monitor.check() }
+    return monitor
 }
 
 private const val HEALTH_LOG_TAG = "VNoteHealth"

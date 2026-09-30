@@ -1,6 +1,12 @@
 package link.desync.vnote.library
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 // The server's `/health` as the library menu reports it (#186).
 sealed interface ServerHealth {
@@ -55,5 +61,36 @@ class ServerHealthProbe(
     companion object {
         // About 15 s in all: longer than the dev redeploy gap Traefik reports.
         val DEFAULT_RETRY_DELAYS_MILLIS = listOf(1_000L, 2_000L, 4_000L, 8_000L)
+    }
+}
+
+// The menu's health line over time (#186): probed when the library first
+// composes and again each time the menu opens, so it is never a stale
+// snapshot from app start.
+//
+// A check while one is already in flight is ignored rather than restarting
+// it (PR #65 review): restarting on every menu open could keep a probe from
+// ever finishing, leaving a stale result up. A re-check after a healthy
+// result keeps showing it until the new verdict is in; one after a failure
+// shows [ServerHealth.Checking] instead of the old failure.
+class ServerHealthMonitor(
+    private val probe: ServerHealthProbe,
+    private val scope: CoroutineScope,
+    private val onGiveUp: (reason: String) -> Unit = {},
+) {
+    private val mutableState = MutableStateFlow<ServerHealth>(ServerHealth.Checking)
+    val state: StateFlow<ServerHealth> = mutableState.asStateFlow()
+
+    private var inFlight: Job? = null
+
+    fun check() {
+        if (inFlight?.isActive == true) return
+        if (mutableState.value !is ServerHealth.Healthy) mutableState.value = ServerHealth.Checking
+        inFlight =
+            scope.launch {
+                val result = probe.probe()
+                if (result is ServerHealth.Unhealthy) onGiveUp(result.reason)
+                mutableState.value = result
+            }
     }
 }

@@ -26,7 +26,6 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
-import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -52,6 +51,19 @@ class OkHttpApiClient(
             .Builder()
             .addInterceptor(TracingInterceptor())
             .build()
+    private val healthCheck =
+        HealthCheck(
+            http = http,
+            baseUrl = baseUrl,
+            decorate = { it.header(REQUEST_ID_HEADER, requestId()).traced("/health") },
+            onFailure = { reason, response ->
+                AppLog.d(
+                    LOG_TAG,
+                    "GET /health attempt failed: $reason request_id=${response?.requestId().orEmpty()}",
+                    context = parseTraceparent(response?.request?.header(TRACEPARENT_HEADER)),
+                )
+            },
+        )
     private val jsonMediaType = "application/json".toMediaType()
     private val thumbnailCache = ConcurrentHashMap<String, ByteArray>()
 
@@ -59,36 +71,7 @@ class OkHttpApiClient(
     // server's `/health` span joins. Retrying is the caller's
     // ([link.desync.vnote.library.ServerHealthProbe]); only its final verdict
     // is worth a warning, so a single failed attempt logs at debug.
-    override suspend fun checkHealth(): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            val request =
-                Request
-                    .Builder()
-                    .url("$baseUrl/health")
-                    .header(REQUEST_ID_HEADER, requestId())
-                    .traced("/health")
-                    .get()
-                    .build()
-            val response =
-                try {
-                    http.newCall(request).execute()
-                } catch (error: IOException) {
-                    AppLog.d(LOG_TAG, "GET /health attempt failed: ${error.javaClass.simpleName}")
-                    return@withContext Result.failure(error)
-                }
-            response.use {
-                if (it.isSuccessful) {
-                    Result.success(Unit)
-                } else {
-                    AppLog.d(
-                        LOG_TAG,
-                        "GET /health attempt failed: HTTP ${it.code} request_id=${it.requestId().orEmpty()}",
-                        context = parseTraceparent(it.request.header(TRACEPARENT_HEADER)),
-                    )
-                    Result.failure(IllegalStateException("HTTP ${it.code}"))
-                }
-            }
-        }
+    override suspend fun checkHealth(): Result<Unit> = withContext(Dispatchers.IO) { healthCheck.check() }
 
     override suspend fun fetchMe(): Result<MeProfile> =
         withContext(Dispatchers.IO) {
