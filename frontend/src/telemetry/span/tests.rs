@@ -235,3 +235,73 @@ fn every_entry_point_that_records_is_track_caller() {
         }
     }
 }
+
+/// The panic hook's attributes name where the panic happened, not the hook.
+/// Our real hook cannot run on the host (it logs through browser APIs), so a
+/// stand-in hook runs the same `panic_attributes` on a real panic. It only
+/// records its own panic, by message, so a concurrent test failing elsewhere
+/// cannot be mistaken for it; the previous hook is put back either way.
+#[test]
+fn a_panic_is_located_where_it_panicked_not_at_the_hook() {
+    use std::sync::{Arc, Mutex};
+
+    const MESSAGE: &str = "telemetry span tests: located panic";
+    let captured: Arc<Mutex<Option<Vec<KeyValue>>>> = Arc::default();
+    let sink = Arc::clone(&captured);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.payload().downcast_ref::<&str>() == Some(&MESSAGE) {
+            *sink.lock().unwrap() = Some(panic_attributes(info));
+        }
+    }));
+    let line = line!() + 1;
+    let result = std::panic::catch_unwind(|| std::panic::panic_any(MESSAGE));
+    std::panic::set_hook(previous);
+
+    assert!(result.is_err());
+    let attributes = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the hook saw the panic");
+    assert_eq!(
+        string_attr(&attributes, "exception.type").as_deref(),
+        Some("panic")
+    );
+    assert_eq!(
+        string_attr(&attributes, "code.file.path").as_deref(),
+        Some(file!())
+    );
+    assert_eq!(
+        int_attr(&attributes, "code.line.number"),
+        Some(i64::from(line))
+    );
+}
+
+/// A dependency's location is reported from its crate directory, whatever
+/// the build host's `CARGO_HOME`; our own and std's paths pass through.
+#[test]
+fn dependency_paths_drop_the_build_hosts_cargo_home() {
+    let cases = [
+        (
+            "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos-0.8.20/src/lib.rs",
+            "leptos-0.8.20/src/lib.rs",
+        ),
+        (
+            "/home/builder/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde_json-1.0.140/src/de.rs",
+            "serde_json-1.0.140/src/de.rs",
+        ),
+        (
+            "/root/.cargo/git/checkouts/sovereign-config-0123abcd/4f5e6a7/src/lib.rs",
+            "sovereign-config-0123abcd/4f5e6a7/src/lib.rs",
+        ),
+        ("frontend/src/api.rs", "frontend/src/api.rs"),
+        (
+            "/rustc/0123456789abcdef/library/core/src/option.rs",
+            "/rustc/0123456789abcdef/library/core/src/option.rs",
+        ),
+    ];
+    for (built, reported) in cases {
+        assert_eq!(stable_path(built), reported, "{built}");
+    }
+}

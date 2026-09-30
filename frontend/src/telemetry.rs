@@ -419,8 +419,8 @@ pub(crate) fn log_in(
     log_at(Location::caller(), context, severity, message, attributes);
 }
 
-/// The one place a log record is built, at an explicit `location` — the
-/// caller of a public logging function, or where a panic happened.
+/// A log record located at `location`, the caller of a public logging
+/// function.
 fn log_at(
     location: &Location<'_>,
     context: Parent,
@@ -428,9 +428,20 @@ fn log_at(
     message: impl Into<String>,
     mut attributes: Vec<KeyValue>,
 ) {
+    attributes.extend(span::code_location(location));
+    push_log(context, severity, message, attributes);
+}
+
+/// Queues a record with the attributes as given — location included — and
+/// echoes it to the console.
+fn push_log(
+    context: Parent,
+    severity: Severity,
+    message: impl Into<String>,
+    attributes: Vec<KeyValue>,
+) {
     let time = now_unix_nanos();
     let message = message.into();
-    attributes.extend(span::code_location(location));
     with_state(|state| {
         if !state.lifecycle.is_off() {
             state.logs.push(LogRecord {
@@ -514,17 +525,14 @@ pub(crate) fn install_panic_hook() {
         // panic is the rarest and most valuable thing this module reports, and
         // the location alone rarely says which of several `expect`s fired.
         //
-        // Located at the panic, not at this hook (#453). A panic with no
-        // location — none in practice — falls back to the hook.
-        log_at(
-            info.location().unwrap_or_else(|| Location::caller()),
+        //
+        // Located at the panic, not at this hook (#453): see
+        // `span::panic_attributes`, which is tested on the host.
+        push_log(
             screen(),
             Severity::Error,
             format!("wasm panic: {info}"),
-            vec![KeyValue {
-                key: "exception.type",
-                value: "panic".into(),
-            }],
+            span::panic_attributes(info),
         );
         // Flushed immediately: a panic usually means this page load is over, and
         // the next tick may never come.

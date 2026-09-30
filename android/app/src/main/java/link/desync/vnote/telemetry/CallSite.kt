@@ -38,6 +38,40 @@ private val RUNTIME_CLASSES =
         "${TELEMETRY_PACKAGE}CallSiteKt",
     )
 
+// App methods that sit *between* the code that asked for a request or a log line
+// and the telemetry call, shared by every caller: attributing to one of these
+// would name the same helper for every request (`makeAuthorizedApiRequest` for
+// listPages, createPage and deletePage alike) instead of the method that made
+// it. Keyed by class, matched on the source name of the method: see
+// [sourceMethodName] for the two ways the JVM name differs from it.
+//
+// Add a helper here when it both (a) is called from several app methods and
+// (b) runs the request or writes the log on their behalf. A rename is caught
+// by `CallSiteTest`, which checks every entry against the real class.
+internal val PLUMBING_METHODS: Map<String, Set<String>> =
+    mapOf(
+        "link.desync.vnote.api.OkHttpApiClient" to
+            setOf(
+                "requestMe",
+                "makeAuthorizedApiRequest",
+                "makeAuthorizedApiRequestForBytes",
+                "logHttpFailure",
+                "logWebSocketFailure",
+            ),
+    )
+
+private const val SYNTHETIC_ACCESSOR = "access$"
+
+// A frame's method name as the source spells it. Kotlin compiles a private
+// function a lambda calls with a synthetic `access$<name>` accessor, and a
+// function taking or returning an inline class (`Result`, which every
+// OkHttpApiClient helper returns) under a mangled name, `<name>-<hash>`, e.g.
+// `makeAuthorizedApiRequest-0E7RQCE`. `-` cannot occur in a Kotlin name, so
+// everything from it on is the mangling.
+internal fun sourceMethodName(jvmName: String): String = jvmName.removePrefix(SYNTHETIC_ACCESSOR).substringBefore('-')
+
+private fun StackTraceElement.isPlumbing(): Boolean = PLUMBING_METHODS[className]?.contains(sourceMethodName(methodName)) == true
+
 // The calling thread and the frame that called into telemetry, as attributes.
 internal fun callSite(thread: Thread = Thread.currentThread()): List<Attribute> =
     callSiteAttributes(Throwable("telemetry call site").stackTrace, thread)
@@ -55,15 +89,22 @@ internal fun callSiteAttributes(
     }
 
 // The frame to attribute to. First choice: the innermost frame of *app* code
-// outside the telemetry package — the screen, session or API client that opened
-// the span, even when OkHttp's interceptor chain sits between it and
-// [TracingInterceptor]. Failing that (a request OkHttp runs on its own
-// dispatcher thread, with no app frame on the stack; a test in this package),
-// the innermost frame that is not the telemetry runtime itself, which is the
-// code that actually opened the span.
+// outside the telemetry package and outside [PLUMBING_METHODS] — the screen,
+// session or API method that opened the span, even when OkHttp's interceptor
+// chain and a shared request helper sit between it and [TracingInterceptor].
+// A request run inside `withContext` is attributed to the coroutine body, whose
+// frame is `Outer$method$N.invokeSuspend`: the name still says which method.
+// Failing that (a request OkHttp runs on its own dispatcher thread, with no app
+// frame on the stack; a test in this package), the innermost frame that is not
+// the telemetry runtime itself, which is the code that actually opened the span.
 internal fun selectCallSite(frames: Array<StackTraceElement>): StackTraceElement? =
-    frames.firstOrNull { it.className.startsWith(APP_PACKAGE) && !it.className.startsWith(TELEMETRY_PACKAGE) }
+    frames.firstOrNull { it.isApp() && !it.isPlumbing() }
+        // Only a helper on the stack (nothing calls one like that today): still
+        // better than OkHttp or the runtime.
+        ?: frames.firstOrNull { it.isApp() }
         ?: frames.firstOrNull { it.className.substringBefore('$') !in RUNTIME_CLASSES }
+
+private fun StackTraceElement.isApp(): Boolean = className.startsWith(APP_PACKAGE) && !className.startsWith(TELEMETRY_PACKAGE)
 
 private fun frameAttributes(frame: StackTraceElement): List<Attribute> =
     buildList {

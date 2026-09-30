@@ -90,24 +90,103 @@ class CallSiteTest {
         assertEquals(Thread.currentThread().id.toString(), attributes.getValue(THREAD_ID).getString("intValue"))
     }
 
+    // The stack under `OkHttpApiClient.listPages()` as the JVM reports it: the
+    // runtime, the interceptor, OkHttp's chain, the shared request helper (and
+    // Kotlin's synthetic accessor for it, since a lambda calls it — both under
+    // the mangled name `javap` shows for a `Result`-returning function), then
+    // the `withContext` body of listPages and the coroutine machinery below it.
+    private fun listPagesStack(vararg top: StackTraceElement) =
+        arrayOf(
+            *top,
+            frame("okhttp3.internal.http.RealInterceptorChain", "proceed", "RealInterceptorChain.kt", 126),
+            frame("okhttp3.internal.connection.RealCall", "getResponseWithInterceptorChain", "RealCall.kt", 203),
+            frame("okhttp3.internal.connection.RealCall", "execute", "RealCall.kt", 158),
+            frame("link.desync.vnote.api.OkHttpApiClient", "makeAuthorizedApiRequest-0E7RQCE", "OkHttpApiClient.kt", 291),
+            frame("link.desync.vnote.api.OkHttpApiClient", "access\$makeAuthorizedApiRequest-0E7RQCE", "OkHttpApiClient.kt", 36),
+            frame("link.desync.vnote.api.OkHttpApiClient\$listPages\$2", "invokeSuspend", "OkHttpApiClient.kt", 83),
+            frame("kotlin.coroutines.jvm.internal.BaseContinuationImpl", "resumeWith", "ContinuationImpl.kt", 33),
+            frame("kotlinx.coroutines.DispatchedTask", "run", "DispatchedTask.kt", 100),
+            frame("java.lang.Thread", "run", "Thread.java", 1012),
+        )
+
     @Test
-    fun theFirstAppFrameOutsideTheTelemetryPackageIsTheCallSite() {
+    fun aRequestIsAttributedToTheApiMethodNotTheSharedHelperThatRanIt() {
         val frames =
-            arrayOf(
-                frame("link.desync.vnote.telemetry.CallSiteKt", "callSite", "CallSite.kt", 40),
+            listPagesStack(
+                frame("link.desync.vnote.telemetry.CallSiteKt", "callSite", "CallSite.kt", 70),
+                frame("link.desync.vnote.telemetry.TelemetryRuntime", "getLocated", "Telemetry.kt", 159),
                 frame("link.desync.vnote.telemetry.TelemetryRuntime", "span", "Telemetry.kt", 138),
                 frame("link.desync.vnote.telemetry.TracingInterceptor", "intercept", "TracingInterceptor.kt", 45),
-                frame("okhttp3.internal.http.RealInterceptorChain", "proceed", "RealInterceptorChain.kt", 126),
-                frame("link.desync.vnote.api.OkHttpApiClient", "listPages", "OkHttpApiClient.kt", 245),
-                frame("link.desync.vnote.library.LibraryStateHolder\$load\$1", "invokeSuspend", "LibraryStateHolder.kt", 70),
             )
 
-        val attributes = callSiteAttributes(frames, Thread("ink-worker")).associate { it.key to it.value }
+        val attributes = callSiteAttributes(frames, Thread("DefaultDispatcher-worker-1")).associate { it.key to it.value }
 
-        assertEquals("link.desync.vnote.api.OkHttpApiClient.listPages", attributes[CODE_FUNCTION_NAME])
+        assertEquals(
+            "link.desync.vnote.api.OkHttpApiClient\$listPages\$2.invokeSuspend",
+            attributes[CODE_FUNCTION_NAME],
+        )
         assertEquals("link/desync/vnote/api/OkHttpApiClient.kt", attributes[CODE_FILE_PATH])
-        assertEquals(245, attributes[CODE_LINE_NUMBER])
-        assertEquals("ink-worker", attributes[THREAD_NAME])
+        assertEquals(83, attributes[CODE_LINE_NUMBER])
+        assertEquals("DefaultDispatcher-worker-1", attributes[THREAD_NAME])
+    }
+
+    // The failure log the helper writes for that request lands on the same
+    // method, not on `logHttpFailure`.
+    @Test
+    fun aFailureLogIsAttributedToTheApiMethodNotTheLoggingHelper() {
+        val frames =
+            arrayOf(
+                frame("link.desync.vnote.telemetry.CallSiteKt", "callSite", "CallSite.kt", 70),
+                frame("link.desync.vnote.telemetry.TelemetryRuntime", "log", "Telemetry.kt", 150),
+                frame("link.desync.vnote.telemetry.Telemetry", "log", "Telemetry.kt", 445),
+                frame("link.desync.vnote.telemetry.AppLog", "export", "AppLog.kt", 70),
+                frame("link.desync.vnote.telemetry.AppLog", "w\$default", "AppLog.kt", 38),
+                frame("link.desync.vnote.api.OkHttpApiClient", "logHttpFailure", "OkHttpApiClient.kt", 361),
+                frame("link.desync.vnote.api.OkHttpApiClient", "makeAuthorizedApiRequest-0E7RQCE", "OkHttpApiClient.kt", 300),
+                frame("link.desync.vnote.api.OkHttpApiClient", "access\$makeAuthorizedApiRequest-0E7RQCE", "OkHttpApiClient.kt", 36),
+                frame("link.desync.vnote.api.OkHttpApiClient\$deletePage\$2", "invokeSuspend", "OkHttpApiClient.kt", 105),
+                frame("kotlin.coroutines.jvm.internal.BaseContinuationImpl", "resumeWith", "ContinuationImpl.kt", 33),
+            )
+
+        assertEquals("link.desync.vnote.api.OkHttpApiClient\$deletePage\$2", selectCallSite(frames)?.className)
+    }
+
+    // Every helper named in the skip-list exists on its compiled class, under
+    // the JVM names the matcher will see, so a rename cannot quietly turn the
+    // skip off (and a name the matcher cannot normalise fails here first).
+    @Test
+    fun everyPlumbingMethodIsARealMethod() {
+        for ((className, methods) in PLUMBING_METHODS) {
+            val declared =
+                Class
+                    .forName(className)
+                    .declaredMethods
+                    .map { sourceMethodName(it.name) }
+                    .toSet()
+            for (method in methods) {
+                assertTrue("$className.$method is not declared", method in declared)
+            }
+        }
+    }
+
+    @Test
+    fun jvmMethodNamesAreReducedToTheirSourceNames() {
+        assertEquals("makeAuthorizedApiRequest", sourceMethodName("makeAuthorizedApiRequest-0E7RQCE"))
+        assertEquals("requestMe", sourceMethodName("access\$requestMe-gIAlu-s"))
+        assertEquals("logWebSocketFailure", sourceMethodName("access\$logWebSocketFailure"))
+        assertEquals("logHttpFailure", sourceMethodName("logHttpFailure"))
+    }
+
+    @Test
+    fun anAppMethodOutsideTheSkipListIsTheCallSiteAsIs() {
+        val frames =
+            arrayOf(
+                frame("link.desync.vnote.telemetry.TelemetryRuntime", "span", "Telemetry.kt", 138),
+                frame("link.desync.vnote.ink.PageInkSession", "connect", "PageInkSession.kt", 110),
+                frame("link.desync.vnote.library.LibraryStateHolder", "openPage", "LibraryStateHolder.kt", 61),
+            )
+
+        assertEquals("connect", selectCallSite(frames)?.methodName)
     }
 
     // A request OkHttp runs on its own dispatcher thread has no app frame: the
