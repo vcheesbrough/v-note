@@ -42,7 +42,7 @@ private const val THUMBNAIL_ROUTE = "/api/pages/{page_id}/thumbnails/{source_seq
 // on 401, and the two realtime WebSockets. Wire formats live in `api.codec`.
 // Every request — upgrades included — is traced by [TracingInterceptor] (#406).
 class OkHttpApiClient(
-    private val baseUrl: String,
+    override val baseUrl: String,
     private val tokenStore: TokenStore,
     private val authRepository: AuthRepository,
 ) : ApiClient {
@@ -51,8 +51,27 @@ class OkHttpApiClient(
             .Builder()
             .addInterceptor(TracingInterceptor())
             .build()
+    private val healthCheck =
+        HealthCheck(
+            http = http,
+            baseUrl = baseUrl,
+            decorate = { it.header(REQUEST_ID_HEADER, requestId()).traced("/health") },
+            onFailure = { reason, response ->
+                AppLog.d(
+                    LOG_TAG,
+                    "GET /health attempt failed: $reason request_id=${response?.requestId().orEmpty()}",
+                    context = parseTraceparent(response?.request?.header(TRACEPARENT_HEADER)),
+                )
+            },
+        )
     private val jsonMediaType = "application/json".toMediaType()
     private val thumbnailCache = ConcurrentHashMap<String, ByteArray>()
+
+    // On the shared, traced client, so each probe is an `http.client` span the
+    // server's `/health` span joins. Retrying is the caller's
+    // ([link.desync.vnote.library.ServerHealthProbe]); only its final verdict
+    // is worth a warning, so a single failed attempt logs at debug.
+    override suspend fun checkHealth(): Result<Unit> = withContext(Dispatchers.IO) { healthCheck.check() }
 
     override suspend fun fetchMe(): Result<MeProfile> =
         withContext(Dispatchers.IO) {
