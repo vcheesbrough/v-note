@@ -1016,13 +1016,15 @@ tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48 \
 **Test data.** The smoke writes to the shared dev database on every push. It
 creates one page titled `live-smoke-<timestamp>-<random>` and deletes it before
 signing out — also in a `finally` if an assertion fails first — and at the start
-it sweeps any `live-smoke-*` page a killed run left behind. The smoke user's
-pages are **disposable by definition**: nobody else uses the account.
+it sweeps `live-smoke-*` pages a killed run left behind, **only once they are at
+least 15 minutes old** (the timestamp in the title; `e2e/live/leftovers.ts`). The
+smoke user's pages are **disposable by definition**: nobody else uses the
+account.
 
-**Concurrency.** Two pipelines deploying dev at once already race (last push
-wins); their smokes each clean up only their own page, and the sweep of the
-second may delete the first's page mid-run, failing it. Pushes are serialised in
-practice; re-run the loser.
+**Concurrency.** Several PRs deploy dev, so smoke runs overlap. Each run deletes
+only its own page, and the sweep's age floor — far longer than a whole run with
+its retry — means one run never deletes another's page mid-test. The floor is
+unit-checked by `e2e/live/leftovers.spec.ts`, which runs first in the same step.
 
 #### Running it by hand
 

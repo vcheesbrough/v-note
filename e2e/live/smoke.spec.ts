@@ -1,4 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from '../csp-guard';
+import { isAbandonedSmokePage, smokeTitle } from './leftovers';
 
 // Live post-deploy smoke (#179). Runs against a DEPLOYED host through the REAL
 // IdP — config playwright.live.config.ts, driver scripts/smoke-web-live.sh,
@@ -10,13 +11,13 @@ import { expect, test, type BrowserContext, type Page } from '../csp-guard';
 //
 // The account is the blueprint's dedicated smoke user (authentik/blueprint-dev.yaml):
 // its pages are disposable. The page this creates is deleted before sign-out,
-// and in `finally` if the test fails first; `live-smoke-*` leftovers of a run
-// that was killed outright are swept at the start.
+// and in `finally` if the test fails first. `live-smoke-*` leftovers of a run
+// that was killed outright are swept at the start — only once they are old
+// enough that no overlapping run can still be using them (./leftovers.ts):
+// several PRs deploy dev, so smoke runs do overlap.
 //
 // Nothing here may print the password: no logging of env, and the config keeps
 // tracing off because a trace records every `fill`.
-
-const TITLE_PREFIX = 'live-smoke-';
 
 const username = required('V_NOTE_SMOKE_USERNAME');
 const password = required('V_NOTE_SMOKE_PASSWORD');
@@ -41,16 +42,17 @@ test('a real user signs in, inks a page that persists, and signs out', async ({ 
       expect(body.email, 'the identity is the blueprint smoke user').toBe(expectedEmail);
     });
 
-    await test.step('sweep pages left behind by a killed run', async () => {
+    await test.step('sweep pages abandoned by a killed run', async () => {
+      const now = Date.now();
       for (const leftover of await listPages(context)) {
-        if (leftover.title.startsWith(TITLE_PREFIX)) {
+        if (isAbandonedSmokePage(leftover.title, now)) {
           const res = await context.request.delete(`/api/pages/${leftover.id}`);
           expect([204, 404]).toContain(res.status());
         }
       }
     });
 
-    const title = `${TITLE_PREFIX}${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    const title = smokeTitle(Date.now(), Math.random().toString(16).slice(2, 10));
     await test.step('create a page; it is in the library after a reload', async () => {
       const created = await context.request.post('/api/pages', { data: { title } });
       expect(created.status()).toBe(201);

@@ -138,7 +138,7 @@ entries:
   #   - `groups` is set wholesale to v-note-dev-users ONLY — never
   #     v-note-dev-admins (the SQL console) or anything outside v-note;
   #   - its pages are disposable: the smoke deletes what it creates and sweeps
-  #     `live-smoke-*` leftovers, and no human uses this account.
+  #     abandoned `live-smoke-*` leftovers, and no human uses this account.
   # `email` is what the smoke asserts /api/me returns, so it must match
   # V_NOTE_SMOKE_EMAIL in deploy.yml (scripts/test-authentik-blueprints.sh
   # checks both names match). `.invalid` so no mail can ever be delivered.
