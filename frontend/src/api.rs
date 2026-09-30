@@ -30,6 +30,11 @@ fn request_id() -> String {
 /// `route` is the *template*, never the concrete path: a span attribute with an
 /// id in it is fine, but this one is also how spans are grouped, and
 /// `/api/pages/abc123` as a name makes every page its own operation.
+///
+/// `#[track_caller]` so the span is located at the request function that
+/// called this (#453), not at the one line below every `http.client` span
+/// would otherwise share.
+#[track_caller]
 fn start(
     parent: Parent,
     method: &'static str,

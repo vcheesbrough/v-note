@@ -125,7 +125,7 @@ class TelemetryRuntime internal constructor(
         val root = SpanContext(TraceId.random(), SpanId.random())
         val start = now()
         screenRoot = root
-        record(FinishedSpan(root, null, name, SpanKind.Internal, start, start, attributes))
+        record(FinishedSpan(root, null, name, SpanKind.Internal, start, start, attributes + located))
         return root
     }
 
@@ -134,7 +134,12 @@ class TelemetryRuntime internal constructor(
         parent: SpanContext,
         kind: SpanKind = SpanKind.Internal,
         startUnixNanos: Long = now(),
-    ): OpenSpan = OpenSpan(this, SpanContext(parent.traceId, SpanId.random()), parent.spanId, name, kind, startUnixNanos)
+    ): OpenSpan {
+        val span = OpenSpan(this, SpanContext(parent.traceId, SpanId.random()), parent.spanId, name, kind, startUnixNanos)
+        // First, so a caller's own attributes follow.
+        located.forEach { span.attr(it.key, it.value) }
+        return span
+    }
 
     // **Never pass user content.** Page titles and stroke data are the user's;
     // ids, counts, statuses and our own error strings are not. This goes to a
@@ -145,8 +150,16 @@ class TelemetryRuntime internal constructor(
         context: SpanContext? = screen(),
         attributes: List<Attribute> = emptyList(),
     ) {
-        queue?.push(LogRecord(now(), severity, message, attributes, context))
+        if (queue == null) return
+        queue.push(LogRecord(now(), severity, message, attributes + located, context))
     }
+
+    // The caller's source location and thread (#453), taken — a getter, read
+    // afresh each time — where a span opens or a line is written. Skipped with
+    // export off, so the no-op runtime every unit test and pre-install call
+    // uses stays free.
+    private val located: List<Attribute>
+        get() = if (queue == null) emptyList() else callSite()
 
     internal fun record(span: FinishedSpan) {
         queue?.push(span)
