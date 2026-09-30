@@ -36,6 +36,7 @@ import link.desync.vnote.ink.Paper
 import link.desync.vnote.ink.PaperPreferences
 import link.desync.vnote.ink.normalizedSamsungSpenAction
 import link.desync.vnote.library.LibraryStateHolder
+import link.desync.vnote.library.ServerHealthProbe
 import link.desync.vnote.telemetry.AppLog
 import link.desync.vnote.ui.theme.VNoteTheme
 
@@ -49,12 +50,17 @@ class MainActivity : ComponentActivity() {
 
         @Volatile
         internal var apiClientFactory: ((TokenStore, AuthRepository) -> ApiClient)? = null
+
+        // Tests shorten the `/health` retry backoff; null is the production one.
+        @Volatile
+        internal var healthRetryDelaysMillis: List<Long>? = null
     }
 
     private lateinit var tokenStore: TokenStore
     private lateinit var authRepository: AuthRepository
     private lateinit var apiClient: ApiClient
     private lateinit var library: LibraryStateHolder
+    private lateinit var healthProbe: ServerHealthProbe
 
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
@@ -83,6 +89,7 @@ class MainActivity : ComponentActivity() {
         apiClient =
             apiClientFactory?.invoke(tokenStore, authRepository)
                 ?: OkHttpApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+        healthProbe = serverHealthProbe(apiClient)
         library =
             LibraryStateHolder(
                 apiClient = apiClient,
@@ -111,6 +118,7 @@ class MainActivity : ComponentActivity() {
                         } else {
                             AppScreen(
                                 apiClient = apiClient,
+                                healthProbe = healthProbe,
                                 sessionState = session,
                                 onSignIn = { signIn() },
                                 onSignOut = { signOut() },
@@ -131,6 +139,13 @@ class MainActivity : ComponentActivity() {
             reloadSession()
         }
     }
+
+    private fun serverHealthProbe(client: ApiClient): ServerHealthProbe =
+        ServerHealthProbe(
+            baseUrl = client.baseUrl,
+            check = client::checkHealth,
+            retryDelaysMillis = healthRetryDelaysMillis ?: ServerHealthProbe.DEFAULT_RETRY_DELAYS_MILLIS,
+        )
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)

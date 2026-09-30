@@ -163,6 +163,10 @@ class LibraryStateHolderTest {
 
     // The baseline every fake narrows: a call nobody overrode is a test bug.
     private object UnusedApiClient : ApiClient {
+        override val baseUrl: String get() = error("unused")
+
+        override suspend fun checkHealth(): Result<Unit> = error("unused")
+
         override suspend fun fetchMe(): Result<MeProfile> = error("unused")
 
         override suspend fun listPages(): Result<List<PageSummary>> = error("unused")

@@ -24,9 +24,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -34,11 +36,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.library.PageTile
+import link.desync.vnote.library.ServerHealthMonitor
+import link.desync.vnote.library.ServerHealthProbe
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.telemetry.AppLog
 import link.desync.vnote.ui.StatePanel
 import link.desync.vnote.ui.StatusBanner
 import link.desync.vnote.ui.VNoteTopBar
@@ -51,6 +54,7 @@ import link.desync.vnote.ui.displayTitle
 @Composable
 internal fun AppScreen(
     apiClient: ApiClient,
+    healthProbe: ServerHealthProbe,
     sessionState: SessionState,
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
@@ -74,10 +78,14 @@ internal fun AppScreen(
         )
     }
 
+    val health = rememberServerHealth(healthProbe)
+    val healthState by health.state.collectAsState()
+
     Column(modifier = Modifier.fillMaxSize()) {
         LibraryTopBar(
             sessionState = sessionState,
-            health = rememberServerHealth(),
+            health = healthState.label,
+            onMenuOpened = health::check,
             onSignIn = onSignIn,
             onSignOut = onSignOut,
             onCreatePage = onCreatePage,
@@ -99,6 +107,7 @@ internal fun AppScreen(
 private fun LibraryTopBar(
     sessionState: SessionState,
     health: String,
+    onMenuOpened: () -> Unit,
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onCreatePage: () -> Unit,
@@ -107,6 +116,7 @@ private fun LibraryTopBar(
         LibraryMenu(
             sessionState = sessionState,
             health = health,
+            onMenuOpened = onMenuOpened,
             onSignOut = onSignOut,
         )
         Text(
@@ -139,6 +149,7 @@ private fun LibraryTopBar(
 private fun LibraryMenu(
     sessionState: SessionState,
     health: String,
+    onMenuOpened: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -148,7 +159,10 @@ private fun LibraryMenu(
                 Modifier
                     .testTag("main-menu-button")
                     .semantics { contentDescription = "Open main menu" },
-            onClick = { expanded = true },
+            onClick = {
+                expanded = true
+                onMenuOpened()
+            },
         ) {
             Icon(Icons.Outlined.Menu, contentDescription = null)
         }
@@ -156,7 +170,7 @@ private fun LibraryMenu(
             if (sessionState is SessionState.SignedIn) {
                 MenuNote(sessionState.profile.email ?: sessionState.profile.sub)
             }
-            MenuNote(health)
+            MenuNote(health, Modifier.testTag("server-health"))
             if (sessionState is SessionState.SignedIn) {
                 DropdownMenuItem(
                     text = { Text("Sign out") },
@@ -172,11 +186,14 @@ private fun LibraryMenu(
 
 // A read-only line in the menu — identity, server health.
 @Composable
-private fun MenuNote(text: String) {
+private fun MenuNote(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
     Text(
         text,
         modifier =
-            Modifier
+            modifier
                 .widthIn(max = 280.dp)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         maxLines = 1,
@@ -282,34 +299,20 @@ private fun DeletePageDialog(
     )
 }
 
-// The `/health` probe reported in the menu. okhttp `execute()` is blocking, so
-// it must run off the main thread or it throws `NetworkOnMainThreadException`
-// before the request is even sent.
+// The `/health` line the menu reports (#186) — see [ServerHealthMonitor].
+// Probed on first composition; the menu re-checks on every open. The probe
+// runs in this composition's scope, so it stops when the library leaves.
 @Composable
-private fun rememberServerHealth(): String {
-    val health = remember { mutableStateOf("Checking server health…") }
-    LaunchedEffect(Unit) {
-        health.value =
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val client = okhttp3.OkHttpClient()
-                    val request =
-                        okhttp3.Request
-                            .Builder()
-                            .url("${BuildConfig.BASE_URL}/health")
-                            .get()
-                            .build()
-                    client.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) {
-                            "Health check failed: HTTP ${response.code}"
-                        } else {
-                            "Server healthy at ${BuildConfig.BASE_URL}"
-                        }
-                    }
-                }.getOrElse { error ->
-                    "Health check failed: ${error.message ?: error.javaClass.simpleName}"
-                }
+private fun rememberServerHealth(probe: ServerHealthProbe): ServerHealthMonitor {
+    val scope = rememberCoroutineScope()
+    val monitor =
+        remember(probe) {
+            ServerHealthMonitor(probe, scope) { reason ->
+                AppLog.w(HEALTH_LOG_TAG, "server health check failed after retries: $reason")
             }
-    }
-    return health.value
+        }
+    LaunchedEffect(monitor) { monitor.check() }
+    return monitor
 }
+
+private const val HEALTH_LOG_TAG = "VNoteHealth"
