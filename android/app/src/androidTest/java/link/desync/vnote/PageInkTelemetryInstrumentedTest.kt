@@ -31,6 +31,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.net.InetAddress
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 // #406: the spans a real page session produces, through the real OkHttp client
@@ -42,6 +43,7 @@ class PageInkTelemetryInstrumentedTest {
     private lateinit var apiClient: OkHttpApiClient
     private lateinit var installed: TelemetryRuntime
     private val exported = Collections.synchronizedList(mutableListOf<String>())
+    private val pageChannelClosed = CountDownLatch(1)
     private val recording =
         TelemetryRuntime(
             object : Transport {
@@ -140,6 +142,28 @@ class PageInkTelemetryInstrumentedTest {
                                     )
                             }
                         }
+
+                        // #455: answer the client's close. Unanswered, this
+                        // side never closes its sink, and MockWebServer's
+                        // connection task waits on both halves of the socket
+                        // closing — so `server.close()` gave up after 5 s
+                        // whenever the client's close frame was read before
+                        // teardown shut the socket under it.
+                        override fun onClosing(
+                            webSocket: WebSocket,
+                            code: Int,
+                            reason: String,
+                        ) {
+                            webSocket.close(code, reason)
+                        }
+
+                        override fun onClosed(
+                            webSocket: WebSocket,
+                            code: Int,
+                            reason: String,
+                        ) {
+                            pageChannelClosed.countDown()
+                        }
                     },
                 ).build(),
         )
@@ -151,6 +175,9 @@ class PageInkTelemetryInstrumentedTest {
         assertTrue("stroke confirmed", awaitUntil { session.strokes.size == 1 && session.pendingBatchCount == 0 })
         val upgrade = server.takeRequest(5, TimeUnit.SECONDS)!!
         session.disconnect()
+        // The handshake completes before teardown, so `server.close()` finds
+        // no connection still open rather than racing the close frame.
+        assertTrue("page channel closed", pageChannelClosed.await(5, TimeUnit.SECONDS))
 
         val spans = spans()
         val screen = spans.named("screen.page")
