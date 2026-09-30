@@ -284,6 +284,7 @@ fn paint(canvas: NodeRef<leptos::html::Canvas>, feed: PageFeed, pan_zoom: PanZoo
     let performance = web_sys::window().and_then(|window| window.performance());
     let started = performance.as_ref().map(|performance| performance.now());
     feed.batches.with_untracked(|batches| {
+        mark_ink_state(batches, feed.paper.get_untracked());
         render::draw_canvas(
             &canvas,
             batches,
@@ -428,6 +429,26 @@ fn mark_ink_drawn(duration_ms: f64) {
         .unwrap_or(0.0);
     let _ = Reflect::set(&window, &"__vNoteInkDraws".into(), &(draws + 1.0).into());
     let _ = Reflect::set(&window, &"__vNoteInkLastDrawMs".into(), &duration_ms.into());
+}
+
+/// Expose what the viewer is showing — its stroke count and paper — so e2e can
+/// compare it with the server's page after a forced lag and reconnect (#279).
+/// A count rather than the ids: this runs on every paint.
+fn mark_ink_state(batches: &[StrokeBatch], paper: Paper) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let strokes: usize = batches.iter().map(|batch| batch.strokes.len()).sum();
+    let _ = Reflect::set(
+        &window,
+        &"__vNoteInkStrokeCount".into(),
+        &(strokes as f64).into(),
+    );
+    let _ = Reflect::set(
+        &window,
+        &"__vNoteInkPaper".into(),
+        &paper.wire_value().into(),
+    );
 }
 
 fn mark_ink_applied(seq: u64) {

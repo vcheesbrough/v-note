@@ -12,7 +12,16 @@ use tokio::sync::broadcast;
 
 const TICKET_TTL_SECONDS: i64 = 60;
 const LIBRARY_CHANNEL_CAPACITY: usize = 64;
-const PAGE_CHANNEL_CAPACITY: usize = 256;
+/// How far one page subscriber may fall behind before it is closed (#279).
+///
+/// Kept at 256 rather than raised: a subscriber this far behind is one whose
+/// socket has stopped draining (a stalled network, a frozen tab), and a larger
+/// buffer only delays the close while every retained message — a stroke batch
+/// is up to ~1 MiB inbound — is held per page. Recovery is a reconnect and a
+/// gap-filling `subscribe`, which costs the same however far behind it was.
+/// `v_note_realtime_events_total{result="lagged"}` is the signal for revisiting
+/// this; the lag log line carries how many messages were skipped.
+pub(super) const PAGE_CHANNEL_CAPACITY: usize = 256;
 const LEASE_TTL_SECONDS: i64 = 30;
 
 #[derive(Default)]

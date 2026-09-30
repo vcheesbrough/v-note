@@ -23,7 +23,8 @@ import java.util.UUID
 // Drives one open page's ink channel: connects the WSS, replays persisted
 // strokes (gap-fill), tracks the single-editor edit lease, and commits new
 // strokes. Exposes Compose state for the canvas. Always-online MVP — a full
-// disconnect/error UX lands in a later card.
+// disconnect/error UX lands in a later card — but it does reconnect on its own
+// after any close it did not ask for (#279), resubscribing from its cursor.
 class PageInkSession(
     private val apiClient: ApiClient,
     private val pageId: String,
@@ -102,11 +103,34 @@ class PageInkSession(
     private val strokeSpans = hashMapOf<String, StrokeSpans>()
 
     // Set by [disconnect]: the close that follows is ours, not a failure.
+    @Volatile
     private var closing = false
+
+    // Bumped for every socket this session opens and whenever one is retired, so
+    // a late callback from a socket a reconnect replaced is ignored rather than
+    // tearing down its successor.
+    @Volatile
+    private var socketGeneration = 0
+
+    // Reconnect after any close this session did not ask for (#279). The server
+    // closes a page subscriber that falls behind its fan-out and expects the
+    // client to come back — as it does after a restart or a dropped network —
+    // so without this an open page went dead until the user left and returned.
+    private var reconnectJob: Job? = null
+    private var reconnectAttempts = 0
 
     fun connect() {
         statusBanner = CONNECTING
         screen = Telemetry.startScreen("screen.page", listOf(Attribute("vnote.page_id", pageId)))
+        open()
+    }
+
+    // Opens a page socket. Everything the session has already confirmed —
+    // strokes, `lastSeq`, seen batch ids — is kept, so a reconnect's
+    // `subscribe(lastSeq)` asks only for what it missed and `Welcome` restores
+    // the paper and lease holder.
+    private fun open() {
+        val generation = ++socketGeneration
         connectSpan = Telemetry.span("realtime.connect", screen).attr("vnote.channel", "page")
         // The upgrade request's own `http.client` span is opened by the
         // interceptor under this screen, and its `traceparent` is what the
@@ -116,15 +140,15 @@ class PageInkSession(
                 pageId,
                 object : PageEventListener {
                     override fun onEvent(event: PageEvent) {
-                        scope.launch { handle(event) }
+                        scope.launch { if (generation == socketGeneration) handle(event) }
                     }
 
                     override fun onError(message: String) {
-                        scope.launch { handleDisconnected(message) }
+                        scope.launch { if (generation == socketGeneration) handleDisconnected(message) }
                     }
 
                     override fun onClosed() {
-                        scope.launch { handleDisconnected(DISCONNECTED) }
+                        scope.launch { if (generation == socketGeneration) handleDisconnected(DISCONNECTED) }
                     }
                 },
             )
@@ -138,6 +162,8 @@ class PageInkSession(
 
     fun disconnect() {
         closing = true
+        reconnectJob?.cancel()
+        reconnectJob = null
         failStrokeSpans("page closed")
         stopLeaseRenewal()
         socket?.releaseLease()
@@ -216,6 +242,7 @@ class PageInkSession(
         AppLog.i(TAG, "page channel connected", context = screen)
         sessionId = event.sessionId
         statusBanner = null
+        reconnectAttempts = 0
         // Authoritative on every (re)connect, which is what
         // self-corrects a value that went stale in the open library.
         paperState = event.paper
@@ -454,6 +481,30 @@ class PageInkSession(
         stopLeaseRenewal()
         revertUnconfirmedPaper()
         statusBanner = message
+        if (!closing) {
+            scheduleReconnect()
+        }
+    }
+
+    private fun scheduleReconnect() {
+        if (reconnectJob?.isActive == true) {
+            return
+        }
+        // Retire the socket that failed: its late callbacks are ignored, and one
+        // that reported an error without closing is closed rather than leaked.
+        socketGeneration++
+        socket?.close()
+        socket = null
+        val delayMs = reconnectDelayMs(reconnectAttempts++)
+        reconnectJob =
+            scope.launch {
+                delay(delayMs)
+                if (!closing) {
+                    AppLog.i(TAG, "page channel reconnecting", context = screen)
+                    statusBanner = CONNECTING
+                    open()
+                }
+            }
     }
 
     private fun failStrokeSpans(reason: String) {
@@ -475,6 +526,15 @@ class PageInkSession(
     }
 
     companion object {
+        // First retry after 1 s — the SPA's page loop and the library channel
+        // wait the same — doubling to a 30 s ceiling while the server stays
+        // unreachable. Reset by the next `Welcome`.
+        internal fun reconnectDelayMs(attempt: Int): Long =
+            (RECONNECT_BASE_MS shl attempt.coerceIn(0, RECONNECT_MAX_DOUBLINGS)).coerceAtMost(RECONNECT_MAX_MS)
+
+        private const val RECONNECT_BASE_MS = 1_000L
+        private const val RECONNECT_MAX_MS = 30_000L
+        private const val RECONNECT_MAX_DOUBLINGS = 5
         private const val TAG = "PageInkSession"
         private const val LEASE_RENEW_INTERVAL_MS = 10_000L
         private const val TOMBSTONE_FAILED = "tombstone_failed"

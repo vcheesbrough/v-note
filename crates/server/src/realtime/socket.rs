@@ -16,6 +16,7 @@ use protocol::{PageClientMessage, PageServerMessage, RealtimeTicketResponse};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
+use yawc::close::CloseCode;
 use yawc::frame::{Frame, OpCode};
 use yawc::{HttpWebSocket, IncomingUpgrade, Options};
 
@@ -269,10 +270,18 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWe
             event = receiver.recv() => {
                 let Fanout { message: event, origin } = match event {
                     Ok(fanout) => fanout,
-                    // Unlike the page channel, a lagged library socket closes.
-                    // Counted here so it is visible; recovery is #279.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // Closed like a lagged page socket (#279): the client
+                    // reconnects and refetches the list, which is its recovery.
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         crate::observability::metrics().record_realtime_event("library", "lagged");
+                        tracing::warn!(
+                            owner_id = %owner_id,
+                            skipped,
+                            "library subscriber lagged; closing so the client reconnects"
+                        );
+                        let _ = sender
+                            .send(Frame::close(LAGGED_CLOSE_CODE, LAGGED_CLOSE_REASON))
+                            .await;
                         break "lagged: the subscriber fell behind the library channel";
                     }
                     Err(broadcast::error::RecvError::Closed) => break "library channel closed",
@@ -406,38 +415,8 @@ async fn handle_page_socket(
     let reason = loop {
         tokio::select! {
             event = receiver.recv() => {
-                match event {
-                    Ok(Fanout { message, origin }) => {
-                        let delivery = fanout_delivery_span("page", message.message_type(), &origin);
-                        delivery.record("session_id", session_id.as_str());
-                        match send_page_frame(&mut sender, message)
-                            .instrument(delivery.clone())
-                            .await
-                        {
-                            Some(bytes) => {
-                                delivery.record("bytes", bytes);
-                            }
-                            None => {
-                                crate::observability::metrics().record_realtime_event("page", "send_error");
-                                break "send failed";
-                            }
-                        }
-                    }
-                    // Dropped fan-out is still skipped — recovery is #279 — but
-                    // no longer silently.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        crate::observability::metrics().record_realtime_event("page", "lagged");
-                        // The counter says how often; this names the session that
-                        // missed fan-out and why. Not the skipped count: the
-                        // connection stays open and will gap-fill on resubscribe.
-                        tracing::warn!(
-                            page_id = %page_id,
-                            session_id = %session_id,
-                            "page subscriber lagged; fan-out messages were skipped"
-                        );
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break "page channel closed",
+                if let Err(reason) = forward_page_fanout(event, &mut sender, &page_id, &session_id).await {
+                    break reason;
                 }
             }
             inbound_message = inbound.next() => {
@@ -479,6 +458,80 @@ async fn handle_page_socket(
         state
             .realtime
             .publish_page(&page_id, PageServerMessage::LeaseChanged { holder: None });
+    }
+}
+
+/// Close code sent to a subscriber that fell behind its broadcast channel:
+/// RFC 6455 **1013 Try Again Later** — the server is telling the client to come
+/// back, not that anything it did was wrong.
+///
+/// Not a protocol change (#279): a server-initiated close was always possible
+/// (a restart, a deploy, a proxy timeout), every client already treats any
+/// close as "reconnect", and none of them branches on the code. The code and the
+/// `lagged` reason are there for whoever reads a client log or a packet capture.
+const LAGGED_CLOSE_CODE: CloseCode = CloseCode::Again;
+const LAGGED_CLOSE_REASON: &str = "lagged";
+
+/// Sends one page-channel fan-out message to this socket, or decides the
+/// connection is over. `Err` carries the reason the socket closes.
+///
+/// **A lagged subscriber is closed, not skipped past (#279).** `Lagged` means
+/// the broadcast channel overwrote messages this socket never sent — ink, a
+/// tombstone, a paper change — and nothing re-delivers them on an open socket:
+/// `subscribe` replays only when asked, and paper is only read into `welcome`.
+/// Closing hands recovery to the path every client already has and every test
+/// already covers: reconnect, fresh `welcome` (current paper and lease holder),
+/// then `subscribe` from the client's cursor. That cursor is sound, because a
+/// lag is detected at the first missing message, so everything this socket did
+/// deliver is an unbroken prefix of the channel.
+///
+/// The close is sent as a frame rather than by dropping the connection so a
+/// client sees a clean close with [`LAGGED_CLOSE_CODE`] instead of an abnormal
+/// 1006; a peer too far behind to read it is dropped either way.
+async fn forward_page_fanout<S>(
+    event: Result<Fanout<PageServerMessage>, broadcast::error::RecvError>,
+    sender: &mut S,
+    page_id: &str,
+    session_id: &str,
+) -> Result<(), &'static str>
+where
+    S: futures_util::Sink<Frame> + Unpin,
+{
+    match event {
+        Ok(Fanout { message, origin }) => {
+            let delivery = fanout_delivery_span("page", message.message_type(), &origin);
+            delivery.record("session_id", session_id);
+            match send_page_frame(sender, message)
+                .instrument(delivery.clone())
+                .await
+            {
+                Some(bytes) => {
+                    delivery.record("bytes", bytes);
+                    Ok(())
+                }
+                None => {
+                    crate::observability::metrics().record_realtime_event("page", "send_error");
+                    Err("send failed")
+                }
+            }
+        }
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            crate::observability::metrics().record_realtime_event("page", "lagged");
+            // The counter says how often; this names the session and how far
+            // behind it was, which is what sizing the channel would need.
+            tracing::warn!(
+                page_id,
+                session_id,
+                skipped,
+                "page subscriber lagged; closing so the client resubscribes"
+            );
+            // Best effort: a failed send means the peer is gone already.
+            let _ = sender
+                .send(Frame::close(LAGGED_CLOSE_CODE, LAGGED_CLOSE_REASON))
+                .await;
+            Err("lagged: the subscriber fell behind the page channel")
+        }
+        Err(broadcast::error::RecvError::Closed) => Err("page channel closed"),
     }
 }
 
@@ -652,6 +705,80 @@ mod tests {
             !deflate.client_no_context_takeover,
             "the server should not force clients to drop their context"
         );
+    }
+
+    // ---- Lagged subscribers (#279) ----------------------------------------
+
+    use crate::realtime::hub::{PAGE_CHANNEL_CAPACITY, RealtimeHub};
+
+    fn lease_changed(n: usize) -> PageServerMessage {
+        PageServerMessage::LeaseChanged {
+            holder: Some(format!("session_{n}")),
+        }
+    }
+
+    /// A subscriber that falls past the channel's capacity is closed with a
+    /// clean 1013 and counted, rather than left open with a hole in what it
+    /// was sent. The reconnect that follows is the clients' to make; this is
+    /// the server's half of the policy.
+    #[tokio::test]
+    async fn a_lagged_page_subscriber_is_closed_with_try_again_later_and_counted() {
+        let hub = RealtimeHub::default();
+        let mut receiver = hub.subscribe_page("page_1");
+        for n in 0..PAGE_CHANNEL_CAPACITY + 3 {
+            hub.publish_page("page_1", lease_changed(n));
+        }
+        let lagged_before = crate::observability::metrics().realtime_event_count("page", "lagged");
+
+        let mut sink: Vec<Frame> = Vec::new();
+        let outcome =
+            forward_page_fanout(receiver.recv().await, &mut sink, "page_1", "session_a").await;
+
+        assert_eq!(
+            outcome,
+            Err("lagged: the subscriber fell behind the page channel")
+        );
+        let [close] = sink.as_slice() else {
+            panic!("expected exactly one frame, got {}", sink.len());
+        };
+        assert_eq!(close.opcode(), OpCode::Close);
+        assert_eq!(close.close_code(), Some(CloseCode::Again));
+        assert_eq!(close.close_reason().expect("utf-8"), Some("lagged"));
+        // Only this test moves the page `lagged` series in this binary, so the
+        // delta is exact.
+        assert_eq!(
+            crate::observability::metrics().realtime_event_count("page", "lagged"),
+            lagged_before + 1
+        );
+    }
+
+    /// Up to capacity nothing is dropped, so nothing closes: every message is
+    /// forwarded, in order, as a text frame.
+    #[tokio::test]
+    async fn a_subscriber_within_capacity_is_sent_every_message_in_order() {
+        let hub = RealtimeHub::default();
+        let mut receiver = hub.subscribe_page("page_1");
+        for n in 0..PAGE_CHANNEL_CAPACITY {
+            hub.publish_page("page_1", lease_changed(n));
+        }
+
+        let mut sink: Vec<Frame> = Vec::new();
+        for _ in 0..PAGE_CHANNEL_CAPACITY {
+            forward_page_fanout(receiver.recv().await, &mut sink, "page_1", "session_a")
+                .await
+                .expect("a subscriber within capacity stays open");
+        }
+
+        let sent: Vec<PageServerMessage> = sink
+            .iter()
+            .map(|frame| {
+                assert_eq!(frame.opcode(), OpCode::Text);
+                serde_json::from_slice(frame.payload()).expect("a page server message")
+            })
+            .collect();
+        let expected: Vec<PageServerMessage> =
+            (0..PAGE_CHANNEL_CAPACITY).map(lease_changed).collect();
+        assert_eq!(sent, expected);
     }
 
     /// The inbound cap is stated rather than inherited, in both settings —

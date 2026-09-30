@@ -10,6 +10,7 @@ import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
+import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.SolidRoundParameters
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
@@ -590,6 +591,94 @@ class PageInkInstrumentedTest {
 
         assertTrue("partial ink painted", awaitUntil { session.strokes.size == 2 })
         session.disconnect()
+    }
+
+    /**
+     * #279: the server closes a page subscriber that fell behind its fan-out
+     * (1013 "lagged") and relies on the client to come back. The session must
+     * reconnect on its own, resubscribe from the last `seq` it holds, and end up
+     * with what the server has — here a batch, an erasure of ink it already
+     * showed and a paper change, all of which it missed while lagging.
+     */
+    @Test
+    fun reconnectsAfterServerCloseAndConvergesOnMissedInkErasureAndPaper() {
+        val resubscribedFrom = AtomicReference<Long>()
+        // First connection: one batch, then the server gives up on this socket.
+        openPage { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send(replayFrame(batchCount = 1))
+            }
+            if (type == "acquire-lease") {
+                webSocket.close(1013, "lagged")
+            }
+        }
+        // Second: what the server holds now — batches 2 and 3, batch 1's
+        // stroke erased, and a different paper.
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send(
+                                """{"type":"welcome","session_id":"me-again","last_seq":3,"paper":"ruled-wide"}""",
+                            )
+                        }
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            val message = JSONObject(text)
+                            when (message.getString("type")) {
+                                "subscribe" -> {
+                                    resubscribedFrom.set(message.getLong("from_seq"))
+                                    val batches = listOf(1, 2).joinToString(",") { replayBatchBody(it) }
+                                    webSocket.send(
+                                        """{"type":"page-replay","page_id":"page_1","last_seq":3,""" +
+                                            """"batches":[$batches],"tombstones":[{"revision":4,""" +
+                                            """"client_mutation_id":"m1","stroke_ids":["replay-stroke-0"]}]}""",
+                                    )
+                                }
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
+        )
+
+        val session = openSession()
+
+        assertTrue(
+            "converged on the server's ink",
+            awaitUntil(timeoutMs = 10_000) {
+                session.strokes.map { it.id } == listOf("replay-stroke-1", "replay-stroke-2")
+            },
+        )
+        assertEquals("resubscribed from the last seq it held", 1L, resubscribedFrom.get())
+        assertEquals("paper from the fresh welcome", Paper.RuledWide, session.paper)
+        assertTrue("editing again after reconnecting", awaitUntil { session.canEdit })
+        assertEquals("banner cleared", null, session.statusBanner)
+        assertEquals("one reconnect, not a loop", 2, server.requestCount)
+
+        session.disconnect()
+    }
+
+    /** A page the user left must not reconnect behind their back. */
+    @Test
+    fun doesNotReconnectAfterDisconnect() {
+        openPage { _, _ -> }
+        val session = openSession()
+        assertTrue("connected", awaitUntil { session.canEdit })
+
+        session.disconnect()
+        Thread.sleep(2_500)
+
+        assertEquals("no second upgrade", 1, server.requestCount)
     }
 
     private fun openSession(): PageInkSession {
