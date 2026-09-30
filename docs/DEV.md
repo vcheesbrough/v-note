@@ -503,6 +503,8 @@ docker build -f Dockerfile.web -t v-note:local --secret id=github_token,env=GITH
 ./scripts/test-smoke-oidc-login.sh                # CI `oidc-login-smoke-validation`: the post-deploy login (and SPA CSP, #444) smoke check, against a stub IdP
 V_NOTE_HOST=v-notes-dev.desync.link \
   ./scripts/smoke-oidc-login.sh                   # the smoke check itself, against a live environment (read-only, no credentials)
+./scripts/test-smoke-web-live.sh                 # CI `oidc-login-smoke-validation`: the authenticated live smoke's driver (#179), with stub npm/npx
+                                                  # the live spec itself (e2e/live/) runs post-deploy; see DEPLOY.md → Post-deploy smoke to run it by hand
 ./scripts/check-android-build-box-image.sh        # CI `android-build-box-pin`
 TEST_IMAGE=v-note:local docker compose -f e2e/docker-compose.test.yml \
   -f e2e/docker-compose.android-apk.test.yml up \

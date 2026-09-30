@@ -26,8 +26,9 @@
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint-dev** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
 4. **deploy** — `sovereign-config render /v-note/devops/dev/compose /v-note/devops/dev/otlp-collector-oidc -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
-5. **tag-release** — after a successful deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
-6. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
+5. **post-deploy smoke** — `smoke-oidc-login-*`, `smoke-sql-console-*` and the authenticated **`smoke-web-live-*`** (#179) against the host just deployed; see [Post-deploy smoke](#post-deploy-smoke)
+6. **tag-release** — after a successful deploy **and** the smoke steps, push the git tag matching `.release-tag` so the next deployment advances the patch digit
+7. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
 Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced.
 
@@ -214,11 +215,12 @@ Mini points `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at the
 `from_secret: <name>` in any [`.woodpecker/`](../.woodpecker/) workflow resolves
 at `/woodpecker/shared/<name>` or `/woodpecker/repos/vcheesbrough/v-note/<name>`.
 
-v-note's **own** layer now holds exactly one leaf:
+v-note's **own** layer holds two leaves:
 
 | Repo secret key | Used for |
 | --- | --- |
 | `v_note_devops_sovereign_access_url` | `SOVEREIGN_CONFIG_URL` — read-only connection **`v-note-devops`** rooted at `/v-note/devops`, the credential `render` uses above |
+| `v_note_dev_smoke_password` | The live smoke user's password (#179): the blueprint plugin's `vars` sets it on `v-note-smoke-dev` at every apply, and `smoke-web-live-*` signs in with it. 48 random alphanumerics; see [Post-deploy smoke](#post-deploy-smoke) for rotation |
 
 The rest are **shared** infrastructure credentials on `/woodpecker/shared`, used
 by bored and sovereign-config too, and **not v-note's to move or remove**:
@@ -958,3 +960,102 @@ manual visit to the database.
   that gating it did not break SPA login on the same host. No CI stack can make
   these claims (e2e has neither Traefik nor Authentik), so it gates the release
   tag alongside the OIDC smoke check.
+- **#179:** `scripts/smoke-web-live.sh` → `e2e/live/smoke.spec.ts` — the
+  **authenticated** smoke, described below. The Android half (install and launch
+  the deployed APK on an emulator) was split to **#457**.
+
+### Authenticated web smoke (`smoke-web-live-*`, #179)
+
+`smoke-oidc-login.sh` stops at Authentik's login page on purpose; nothing else
+after the deploy went past it, and the pre-merge e2e suite signs in through the
+mock IdP's `client_credentials` shortcut, which real Authentik does not offer.
+`smoke-web-live-auto-dev` (push) and `smoke-web-live-dev` (manual deployment)
+run after the deploy, in the Playwright image the e2e stack pins, and drive a
+real browser through the real flow:
+
+| Step | Assertion |
+| --- | --- |
+| Sign in | `/auth/login` → Authentik identification (`uidField`) → password stage → back on the SPA, signed in |
+| `/api/me` | 200, and `email` is the smoke user's (`V_NOTE_SMOKE_EMAIL`) |
+| Create a page | `POST /api/pages`; the page is in the library after a reload |
+| Draw a stroke | A stroke batch committed over the page channel (ticket → WSS → lease → commit), echoed with a `seq` |
+| Persistence | After a reload the page opens at `seq 1`, the stroke is on the canvas, and a fresh `subscribe` replays it from Postgres |
+| Clean up | The page is deleted (`204`) and gone from the list |
+| Sign out | `/auth/logout` clears the cookie; `/api/me` from the same browser is `401` |
+
+**It blocks the release tag** on both paths (`tag-release-auto-dev`,
+`tag-release-dev`): a tag claims the deployed product works. The live config
+retries once in CI to absorb a single transient; a repeat fails the step. On a
+failure the log names the URL and the authentik stage the sign-in stopped in
+(`ak-stage-password` = rejected password, `ak-stage-authenticator-validate` =
+the flow started asking for MFA, …).
+
+**The smoke user** is `v-note-smoke-dev`, declared in
+[`authentik/blueprint-dev.yaml`](../authentik/blueprint-dev.yaml) and
+re-asserted on every apply: type `external` (no authentik user or admin
+interface), in **only** `v-note-dev-users` (never `v-note-dev-admins`, which is
+the SQL console), marked `v-note/smoke-user`, email
+`v-note-smoke-dev@smoke.invalid`. `scripts/test-authentik-blueprints.sh` holds
+those invariants and checks that the blueprint and the smoke steps agree on the
+username and email. Its password is the placeholder
+`${V_NOTE_DEV_SMOKE_PASSWORD}`, filled by the plugin's `vars` from the broker
+secret `v_note_dev_smoke_password` — so the blueprint instance stored in
+Authentik holds the plaintext, visible to Authentik admins only, as the old
+client secret was before #274. Woodpecker masks it in step logs; the driver
+never prints it (its test asserts that), and the live config keeps Playwright
+tracing off because a trace records every `fill`.
+
+**Rotate** the password by rewriting the leaf and pushing (any branch): the next
+blueprint apply sets it and the smoke in the same pipeline uses it.
+
+```bash
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48 \
+  | sovereign-config set --secret /woodpecker/repos/vcheesbrough/v-note/v_note_dev_smoke_password
+```
+
+**Test data.** The smoke writes to the shared dev database on every push. It
+creates one page titled `live-smoke-<timestamp>-<random>` and deletes it before
+signing out — also in a `finally` if an assertion fails first — and at the start
+it sweeps `live-smoke-*` pages a killed run left behind, **only once they are at
+least 15 minutes old** (the timestamp in the title; `e2e/live/leftovers.ts`). The
+smoke user's pages are **disposable by definition**: nobody else uses the
+account.
+
+**Concurrency.** Several PRs deploy dev, so smoke runs overlap. Each run deletes
+only its own page, and the sweep's age floor — far longer than a whole run with
+its retry — means one run never deletes another's page mid-test. The floor is
+unit-checked by `e2e/live/leftovers.spec.ts`, which runs first in the same step.
+
+#### Running it by hand
+
+Against **dev** (you need the password; reading it reveals a secret, so only do
+this when you have to):
+
+```bash
+V_NOTE_HOST=v-notes-dev.desync.link \
+V_NOTE_SMOKE_USERNAME=v-note-smoke-dev \
+V_NOTE_SMOKE_EMAIL=v-note-smoke-dev@smoke.invalid \
+V_NOTE_SMOKE_PASSWORD="$(sovereign-config get --reveal /woodpecker/repos/vcheesbrough/v-note/v_note_dev_smoke_password)" \
+  ./scripts/smoke-web-live.sh
+```
+
+(needs Node and `npx playwright install chromium` locally; or run the same
+inside `mcr.microsoft.com/playwright:v1.54.2-jammy`, as CI does).
+
+Against the **local e2e stack** (mock IdP, no credentials) — this is how the
+spec is validated without touching dev. The mock signs in without a form, so the
+username and password are unused and its token's email is `test@example.com`:
+
+```bash
+export TEST_IMAGE=v-note:local
+C="docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml"
+$C build playwright
+$C run --rm -e LIVE_SMOKE_IGNORE_HTTPS_ERRORS=1 \
+  -e V_NOTE_SMOKE_USERNAME=unused -e V_NOTE_SMOKE_PASSWORD=unused \
+  -e V_NOTE_SMOKE_EMAIL=test@example.com \
+  playwright npx playwright test --config playwright.live.config.ts
+$C down --volumes
+```
+
+`LIVE_SMOKE_IGNORE_HTTPS_ERRORS=1` is only for the local stack's self-signed
+certificate; against a deployed host a certificate error is a real failure.

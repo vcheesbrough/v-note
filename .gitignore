@@ -51,6 +51,7 @@ lcov.info
 /e2e/.auth-state.json
 /e2e/playwright-report/
 /e2e/test-results/
+/e2e/test-results-live/
 
 # Tool-local (not committed)
 .claude/

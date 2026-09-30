@@ -84,12 +84,18 @@ steps:
   # found by the next outage rather than by CI. This drives it against a local
   # stub IdP and asserts it both passes a healthy login and fails each way the
   # flow can break. curl is unpinned for the reason given on the Grafana steps.
+  #
+  # smoke-web-live.sh (#179), the authenticated half of the post-deploy smoke,
+  # rides along for the same reason with the same tools: its test stubs npm/npx
+  # and the app's /health, and asserts the driver refuses missing inputs, runs
+  # the live config (never the mock-IdP suite) and never prints the password.
   oidc-login-smoke-validation:
     depends_on: []
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
     commands:
       - apk add --no-cache python3 bash curl
       - ./scripts/test-smoke-oidc-login.sh
+      - ./scripts/test-smoke-web-live.sh
 
   # Same argument for the two scripts #299 added, both of which only ever run
   # against live shared infrastructure:
