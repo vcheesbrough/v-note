@@ -111,11 +111,14 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
   ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
-  auto-deploy-dev → smoke-oidc-login → tag) runs only when all three succeed.
+  auto-deploy-dev → smoke-oidc-login ∥ smoke-sql-console ∥ smoke-web-live → tag) runs only when all three succeed.
   **The deploy workflow runs on every branch, not just `master`** — dev is the
   pre-merge environment, so every push deploys its build there and the last push
   wins. It applies `blueprint-dev.yaml` to shared Authentik and redeploys dev, so
-  check a branch's pipeline side effects before pushing. **There is no prod
+  check a branch's pipeline side effects before pushing. `smoke-web-live-*` (#179)
+  then signs in to dev through the **real** Authentik as the blueprint's
+  `v-note-smoke-dev` user and inks a page (`e2e/live/`, its own Playwright
+  config — never part of the mock-IdP suite); it gates the release tag. **There is no prod
   (#392); dev is the only deploy target until #388.** **`ci-watch` must follow
   every workflow of the pushed commit's pipeline to completion** — one green
   workflow while another is still running is not a result. Do not fold them back

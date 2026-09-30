@@ -17,7 +17,11 @@
 #   4. the provider declares the grants it needs. Authentik defaults a
 #      blueprint-created provider to *no* grants, which rejects every authorize
 #      request — #372 shipped exactly that and took dev login down while every
-#      check that existed at the time stayed green.
+#      check that existed at the time stayed green;
+#   5. the live smoke user (#179) stays least-privileged — external, one group,
+#      never the admins group, password only as a secret placeholder — and
+#      agrees with the smoke steps in .woodpecker/deploy.yml on its username
+#      and email, and every step applying the file supplies the placeholder.
 #
 # Dev is the only environment today (#392); #388 adds prod as a second file and
 # every check below applies to it unchanged.
@@ -206,6 +210,82 @@ for env, doc in loaded.items():
     check(
         f"[authentik_core.group, [name, {admins}]]" in raw,
         f"{env}: a binding resolves the {admins} group",
+    )
+
+print("==> the #179 live smoke user is least-privileged and matches the smoke step")
+with open(".woodpecker/deploy.yml") as handle:
+    deploy = yaml.load(handle, Loader=BlueprintLoader)
+smoke_steps = {
+    name: step for name, step in deploy["steps"].items() if name.startswith("smoke-web-live-")
+}
+check(
+    {"smoke-web-live-auto-dev", "smoke-web-live-dev"} <= set(smoke_steps),
+    "deploy.yml has smoke-web-live on both the push and deployment paths",
+)
+for env, doc in loaded.items():
+    entries = doc["entries"]
+    users = [e for e in entries if e["model"] == "authentik_core.user"]
+    check(len(users) == 1, f"{env}: exactly one user entry (the smoke user)")
+    if not users:
+        continue
+    user = users[0]
+    attrs = user.get("attrs", {})
+    username = f"v-note-smoke-{env}"
+    check(user.get("state", "present") == "present", f"{env}: smoke user is present")
+    check(
+        user["identifiers"].get("username") == username and attrs.get("username") == username,
+        f"{env}: smoke user is named {username}",
+    )
+    # Least privilege. `external` has no authentik user/admin interface;
+    # superuser anywhere would make a credential CI holds an admin one.
+    check(attrs.get("type") == "external", f"{env}: smoke user is type external")
+    check(not attrs.get("is_superuser"), f"{env}: smoke user is not a superuser")
+    check(
+        (attrs.get("attributes") or {}).get("v-note/smoke-user") is True,
+        f"{env}: smoke user carries the v-note/smoke-user marker",
+    )
+    # `!Find` loads as None, so the group is checked on the raw text: exactly one
+    # group, and it is the ordinary users group — never the admins group, which
+    # would hand the SQL console to a CI-held credential.
+    groups = attrs.get("groups")
+    check(isinstance(groups, list) and len(groups) == 1, f"{env}: smoke user is in exactly one group")
+    with open(FILES[env]) as handle:
+        raw = handle.read()
+    user_block = raw[raw.index(f"username: {username}") :]
+    # The entry ends at the first blank line.
+    user_block = user_block.split("\n\n", 1)[0]
+    check(
+        f"!Find [authentik_core.group, [name, v-note-{env}-users]]" in user_block
+        and f"v-note-{env}-admins" not in user_block,
+        f"{env}: the smoke user's one group is v-note-{env}-users",
+    )
+    # The password is a placeholder the plugin fills from a Woodpecker secret —
+    # a literal here would be a committed credential.
+    placeholder = f"${{V_NOTE_{env.upper()}_SMOKE_PASSWORD}}"
+    check(attrs.get("password") == placeholder, f"{env}: smoke password is the {placeholder} placeholder")
+    check("password_hash" not in attrs, f"{env}: no password_hash alongside password")
+
+    # The spec asserts /api/me returns this email and signs in with this name,
+    # so the step and the blueprint must agree.
+    for name in (f"smoke-web-live-auto-{env}", f"smoke-web-live-{env}"):
+        environment = smoke_steps.get(name, {}).get("environment", {})
+        check(
+            environment.get("V_NOTE_SMOKE_USERNAME") == username,
+            f"{env}: {name} V_NOTE_SMOKE_USERNAME matches the blueprint",
+        )
+        check(
+            environment.get("V_NOTE_SMOKE_EMAIL") == attrs.get("email"),
+            f"{env}: {name} V_NOTE_SMOKE_EMAIL matches the blueprint's email",
+        )
+    blueprint_vars = [
+        s.get("settings", {}).get("vars", {})
+        for s in deploy["steps"].values()
+        if s.get("settings", {}).get("file") == FILES[env]
+    ]
+    check(
+        blueprint_vars
+        and all(f"V_NOTE_{env.upper()}_SMOKE_PASSWORD" in v for v in blueprint_vars),
+        f"{env}: every step applying {FILES[env]} supplies V_NOTE_{env.upper()}_SMOKE_PASSWORD",
     )
 
 if failures:

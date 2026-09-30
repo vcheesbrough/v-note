@@ -26,8 +26,9 @@
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
 3. **apply-authentik-blueprint-dev** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
 4. **deploy** — `sovereign-config render /v-note/devops/dev/compose /v-note/devops/dev/otlp-collector-oidc -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
-5. **tag-release** — after a successful deploy, push the git tag matching `.release-tag` so the next deployment advances the patch digit
-6. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
+5. **post-deploy smoke** — `smoke-oidc-login-*`, `smoke-sql-console-*` and the authenticated **`smoke-web-live-*`** (#179) against the host just deployed; see [Post-deploy smoke](#post-deploy-smoke)
+6. **tag-release** — after a successful deploy **and** the smoke steps, push the git tag matching `.release-tag` so the next deployment advances the patch digit
+7. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
 Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced.
 
@@ -214,11 +215,12 @@ Mini points `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at the
 `from_secret: <name>` in any [`.woodpecker/`](../.woodpecker/) workflow resolves
 at `/woodpecker/shared/<name>` or `/woodpecker/repos/vcheesbrough/v-note/<name>`.
 
-v-note's **own** layer now holds exactly one leaf:
+v-note's **own** layer holds two leaves:
 
 | Repo secret key | Used for |
 | --- | --- |
 | `v_note_devops_sovereign_access_url` | `SOVEREIGN_CONFIG_URL` — read-only connection **`v-note-devops`** rooted at `/v-note/devops`, the credential `render` uses above |
+| `v_note_dev_smoke_password` | The live smoke user's password (#179): the blueprint plugin's `vars` sets it on `v-note-smoke-dev` at every apply, and `smoke-web-live-*` signs in with it. 48 random alphanumerics; see [Post-deploy smoke](#post-deploy-smoke) for rotation |
 
 The rest are **shared** infrastructure credentials on `/woodpecker/shared`, used
 by bored and sovereign-config too, and **not v-note's to move or remove**:
@@ -535,7 +537,7 @@ v-note integrates with the mini-config monitoring stack on `proxy-backend`:
 
 - **Metrics:** the app serves Prometheus text on internal port `9090` at `/metrics`. Alloy discovers it through Docker labels on the `v-note` service: `observability.metrics.scrape=true`, `observability.metrics.port=9090`, `observability.metrics.path=/metrics`, `observability.metrics.scheme=http`, `observability.service.name=v-note`, `observability.deployment.environment`, `observability.release`, and `observability.protocol`.
 - **Traces:** the `observability` config group sets `otlp-endpoint=http://monitor-alloy:4317`, `otlp-protocol=grpc`, and `service-name=v-note` in each deployed environment's subtree; `observability/environment` supplies the OTEL `deployment.environment` attribute (`dev` / `production`). Every `http.request` span adopts the W3C `traceparent` Traefik forwards, so a request's trace starts at Traefik's edge span and drills down into v-note. WebSocket connection spans nest under their upgrade request; each inbound page message is its own trace, linked to its connection span. A broadcast carries its publisher's trace context, so each socket's send of a fanned-out message is a `realtime.fanout.deliver` span (`channel`, `message_type`, `bytes`, plus `session_id` on the page channel) inside the publisher's trace — a `commit-batch` trace shows the delivery to every sibling session — and linked to the receiving connection. Every Postgres round trip — each query, and each transaction's `BEGIN`/`COMMIT` — is a `db.query` span carrying `db.operation` and `db.query_name` (the call site, never SQL text or values), plus the size of the result: `db.response.returned_rows`, `db.response.bytes` and `db.response.max_row_bytes` (Postgres wire bytes of the returned column values, in total and for the widest row), and `db.response.affected_rows` for writes. Every span also carries the OpenTelemetry `code.file.path` / `code.module.name` / `code.line.number` the tracing layer derives from where the span was opened; `db_query_span!` is a macro so that those name the query's own call site rather than `observability.rs` (#343). Thumbnail jobs run detached, so each is its own `thumbnail.generate` trace (with `db.query` and `thumbnail.render` children) linked to the request that queued it.
-- **Client telemetry (#439, replacing #354's proxy and sidecar):** the SPA's and the Android app's traces and logs go to **`otlp-collector-oidc`** — the estate's reference ingest image, pinned by tag and digest (`ghcr.io/vcheesbrough/otlp-collector-oidc:0.13.0`), one container per environment (`${V_NOTE_CONTAINER_NAME}-otlp-collector-oidc`). Traefik routes OTLP's own paths on the app's host — `Host(v-note host) && (PathPrefix(/v1/) || PathPrefix(/opentelemetry.proto.collector))`, priority 100, `lan-vpn-only` plus a rate limit of its own (10/s, burst 40, by source IP; the image has none) — to its one TLS port, re-encrypted to its embedded self-signed certificate under Traefik's global `insecureSkipVerify`. So the SPA's export is **same-origin**. The ingest validates a **bearer access token** from this environment's provider (issuer, audience = the v-note client id, `telemetry:write`, `sub` and `preferred_username` required): every refusal is `401` with the rule in the body, counted by reason. It stamps `user.id`/`user.name`/`user.email`/`user.full_name` from the token over whatever the client sent, and `deployment.environment.name=<env>` and **`telemetry_source=client`** over the resource; keeps the client's own `service.name` (bounded by `ALLOWED_SERVICE_NAMES=^v-note-(spa|android)$`) and **`service.version`** (the old sidecar stamped the server's here); drops spans older than `MAX_PAST_AGE` (48h — Tempo and Loki keep 7 days) and every client metric; caps the decompressed body (4 MiB → 413). It forwards every signal to **`monitor-alloy:4317`**, which sends traces to Tempo and logs to Loki (mini-config #47) and translates the ingest's `telemetry_source=client` / `deployment.environment.name` into the platform's indexed `log_source="client"` / `deployment_environment`. **Clients learn where to send** from `GET /api/telemetry/config` (authenticated): `{endpoint, access_token, expires_at}` when `/v-note/<env>/server/client-telemetry/endpoint` is set (an https bare origin — the app's own), `204` when it is not; a client with no configuration never initialises OTLP. **The SPA therefore holds an access token in JavaScript** — the route returns the session cookie's token, `Cache-Control: no-store` — which is the deliberate cost of an ingest that takes only a bearer: script injection could read it. **What bounds it is the SPA's Content-Security-Policy (#444)** — see [SPA Content-Security-Policy](#spa-content-security-policy-444): only the app's own script runs, and the page may only connect to the app and this ingest. Login asks for `telemetry:write` (SPA and Android); the blueprint attaches the estate's one `telemetry:write` scope mapping to the provider. A token issued before the mapping was attached lacks the scope, so a client still holding one is refused (`401 missing scope`), refreshes once and stops telemetry until the user next signs in (a refresh keeps the scopes the session was granted). Authentik cannot withhold a scope per user or group (a scope mapping's expression adds claims, it cannot drop the scope), so there is **no per-user telemetry opt-out** from the provider — group membership gates sign-in as a whole. Its own metrics on `:8888` are scraped as `service_name="v-note-otlp-collector-oidc"`; charted on the dashboard's **Client telemetry** row (accepted, refused by reason, dropped), and the **ingest-volume alert** (`deploy/grafana/v-note-alerts.json`, > 50 items/s for 15 min) links to the image's runbook; it is published by an operator with `GRAFANA_FOLDER_UID=v-note scripts/publish-grafana-alerts.sh deploy/grafana/v-note-alerts.json` (admin token), because the CI service account may not write alerting — mini-config #445 decides whether it should, and the pipeline step comes back if so. It is **not** in the deploy health gate, and nothing `depends_on` it: telemetry must never fail a product deploy. **Emergency stop:** `docker stop v-note-<env>-otlp-collector-oidc` — clients drop their events and carry on. Loki: `{service_name=~"v-note-(spa|android)", deployment_environment="dev", log_source="client"}`.
+- **Client telemetry (#439, replacing #354's proxy and sidecar):** the SPA's and the Android app's traces and logs go to **`otlp-collector-oidc`** — the estate's reference ingest image, pinned by tag and digest (`ghcr.io/vcheesbrough/otlp-collector-oidc:0.13.0`), one container per environment (`${V_NOTE_CONTAINER_NAME}-otlp-collector-oidc`). Traefik routes OTLP's own paths on the app's host — `Host(v-note host) && (PathPrefix(/v1/) || PathPrefix(/opentelemetry.proto.collector))`, priority 100, `lan-vpn-only` plus a rate limit of its own (10/s, burst 40, by source IP; the image has none) — to its one TLS port, re-encrypted to its embedded self-signed certificate under Traefik's global `insecureSkipVerify`. So the SPA's export is **same-origin**. The ingest validates a **bearer access token** from this environment's provider (issuer, audience = the v-note client id, `telemetry:write`, `sub` and `preferred_username` required): every refusal is `401` with the rule in the body, counted by reason. It stamps `user.id`/`user.name`/`user.email`/`user.full_name` from the token over whatever the client sent, and `deployment.environment.name=<env>` and **`telemetry_source=client`** over the resource; keeps the client's own `service.name` (bounded by `ALLOWED_SERVICE_NAMES=^v-note-(spa|android)$`) and **`service.version`** (the old sidecar stamped the server's here); drops spans older than `MAX_PAST_AGE` (48h — Tempo and Loki keep 7 days) and every client metric; caps the decompressed body (4 MiB → 413). It forwards every signal to **`monitor-alloy:4317`**, which sends traces to Tempo and logs to Loki (mini-config #47) and translates the ingest's `telemetry_source=client` / `deployment.environment.name` into the platform's indexed `log_source="client"` / `deployment_environment`. **Clients learn where to send** from `GET /api/telemetry/config` (authenticated): `{endpoint, access_token, expires_at}` when `/v-note/<env>/server/client-telemetry/endpoint` is set (an https bare origin — the app's own), `204` when it is not; a client with no configuration never initialises OTLP. **The SPA therefore holds an access token in JavaScript** — the route returns the session cookie's token, `Cache-Control: no-store` — which is the deliberate cost of an ingest that takes only a bearer: script injection could read it. **What bounds it is the SPA's Content-Security-Policy (#444)** — see [SPA Content-Security-Policy](#spa-content-security-policy-444): only the app's own script runs, and the page may only connect to the app and this ingest. Login asks for `telemetry:write` (SPA and Android); the blueprint attaches the estate's one `telemetry:write` scope mapping to the provider. A token issued before the mapping was attached lacks the scope, so a client still holding one is refused (`401 missing scope`), refreshes once and stops telemetry until the user next signs in (a refresh keeps the scopes the session was granted). Authentik cannot withhold a scope per user or group (a scope mapping's expression adds claims, it cannot drop the scope), so there is **no per-user telemetry opt-out** from the provider — group membership gates sign-in as a whole. Its own metrics on `:8888` are scraped as `service_name="v-note-otlp-collector-oidc"`; charted on the dashboard's **Client telemetry** row (accepted, refused by reason, dropped), and the **ingest-volume alert** (`deploy/grafana/v-note-alerts.json`, > 50 items/s for 15 min) links to the image's runbook; it is published by an operator with `GRAFANA_FOLDER_UID=v-note scripts/publish-grafana-alerts.sh deploy/grafana/v-note-alerts.json` (admin token), because the CI service account may not write alerting — mini-config #445 decides whether it should, and the pipeline step comes back if so. It is **not** in the deploy health gate, and nothing `depends_on` it: telemetry must never fail a product deploy. **Emergency stop:** `docker stop v-note-<env>-otlp-collector-oidc` — clients drop their events and carry on. Loki: `{service_name=~"v-note-(spa|android)", deployment_environment="dev", log_source="client"}`. **Every client span and log record names its source (#453)**, as the server's do: the SPA sends `code.file.path` / `code.line.number` of the call site (`#[track_caller]`, so a helper that opens a span must be `#[track_caller]` too, as `api::start` is); the Android app sends `code.function.name` / `code.file.path` (package path + file) / `code.line.number` of the first app frame outside the telemetry package and the shared request helpers listed in `telemetry/CallSite.kt` (so a request and its failure log name the API method that made it), plus `thread.name` / `thread.id` — read off a stack trace, so it depends on R8 minification staying off (`android/app/build.gradle.kts`). A panic inside a dependency is reported from the crate directory (`leptos-0.8.20/src/…`), without the build host's cargo home. Span and log attributes only: no metric label, and nothing but code locations. In Loki they are the structured metadata `code_file_path`, `code_line_number`, `code_function_name`, `thread_name`, `thread_id`.
 - **Logs (#417):** every server log line leaves by **two paths**, deliberately.
   - **OTLP** — the server exports log records over the same `otlp-endpoint` / `otlp-protocol` / `otlp-timeout-ms` as its spans (an unset endpoint turns both off), with the **same resource** (`service.name`, `service.version`, `deployment.environment`, `vnote.protocol`, one `Resource` shared by both providers). The server marks its own push with the contract's key, **`telemetry_source = "otlp"`**, on the shared resource (spans too); the shared Alloy copies it into the indexed `log_source` (mini-config #47), so the query is **`{service_name="v-note", log_source="otlp"}`**; each record carries the active span's `trace_id` / `span_id` (Loki structured metadata) and its event fields (`page_id`, `client_batch_id`, …) as attributes. `observability/otlp-log-filter` (an `EnvFilter` directive, e.g. `server=info`) sets what reaches Loki independently of `RUST_LOG`; unset means the stdout filter. The shared Alloy's `apps` receiver has forwarded logs to Loki since mini-config **#47** (card #443 on the mini-config board); before it, these exports were rejected with gRPC `Unimplemented`. The e2e stand-in (`e2e/alloy/monitor-alloy.alloy`) mirrors that pipeline, marker translation included.
   - **stdout** — structured JSON, scraped by the shared Alloy as `{service_name="v-note", log_source="docker"}`, with environment and release from the Docker labels. The crash-safe copy: it is what carries pre-init and post-shutdown output and what `docker logs` shows. Every line written inside a span carries the same `trace_id` / `span_id` as **top-level JSON body fields** — never stream labels (they are unbounded).
@@ -958,3 +960,102 @@ manual visit to the database.
   that gating it did not break SPA login on the same host. No CI stack can make
   these claims (e2e has neither Traefik nor Authentik), so it gates the release
   tag alongside the OIDC smoke check.
+- **#179:** `scripts/smoke-web-live.sh` → `e2e/live/smoke.spec.ts` — the
+  **authenticated** smoke, described below. The Android half (install and launch
+  the deployed APK on an emulator) was split to **#457**.
+
+### Authenticated web smoke (`smoke-web-live-*`, #179)
+
+`smoke-oidc-login.sh` stops at Authentik's login page on purpose; nothing else
+after the deploy went past it, and the pre-merge e2e suite signs in through the
+mock IdP's `client_credentials` shortcut, which real Authentik does not offer.
+`smoke-web-live-auto-dev` (push) and `smoke-web-live-dev` (manual deployment)
+run after the deploy, in the Playwright image the e2e stack pins, and drive a
+real browser through the real flow:
+
+| Step | Assertion |
+| --- | --- |
+| Sign in | `/auth/login` → Authentik identification (`uidField`) → password stage → back on the SPA, signed in |
+| `/api/me` | 200, and `email` is the smoke user's (`V_NOTE_SMOKE_EMAIL`) |
+| Create a page | `POST /api/pages`; the page is in the library after a reload |
+| Draw a stroke | A stroke batch committed over the page channel (ticket → WSS → lease → commit), echoed with a `seq` |
+| Persistence | After a reload the page opens at `seq 1`, the stroke is on the canvas, and a fresh `subscribe` replays it from Postgres |
+| Clean up | The page is deleted (`204`) and gone from the list |
+| Sign out | `/auth/logout` clears the cookie; `/api/me` from the same browser is `401` |
+
+**It blocks the release tag** on both paths (`tag-release-auto-dev`,
+`tag-release-dev`): a tag claims the deployed product works. The live config
+retries once in CI to absorb a single transient; a repeat fails the step. On a
+failure the log names the URL and the authentik stage the sign-in stopped in
+(`ak-stage-password` = rejected password, `ak-stage-authenticator-validate` =
+the flow started asking for MFA, …).
+
+**The smoke user** is `v-note-smoke-dev`, declared in
+[`authentik/blueprint-dev.yaml`](../authentik/blueprint-dev.yaml) and
+re-asserted on every apply: type `external` (no authentik user or admin
+interface), in **only** `v-note-dev-users` (never `v-note-dev-admins`, which is
+the SQL console), marked `v-note/smoke-user`, email
+`v-note-smoke-dev@smoke.invalid`. `scripts/test-authentik-blueprints.sh` holds
+those invariants and checks that the blueprint and the smoke steps agree on the
+username and email. Its password is the placeholder
+`${V_NOTE_DEV_SMOKE_PASSWORD}`, filled by the plugin's `vars` from the broker
+secret `v_note_dev_smoke_password` — so the blueprint instance stored in
+Authentik holds the plaintext, visible to Authentik admins only, as the old
+client secret was before #274. Woodpecker masks it in step logs; the driver
+never prints it (its test asserts that), and the live config keeps Playwright
+tracing off because a trace records every `fill`.
+
+**Rotate** the password by rewriting the leaf and pushing (any branch): the next
+blueprint apply sets it and the smoke in the same pipeline uses it.
+
+```bash
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48 \
+  | sovereign-config set --secret /woodpecker/repos/vcheesbrough/v-note/v_note_dev_smoke_password
+```
+
+**Test data.** The smoke writes to the shared dev database on every push. It
+creates one page titled `live-smoke-<timestamp>-<random>` and deletes it before
+signing out — also in a `finally` if an assertion fails first — and at the start
+it sweeps `live-smoke-*` pages a killed run left behind, **only once they are at
+least 15 minutes old** (the timestamp in the title; `e2e/live/leftovers.ts`). The
+smoke user's pages are **disposable by definition**: nobody else uses the
+account.
+
+**Concurrency.** Several PRs deploy dev, so smoke runs overlap. Each run deletes
+only its own page, and the sweep's age floor — far longer than a whole run with
+its retry — means one run never deletes another's page mid-test. The floor is
+unit-checked by `e2e/live/leftovers.spec.ts`, which runs first in the same step.
+
+#### Running it by hand
+
+Against **dev** (you need the password; reading it reveals a secret, so only do
+this when you have to):
+
+```bash
+V_NOTE_HOST=v-notes-dev.desync.link \
+V_NOTE_SMOKE_USERNAME=v-note-smoke-dev \
+V_NOTE_SMOKE_EMAIL=v-note-smoke-dev@smoke.invalid \
+V_NOTE_SMOKE_PASSWORD="$(sovereign-config get --reveal /woodpecker/repos/vcheesbrough/v-note/v_note_dev_smoke_password)" \
+  ./scripts/smoke-web-live.sh
+```
+
+(needs Node and `npx playwright install chromium` locally; or run the same
+inside `mcr.microsoft.com/playwright:v1.54.2-jammy`, as CI does).
+
+Against the **local e2e stack** (mock IdP, no credentials) — this is how the
+spec is validated without touching dev. The mock signs in without a form, so the
+username and password are unused and its token's email is `test@example.com`:
+
+```bash
+export TEST_IMAGE=v-note:local
+C="docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml"
+$C build playwright
+$C run --rm -e LIVE_SMOKE_IGNORE_HTTPS_ERRORS=1 \
+  -e V_NOTE_SMOKE_USERNAME=unused -e V_NOTE_SMOKE_PASSWORD=unused \
+  -e V_NOTE_SMOKE_EMAIL=test@example.com \
+  playwright npx playwright test --config playwright.live.config.ts
+$C down --volumes
+```
+
+`LIVE_SMOKE_IGNORE_HTTPS_ERRORS=1` is only for the local stack's self-signed
+certificate; against a deployed host a certificate error is a real failure.

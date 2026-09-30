@@ -127,6 +127,45 @@ entries:
       group: !Find [authentik_core.group, [name, v-note-dev-users]]
 
   # -------------------------------------------------------------------------
+  # Live post-deploy smoke user (#179). The account smoke-web-live-* in
+  # .woodpecker/deploy.yml signs in as, through the real login flow, after every
+  # dev deploy. Declared here rather than made by hand so it is re-asserted on
+  # every apply: nobody can quietly widen it and have that survive the next push.
+  #
+  # Least privilege, and each property is load-bearing:
+  #   - `external`: no access to the authentik user or admin interfaces, only
+  #     to applications its groups allow;
+  #   - `groups` is set wholesale to v-note-dev-users ONLY — never
+  #     v-note-dev-admins (the SQL console) or anything outside v-note;
+  #   - its pages are disposable: the smoke deletes what it creates and sweeps
+  #     abandoned `live-smoke-*` leftovers, and no human uses this account.
+  # `email` is what the smoke asserts /api/me returns, so it must match
+  # V_NOTE_SMOKE_EMAIL in deploy.yml (scripts/test-authentik-blueprints.sh
+  # checks both names match). `.invalid` so no mail can ever be delivered.
+  #
+  # The password is the Woodpecker secret v_note_dev_smoke_password (a broker
+  # leaf in sovereign-config, docs/DEPLOY.md → Secrets), substituted by the
+  # plugin's `vars` at apply time — this file holds only the placeholder.
+  # Rotate it by rewriting the leaf and pushing: the next apply sets it.
+  # -------------------------------------------------------------------------
+  - model: authentik_core.user
+    state: present
+    identifiers:
+      username: v-note-smoke-dev
+    attrs:
+      username: v-note-smoke-dev
+      name: v-note live smoke (dev)
+      email: v-note-smoke-dev@smoke.invalid
+      type: external
+      path: v-note/smoke
+      is_active: true
+      attributes:
+        v-note/smoke-user: true
+      groups:
+        - !Find [authentik_core.group, [name, v-note-dev-users]]
+      password: "${V_NOTE_DEV_SMOKE_PASSWORD}"
+
+  # -------------------------------------------------------------------------
   # SQL console (#299) — a *separate* application with its own provider and its
   # own group, so that "can use v-note" and "can read every row of everyone's
   # notes" stay different facts. Nothing above is affected.

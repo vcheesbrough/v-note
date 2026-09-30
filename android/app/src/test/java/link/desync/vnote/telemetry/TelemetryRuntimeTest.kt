@@ -362,6 +362,13 @@ class TelemetryRuntimeTest {
         assertEquals("boom", attributes.getValue("exception.message").getString("stringValue"))
         assertTrue(attributes.getValue("exception.stacktrace").getString("stringValue").contains("boom"))
         assertEquals(runtime.screen().traceId.hex, log.getString("traceId"))
+        // Located where it was thrown, on the thread that crashed (#453).
+        assertEquals(
+            "link.desync.vnote.telemetry.TelemetryRuntimeTest.crashHandlerLogsTheCrashWithItsStackAndDefersToThePreviousHandler",
+            attributes.getValue(CODE_FUNCTION_NAME).getString("stringValue"),
+        )
+        assertEquals(Thread.currentThread().name, attributes.getValue(THREAD_NAME).getString("stringValue"))
+        assertTrue(attributes.containsKey(THREAD_ID))
     }
 
     // The crash must go out even when the ordinary export would not send it:
