@@ -12,7 +12,7 @@ use axum::{
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use protocol::{PageClientMessage, PageServerMessage, RealtimeTicketResponse};
+use protocol::{LibraryEvent, PageClientMessage, PageServerMessage, RealtimeTicketResponse};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
@@ -268,45 +268,9 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWe
     let reason = loop {
         tokio::select! {
             event = receiver.recv() => {
-                let Fanout { message: event, origin } = match event {
-                    Ok(fanout) => fanout,
-                    // Closed like a lagged page socket (#279): the client
-                    // reconnects and refetches the list, which is its recovery.
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        crate::observability::metrics().record_realtime_event("library", "lagged");
-                        tracing::warn!(
-                            owner_id = %owner_id,
-                            skipped,
-                            "library subscriber lagged; closing so the client reconnects"
-                        );
-                        let _ = sender
-                            .send(Frame::close(LAGGED_CLOSE_CODE, LAGGED_CLOSE_REASON))
-                            .await;
-                        break "lagged: the subscriber fell behind the library channel";
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break "library channel closed",
-                };
-                let message_type = event.message_type();
-                let Ok(payload) = serde_json::to_string(&event) else {
-                    continue;
-                };
-                let bytes = payload.len();
-                let delivery = fanout_delivery_span("library", message_type, &origin);
-                delivery.record("bytes", bytes);
-                if sender
-                    .send(Frame::text(payload))
-                    .instrument(delivery)
-                    .await
-                    .is_err()
-                {
-                    crate::observability::metrics().record_realtime_event("library", "send_error");
-                    break "send failed";
+                if let Err(reason) = forward_library_fanout(event, &mut sender, &owner_id).await {
+                    break reason;
                 }
-                crate::observability::metrics().observe_realtime_message_bytes(
-                    "library",
-                    message_type,
-                    bytes,
-                );
             }
             message = inbound.next() => {
                 match message {
@@ -327,6 +291,57 @@ async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWe
         }
     };
     tracing::info!(owner_id = %owner_id, reason, "library socket closed");
+}
+
+/// Sends one library-channel event to this socket, or decides the connection
+/// is over (`Err` is the reason). A lagged subscriber is closed exactly like a
+/// lagged page subscriber (#279) — see [`forward_page_fanout`] — and recovers
+/// the same way: the client reconnects and refetches the list.
+async fn forward_library_fanout<S>(
+    event: Result<Fanout<LibraryEvent>, broadcast::error::RecvError>,
+    sender: &mut S,
+    owner_id: &str,
+) -> Result<(), &'static str>
+where
+    S: futures_util::Sink<Frame> + Unpin,
+{
+    let Fanout {
+        message: event,
+        origin,
+    } = match event {
+        Ok(fanout) => fanout,
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            crate::observability::metrics().record_realtime_event("library", "lagged");
+            tracing::warn!(
+                owner_id,
+                skipped,
+                "library subscriber lagged; closing so the client reconnects"
+            );
+            let _ = sender
+                .send(Frame::close(LAGGED_CLOSE_CODE, LAGGED_CLOSE_REASON))
+                .await;
+            return Err("lagged: the subscriber fell behind the library channel");
+        }
+        Err(broadcast::error::RecvError::Closed) => return Err("library channel closed"),
+    };
+    let message_type = event.message_type();
+    let Ok(payload) = serde_json::to_string(&event) else {
+        return Ok(());
+    };
+    let bytes = payload.len();
+    let delivery = fanout_delivery_span("library", message_type, &origin);
+    delivery.record("bytes", bytes);
+    if sender
+        .send(Frame::text(payload))
+        .instrument(delivery)
+        .await
+        .is_err()
+    {
+        crate::observability::metrics().record_realtime_event("library", "send_error");
+        return Err("send failed");
+    }
+    crate::observability::metrics().observe_realtime_message_bytes("library", message_type, bytes);
+    Ok(())
 }
 
 // ---- Page channel (per-`page_id` ink WSS) --------------------------------
@@ -487,7 +502,10 @@ const LAGGED_CLOSE_REASON: &str = "lagged";
 ///
 /// The close is sent as a frame rather than by dropping the connection so a
 /// client sees a clean close with [`LAGGED_CLOSE_CODE`] instead of an abnormal
-/// 1006; a peer too far behind to read it is dropped either way.
+/// 1006. Note what this does *not* bound: lag is only noticed at the next
+/// `recv`, after the send in progress completes, and fan-out sends have no
+/// timeout — a peer that stops reading entirely holds this task in `send`
+/// until TCP itself gives up on the connection (pre-existing, not #279's).
 async fn forward_page_fanout<S>(
     event: Result<Fanout<PageServerMessage>, broadcast::error::RecvError>,
     sender: &mut S,
@@ -709,7 +727,7 @@ mod tests {
 
     // ---- Lagged subscribers (#279) ----------------------------------------
 
-    use crate::realtime::hub::{PAGE_CHANNEL_CAPACITY, RealtimeHub};
+    use crate::realtime::hub::{LIBRARY_CHANNEL_CAPACITY, PAGE_CHANNEL_CAPACITY, RealtimeHub};
 
     fn lease_changed(n: usize) -> PageServerMessage {
         PageServerMessage::LeaseChanged {
@@ -748,6 +766,42 @@ mod tests {
         // delta is exact.
         assert_eq!(
             crate::observability::metrics().realtime_event_count("page", "lagged"),
+            lagged_before + 1
+        );
+    }
+
+    /// The library channel follows the same policy: past its capacity the
+    /// subscriber is sent a 1013 "lagged" close and the lag is counted.
+    #[tokio::test]
+    async fn a_lagged_library_subscriber_is_closed_with_try_again_later_and_counted() {
+        let hub = RealtimeHub::default();
+        let mut receiver = hub.subscribe_library("owner_1");
+        for n in 0..LIBRARY_CHANNEL_CAPACITY + 3 {
+            hub.publish_library_event(
+                "owner_1",
+                LibraryEvent::PageDeleted {
+                    page_id: format!("page_{n}"),
+                },
+            );
+        }
+        let lagged_before =
+            crate::observability::metrics().realtime_event_count("library", "lagged");
+
+        let mut sink: Vec<Frame> = Vec::new();
+        let outcome = forward_library_fanout(receiver.recv().await, &mut sink, "owner_1").await;
+
+        assert_eq!(
+            outcome,
+            Err("lagged: the subscriber fell behind the library channel")
+        );
+        let [close] = sink.as_slice() else {
+            panic!("expected exactly one frame, got {}", sink.len());
+        };
+        assert_eq!(close.opcode(), OpCode::Close);
+        assert_eq!(close.close_code(), Some(CloseCode::Again));
+        assert_eq!(close.close_reason().expect("utf-8"), Some("lagged"));
+        assert_eq!(
+            crate::observability::metrics().realtime_event_count("library", "lagged"),
             lagged_before + 1
         );
     }

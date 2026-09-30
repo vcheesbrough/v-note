@@ -119,6 +119,14 @@ class PageInkSession(
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
 
+    // Set when a socket drops with ink or erasures still unacknowledged, and
+    // consumed once the next socket holds the lease again. Both commits are
+    // idempotent on the server (keyed by `client_batch_id` / `client_mutation_id`,
+    // a retry is re-echoed rather than stored twice), so re-sending is safe
+    // whether or not the dropped socket's commit landed — and the user keeps
+    // ink they drew rather than watching it vanish on a reconnect.
+    private var resendPendingOnLease = false
+
     fun connect() {
         statusBanner = CONNECTING
         screen = Telemetry.startScreen("screen.page", listOf(Attribute("vnote.page_id", pageId)))
@@ -334,6 +342,29 @@ class PageInkSession(
         if (statusBanner == LEASE_BLOCKED) {
             statusBanner = null
         }
+        if (resendPendingOnLease) {
+            resendPendingOnLease = false
+            resendPending()
+        }
+    }
+
+    // Re-commit what the previous socket never acknowledged (#279). The
+    // reconnect's replay has already run by now — `lease-granted` answers an
+    // `acquire-lease` sent after `subscribe`, and the channel is ordered — so a
+    // batch the server did store has been confirmed and removed from
+    // [pendingBatches], and ink a replayed tombstone erased has been dropped
+    // from it. What is left is exactly what the server may never have seen.
+    private fun resendPending() {
+        val activeSocket = socket ?: return
+        if (pendingBatches.isEmpty() && pendingErasures.isEmpty()) return
+        AppLog.i(
+            TAG,
+            "re-sending unacknowledged edits after reconnect: " +
+                "batches=${pendingBatches.size} erasures=${pendingErasures.size}",
+            context = screen,
+        )
+        pendingBatches.forEach { (clientBatchId, strokes) -> activeSocket.commitBatch(clientBatchId, strokes) }
+        pendingErasures.forEach { (clientMutationId, ids) -> activeSocket.commitTombstones(clientMutationId, ids.toList()) }
     }
 
     private fun onLeaseDenied() {
@@ -482,6 +513,9 @@ class PageInkSession(
         revertUnconfirmedPaper()
         statusBanner = message
         if (!closing) {
+            if (pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()) {
+                resendPendingOnLease = true
+            }
             scheduleReconnect()
         }
     }

@@ -11,7 +11,7 @@ use rand::Rng;
 use tokio::sync::broadcast;
 
 const TICKET_TTL_SECONDS: i64 = 60;
-const LIBRARY_CHANNEL_CAPACITY: usize = 64;
+pub(super) const LIBRARY_CHANNEL_CAPACITY: usize = 64;
 /// How far one page subscriber may fall behind before it is closed (#279).
 ///
 /// Kept at 256 rather than raised: a subscriber this far behind is one whose

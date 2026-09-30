@@ -27,6 +27,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.net.InetAddress
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -681,6 +682,173 @@ class PageInkInstrumentedTest {
         assertEquals("no second upgrade", 1, server.requestCount)
     }
 
+    /**
+     * The user leaves while a reconnect is scheduled: the pending reconnect is
+     * cancelled, not merely made harmless when it fires.
+     */
+    @Test
+    fun leavingWhileAReconnectIsPendingCancelsIt() {
+        openPage { webSocket, type ->
+            if (type == "acquire-lease") webSocket.close(1013, "lagged")
+        }
+        val session = openSession()
+        assertTrue(
+            "server close seen",
+            awaitUntil { session.statusBanner == PageInkSession.DISCONNECTED },
+        )
+
+        // Within the 1 s backoff: a reconnect is pending right now.
+        session.disconnect()
+        Thread.sleep(2_500)
+
+        assertEquals("the pending reconnect never opened a socket", 1, server.requestCount)
+    }
+
+    /**
+     * #279 review: a batch in flight when the server drops the socket, and which
+     * the server never stored, is re-committed on the next socket once the lease
+     * is back — under the same `client_batch_id`, so a server that had stored it
+     * would only re-echo it — and local state ends equal to the server's.
+     */
+    @Test
+    fun anUnacknowledgedBatchIsRecommittedAfterReconnectAndConverges() {
+        val firstCommit = AtomicReference<JSONObject>()
+        openPage { webSocket, type ->
+            if (type == "subscribe") webSocket.send("""{"type":"synced","last_seq":0}""")
+        }
+        dropOnCommit(firstCommit)
+        val recommits = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = null, commits = recommits)
+
+        val session = openSession()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+        val stroke = Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16)))
+        session.commitStroke(stroke)
+
+        assertTrue("re-committed on the new socket", awaitUntil(timeoutMs = 10_000) { recommits.size == 1 })
+        assertTrue("confirmed by the echo", awaitUntil { session.pendingBatchCount == 0 })
+        assertEquals(
+            "same client_batch_id, so the server can dedupe",
+            firstCommit.get().getString("client_batch_id"),
+            recommits[0].getString("client_batch_id"),
+        )
+        assertEquals("local ink equals the server's", listOf(stroke.id), session.strokes.map { it.id })
+        Thread.sleep(300)
+        assertEquals("sent exactly once more", 1, recommits.size)
+
+        session.disconnect()
+    }
+
+    /**
+     * The other half: the server *did* store the batch before the socket
+     * dropped, so the reconnect's replay confirms it and nothing is re-sent.
+     */
+    @Test
+    fun aBatchTheServerStoredIsConfirmedByTheReplayAndNotResent() {
+        val stored = AtomicReference<JSONObject>()
+        openPage { webSocket, type ->
+            if (type == "subscribe") webSocket.send("""{"type":"synced","last_seq":0}""")
+        }
+        dropOnCommit(stored)
+        val recommits = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = stored, commits = recommits)
+
+        val session = openSession()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+        val stroke = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)))
+        session.commitStroke(stroke)
+
+        assertTrue(
+            "confirmed by the replay",
+            awaitUntil(timeoutMs = 10_000) { session.pendingBatchCount == 0 && session.canEdit },
+        )
+        Thread.sleep(300)
+        assertEquals("nothing re-sent", 0, recommits.size)
+        assertEquals("local ink equals the server's", listOf(stroke.id), session.strokes.map { it.id })
+
+        session.disconnect()
+    }
+
+    /**
+     * Makes the *first* enqueued page drop its socket (1013) on the first
+     * `commit-batch`, recording the commit — the in-flight batch a lagged or
+     * failed connection leaves unacknowledged. MockWebServer serves responses
+     * in order, so this wraps the page [openPage] just enqueued.
+     */
+    private fun dropOnCommit(commit: AtomicReference<JSONObject>) {
+        droppingCommit = commit
+    }
+
+    // Read by [openPage]'s listener: when set, a `commit-batch` is recorded and
+    // answered by closing the socket instead of by the test's handler.
+    private var droppingCommit: AtomicReference<JSONObject>? = null
+
+    /**
+     * A page that replays [stored] (a commit the server kept) as seq 1 when
+     * given, grants the lease, and echoes every commit it receives into
+     * [commits] — the server the session reconnects to.
+     */
+    private fun enqueueEchoingPage(
+        stored: AtomicReference<JSONObject>?,
+        commits: MutableList<JSONObject>,
+    ) {
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            val head = if (stored?.get() != null) 1 else 0
+                            webSocket.send("""{"type":"welcome","session_id":"me-again","last_seq":$head}""")
+                        }
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            val message = JSONObject(text)
+                            when (message.getString("type")) {
+                                "subscribe" -> {
+                                    val kept = stored?.get()
+                                    val batches =
+                                        if (kept == null) {
+                                            ""
+                                        } else {
+                                            JSONObject()
+                                                .put("seq", 1)
+                                                .put("client_batch_id", kept.getString("client_batch_id"))
+                                                .put("strokes", kept.getJSONArray("strokes"))
+                                                .toString()
+                                        }
+                                    val head = if (kept == null) 0 else 1
+                                    webSocket.send(
+                                        """{"type":"page-replay","page_id":"page_1","last_seq":$head,""" +
+                                            """"batches":[$batches],"tombstones":[]}""",
+                                    )
+                                }
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "commit-batch" -> {
+                                    commits += message
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "stroke-batch")
+                                            .put("seq", 1)
+                                            .put("client_batch_id", message.getString("client_batch_id"))
+                                            .put("strokes", message.getJSONArray("strokes"))
+                                            .toString(),
+                                    )
+                                }
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
+        )
+    }
+
     private fun openSession(): PageInkSession {
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
         session.connect()
@@ -714,6 +882,12 @@ class PageInkInstrumentedTest {
                             text: String,
                         ) {
                             val type = JSONObject(text).getString("type")
+                            val dropping = droppingCommit
+                            if (type == "commit-batch" && dropping != null) {
+                                dropping.set(JSONObject(text))
+                                webSocket.close(1013, "lagged")
+                                return
+                            }
                             onMessage(webSocket, type)
                             when (type) {
                                 "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
