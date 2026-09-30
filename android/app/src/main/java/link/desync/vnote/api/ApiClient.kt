@@ -11,6 +11,13 @@ import okhttp3.WebSocket
 // channels. [OkHttpApiClient] is the production implementation; screens and the
 // ink session depend on this interface so they can run against a fake.
 interface ApiClient {
+    // The server this client talks to, as the menu names it.
+    val baseUrl: String
+
+    // One unauthenticated `GET /health`. Failure carries a short reason
+    // ("HTTP 502", or the transport error) for the menu to show.
+    suspend fun checkHealth(): Result<Unit>
+
     suspend fun fetchMe(): Result<MeProfile>
 
     suspend fun listPages(): Result<List<PageSummary>>
