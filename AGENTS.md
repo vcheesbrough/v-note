@@ -110,7 +110,7 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   `checks` (lint, rust-test, deploy-script-validation, deploy-pipeline-validation,
   grafana-dashboard-validation, lane-key-validation, android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
-  ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy`
+  ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `verify-tag-deploy`
   (verify-release-images → tag-release) runs only when all three succeed.
   **A push never deploys dev (#462)** — it builds, tests and tags, on any branch,
   without touching shared infrastructure, so parallel iterations' pipelines do not

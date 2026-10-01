@@ -128,7 +128,7 @@ entries:
 
   # -------------------------------------------------------------------------
   # Live post-deploy smoke user (#179). The account smoke-web-live-* in
-  # .woodpecker/deploy.yml signs in as, through the real login flow, after every
+  # .woodpecker/verify-tag-deploy.yml signs in as, through the real login flow, after every
   # dev deploy. Declared here rather than made by hand so it is re-asserted on
   # every apply: nobody can quietly widen it and have that survive the next deploy.
   #
@@ -140,7 +140,7 @@ entries:
   #   - its pages are disposable: the smoke deletes what it creates and sweeps
   #     abandoned `live-smoke-*` leftovers, and no human uses this account.
   # `email` is what the smoke asserts /api/me returns, so it must match
-  # V_NOTE_SMOKE_EMAIL in deploy.yml (scripts/test-authentik-blueprints.sh
+  # V_NOTE_SMOKE_EMAIL in verify-tag-deploy.yml (scripts/test-authentik-blueprints.sh
   # checks both names match). `.invalid` so no mail can ever be delivered.
   #
   # The password is the Woodpecker secret v_note_dev_smoke_password (a broker
@@ -235,10 +235,10 @@ entries:
   # that protect glances, woodpecker, the Traefik dashboard and the rest. A
   # blueprint sets a list wholesale, so declaring that object here would drop
   # every one of them — and this file is applied by *every dev deployment*, from
-  # any branch (.woodpecker/deploy.yml), not just master.
+  # any branch (.woodpecker/verify-tag-deploy.yml), not just master.
   #
   # The attachment is an append-only read-modify-write instead, done by the
-  # attach-sqltool-outpost step in .woodpecker/deploy.yml.
+  # attach-sqltool-outpost step in .woodpecker/verify-tag-deploy.yml.
 
   # -------------------------------------------------------------------------
   # Retired by #274: the separate Android application and the old confidential

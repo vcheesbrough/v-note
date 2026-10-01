@@ -1,7 +1,7 @@
 #!/bin/sh
 # Offline checks for the v-note Grafana dashboard and the script that publishes it.
 #
-# Every dev deployment publishes (deploy.yml `publish-grafana-dashboard`),
+# Every dev deployment publishes (verify-tag-deploy.yml `publish-grafana-dashboard`),
 # so a broken dashboard would otherwise land straight on the shared dashboard.
 # Everything here runs with no network and no token:
 #

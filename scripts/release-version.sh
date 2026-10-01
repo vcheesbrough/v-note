@@ -11,7 +11,7 @@ set -eu
 # The tag is MAJOR.MINOR.PATCH: major and minor from [workspace.package].version
 # in Cargo.toml (the iteration's line), the patch from $CI_PIPELINE_NUMBER.
 # Woodpecker allocates pipeline numbers one at a time per repository, and every
-# workflow of one pipeline sees the same number, so web, android and deploy each
+# workflow of one pipeline sees the same number, so web, android and verify-tag-deploy each
 # compute the same tag on their own and no two pipelines can ever compute the
 # same one. The plugin this replaces took the highest patch on the remote plus
 # one: two pipelines on one line got the same tag and overwrote each other's
@@ -21,7 +21,7 @@ set -eu
 # deployment, or a restarted pipeline, which both have pipeline numbers of their
 # own, find the tag the commit was built and tested under — and only a green push
 # pipeline tags a commit, so "not reused" on a deployment means there is nothing
-# tested to deploy (verify-release-images in deploy.yml refuses it).
+# tested to deploy (verify-release-images in verify-tag-deploy.yml refuses it).
 #
 # Immutability is git's own: pushing a tag name that already exists is rejected
 # by the server, atomically, without --force.

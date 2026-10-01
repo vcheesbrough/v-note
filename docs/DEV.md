@@ -544,7 +544,7 @@ by id. If a cargo target cache ever grows large enough to crowd the host, prune 
 one record: `docker buildx prune --filter id=<ID>`, with the ID from `docker buildx du
 --verbose`.
 
-**Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `deploy`
+**Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `verify-tag-deploy`
 (after all three). A commit is green only when every one of them is; the combined
 GitHub status below reflects all of them. `checks` gates Rust with clippy (`-D warnings`,
 plus the `[workspace.lints]` ratchet in `Cargo.toml` / `clippy.toml`) and rustfmt;

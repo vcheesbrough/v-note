@@ -19,7 +19,7 @@ steps:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
-      # git is unpinned for the reason given on the apk lines in deploy.yml: the
+      # git is unpinned for the reason given on the apk lines in verify-tag-deploy.yml: the
       # base image is digest-pinned, and Alpine drops superseded versions.
       - apk add --no-cache git
       - ./scripts/release-version.sh compute

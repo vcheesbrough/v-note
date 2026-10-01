@@ -3,7 +3,7 @@ import { isAbandonedSmokePage, smokeTitle } from './leftovers';
 
 // Live post-deploy smoke (#179). Runs against a DEPLOYED host through the REAL
 // IdP — config playwright.live.config.ts, driver scripts/smoke-web-live.sh,
-// pipeline steps smoke-web-live-* in .woodpecker/deploy.yml.
+// pipeline steps smoke-web-live-* in .woodpecker/verify-tag-deploy.yml.
 //
 // One test, in order, because each step needs the session the previous one
 // built and the point is the whole journey a user makes: sign in → /api/me →

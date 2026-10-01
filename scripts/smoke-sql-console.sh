@@ -38,7 +38,7 @@ HOST="${V_NOTE_HOST:?V_NOTE_HOST must be set (e.g. v-notes-dev.desync.link)}"
 # would have bricked deploys.
 #
 # The value is shared with the deploy step through a YAML anchor in
-# .woodpecker/deploy.yml, so enabling and disabling stays a single edit.
+# .woodpecker/verify-tag-deploy.yml, so enabling and disabling stays a single edit.
 # Exact comma-separated match, as compose does it and as deploy-v-note.sh does
 # it — the two must agree about whether the console is deployed, or this check
 # runs against a stack that has none (or skips one that does).

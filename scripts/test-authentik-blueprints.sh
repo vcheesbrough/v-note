@@ -20,7 +20,7 @@
 #      check that existed at the time stayed green;
 #   5. the live smoke user (#179) stays least-privileged — external, one group,
 #      never the admins group, password only as a secret placeholder — and
-#      agrees with the smoke steps in .woodpecker/deploy.yml on its username
+#      agrees with the smoke steps in .woodpecker/verify-tag-deploy.yml on its username
 #      and email, and every step applying the file supplies the placeholder.
 #
 # Dev is the only environment today (#392); #388 adds prod as a second file and
@@ -213,14 +213,14 @@ for env, doc in loaded.items():
     )
 
 print("==> the #179 live smoke user is least-privileged and matches the smoke step")
-with open(".woodpecker/deploy.yml") as handle:
+with open(".woodpecker/verify-tag-deploy.yml") as handle:
     deploy = yaml.load(handle, Loader=BlueprintLoader)
 smoke_steps = {
     name: step for name, step in deploy["steps"].items() if name.startswith("smoke-web-live-")
 }
 check(
     "smoke-web-live-dev" in smoke_steps,
-    "deploy.yml has smoke-web-live on the deployment path",
+    "verify-tag-deploy.yml has smoke-web-live on the deployment path",
 )
 for env, doc in loaded.items():
     entries = doc["entries"]

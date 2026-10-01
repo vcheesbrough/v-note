@@ -281,7 +281,7 @@ The authoritative definition is the four workflow files in **[`.woodpecker/`](..
 | **web** | **e2e-web** | `e2e/docker-compose.test.yml` (+ the android-apk overlay) — Playwright against the pushed image |
 | **android** | **build-android** | `Dockerfile.android --target apk` — **Gradle** APK + unit tests; image metadata check; push `registry.desync.link/v-note-android:{release}` |
 | **android** | **android-instrumented-api-29 / -36** | `Dockerfile.android --target instrumented` — emulator instrumented tests on API 29 and 36. The Gradle `builder` stage is shared with **build-android**, so the app is built once |
-| **deploy** | **verify-release-images → tag-release** | After every workflow above is green: check both pushed images carry this commit's revision label, push the release tag. **A push never deploys (#462)** — dev is deployed by a manual `deployment` (target `dev`, any branch) of a green, tagged commit: blueprint → outpost → deploy-dev → live smokes ∥ dashboard publish ([`DEPLOY.md`](DEPLOY.md)) |
+| **verify-tag-deploy** | **verify-release-images → tag-release** | After every workflow above is green: check both pushed images carry this commit's revision label, push the release tag. **A push never deploys (#462)** — dev is deployed by a manual `deployment` (target `dev`, any branch) of a green, tagged commit: blueprint → outpost → deploy-dev → live smokes ∥ dashboard publish ([`DEPLOY.md`](DEPLOY.md)) |
 
 The Rust gates run inside BuildKit so they share **build-web**'s crate cache (the whole `CARGO_HOME`, cache id `v-note-cargo-home`, so cargo's download lock is shared too) and keep their own compiled target dirs (`v-note-cargo-target-lint` / `-test`) across pipelines.
 
