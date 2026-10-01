@@ -269,3 +269,5 @@ create**:
 Minimal repo hygiene (**`AGENTS.md`**, **`README.md`**, **`.gitignore`**, plan
 updates) is in scope for bootstrap; the full monorepo scaffold is a **separate**
 plan todo.
+
+
