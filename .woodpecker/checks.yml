@@ -95,6 +95,9 @@ steps:
       - apk add --no-cache python3 py3-yaml bash git
       - ./scripts/test-deploy-pipeline.sh
       - ./scripts/test-release-version.sh
+      # The lane-key gates' wiring (#467) — skip first, mark only after a passed
+      # test run — is workflow shape too, checked here for the python+yaml.
+      - ./scripts/test-lane-key-wiring.sh
 
   # scripts/smoke-oidc-login.sh is the post-deploy gate #372 was missing, and it
   # runs only against live infrastructure — so a broken assertion in it would be

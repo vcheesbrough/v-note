@@ -567,10 +567,13 @@ pipeline still ships images under its own release tag. The tests:
   trip; that every path a lane's workflow or e2e compose file names literally
   (a tracked file, or a tracked directory written with a `/`) is covered.
   Paths built from variables are not visible to it.
+- `scripts/test-lane-key-wiring.sh` (in `deploy-pipeline-validation`): the
+  workflow wiring. Each gated step's first command is the skip guard, and it
+  calls `mark` once, only after a passed test run.
 - `scripts/test-lane-key-context.sh`: the `.dockerignore` matcher against
   BuildKit's real context.
 
-Both run in the `lane-key-validation` checks step.
+The other two run in the `lane-key-validation` checks step.
 
 Force a full run with a manual pipeline and the variable `FULL_RUN=1`. Print a
 lane's key and files locally with `scripts/lane-key.sh key web` /
