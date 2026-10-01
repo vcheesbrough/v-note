@@ -107,18 +107,25 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   setup notes ([`docs/PR-AGENT.md`](docs/PR-AGENT.md)) are kept only so the
   documented re-enable path still works.
 - **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
-  `checks` (lint, rust-test, deploy-script-validation, grafana-dashboard-validation,
-  android-build-box-pin),
+  `checks` (lint, rust-test, deploy-script-validation, deploy-pipeline-validation,
+  grafana-dashboard-validation, android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
-  ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy` (verify-release-images → blueprint →
-  auto-deploy-dev → smoke-oidc-login ∥ smoke-sql-console ∥ smoke-web-live → tag) runs only when all three succeed.
-  **The deploy workflow runs on every branch, not just `master`** — dev is the
-  pre-merge environment, so every push deploys its build there and the last push
-  wins. It applies `blueprint-dev.yaml` to shared Authentik and redeploys dev, so
-  check a branch's pipeline side effects before pushing. `smoke-web-live-*` (#179)
-  then signs in to dev through the **real** Authentik as the blueprint's
-  `v-note-smoke-dev` user and inks a page (`e2e/live/`, its own Playwright
-  config — never part of the mock-IdP suite); it gates the release tag. **There is no prod
+  ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy`
+  (verify-release-images → tag-release) runs only when all three succeed.
+  **A push never deploys dev (#462)** — it builds, tests and tags, on any branch,
+  without touching shared infrastructure, so parallel iterations' pipelines do not
+  queue behind or overwrite each other's dev. **Dev is deployed by a manual
+  Woodpecker deployment** (target `dev`) of a commit whose push pipeline is green,
+  from **any branch**: verify-release-images (refuses an untagged commit) →
+  blueprint → outpost → deploy-dev → smoke-oidc-login ∥ smoke-sql-console ∥
+  smoke-web-live ∥ dashboard publish. A deployment applies `blueprint-dev.yaml`
+  to shared Authentik and redeploys dev, and the last deployment wins.
+  `smoke-web-live-dev` (#179) signs in to dev through the **real** Authentik as
+  the blueprint's `v-note-smoke-dev` user and inks a page (`e2e/live/`, its own
+  Playwright config — never part of the mock-IdP suite); it fails the deployment.
+  **A green push pipeline is not proof the build works on dev** — when a card's
+  change needs the live check (auth, blueprint, deploy, migrations, the
+  dashboard), deploy the branch and watch that deployment too. **There is no prod
   (#392); dev is the only deploy target until #388.** **`ci-watch` must follow
   every workflow of the pushed commit's pipeline to completion** — one green
   workflow while another is still running is not a result. Do not fold them back

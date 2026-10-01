@@ -12,7 +12,7 @@
 # the providers protecting glances, woodpecker, uptime-kuma, the Traefik
 # dashboard and the rest. A blueprint sets a list wholesale rather than
 # appending, so that entry would detach all of them, and the blueprint is
-# applied on *every branch push*, not just master. One careless entry, LAN-wide
+# applied by *every dev deployment*, from any branch. One careless entry, LAN-wide
 # auth outage.
 #
 # So this does an explicit read-modify-write instead: read the list, append our

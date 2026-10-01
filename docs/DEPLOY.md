@@ -20,26 +20,39 @@
 
 ## Woodpecker deploy pipeline
 
-**Every push deploys dev, on any branch** — dev is the pre-merge environment, so a branch is deployed there to be tested before it merges, and the last push wins. (#274 restricted this to `master`; the per-environment blueprint split plus `smoke-oidc-login-auto-dev` replaced that guard — see the header comment in [`.woodpecker/deploy.yml`](../.woodpecker/deploy.yml).) Manual deployment with **`CI_PIPELINE_DEPLOY_TARGET=dev`** remains available (bored-aligned steps in `.woodpecker/deploy.yml`):
+**A push never deploys (#462).** It builds, tests and tags; dev changes only when someone asks for it with a **manual deployment** to target **`dev`**, from **any branch**. Dev is still the pre-merge environment — deploy a branch there to test it before it merges — and still shared: the last deployment wins. Until #462 every push on every branch redeployed dev, so parallel iterations queued behind each other's deploys and overwrote each other's dev.
+
+### Deploying dev
+
+Pick a commit whose **push pipeline is green** — any branch — and start a deployment of that pipeline with target `dev`: in the Woodpecker UI, open the pipeline and choose **Deploy** (target `dev`). Woodpecker runs `deploy.yml` on the `deployment` event for that commit. A commit whose push pipeline failed or has not finished has no release tag, and the deployment refuses it at `verify-release-images`. **Rollback** is the same action on an older green pipeline (see [Rollback](#rollback)).
+
+### Push path
+
+`compute-version` → **verify-release-images** → **tag-release**, after the workflow-level `depends_on` has required `checks`, `web` and `android` to pass. The tag is still pushed on every green build: the release-versions plugin reuses a commit's existing tag and otherwise allocates the next patch, so an untagged build would hand its patch to every later push and the image tags would overwrite each other. A tag therefore means **built and passed checks, web and android** — no longer "deployed and smoke-tested on dev"; the smokes gate the deployment instead.
+
+### Deployment path
+
+Every step below runs only on `deployment` with `CI_PIPELINE_DEPLOY_TARGET=dev` (`scripts/test-deploy-pipeline.sh`, run as the `checks` step `deploy-pipeline-validation`, holds that shape):
 
 1. **validate-deployment** — manual deployment target must be `dev`, the only environment that exists; the error names **#388**
 2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
-3. **apply-authentik-blueprint-dev** — the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
+3. **apply-authentik-blueprint-dev** — after `verify-release-images`, the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
 4. **deploy** — `sovereign-config render /v-note/devops/dev/compose /v-note/devops/dev/otlp-collector-oidc -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
-5. **post-deploy smoke** — `smoke-oidc-login-*`, `smoke-sql-console-*` and the authenticated **`smoke-web-live-*`** (#179) against the host just deployed; see [Post-deploy smoke](#post-deploy-smoke)
-6. **tag-release** — after a successful deploy **and** the smoke steps, push the git tag matching `.release-tag` so the next deployment advances the patch digit
-7. **publish-grafana-dashboard** — **every push to `master`**, after `auto-deploy-dev` and alongside `tag-release-auto-dev` (it does not gate it): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
+5. **post-deploy smoke** — `smoke-oidc-login-dev`, `smoke-sql-console-dev` and the authenticated **`smoke-web-live-dev`** (#179) against the host just deployed; see [Post-deploy smoke](#post-deploy-smoke). They fail the deployment; there is no tag left for them to gate
+6. **publish-grafana-dashboard** — after `deploy-dev`, alongside the smokes (it does not wait for them): publishes `deploy/grafana/v-note-overview.json` to Grafana — see [Grafana dashboard](#grafana-dashboard)
 
-Push auto-dev deploy uses the same script and literally the same environment block as manual `deploy-dev` (a YAML anchor, so they cannot drift), but it is gated by the successful push path. The gate is the **workflow-level** `depends_on` of `deploy.yml`: the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`) must all succeed before `deploy.yml` starts at all. The dependencies are marked `optional` only so that a manual deployment — which runs none of those workflows — is not blocked; on a push all three are present and enforced.
+There is no tag step on this path: a deployable commit is already tagged.
 
-Because workflows share nothing, `deploy.yml` computes the release tag again. The first push step, **verify-release-images**, pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — so a tag pushed by another pipeline in between can never roll out someone else's images.
+The workflow-level `depends_on` of `deploy.yml` names the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `deploy-pipeline-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`); on a push all three must succeed before `deploy.yml` starts at all. They are marked `optional` only so that a deployment — which runs none of those workflows — is not blocked; the deployment's equivalent gate is the release tag, which only a green push pipeline pushes.
+
+Because workflows share nothing, `deploy.yml` computes the release tag again. **verify-release-images** (both events) pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — so a tag pushed by another pipeline in between can never tag or roll out someone else's images. On a deployment it first requires `.release-tag-reused` to be `true`, i.e. the commit was already tagged by its push pipeline.
 
 ### The deploy script takes no arguments
 
 `scripts/deploy-v-note.sh` has **one entry point and no modes**. It does not know
 which environments exist: every environment-specific value is a parameter set by
 the calling step in [`.woodpecker/deploy.yml`](../.woodpecker/deploy.yml), where
-the dev block is defined once and reused by `auto-deploy-dev` via a YAML anchor.
+the dev block is defined once, on `deploy-dev`.
 Adding an environment means adding a step, not editing the script.
 
 The parameters reach it from two places, and the script cannot tell them apart —
@@ -161,10 +174,9 @@ runs.
 
 #### The CLI comes from the step image
 
-The pipeline does **not** install the CLI. Both deploy steps (`deploy-dev`,
-`auto-deploy-dev`) run in
+The pipeline does **not** install the CLI. The deploy step (`deploy-dev`) runs in
 `registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf4909…1827`
-(`&deploy-image` in `.woodpecker/deploy.yml`): the docker CLI image with the
+(its `image` in `.woodpecker/deploy.yml`): the docker CLI image with the
 sovereign-config CLI baked in, published by the operator. It carries everything
 the step uses — Docker with the compose plugin, `sh`, and the busybox tools
 `deploy-v-note.sh` needs — so it is a drop-in for `docker:27-cli`. Every other
@@ -315,11 +327,11 @@ not correct the live provider — the blueprint has to be *applied*:
 
 | Environment | Applied by | When |
 | --- | --- | --- |
-| dev | `apply-authentik-blueprint-auto-dev` | automatically, on every push, from any branch |
+| dev | `apply-authentik-blueprint-dev` | on a manual deployment to `dev`, from any branch (#462) |
 
-So pushing the fix restores dev on its own, and `smoke-oidc-login-auto-dev`
-verifies it on the same pipeline. An environment applied only by a *manual*
-deployment (as #388's will be) stays broken until someone runs one. Confirm an
+So pushing the fix does **not** restore dev on its own: once its push pipeline is
+green, deploy it, and `smoke-oidc-login-dev` verifies it in the same pipeline.
+Until someone deploys, dev stays broken. Confirm an
 environment by hand with:
 
 ```bash
@@ -352,13 +364,14 @@ unable to authenticate until the leaf catches up.
 > combined file, applied from a feature-branch push, deleted the live providers for
 > **every** environment during #274.
 >
-> The push-path apply runs on **every branch**, because dev is the pre-merge
+> A dev deployment applies it from **any branch**, because dev is the pre-merge
 > environment: a branch that changes the provider has to be able to apply it, or
-> auth work cannot be tested before it merges. #274 additionally restricted this
-> path to `master`, which removed branch deploys entirely; that restriction was
-> lifted in iteration 47. A branch can still break **dev** login for everyone
-> until it is fixed, reverted, or `master` is re-pushed — accepted deliberately,
-> and `smoke-oidc-login-auto-dev` now fails the branch that does it.
+> auth work cannot be tested before it merges. #274 additionally restricted the
+> then-automatic push path to `master`, which removed branch deploys entirely;
+> that restriction was lifted in iteration 47, and #462 made every deploy manual.
+> A deployed branch can still break **dev** login for everyone until it is fixed,
+> reverted, or `master` is redeployed — accepted deliberately, and
+> `smoke-oidc-login-dev` fails the deployment that does it.
 >
 > **Operator step, once — tracked as [#367](https://bored.desync.link/boards/v-notes?card=367), sequenced after #274 deploys.**
 > The pre-split blueprint instance is still registered in Authentik under
@@ -603,10 +616,10 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 **`v-note — overview`** (uid **`v-note-overview`**) lives in Grafana under **Applications / v-note** (folder uid `v-note`). Its source of truth is [`deploy/grafana/v-note-overview.json`](../deploy/grafana/v-note-overview.json): application dashboards ship in the application repo, in the same PR as the metrics they chart.
 
 - **One dashboard per environment:** an `env` variable — a **constant** pinned to `dev`, `hide: 2` — filters every query. It was a `label_values(v_note_realtime_active_connections, env)` query until **#392**: that would have silently widened to any new `env` series the moment one appeared, so it is pinned while dev is the only deployment. **#388** copies this dashboard under a new uid and changes the constant; every panel keeps `deployment_environment="$env"` (the label mini-config's Alloy attaches from `observability.deployment.environment`, and the name Loki gives OTLP's `deployment.environment`), so nothing else moves. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
-- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every push, on any branch**, after `auto-deploy-dev`, so the dashboard always matches what is deployed to dev — a branch's panels go live with the metrics they chart and can be checked before merge. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself.
-- **UI edits are overwritten** on the next push to `master` that deploys dev. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
+- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every dev deployment, from any branch**, after `deploy-dev`, so the dashboard always matches what is deployed to dev — a branch's panels go live with the metrics they chart and can be checked before merge. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself.
+- **UI edits are overwritten** on the next dev deployment. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
 - **Offline validation:** [`scripts/test-grafana-dashboard.sh`](../scripts/test-grafana-dashboard.sh), run in the `checks` step `grafana-dashboard-validation`, checks that the JSON parses, keeps its uid, has no committed id, filters every query by `env`, references no unbounded id, and charts only metrics `observability.rs` registers. It also checks the publish script's `--dry-run` payload, its input guards, and its live path against a stub `curl` (2xx passes; non-2xx and transport failures fail without leaking the token).
-- **Pre-merge check:** since #274 a branch push publishes **nothing** — the dashboard follows `master` only, in step with dev. Validate a dashboard change offline with the `--dry-run` below and the `checks` step above, then check the panels under Applications / v-note after the merge lands on dev, and record that in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.
+- **Pre-merge check:** validate a dashboard change offline with the `--dry-run` below and the `checks` step above, then deploy the branch to dev (see [Deploying dev](#deploying-dev)) and check the panels under Applications / v-note, and record that in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.
 
 ### Set App Links JSON
 
@@ -737,9 +750,9 @@ Clients send **`X-V-Note-Client-Release`** / **`X-V-Note-Client-Protocol`**; **`
 ## Rollback
 
 **Dev only** — dev is the only deploy target (#392), so this is the only
-environment there is to roll back. Redeploy a **previous image tag** via
-Woodpecker manual deploy (`CI_PIPELINE_DEPLOY_TARGET=dev`) with pinned version env
-(detail in **#152** runbook). **Also reinstall the matching Android APK.**
+environment there is to roll back. Start a dev deployment of the **older commit's green
+push pipeline** (see [Deploying dev](#deploying-dev)): its release tag is reused,
+so the deployment pulls exactly the images that pipeline built and verified. **Also reinstall the matching Android APK.**
 
 **Floor: `0.45.0` — do not roll back past it.** Pre-#274 images do not work
 against the current Authentik provider and config (#394); treat them as
@@ -851,8 +864,8 @@ This is **not** done by the blueprint, and must never be. The embedded outpost i
 **shared** — its provider list also carries the providers protecting glances,
 woodpecker, uptime-kuma and the Traefik dashboard — and a blueprint writes a list
 wholesale rather than appending, so an outpost entry in
-`authentik/blueprint-dev.yaml` would detach all of them. That file is applied on
-**every branch push**, not just master.
+`authentik/blueprint-dev.yaml` would detach all of them. That file is applied by
+**every dev deployment**, from any branch, not just master.
 
 `scripts/attach-sqltool-outpost.sh` does an append-only read-modify-write
 instead, runs on every deploy, is idempotent, and refuses to write a list that
@@ -903,7 +916,7 @@ docker compose exec postgres psql -U v_note -d v_note
 
 Not console-specific, but #299 hit it and it will happen again.
 
-**A branch push deploys dev**, so the first push applies your new migration to
+**A dev deployment of your branch** applies your new migration to
 the *real* dev database and records its checksum. Editing that file afterwards —
 even on an unmerged branch, even before review — makes the next deploy fail with:
 
@@ -958,8 +971,8 @@ manual visit to the database.
 - **#299:** `scripts/smoke-sql-console.sh` — the only automated assertion that
   the SQL console is not publicly readable, that its callback router exists, and
   that gating it did not break SPA login on the same host. No CI stack can make
-  these claims (e2e has neither Traefik nor Authentik), so it gates the release
-  tag alongside the OIDC smoke check.
+  these claims (e2e has neither Traefik nor Authentik), so it fails the
+  deployment alongside the OIDC smoke check.
 - **#179:** `scripts/smoke-web-live.sh` → `e2e/live/smoke.spec.ts` — the
   **authenticated** smoke, described below. The Android half (install and launch
   the deployed APK on an emulator) was split to **#457**.
@@ -969,8 +982,7 @@ manual visit to the database.
 `smoke-oidc-login.sh` stops at Authentik's login page on purpose; nothing else
 after the deploy went past it, and the pre-merge e2e suite signs in through the
 mock IdP's `client_credentials` shortcut, which real Authentik does not offer.
-`smoke-web-live-auto-dev` (push) and `smoke-web-live-dev` (manual deployment)
-run after the deploy, in the Playwright image the e2e stack pins, and drive a
+`smoke-web-live-dev` runs after every dev deployment, in the Playwright image the e2e stack pins, and drive a
 real browser through the real flow:
 
 | Step | Assertion |
@@ -983,8 +995,9 @@ real browser through the real flow:
 | Clean up | The page is deleted (`204`) and gone from the list |
 | Sign out | `/auth/logout` clears the cookie; `/api/me` from the same browser is `401` |
 
-**It blocks the release tag** on both paths (`tag-release-auto-dev`,
-`tag-release-dev`): a tag claims the deployed product works. The live config
+**It fails the deployment** that broke signing in or inking. Since #462 it no
+longer gates the release tag — the push path tags a green build before anything
+is deployed (see [Push path](#push-path)). The live config
 retries once in CI to absorb a single transient; a repeat fails the step. On a
 failure the log names the URL and the authentik stage the sign-in stopped in
 (`ak-stage-password` = rejected password, `ak-stage-authenticator-validate` =
@@ -1005,15 +1018,15 @@ client secret was before #274. Woodpecker masks it in step logs; the driver
 never prints it (its test asserts that), and the live config keeps Playwright
 tracing off because a trace records every `fill`.
 
-**Rotate** the password by rewriting the leaf and pushing (any branch): the next
-blueprint apply sets it and the smoke in the same pipeline uses it.
+**Rotate** the password by rewriting the leaf and deploying dev (any branch): the
+deployment's blueprint apply sets it and the smoke in the same pipeline uses it.
 
 ```bash
 tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48 \
   | sovereign-config set --secret /woodpecker/repos/vcheesbrough/v-note/v_note_dev_smoke_password
 ```
 
-**Test data.** The smoke writes to the shared dev database on every push. It
+**Test data.** The smoke writes to the shared dev database on every dev deployment. It
 creates one page titled `live-smoke-<timestamp>-<random>` and deletes it before
 signing out — also in a `finally` if an assertion fails first — and at the start
 it sweeps `live-smoke-*` pages a killed run left behind, **only once they are at
@@ -1021,7 +1034,7 @@ least 15 minutes old** (the timestamp in the title; `e2e/live/leftovers.ts`). Th
 smoke user's pages are **disposable by definition**: nobody else uses the
 account.
 
-**Concurrency.** Several PRs deploy dev, so smoke runs overlap. Each run deletes
+**Concurrency.** Several PRs deploy dev, so smoke runs can overlap. Each run deletes
 only its own page, and the sweep's age floor — far longer than a whole run with
 its retry — means one run never deletes another's page mid-test. The floor is
 unit-checked by `e2e/live/leftovers.spec.ts`, which runs first in the same step.

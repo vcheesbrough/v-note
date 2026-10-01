@@ -33,9 +33,9 @@ HOST="${V_NOTE_HOST:?V_NOTE_HOST must be set (e.g. v-notes-dev.desync.link)}"
 # be actively harmful. With the profile off, /dbconsole stops matching the
 # console router and falls through to the app's `Host(…)` router, where the
 # SPA's catch-all serves index.html with a 200. This check reads a 200 as
-# "publicly readable" and fails, which would then block tag-release-auto-dev on
-# every subsequent push — so documenting "remove COMPOSE_PROFILES to disable the
-# console" would have bricked releases.
+# "publicly readable" and fails, which would then fail every subsequent dev
+# deployment — so documenting "remove COMPOSE_PROFILES to disable the console"
+# would have bricked deploys.
 #
 # The value is shared with the deploy step through a YAML anchor in
 # .woodpecker/deploy.yml, so enabling and disabling stays a single edit.

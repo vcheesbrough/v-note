@@ -130,7 +130,7 @@ entries:
   # Live post-deploy smoke user (#179). The account smoke-web-live-* in
   # .woodpecker/deploy.yml signs in as, through the real login flow, after every
   # dev deploy. Declared here rather than made by hand so it is re-asserted on
-  # every apply: nobody can quietly widen it and have that survive the next push.
+  # every apply: nobody can quietly widen it and have that survive the next deploy.
   #
   # Least privilege, and each property is load-bearing:
   #   - `external`: no access to the authentik user or admin interfaces, only
@@ -234,8 +234,8 @@ entries:
   # Embedded Outpost", whose `providers` list also holds the eleven providers
   # that protect glances, woodpecker, the Traefik dashboard and the rest. A
   # blueprint sets a list wholesale, so declaring that object here would drop
-  # every one of them — and this file is applied on *every branch push*
-  # (.woodpecker/deploy.yml), not just master.
+  # every one of them — and this file is applied by *every dev deployment*, from
+  # any branch (.woodpecker/deploy.yml), not just master.
   #
   # The attachment is an append-only read-modify-write instead, done by the
   # attach-sqltool-outpost step in .woodpecker/deploy.yml.
