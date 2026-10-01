@@ -125,7 +125,10 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   Playwright config — never part of the mock-IdP suite); it fails the deployment.
   **A green push pipeline is not proof the build works on dev** — when a card's
   change needs the live check (auth, blueprint, deploy, migrations, the
-  dashboard), deploy the branch and watch that deployment too. **There is no prod
+  dashboard), deploy the branch and watch that deployment too. **Merges to
+  `master` do not deploy either** (deliberate, #462): the live smokes run only on
+  a deployment, so a merge that breaks real login stays undetected until someone
+  deploys — deploy master after merging such a change. **There is no prod
   (#392); dev is the only deploy target until #388.** **`ci-watch` must follow
   every workflow of the pushed commit's pipeline to completion** — one green
   workflow while another is still running is not a result. Do not fold them back

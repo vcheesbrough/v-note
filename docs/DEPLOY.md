@@ -22,6 +22,8 @@
 
 **A push never deploys (#462).** It builds, tests and tags; dev changes only when someone asks for it with a **manual deployment** to target **`dev`**, from **any branch**. Dev is still the pre-merge environment — deploy a branch there to test it before it merges — and still shared: the last deployment wins. Until #462 every push on every branch redeployed dev, so parallel iterations queued behind each other's deploys and overwrote each other's dev.
 
+> **Merges don't deploy either — a deliberate trade-off.** The live smokes (`smoke-oidc-login`, #372; `smoke-sql-console`, #299; `smoke-web-live`, #179) run only on a deployment, so a merge that breaks real-Authentik login or exposes `/dbconsole` is green and tagged until the next deployment finds it, and dev holds whatever was deployed last — possibly a branch — until someone redeploys. **Deploy master after merging anything that touches auth, the blueprint, the deploy or migrations**, and deploy such a branch before merging it. A master-only auto-deploy was rejected: it would bring the duplicated push path back and overwrite whichever branch is on dev at every merge.
+
 ### Deploying dev
 
 Pick a commit whose **push pipeline is green** — any branch — and start a deployment of that pipeline with target `dev`: in the Woodpecker UI, open the pipeline and choose **Deploy** (target `dev`). Woodpecker runs `deploy.yml` on the `deployment` event for that commit. A commit whose push pipeline failed or has not finished has no release tag, and the deployment refuses it at `verify-release-images`. **Rollback** is the same action on an older green pipeline (see [Rollback](#rollback)).

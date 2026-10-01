@@ -16,6 +16,16 @@
 # overwrote each other's dev. The deploy steps themselves are unchanged; only the
 # event that runs them is.
 #
+# That includes master, deliberately: a merge does not deploy either. The cost is
+# that the live smokes (#372 login, #299 SQL console, #179 signed-in web) no
+# longer run after every merge — only when someone deploys — and dev holds
+# whatever was deployed last, possibly a branch, until someone redeploys. A merge
+# that breaks real-Authentik login is green and tagged until the next deployment
+# finds it. So deploy master after merging anything that touches auth, the
+# blueprint, the deploy or migrations, and deploy a branch before merging it when
+# that is what it changes. A master-only auto-deploy would bring back the
+# duplicated push path and overwrite whichever branch is on dev at every merge.
+#
 # The push path still tags. The release-versions plugin reuses a commit's
 # existing tag and otherwise allocates the next patch on the line, so a push that
 # did not tag would hand the same patch to every later push and the image tags
