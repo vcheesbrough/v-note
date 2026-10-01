@@ -1,13 +1,13 @@
 # Checks workflow: the static gates. No step depends on another, so all of them
 # start together and none holds up the build workflows.
 #
-# Push pipeline = four workflows: checks ∥ web ∥ android → deploy.
+# Push pipeline = four workflows: checks ∥ web ∥ android → verify-tag-deploy.
 # Why workflows and not one file of `depends_on` steps: Woodpecker runs step
 # dependencies as whole stages — a step starts only when *every* step of the
 # previous dependency level has finished, not just the ones it names. In the old
 # single build.yml that made build-web wait ~100s on the Rust tests and e2e-web
 # ~138s on the API 36 emulator lane. Workflows run in parallel and share nothing;
-# deploy.yml depends on all three.
+# verify-tag-deploy.yml depends on all three.
 
 when:
   - event: [push, manual]
@@ -47,7 +47,7 @@ steps:
         echo "timing: rust-ci test took $$(( $$(date +%s) - $$START ))s"
 
   # deploy-v-note.sh takes no arguments: every environment-specific value is a
-  # parameter set by the deploy steps in deploy.yml, so a missing one is not a
+  # parameter set by the deploy steps in verify-tag-deploy.yml, so a missing one is not a
   # crash but a silently wrong deploy (a container mislabelled with the wrong env,
   # a parallel compose project, an app with no runtime config). The deploy steps
   # only ever exercise the happy path, so the guards get their own test. Runs on
@@ -79,7 +79,7 @@ steps:
       - apk add --no-cache python3 py3-yaml bash
       - ./scripts/test-authentik-blueprints.sh
 
-  # deploy.yml holds two paths chosen per step by `when`, and only Woodpecker
+  # verify-tag-deploy.yml holds two paths chosen per step by `when`, and only Woodpecker
   # reads it — a step that drifts onto `push` redeploys shared dev from every
   # branch again (#462). This asserts the push path only builds, verifies and
   # tags, that everything touching dev runs on a `deployment` after the image
@@ -95,6 +95,9 @@ steps:
       - apk add --no-cache python3 py3-yaml bash git
       - ./scripts/test-deploy-pipeline.sh
       - ./scripts/test-release-version.sh
+      # The lane-key gates' wiring (#467) — skip first, mark only after a passed
+      # test run — is workflow shape too, checked here for the python+yaml.
+      - ./scripts/test-lane-key-wiring.sh
 
   # scripts/smoke-oidc-login.sh is the post-deploy gate #372 was missing, and it
   # runs only against live infrastructure — so a broken assertion in it would be
@@ -132,11 +135,11 @@ steps:
       - ./scripts/test-smoke-sql-console.sh
       - ./scripts/test-attach-sqltool-outpost.sh
 
-  # deploy.yml publishes the Grafana dashboard on every dev deployment, from any
+  # verify-tag-deploy.yml publishes the Grafana dashboard on every dev deployment, from any
   # branch, so a broken one would otherwise land straight on the shared dashboard. This
   # validates deploy/grafana/v-note-overview.json and the publish script's payload
   # without Grafana or a token. Its own step: the docker CLI image has no jq.
-  # jq is unpinned for the reason given on publish-grafana-dashboard in deploy.yml.
+  # jq is unpinned for the reason given on publish-grafana-dashboard in verify-tag-deploy.yml.
   grafana-dashboard-validation:
     depends_on: []
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
@@ -153,6 +156,20 @@ steps:
     image: grafana/alloy:v1.17.1@sha256:4f6ddc56ffdcf8a6316748fc5162972e20cb301523cac1bb4a31957df733ae9b
     commands:
       - ./scripts/test-alloy-config.sh
+
+  # The lane keys (#467) decide whether e2e-web and the emulator lanes run at
+  # all, so a key that misses an input is a green that never tested the change.
+  # test-lane-key.sh pins which changes move which key, the marker round trip,
+  # and that every path a lane's workflow or e2e compose file reads is covered;
+  # test-lane-key-context.sh holds the .dockerignore matcher to what BuildKit
+  # actually sends as each lane's context, hence the docker socket.
+  lane-key-validation:
+    depends_on: []
+    image: *docker-image
+    volumes: *docker-socket
+    commands:
+      - ./scripts/test-lane-key.sh
+      - ./scripts/test-lane-key-context.sh
 
   # Every file that names the android-build-box image must agree with
   # scripts/android-build-box-image.ref.

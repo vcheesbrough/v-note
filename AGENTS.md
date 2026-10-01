@@ -108,9 +108,9 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   documented re-enable path still works.
 - **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
   `checks` (lint, rust-test, deploy-script-validation, deploy-pipeline-validation,
-  grafana-dashboard-validation, android-build-box-pin),
+  grafana-dashboard-validation, lane-key-validation, android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
-  ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy`
+  ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `verify-tag-deploy`
   (verify-release-images → tag-release) runs only when all three succeed.
   **A push never deploys dev (#462)** — it builds, tests and tags, on any branch,
   without touching shared infrastructure, so parallel iterations' pipelines do not
@@ -139,6 +139,21 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   - `docker build -f Dockerfile.web -t v-note:ci-local --secret id=github_token,env=GITHUB_TOKEN .`
   - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
   - **All push workflows, including `e2e-web` and both Android lanes, must be green** before an iteration is done.
+  - **Lane keys skip unchanged tests (#467).** `e2e-web` and each Android
+    instrumented step hash exactly what their lane reads
+    ([`scripts/lane-key.sh`](scripts/lane-key.sh): the files the lane's
+    `.dockerignore` admits, plus declared extras such as `e2e/`) and exit green
+    with a `lane-key: SKIPPING` line when that key already passed — docs-only
+    pushes, the other lane's changes, and the master merge of an
+    already-synced branch. A skipped step still counts as green: it names the
+    commit and pipeline that passed. Images are **always** built, so release
+    tags and deploys are unaffected. Markers live at `refs/ci/green/<step>/<key>`
+    on GitHub. **Run a manual pipeline with `FULL_RUN=1`** to force every lane
+    (flake hunting, a suspected stale key). When a lane's step starts reading a
+    new path outside its build context, add it to `lane_extras`. If the path is
+    written literally in the lane's workflow or e2e compose files,
+    `lane-key-validation` in `checks` fails until you do. A path assembled from
+    a variable is invisible to that check, so declare it by hand.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see
   [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**). Contract/unit tests
@@ -256,3 +271,5 @@ create**:
 Minimal repo hygiene (**`AGENTS.md`**, **`README.md`**, **`.gitignore`**, plan
 updates) is in scope for bootstrap; the full monorepo scaffold is a **separate**
 plan todo.
+
+

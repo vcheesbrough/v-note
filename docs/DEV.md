@@ -544,11 +544,51 @@ by id. If a cargo target cache ever grows large enough to crowd the host, prune 
 one record: `docker buildx prune --filter id=<ID>`, with the ID from `docker buildx du
 --verbose`.
 
-**Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `deploy`
+**Push CI is four workflows** — `checks`, `web`, `android` (parallel) and `verify-tag-deploy`
 (after all three). A commit is green only when every one of them is; the combined
 GitHub status below reflects all of them. `checks` gates Rust with clippy (`-D warnings`,
 plus the `[workspace.lints]` ratchet in `Cargo.toml` / `clippy.toml`) and rustfmt;
 `android` gates Kotlin with ktlint, detekt and Android Lint inside `build-android`.
+
+**Unchanged lanes skip their tests (#467).** `e2e-web` and both instrumented
+steps begin with `scripts/lane-key.sh skip <step>`. The lane key is a sha256 over
+every file the lane reads at `HEAD`: the tracked files its Dockerfile-specific
+`.dockerignore` admits, plus the extras declared in `lane_extras` (the Dockerfile,
+the workflow file, `e2e/` and `deploy/grafana` for web, …). If
+`refs/ci/green/<step>/<key>` exists on GitHub, the step logs
+`lane-key: SKIPPING`, the commit, branch and pipeline that passed, and exits 0;
+otherwise it runs and `lane-key.sh mark <step>` records the marker on success.
+So a docs-only push skips both lanes, an Android-only change skips e2e, an
+e2e/server change skips the emulators, and the master merge of a branch synced
+with master skips both. `build-web` and `build-android` always run, so every
+pipeline still ships images under its own release tag. The tests:
+
+- `scripts/test-lane-key.sh`: which changes move which key; the marker round
+  trip; that every path a lane's workflow or e2e compose file names literally
+  (a tracked file, or a tracked directory written with a `/`) is covered.
+  Paths built from variables are not visible to it.
+- `scripts/test-lane-key-wiring.sh` (in `deploy-pipeline-validation`): the
+  workflow wiring. Each gated step's first command is the skip guard, and it
+  calls `mark` once, only after a passed test run.
+- `scripts/test-lane-key-context.sh`: the `.dockerignore` matcher against
+  BuildKit's real context.
+
+The other two run in the `lane-key-validation` checks step.
+
+Force a full run with a manual pipeline and the variable `FULL_RUN=1`. Print a
+lane's key and files locally with `scripts/lane-key.sh key web` /
+`scripts/lane-key.sh files android`. The key reads the committed tree, not the
+working tree.
+
+**Markers accumulate.** CI never deletes them. Each pipeline whose inputs
+changed adds up to three refs under `refs/ci/green/`, and each keeps its tested
+commit reachable on GitHub. Deleting a marker is always safe: it only costs that
+step one re-run. To clean up, list what would go, then delete it:
+
+```bash
+DRY_RUN=1 CI_REPO=vcheesbrough/v-note GITHUB_TOKEN=$(gh auth token) scripts/lane-key.sh prune 30
+CI_REPO=vcheesbrough/v-note GITHUB_TOKEN=$(gh auth token) scripts/lane-key.sh prune 30
+```
 
 The e2e stack waits on the app's healthcheck (`service_healthy`), so a container
 that never becomes healthy fails the run with `dependency failed to start`

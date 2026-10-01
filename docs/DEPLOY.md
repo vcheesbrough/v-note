@@ -26,7 +26,7 @@
 
 ### Deploying dev
 
-Pick a commit whose **push pipeline is green** — any branch — and start a deployment of that pipeline with target `dev`: in the Woodpecker UI, open the pipeline and choose **Deploy** (target `dev`). Woodpecker runs `deploy.yml` on the `deployment` event for that commit. A commit whose push pipeline failed or has not finished has no release tag, and the deployment refuses it at `verify-release-images`. **Rollback** is the same action on an older green pipeline (see [Rollback](#rollback)).
+Pick a commit whose **push pipeline is green** — any branch — and start a deployment of that pipeline with target `dev`: in the Woodpecker UI, open the pipeline and choose **Deploy** (target `dev`). Woodpecker runs `verify-tag-deploy.yml` on the `deployment` event for that commit. A commit whose push pipeline failed or has not finished has no release tag, and the deployment refuses it at `verify-release-images`. **Rollback** is the same action on an older green pipeline (see [Rollback](#rollback)).
 
 ### Push path
 
@@ -45,20 +45,20 @@ Every step below runs only on `deployment` with `CI_PIPELINE_DEPLOY_TARGET=dev` 
 
 There is no tag step on this path: a deployable commit is already tagged.
 
-The workflow-level `depends_on` of `deploy.yml` names the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `deploy-pipeline-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`); on a push all three must succeed before `deploy.yml` starts at all. They are marked `optional` only so that a deployment — which runs none of those workflows — is not blocked; the deployment's equivalent gate is the release tag, which only a green push pipeline pushes.
+The workflow-level `depends_on` of `verify-tag-deploy.yml` names the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `deploy-pipeline-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`); on a push all three must succeed before `verify-tag-deploy.yml` starts at all. They are marked `optional` only so that a deployment — which runs none of those workflows — is not blocked; the deployment's equivalent gate is the release tag, which only a green push pipeline pushes.
 
-Because workflows share nothing, `deploy.yml` computes the release tag again. **verify-release-images** (both events) pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — a consistency check now that the pipeline-number patch means no other pipeline can build under this tag, made a verified fact before anything is tagged or rolled out. On a deployment it first requires `.release-tag-reused` to be `true`, i.e. the commit was already tagged by its push pipeline.
+Because workflows share nothing, `verify-tag-deploy.yml` computes the release tag again. **verify-release-images** (both events) pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — a consistency check now that the pipeline-number patch means no other pipeline can build under this tag, made a verified fact before anything is tagged or rolled out. On a deployment it first requires `.release-tag-reused` to be `true`, i.e. the commit was already tagged by its push pipeline.
 
 ### The deploy script takes no arguments
 
 `scripts/deploy-v-note.sh` has **one entry point and no modes**. It does not know
 which environments exist: every environment-specific value is a parameter set by
-the calling step in [`.woodpecker/deploy.yml`](../.woodpecker/deploy.yml), where
+the calling step in [`.woodpecker/verify-tag-deploy.yml`](../.woodpecker/verify-tag-deploy.yml), where
 the dev block is defined once, on `deploy-dev`.
 Adding an environment means adding a step, not editing the script.
 
 The parameters reach it from two places, and the script cannot tell them apart —
-which is the point. **Step** values are written literally in `deploy.yml`;
+which is the point. **Step** values are written literally in `verify-tag-deploy.yml`;
 **rendered** values come out of `/v-note/devops/<env>/compose` via
 `sovereign-config render` (#391). A missing parameter fails the same way
 whichever side it should have come from.
@@ -178,7 +178,7 @@ runs.
 
 The pipeline does **not** install the CLI. The deploy step (`deploy-dev`) runs in
 `registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf4909…1827`
-(its `image` in `.woodpecker/deploy.yml`): the docker CLI image with the
+(its `image` in `.woodpecker/verify-tag-deploy.yml`): the docker CLI image with the
 sovereign-config CLI baked in, published by the operator. It carries everything
 the step uses — Docker with the compose plugin, `sh`, and the busybox tools
 `deploy-v-note.sh` needs — so it is a drop-in for `docker:27-cli`. Every other
@@ -618,7 +618,7 @@ Those ids live in **spans** instead. The socket handlers are instrumented (`page
 **`v-note — overview`** (uid **`v-note-overview`**) lives in Grafana under **Applications / v-note** (folder uid `v-note`). Its source of truth is [`deploy/grafana/v-note-overview.json`](../deploy/grafana/v-note-overview.json): application dashboards ship in the application repo, in the same PR as the metrics they chart.
 
 - **One dashboard per environment:** an `env` variable — a **constant** pinned to `dev`, `hide: 2` — filters every query. It was a `label_values(v_note_realtime_active_connections, env)` query until **#392**: that would have silently widened to any new `env` series the moment one appeared, so it is pinned while dev is the only deployment. **#388** copies this dashboard under a new uid and changes the constant; every panel keeps `deployment_environment="$env"` (the label mini-config's Alloy attaches from `observability.deployment.environment`, and the name Loki gives OTLP's `deployment.environment`), so nothing else moves. Prometheus is referenced by uid `PBFA97CFB590B2093`, Loki by `P8E80F9AEF21F6940`. A dashboard link opens a Tempo TraceQL search for the selected env.
-- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every dev deployment, from any branch**, after `deploy-dev`, so the dashboard always matches what is deployed to dev — a branch's panels go live with the metrics they chart and can be checked before merge. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself.
+- **Published by CI:** the `publish-grafana-dashboard` step in `.woodpecker/verify-tag-deploy.yml` runs [`scripts/publish-grafana-dashboard.sh`](../scripts/publish-grafana-dashboard.sh) on **every dev deployment, from any branch**, after `deploy-dev`, so the dashboard always matches what is deployed to dev — a branch's panels go live with the metrics they chart and can be checked before merge. It posts `{dashboard (id: null), folderUid, overwrite: true, message: "v-note <branch> <release> <sha>"}` to `/api/dashboards/db` with the shared `grafana_api_token` (`woodpecker-ci` service account, Edit on the Applications folder). So every entry in the dashboard's version history names its branch and commit. A non-2xx fails the step and prints Grafana's response body; the token is never printed. The last push wins, as it does for dev itself.
 - **UI edits are overwritten** on the next dev deployment. To change the dashboard, edit it in Grafana (a scratch copy is fine), export the JSON into the repo file, and keep `uid: v-note-overview` with no numeric `id`.
 - **Offline validation:** [`scripts/test-grafana-dashboard.sh`](../scripts/test-grafana-dashboard.sh), run in the `checks` step `grafana-dashboard-validation`, checks that the JSON parses, keeps its uid, has no committed id, filters every query by `env`, references no unbounded id, and charts only metrics `observability.rs` registers. It also checks the publish script's `--dry-run` payload, its input guards, and its live path against a stub `curl` (2xx passes; non-2xx and transport failures fail without leaking the token).
 - **Pre-merge check:** validate a dashboard change offline with the `--dry-run` below and the `checks` step above, then deploy the branch to dev (see [Deploying dev](#deploying-dev)) and check the panels under Applications / v-note, and record that in the PR. `./scripts/publish-grafana-dashboard.sh --dry-run deploy/grafana/v-note-overview.json` (with `GRAFANA_FOLDER_UID`, `RELEASE_TAG`, `COMMIT_SHA` set) prints the exact request body.
@@ -816,7 +816,7 @@ That is the only manual step — the group itself is created by the blueprint.
 
 ### Enabling and disabling
 
-The toggle is the `sqltool` **compose profile**, set in `.woodpecker/deploy.yml`:
+The toggle is the `sqltool` **compose profile**, set in `.woodpecker/verify-tag-deploy.yml`:
 
 ```yaml
 COMPOSE_PROFILES: sqltool

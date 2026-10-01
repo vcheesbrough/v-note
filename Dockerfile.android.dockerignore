@@ -40,6 +40,7 @@ android/local.properties
 # Meta
 README.md
 AGENTS.md
+CLAUDE.md
 LICENSE
 LICENSE-TIER.md
 justfile

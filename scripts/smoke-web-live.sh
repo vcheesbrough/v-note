@@ -10,7 +10,7 @@
 # (authentik/blueprint-dev.yaml): sign in → /api/me → create a page → commit a
 # stroke → both survive a reload → delete the page → sign out.
 #
-# Runs in the Playwright image the e2e stack pins (.woodpecker/deploy.yml), from
+# Runs in the Playwright image the e2e stack pins (.woodpecker/verify-tag-deploy.yml), from
 # the repo root. The spec, not this script, owns every product assertion; this
 # only checks its inputs, waits for the app, and runs it.
 #

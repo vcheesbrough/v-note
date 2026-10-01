@@ -51,7 +51,7 @@ just e2e
 | `schemas/`, `contracts/fixtures/` | JSON Schema + golden fixtures |
 | `deploy/` | Compose (local + deployed Traefik overlay) |
 | `e2e/` | Playwright harness |
-| `.woodpecker/` | Push CI workflows (`checks` ∥ `web` ∥ `android` → `deploy`) + PR review |
+| `.woodpecker/` | Push CI workflows (`checks` ∥ `web` ∥ `android` → `verify-tag-deploy`) + PR review |
 
 ## Documentation
 

@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 // The live post-deploy smoke (#179): e2e/live/ against a DEPLOYED host, signing
 // in through the real IdP. Run by scripts/smoke-web-live.sh after the dev
-// deploy (.woodpecker/deploy.yml → smoke-web-live-*).
+// deploy (.woodpecker/verify-tag-deploy.yml → smoke-web-live-*).
 //
 // Deliberately separate from playwright.config.ts, not a project inside it:
 // that config's global setup mints a session through the mock IdP's

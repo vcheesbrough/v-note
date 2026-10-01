@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Validate the shape of .woodpecker/deploy.yml without running it.
+# Validate the shape of .woodpecker/verify-tag-deploy.yml without running it.
 #
-# The deploy workflow has two paths in one file, chosen per step by `when`, and
+# The verify-tag-deploy workflow has two paths in one file, chosen per step by `when`, and
 # nothing else reads that file until Woodpecker does — so a step that drifts
 # onto the wrong event is found by its side effects on shared infrastructure.
 # This enforces:
@@ -17,7 +17,7 @@
 #   3. no step depends on a step that runs on fewer events than it does.
 #      Woodpecker prunes steps whose `when` does not match, so such a dependency
 #      would name a step that no longer exists and fail the whole config;
-#   4. web, android and deploy all version with scripts/release-version.sh,
+#   4. web, android and verify-tag-deploy all version with scripts/release-version.sh,
 #      so the three workflows of one pipeline agree on its release tag.
 
 set -euo pipefail
@@ -37,7 +37,7 @@ def check(ok, message):
         failures.append(message)
 
 
-with open(".woodpecker/deploy.yml") as handle:
+with open(".woodpecker/verify-tag-deploy.yml") as handle:
     deploy = yaml.safe_load(handle)
 
 WORKFLOW_EVENTS = set()
@@ -186,7 +186,7 @@ print("==> every workflow versions with scripts/release-version.sh (#462)")
 # The release-versions plugin allocated highest-tag + 1, so two pipelines on one
 # line got the same tag; the script uses the pipeline number. A workflow left on
 # the plugin would compute a different tag from its siblings.
-for path in (".woodpecker/web.yml", ".woodpecker/android.yml", ".woodpecker/deploy.yml"):
+for path in (".woodpecker/web.yml", ".woodpecker/android.yml", ".woodpecker/verify-tag-deploy.yml"):
     with open(path) as handle:
         raw = handle.read()
     workflow = yaml.safe_load(raw)
