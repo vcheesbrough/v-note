@@ -222,10 +222,22 @@ skip() {
   echo "lane-key: SKIPPING $step — $lane key $key has already passed:"
   # Into a per-step ref, not FETCH_HEAD: both emulator steps can be skipping at
   # once in one shared clone, and must each print their own marker.
-  if git_remote fetch -q --no-tags --depth=1 "$(remote)" "+$ref:refs/lane-key/$step" 2>/dev/null; then
+  # --depth=1 takes the clone's shallow lock, which the other emulator step may
+  # be holding for the same fetch — so a failure is retried briefly.
+  attempt=1 fetched=false
+  while [ "$attempt" -le 5 ]; do
+    if fetch_error=$(git_remote fetch -q --no-tags --depth=1 "$(remote)" \
+      "+$ref:refs/lane-key/$step" 2>&1); then
+      fetched=true
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  if $fetched; then
     git_local cat-file -p "refs/lane-key/$step" | sed -e '1,/^$/d' -e 's/^/  /'
   else
-    echo "  ($ref)"
+    echo "  ($ref — marker unreadable: $(echo "$fetch_error" | tail -n 1))"
   fi
   echo "lane-key: set FULL_RUN=1 on a manual pipeline to run it anyway"
   return 0
