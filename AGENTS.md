@@ -150,8 +150,10 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
     tags and deploys are unaffected. Markers live at `refs/ci/green/<step>/<key>`
     on GitHub. **Run a manual pipeline with `FULL_RUN=1`** to force every lane
     (flake hunting, a suspected stale key). When a lane's step starts reading a
-    new path outside its build context, add it to `lane_extras` —
-    `lane-key-validation` in `checks` fails until you do.
+    new path outside its build context, add it to `lane_extras`. If the path is
+    written literally in the lane's workflow or e2e compose files,
+    `lane-key-validation` in `checks` fails until you do. A path assembled from
+    a variable is invisible to that check, so declare it by hand.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see
   [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**). Contract/unit tests

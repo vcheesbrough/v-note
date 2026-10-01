@@ -201,6 +201,17 @@ grep -q WARNING "$WORK/out" && pass "failed mark warns" || fail "no warning"
 [ -z "$(git tag -l 'lane-key-mark-*')" ] && pass "mark leaves no local tag" \
   || fail "mark left a local tag"
 
+# mark runs after tests that passed; no local failure may turn the step red.
+GIT_COMMITTER_DATE=not-a-date \
+  expect_exit "failing local tag: mark does not fail the step" 0 "$LANE_KEY" mark e2e-web
+grep -q 'WARNING: could not create the local marker tag' "$WORK/out" \
+  && pass "failing local tag warns" || fail "no tag warning: $(cat "$WORK/out")"
+mkdir "$WORK/not-a-repo"
+(cd "$WORK/not-a-repo" && GIT_CEILING_DIRECTORIES="$WORK" \
+  expect_exit "uncomputable key: mark does not fail the step" 0 "$LANE_KEY" mark e2e-web)
+grep -q 'WARNING: could not compute the web key' "$WORK/out" \
+  && pass "uncomputable key warns" || fail "no key warning: $(cat "$WORK/out")"
+
 expect_exit "unknown step" 2 "$LANE_KEY" skip build-web
 expect_exit "unknown lane" 2 "$LANE_KEY" key prod
 
@@ -215,23 +226,52 @@ lane_refs() {
     android) files=.woodpecker/android.yml ;;
     web) files=".woodpecker/web.yml e2e/docker-compose.test.yml e2e/docker-compose.android-apk.test.yml" ;;
   esac
+  # Every path-shaped token is a candidate (compose paths are relative to e2e/,
+  # so only their `../` escapes leave it). A candidate is a reference when it
+  # names a tracked file exactly, or contains a `/` and names a tracked
+  # directory — so justfile, rust-toolchain.toml or .cargo/… count, while a
+  # bare word like `deploy` in a comment does not. Paths assembled from
+  # variables cannot be seen by any text scan; declare those by hand.
   for f in $files; do
     case "$f" in
-      e2e/*) grep -oE '\.\./[A-Za-z0-9_./-]+' "$f" | sed 's|^\.\./||' ;;
-      *) grep -oE '(^|[^A-Za-z0-9_./-])(Dockerfile\.[A-Za-z0-9_-]+|(scripts|e2e|deploy|android|crates|frontend|contracts)/[A-Za-z0-9_./-]+)' "$f" \
-        | sed -E 's|^[^A-Za-z0-9_./-]||' ;;
+      e2e/*) grep -oE '\.\./[A-Za-z0-9_.+/-]+' "$f" | sed 's|^\.\./||' ;;
+      *) grep -oE '[A-Za-z0-9_.+/-]+' "$f" ;;
     esac
-  done | sed 's|/$||' | sort -u
+  done | sed -E -e 's|^(\./)+||' -e 's|[./:]+$||' | sort -u \
+    | awk 'NR == FNR {
+             file[$0] = 1
+             n = split($0, part, "/"); d = ""
+             for (i = 1; i < n; i++) { d = (i > 1 ? d "/" : "") part[i]; dir[d] = 1 }
+             next
+           }
+           ($0 in file) || (index($0, "/") && ($0 in dir))' "$WORK/tracked" -
 }
 
-for lane in android web; do
-  covered=$("$LANE_KEY" files "$lane")
+git ls-files >"$WORK/tracked"
+
+undeclared_refs() {
+  covered=$("$LANE_KEY" files "$1")
   missing=""
-  for p in $(lane_refs "$lane"); do
+  for p in $(lane_refs "$1"); do
     echo "$NOT_INPUTS" | grep -qxF "$p" && continue
     echo "$covered" | grep -qE "^$(printf '%s' "$p" | sed 's/[.[\*^$]/\\&/g')(/|$)" && continue
     missing="$missing $p"
   done
+  echo "$missing"
+}
+
+# The guard itself: a root-level file the android context excludes, newly
+# referenced by its workflow, must be reported.
+cp .woodpecker/android.yml "$WORK/android.yml.orig"
+echo "# reads rust-toolchain.toml" >>.woodpecker/android.yml
+case " $(undeclared_refs android) " in
+  *" rust-toolchain.toml "*) pass "an undeclared root-level reference is caught" ;;
+  *) fail "rust-toolchain.toml referenced by android.yml was not reported" ;;
+esac
+cp "$WORK/android.yml.orig" .woodpecker/android.yml
+
+for lane in android web; do
+  missing=$(undeclared_refs "$lane")
   if [ -z "$missing" ]; then
     pass "$lane: every referenced path is in its key or declared not an input"
   else

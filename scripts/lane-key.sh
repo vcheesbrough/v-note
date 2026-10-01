@@ -243,22 +243,34 @@ skip() {
   return 0
 }
 
-# Never fails the step: the tests passed, and a missing marker only costs a
-# re-run next time. It says so loudly instead.
+mark_warning() {
+  echo "lane-key: WARNING: $*; the next pipeline with this key will re-run $step"
+}
+
+# Never fails the step once it knows the step (an unknown step name is a
+# workflow typo and fails loudly): the tests passed, and a missing marker only
+# costs a re-run next time. Every failure is guarded explicitly and said out
+# loud — `set -e` alone would turn a green test step red.
 mark() {
   step=$1
   lane=$(step_lane "$step")
-  key=$(lane_key "$lane")
+  if ! key=$(lane_key "$lane"); then
+    mark_warning "could not compute the $lane key"
+    return 0
+  fi
   ref=$(marker_ref "$step" "$key")
   # Both emulator steps run concurrently in one shared workspace clone, and $$
   # is a container-local PID they can share — so the step is in the name.
   tmp="lane-key-mark-$step-$$"
-  git_local -c user.name=v-note-ci -c user.email=ci@v-note.invalid \
+  if ! git_local -c user.name=v-note-ci -c user.email=ci@v-note.invalid \
     tag -f -a "$tmp" HEAD -m "$step passed at $lane key $key
 
 commit: $(git_local rev-parse HEAD)
 branch: ${CI_COMMIT_BRANCH:-unknown}
-pipeline: ${CI_PIPELINE_NUMBER:-unknown} ${CI_PIPELINE_URL:-}" >/dev/null
+pipeline: ${CI_PIPELINE_NUMBER:-unknown} ${CI_PIPELINE_URL:-}" >/dev/null; then
+    mark_warning "could not create the local marker tag $tmp"
+    return 0
+  fi
   # Create-only: an empty lease is "the ref must not exist", checked by the
   # server. A plain push is not enough — a newer commit peels as a fast-forward
   # of the old marker's, so it would replace it.
@@ -267,10 +279,9 @@ pipeline: ${CI_PIPELINE_NUMBER:-unknown} ${CI_PIPELINE_URL:-}" >/dev/null
   elif [ -n "$(git_remote ls-remote "$(remote)" "$ref" 2>/dev/null)" ]; then
     echo "lane-key: $step at $lane key $key was already marked green"
   else
-    echo "lane-key: WARNING: could not record the green marker $ref;" \
-      "the next pipeline with this key will re-run $step"
+    mark_warning "could not record the green marker $ref"
   fi
-  git_local tag -d "$tmp" >/dev/null
+  git_local tag -d "$tmp" >/dev/null 2>&1 || echo "lane-key: WARNING: could not delete the local tag $tmp"
 }
 
 [ $# -eq 2 ] || die "usage: $0 key|files|context <lane> | skip|mark <step>"

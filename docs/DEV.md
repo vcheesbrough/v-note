@@ -564,8 +564,9 @@ with master skips both. `build-web` and `build-android` always run, so every
 pipeline still ships images under its own release tag. The tests:
 
 - `scripts/test-lane-key.sh`: which changes move which key; the marker round
-  trip; that every path a lane's workflow or e2e compose file references is
-  covered.
+  trip; that every path a lane's workflow or e2e compose file names literally
+  (a tracked file, or a tracked directory written with a `/`) is covered.
+  Paths built from variables are not visible to it.
 - `scripts/test-lane-key-context.sh`: the `.dockerignore` matcher against
   BuildKit's real context.
 
