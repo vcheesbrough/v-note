@@ -164,6 +164,34 @@ append "$(first android)"
 gitc commit -qam "android change"
 expect_exit "own lane's change: run" 1 "$LANE_KEY" skip android-api-29
 
+# The two emulator steps mark at the same moment in one shared clone; each must
+# land under its own step, labelled as that step.
+"$LANE_KEY" mark android-api-29 >"$WORK/out29" 2>&1 &
+"$LANE_KEY" mark android-api-36 >"$WORK/out36" 2>&1 &
+wait
+for api in 29 36; do
+  r="refs/ci/green/android-api-$api/$(key android)"
+  if git fetch -q --no-tags "$LANE_KEY_REMOTE" "+$r:refs/test/marker-$api" 2>/dev/null \
+    && git cat-file -p "refs/test/marker-$api" | grep -q "^android-api-$api passed"; then
+    pass "concurrent mark: android-api-$api landed under its own name"
+  else
+    fail "concurrent mark: android-api-$api missing or mislabelled: $(cat "$WORK/out$api")"
+  fi
+done
+
+# …and skip together, each printing its own marker.
+"$LANE_KEY" skip android-api-29 >"$WORK/out29" 2>&1 &
+"$LANE_KEY" skip android-api-36 >"$WORK/out36" 2>&1 &
+wait
+for api in 29 36; do
+  if grep -q "SKIPPING android-api-$api" "$WORK/out$api" \
+    && grep -q "^  android-api-$api passed" "$WORK/out$api"; then
+    pass "concurrent skip: android-api-$api printed its own marker"
+  else
+    fail "concurrent skip: android-api-$api output: $(cat "$WORK/out$api")"
+  fi
+done
+
 LANE_KEY_REMOTE="file://$WORK/no-such-remote.git" \
   expect_exit "unreachable remote: run, never skip" 1 "$LANE_KEY" skip android-api-29
 grep -q WARNING "$WORK/out" && pass "unreachable remote warns" || fail "no warning"

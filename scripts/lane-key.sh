@@ -170,7 +170,7 @@ covered_tree() {
     head_tree | awk -F '\t' -v extras="$extras" '
       BEGIN { n = split(extras, e, "\n") }
       { for (k = 1; k <= n; k++) if ($2 == e[k] || index($2, e[k] "/") == 1) { print; next } }'
-  } | sort -t "$(printf '\t')" -k2 -u
+  } | LC_ALL=C sort -t "$(printf '\t')" -k2 -u # byte order: same key on any machine
 }
 
 lane_key() {
@@ -220,8 +220,10 @@ skip() {
     return 1
   fi
   echo "lane-key: SKIPPING $step — $lane key $key has already passed:"
-  if git_remote fetch -q --no-tags --depth=1 "$(remote)" "$ref" 2>/dev/null; then
-    git_local cat-file -p FETCH_HEAD | sed -e '1,/^$/d' -e 's/^/  /'
+  # Into a per-step ref, not FETCH_HEAD: both emulator steps can be skipping at
+  # once in one shared clone, and must each print their own marker.
+  if git_remote fetch -q --no-tags --depth=1 "$(remote)" "+$ref:refs/lane-key/$step" 2>/dev/null; then
+    git_local cat-file -p "refs/lane-key/$step" | sed -e '1,/^$/d' -e 's/^/  /'
   else
     echo "  ($ref)"
   fi
@@ -236,7 +238,9 @@ mark() {
   lane=$(step_lane "$step")
   key=$(lane_key "$lane")
   ref=$(marker_ref "$step" "$key")
-  tmp="lane-key-mark-$$"
+  # Both emulator steps run concurrently in one shared workspace clone, and $$
+  # is a container-local PID they can share — so the step is in the name.
+  tmp="lane-key-mark-$step-$$"
   git_local -c user.name=v-note-ci -c user.email=ci@v-note.invalid \
     tag -f -a "$tmp" HEAD -m "$step passed at $lane key $key
 
