@@ -9,6 +9,7 @@ set -eu
 #   lane-key.sh context <lane>    the subset its Docker build context admits
 #   lane-key.sh skip <step>       exit 0 (and say why) when <step> may skip
 #   lane-key.sh mark <step>       record that <step> passed under its key
+#   lane-key.sh prune <days>      delete markers older than <days> (operator)
 #
 # Lanes are `android` and `web`. Steps are the test steps that consult a lane:
 # android-api-29 and android-api-36 (android), e2e-web (web). Each step keeps its
@@ -41,6 +42,11 @@ set -eu
 # remote, naming the commit, branch and pipeline that passed. It is pushed
 # create-only, so a marker is never overwritten.
 # FULL_RUN set to anything but "", 0 or false makes `skip` always run.
+#
+# Markers are never deleted by CI, so the namespace grows by up to three refs
+# per pipeline whose inputs changed. `prune` is the cleanup: deleting a marker
+# is always safe, it only costs that step one re-run. DRY_RUN=1 lists what it
+# would delete.
 #
 # Environment: CI_REPO and GITHUB_TOKEN (for a private remote); CI_COMMIT_BRANCH,
 # CI_PIPELINE_NUMBER and CI_PIPELINE_URL label a marker. LANE_KEY_REMOTE
@@ -112,10 +118,14 @@ head_tree() {
 # Docker's rules: patterns are anchored at the context root, `*` and `?` do
 # not cross `/`, `**` does, a pattern also excludes everything under a
 # directory it matches, `!` re-admits, and the last matching pattern wins.
+# The patterns are HEAD's too, like the files: an uncommitted .dockerignore edit
+# must not change the key. They reach awk through ENVIRON, because -v would
+# process the backslash escapes a pattern can contain.
 context_tree() {
   ignore=$(lane_dockerignore "$1")
-  [ -f "$ignore" ] || die "$ignore not found"
-  head_tree | awk -F '\t' -v ignore="$ignore" '
+  LANE_KEY_IGNORE=$(git_local show "HEAD:$ignore" 2>/dev/null) || die "$ignore not found in HEAD"
+  export LANE_KEY_IGNORE
+  head_tree | awk -F '\t' '
     function glob2re(p,   out, i, n, c, j, cls) {
       out = ""; n = length(p)
       for (i = 1; i <= n; i++) {
@@ -143,7 +153,9 @@ context_tree() {
     }
     BEGIN {
       n = 0
-      while ((getline line < ignore) > 0) {
+      count = split(ENVIRON["LANE_KEY_IGNORE"], lines, "\n")
+      for (l = 1; l <= count; l++) {
+        line = lines[l]
         gsub(/^[ \t]+|[ \t\r]+$/, "", line)
         if (line == "" || substr(line, 1, 1) == "#") continue
         neg = 0
@@ -153,7 +165,6 @@ context_tree() {
         if (line == "") continue
         n++; re[n] = glob2re(line); readmit[n] = neg
       }
-      close(ignore)
     }
     {
       admitted = 1
@@ -284,12 +295,41 @@ pipeline: ${CI_PIPELINE_NUMBER:-unknown} ${CI_PIPELINE_URL:-}" >/dev/null; then
   git_local tag -d "$tmp" >/dev/null 2>&1 || echo "lane-key: WARNING: could not delete the local tag $tmp"
 }
 
-[ $# -eq 2 ] || die "usage: $0 key|files|context <lane> | skip|mark <step>"
+# Deletes every marker whose tag is older than $1 days. Reads the tag dates by
+# fetching the markers into a private namespace (shallow: only the tag objects
+# and their commits), then deletes the old ones on the remote in one push.
+prune() {
+  days=$1
+  echo "$days" | grep -Eq '^[0-9]+$' || die "prune: '$days' is not a number of days"
+  cutoff=$(($(date +%s) - days * 86400))
+  git_local for-each-ref --format='%(refname)' refs/lane-key-prune/ \
+    | while read -r r; do git_local update-ref -d "$r"; done
+  git_remote fetch -q --no-tags --depth=1 "$(remote)" \
+    '+refs/ci/green/*:refs/lane-key-prune/*' || die "could not fetch the markers"
+  old=$(git_local for-each-ref --format='%(taggerdate:unix) %(refname)' refs/lane-key-prune/ \
+    | awk -v cutoff="$cutoff" '$1 != "" && $1 < cutoff { sub("^refs/lane-key-prune/", "refs/ci/green/", $2); print $2 }')
+  total=$(git_local for-each-ref refs/lane-key-prune/ | wc -l | tr -d ' ')
+  git_local for-each-ref --format='%(refname)' refs/lane-key-prune/ \
+    | while read -r r; do git_local update-ref -d "$r"; done
+  count=$(echo "$old" | grep -c . || true)
+  echo "lane-key: $count of $total markers are older than $days days"
+  [ "$count" -gt 0 ] || return 0
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "$old" | sed 's/^/  would delete /'
+    return 0
+  fi
+  # shellcheck disable=SC2086 # one ref per word, by construction
+  git_remote push -q "$(remote)" --delete $old || die "deleting the markers failed"
+  echo "lane-key: deleted $count markers"
+}
+
+[ $# -eq 2 ] || die "usage: $0 key|files|context <lane> | skip|mark <step> | prune <days>"
 case "$1" in
   key) lane_key "$2" ;;
   files) covered_tree "$2" | cut -f 2 ;;
   context) context_tree "$2" | cut -f 2 ;;
   skip) skip "$2" ;;
   mark) mark "$2" ;;
-  *) die "usage: $0 key|files|context <lane> | skip|mark <step>" ;;
+  prune) prune "$2" ;;
+  *) die "usage: $0 key|files|context <lane> | skip|mark <step> | prune <days>" ;;
 esac

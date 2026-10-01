@@ -114,6 +114,14 @@ append "$(first crates/server/src)"
 [ "$(key web)" = "$before" ] && pass "uncommitted edit leaves the key alone" \
   || fail "uncommitted edit moved the key"
 gitc checkout -q -- .
+before_files=$("$LANE_KEY" files web)
+echo "frontend/" >>Dockerfile.web.dockerignore
+if [ "$(key web)" = "$before" ] && [ "$("$LANE_KEY" files web)" = "$before_files" ]; then
+  pass "uncommitted .dockerignore edit leaves the key and files alone"
+else
+  fail "uncommitted .dockerignore edit changed the web key or file set"
+fi
+gitc checkout -q -- .
 
 # --- skip / mark --------------------------------------------------------------
 
@@ -214,6 +222,32 @@ grep -q 'WARNING: could not compute the web key' "$WORK/out" \
 
 expect_exit "unknown step" 2 "$LANE_KEY" skip build-web
 expect_exit "unknown lane" 2 "$LANE_KEY" key prod
+
+# --- prune ----------------------------------------------------------------------
+
+append "$(first e2e/tests)"
+gitc commit -qam "e2e change for an old marker"
+old_ref="refs/ci/green/e2e-web/$(key web)"
+GIT_COMMITTER_DATE="2020-01-01T00:00:00Z" "$LANE_KEY" mark e2e-web >/dev/null
+recent_ref=$ref
+has_ref() { [ -n "$(git ls-remote "$LANE_KEY_REMOTE" "$1")" ]; }
+has_ref "$old_ref" && has_ref "$recent_ref" && pass "an old and a recent marker exist" \
+  || fail "test setup: markers missing"
+DRY_RUN=1 expect_exit "prune dry run" 0 "$LANE_KEY" prune 30
+grep -q "would delete $old_ref" "$WORK/out" && has_ref "$old_ref" \
+  && pass "dry run names the old marker and deletes nothing" \
+  || fail "dry run output: $(cat "$WORK/out")"
+expect_exit "prune" 0 "$LANE_KEY" prune 30
+if ! has_ref "$old_ref" && has_ref "$recent_ref"; then
+  pass "prune deletes markers older than the cutoff and keeps recent ones"
+else
+  fail "prune: old present=$(has_ref "$old_ref" && echo yes || echo no)," \
+    "recent present=$(has_ref "$recent_ref" && echo yes || echo no)"
+fi
+[ -z "$(git for-each-ref refs/lane-key-prune/)" ] && pass "prune leaves no local refs" \
+  || fail "prune left refs/lane-key-prune/*"
+expect_exit "prune with nothing old" 0 "$LANE_KEY" prune 30
+expect_exit "prune needs a number of days" 2 "$LANE_KEY" prune soon
 
 # --- every referenced input is declared ---------------------------------------
 

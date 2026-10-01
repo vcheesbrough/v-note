@@ -580,6 +580,16 @@ lane's key and files locally with `scripts/lane-key.sh key web` /
 `scripts/lane-key.sh files android`. The key reads the committed tree, not the
 working tree.
 
+**Markers accumulate.** CI never deletes them. Each pipeline whose inputs
+changed adds up to three refs under `refs/ci/green/`, and each keeps its tested
+commit reachable on GitHub. Deleting a marker is always safe: it only costs that
+step one re-run. To clean up, list what would go, then delete it:
+
+```bash
+DRY_RUN=1 CI_REPO=vcheesbrough/v-note GITHUB_TOKEN=$(gh auth token) scripts/lane-key.sh prune 30
+CI_REPO=vcheesbrough/v-note GITHUB_TOKEN=$(gh auth token) scripts/lane-key.sh prune 30
+```
+
 The e2e stack waits on the app's healthcheck (`service_healthy`), so a container
 that never becomes healthy fails the run with `dependency failed to start`
 instead of surfacing as a confusing Playwright timeout.
