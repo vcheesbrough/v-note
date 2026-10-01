@@ -550,6 +550,32 @@ GitHub status below reflects all of them. `checks` gates Rust with clippy (`-D w
 plus the `[workspace.lints]` ratchet in `Cargo.toml` / `clippy.toml`) and rustfmt;
 `android` gates Kotlin with ktlint, detekt and Android Lint inside `build-android`.
 
+**Unchanged lanes skip their tests (#467).** `e2e-web` and both instrumented
+steps begin with `scripts/lane-key.sh skip <step>`. The lane key is a sha256 over
+every file the lane reads at `HEAD`: the tracked files its Dockerfile-specific
+`.dockerignore` admits, plus the extras declared in `lane_extras` (the Dockerfile,
+the workflow file, `e2e/` and `deploy/grafana` for web, …). If
+`refs/ci/green/<step>/<key>` exists on GitHub, the step logs
+`lane-key: SKIPPING`, the commit, branch and pipeline that passed, and exits 0;
+otherwise it runs and `lane-key.sh mark <step>` records the marker on success.
+So a docs-only push skips both lanes, an Android-only change skips e2e, an
+e2e/server change skips the emulators, and the master merge of a branch synced
+with master skips both. `build-web` and `build-android` always run, so every
+pipeline still ships images under its own release tag. The tests:
+
+- `scripts/test-lane-key.sh`: which changes move which key; the marker round
+  trip; that every path a lane's workflow or e2e compose file references is
+  covered.
+- `scripts/test-lane-key-context.sh`: the `.dockerignore` matcher against
+  BuildKit's real context.
+
+Both run in the `lane-key-validation` checks step.
+
+Force a full run with a manual pipeline and the variable `FULL_RUN=1`. Print a
+lane's key and files locally with `scripts/lane-key.sh key web` /
+`scripts/lane-key.sh files android`. The key reads the committed tree, not the
+working tree.
+
 The e2e stack waits on the app's healthcheck (`service_healthy`), so a container
 that never becomes healthy fails the run with `dependency failed to start`
 instead of surfacing as a confusing Playwright timeout.

@@ -34,6 +34,7 @@ scripts/*
 # Meta
 README.md
 AGENTS.md
+CLAUDE.md
 LICENSE
 LICENSE-TIER.md
 justfile

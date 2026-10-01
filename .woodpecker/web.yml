@@ -63,12 +63,23 @@ steps:
         docker push "$$IMAGE"
         echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
 
+  # Skips — support image build and stack alike — when the web lane key has
+  # already passed (#467, scripts/lane-key.sh): nothing the image or the suite
+  # reads changed since a green run. build-web above always runs, so the image
+  # that ships still carries this pipeline's release tag and passed its own
+  # metadata and health gates. FULL_RUN=1 on a manual pipeline runs it anyway.
   e2e-web:
     depends_on:
       - build-web
     image: *docker-image
     volumes: *docker-socket
+    environment:
+      # Reads and writes the lane-key markers (refs/ci/green/…).
+      GITHUB_TOKEN:
+        from_secret: github_token
     commands:
+      - |
+        if ./scripts/lane-key.sh skip e2e-web; then exit 0; fi
       - |
         RELEASE_TAG=$$(cat .release-tag)
         # One compose project per pipeline. The default (the directory, `e2e`)
@@ -90,4 +101,5 @@ steps:
         echo "timing: e2e compose up took $$(( $$(date +%s) - $$START ))s"
         REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/v-note:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
+        [ "$$RC" != 0 ] || ./scripts/lane-key.sh mark e2e-web
         exit $$RC

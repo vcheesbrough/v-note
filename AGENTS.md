@@ -139,6 +139,19 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   - `docker build -f Dockerfile.web -t v-note:ci-local --secret id=github_token,env=GITHUB_TOKEN .`
   - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
   - **All push workflows, including `e2e-web` and both Android lanes, must be green** before an iteration is done.
+  - **Lane keys skip unchanged tests (#467).** `e2e-web` and each Android
+    instrumented step hash exactly what their lane reads
+    ([`scripts/lane-key.sh`](scripts/lane-key.sh): the files the lane's
+    `.dockerignore` admits, plus declared extras such as `e2e/`) and exit green
+    with a `lane-key: SKIPPING` line when that key already passed — docs-only
+    pushes, the other lane's changes, and the master merge of an
+    already-synced branch. A skipped step still counts as green: it names the
+    commit and pipeline that passed. Images are **always** built, so release
+    tags and deploys are unaffected. Markers live at `refs/ci/green/<step>/<key>`
+    on GitHub. **Run a manual pipeline with `FULL_RUN=1`** to force every lane
+    (flake hunting, a suspected stale key). When a lane's step starts reading a
+    new path outside its build context, add it to `lane_extras` —
+    `lane-key-validation` in `checks` fails until you do.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see
   [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**). Contract/unit tests

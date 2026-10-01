@@ -154,6 +154,20 @@ steps:
     commands:
       - ./scripts/test-alloy-config.sh
 
+  # The lane keys (#467) decide whether e2e-web and the emulator lanes run at
+  # all, so a key that misses an input is a green that never tested the change.
+  # test-lane-key.sh pins which changes move which key, the marker round trip,
+  # and that every path a lane's workflow or e2e compose file reads is covered;
+  # test-lane-key-context.sh holds the .dockerignore matcher to what BuildKit
+  # actually sends as each lane's context, hence the docker socket.
+  lane-key-validation:
+    depends_on: []
+    image: *docker-image
+    volumes: *docker-socket
+    commands:
+      - ./scripts/test-lane-key.sh
+      - ./scripts/test-lane-key-context.sh
+
   # Every file that names the android-build-box image must agree with
   # scripts/android-build-box-image.ref.
   android-build-box-pin:
