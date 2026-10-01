@@ -157,8 +157,8 @@ for env, doc in loaded.items():
     # The check that matters most in this file. The embedded outpost's
     # `providers` list is shared with every other service authentik protects on
     # this LAN, and a blueprint sets a list wholesale rather than appending — so
-    # an outpost entry here would detach all of them. This file is applied on
-    # every branch push, so it would not even wait for a merge.
+    # an outpost entry here would detach all of them. Any branch can deploy dev,
+    # and so apply this file, so it would not even wait for a merge.
     check(
         not any("outpost" in e["model"] for e in entries),
         f"{env}: declares no outpost entry (the shared provider list must not be rewritten)",
@@ -219,8 +219,8 @@ smoke_steps = {
     name: step for name, step in deploy["steps"].items() if name.startswith("smoke-web-live-")
 }
 check(
-    {"smoke-web-live-auto-dev", "smoke-web-live-dev"} <= set(smoke_steps),
-    "deploy.yml has smoke-web-live on both the push and deployment paths",
+    "smoke-web-live-dev" in smoke_steps,
+    "deploy.yml has smoke-web-live on the deployment path",
 )
 for env, doc in loaded.items():
     entries = doc["entries"]
@@ -267,7 +267,7 @@ for env, doc in loaded.items():
 
     # The spec asserts /api/me returns this email and signs in with this name,
     # so the step and the blueprint must agree.
-    for name in (f"smoke-web-live-auto-{env}", f"smoke-web-live-{env}"):
+    for name in (f"smoke-web-live-{env}",):
         environment = smoke_steps.get(name, {}).get("environment", {})
         check(
             environment.get("V_NOTE_SMOKE_USERNAME") == username,

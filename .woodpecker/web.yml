@@ -5,19 +5,23 @@ when:
   - event: [push, manual]
 
 steps:
-  # Workflows share nothing, so each computes its own release tag. compute-version
-  # reuses the tag already on this commit, or allocates highest remote patch + 1,
-  # so every workflow of one commit agrees; deploy.yml still verifies the images'
-  # revision label before it rolls anything out.
+  # Workflows share nothing, so each computes its own release tag:
+  # scripts/release-version.sh reuses the tag already on this commit, or takes
+  # Cargo.toml's major.minor with the pipeline number as the patch. Every workflow
+  # of one pipeline sees the same number, so they agree, and no two pipelines can
+  # compute the same tag (#462). deploy.yml still verifies the images' revision
+  # label before it tags or rolls anything out.
   compute-version:
     depends_on: []
-    pull: true
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
-    settings:
-      mode: compute
-      major_minor_source: cargo
-      github_token:
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    environment:
+      GITHUB_TOKEN:
         from_secret: github_token
+    commands:
+      # git is unpinned for the reason given on the apk lines in deploy.yml: the
+      # base image is digest-pinned, and Alpine drops superseded versions.
+      - apk add --no-cache git
+      - ./scripts/release-version.sh compute
 
   build-web:
     depends_on:

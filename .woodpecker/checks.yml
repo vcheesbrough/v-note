@@ -79,6 +79,23 @@ steps:
       - apk add --no-cache python3 py3-yaml bash
       - ./scripts/test-authentik-blueprints.sh
 
+  # deploy.yml holds two paths chosen per step by `when`, and only Woodpecker
+  # reads it — a step that drifts onto `push` redeploys shared dev from every
+  # branch again (#462). This asserts the push path only builds, verifies and
+  # tags, that everything touching dev runs on a `deployment` after the image
+  # check, and that no dependency is pruned out from under a step.
+  #
+  # release-version.sh rides along: it computes the tag every image is built,
+  # verified and deployed under, and pushes it — run here against a local bare
+  # repository with real git, so a regression is found before it tags anything.
+  deploy-pipeline-validation:
+    depends_on: []
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    commands:
+      - apk add --no-cache python3 py3-yaml bash git
+      - ./scripts/test-deploy-pipeline.sh
+      - ./scripts/test-release-version.sh
+
   # scripts/smoke-oidc-login.sh is the post-deploy gate #372 was missing, and it
   # runs only against live infrastructure — so a broken assertion in it would be
   # found by the next outage rather than by CI. This drives it against a local
@@ -115,8 +132,8 @@ steps:
       - ./scripts/test-smoke-sql-console.sh
       - ./scripts/test-attach-sqltool-outpost.sh
 
-  # deploy.yml publishes the Grafana dashboard on every push to master once dev is
-  # deployed, so a broken one would otherwise land straight on the shared dashboard. This
+  # deploy.yml publishes the Grafana dashboard on every dev deployment, from any
+  # branch, so a broken one would otherwise land straight on the shared dashboard. This
   # validates deploy/grafana/v-note-overview.json and the publish script's payload
   # without Grafana or a token. Its own step: the docker CLI image has no jq.
   # jq is unpinned for the reason given on publish-grafana-dashboard in deploy.yml.

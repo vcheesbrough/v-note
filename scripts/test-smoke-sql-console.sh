@@ -149,9 +149,8 @@ expect_fail app-broken "SPA no longer serves"
 echo "==> with the console disabled, the check skips rather than failing"
 # The trap this closes: with the profile off, /dbconsole falls through to the
 # app's router and the SPA catch-all answers 200. Without the skip, this check
-# reads that as "publicly readable", fails every push, and blocks
-# tag-release-auto-dev forever — so the documented disable path would have
-# bricked releases. `exposed` is the stub mode that serves 200 on /dbconsole,
+# reads that as "publicly readable" and fails every dev deployment — so the
+# documented disable path would have bricked deploys. `exposed` is the stub mode that serves 200 on /dbconsole,
 # which is exactly what the SPA catch-all looks like from out here.
 PROFILES_OVERRIDE="" run_mode exposed
 check "$([ "$RC" -eq 0 ] && echo ok)" "no profile → exits 0 instead of failing (rc=$RC)"

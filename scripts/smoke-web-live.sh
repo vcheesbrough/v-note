@@ -48,7 +48,7 @@ DELAY="${SMOKE_DELAY:-6}"
 SCHEME="${SMOKE_SCHEME:-https}"
 BASE_URL="$SCHEME://$HOST"
 
-# auto-deploy-dev already gated on the container's health, but Traefik can take
+# deploy-dev already gated on the container's health, but Traefik can take
 # a moment to route to a recreated container. Same budget as smoke-oidc-login.
 ready=""
 for attempt in $(seq 1 "$ATTEMPTS"); do
