@@ -30,14 +30,14 @@ Pick a commit whose **push pipeline is green** — any branch — and start a de
 
 ### Push path
 
-`compute-version` → **verify-release-images** → **tag-release**, after the workflow-level `depends_on` has required `checks`, `web` and `android` to pass. The tag is still pushed on every green build: the release-versions plugin reuses a commit's existing tag and otherwise allocates the next patch, so an untagged build would hand its patch to every later push and the image tags would overwrite each other. A tag therefore means **built and passed checks, web and android** — no longer "deployed and smoke-tested on dev"; the smokes gate the deployment instead.
+`compute-version` → **verify-release-images** → **tag-release**, after the workflow-level `depends_on` has required `checks`, `web` and `android` to pass. The tag is still pushed on every green build, because it is what a deployment looks for: a deployment has a pipeline number of its own, so it finds the tag its commit was built under on the commit itself. A tag therefore means **built and passed checks, web and android** — no longer "deployed and smoke-tested on dev"; the smokes gate the deployment instead.
 
 ### Deployment path
 
 Every step below runs only on `deployment` with `CI_PIPELINE_DEPLOY_TARGET=dev` (`scripts/test-deploy-pipeline.sh`, run as the `checks` step `deploy-pipeline-validation`, holds that shape):
 
 1. **validate-deployment** — manual deployment target must be `dev`, the only environment that exists; the error names **#388**
-2. **compute-version** — semver from workspace + tag count (`0.N.P` pre-MVP; **`1.0.0`** after MVP **#151**)
+2. **compute-version** — [`scripts/release-version.sh`](../scripts/release-version.sh) `compute`: the release tag already on the commit (`.release-tag-reused=true`); otherwise `major.minor` from `Cargo.toml` with the pipeline number as the patch (`0.N.<pipeline>` pre-MVP, `1.N.<pipeline>` after MVP **#151**)
 3. **apply-authentik-blueprint-dev** — after `verify-release-images`, the target's own `authentik/blueprint-<env>.yaml` to **`auth.desync.link`** before roll-out (split per environment in #274 — one file, one `instance_name` — so no environment's deploy can reach another's provider)
 4. **deploy** — `sovereign-config render /v-note/devops/dev/compose /v-note/devops/dev/otlp-collector-oidc -- ./scripts/deploy-v-note.sh` supplies the deploy's configuration from the store (see [Secrets](#secrets)). `deploy-v-note.sh` pulls the tested image tag and runs `docker compose` on mini (docker socket), then **gates on health**: it polls the container's own healthcheck status (`HEALTHCHECK` in [`Dockerfile.web`](../Dockerfile.web), which curls `https://127.0.0.1:443/health`) and fails the deploy if it never reports healthy. `docker compose up -d` alone only proves the container was *created* — a crash-looping container would otherwise report a green deploy. Gating on the container's own status rather than a separate probe means the deploy passes on exactly the condition `docker ps` reports, and both failure modes are *decided* rather than waited out: a process that dies on bad config is caught by its **run state** (`exited` / `restarting`) in seconds — it never reports unhealthy at all, which is precisely why the old probe burned the full timeout on every crash loop — and `unhealthy` is **terminal**, because docker has already applied the configured retries. The 120s deadline now only covers an app that stays up and never finishes starting. The failure dump includes `.State.Health.Log`, i.e. the last five probe attempts with curl's own error text. **Rolling back to an image built before iteration 23** has no healthcheck to gate on; the script says so explicitly rather than polling until the deadline.
 5. **post-deploy smoke** — `smoke-oidc-login-dev`, `smoke-sql-console-dev` and the authenticated **`smoke-web-live-dev`** (#179) against the host just deployed; see [Post-deploy smoke](#post-deploy-smoke). They fail the deployment; there is no tag left for them to gate
@@ -47,7 +47,7 @@ There is no tag step on this path: a deployable commit is already tagged.
 
 The workflow-level `depends_on` of `deploy.yml` names the `checks` workflow (`lint`, `rust-test`, `deploy-script-validation`, `deploy-pipeline-validation`, `grafana-dashboard-validation`, `android-build-box-pin`), the `web` workflow (`build-web`, `e2e-web`) and the `android` workflow (`build-android` and both instrumented lanes, `android-instrumented-api-29` / `-36`); on a push all three must succeed before `deploy.yml` starts at all. They are marked `optional` only so that a deployment — which runs none of those workflows — is not blocked; the deployment's equivalent gate is the release tag, which only a green push pipeline pushes.
 
-Because workflows share nothing, `deploy.yml` computes the release tag again. **verify-release-images** (both events) pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — so a tag pushed by another pipeline in between can never tag or roll out someone else's images. On a deployment it first requires `.release-tag-reused` to be `true`, i.e. the commit was already tagged by its push pipeline.
+Because workflows share nothing, `deploy.yml` computes the release tag again. **verify-release-images** (both events) pulls `v-note:{release}` and `v-note-android:{release}` and fails unless both carry this commit's `org.opencontainers.image.revision` — a consistency check now that the pipeline-number patch means no other pipeline can build under this tag, made a verified fact before anything is tagged or rolled out. On a deployment it first requires `.release-tag-reused` to be `true`, i.e. the commit was already tagged by its push pipeline.
 
 ### The deploy script takes no arguments
 
@@ -660,7 +660,7 @@ Obtain SHA-256: `./scripts/android-dev-debug-fingerprint.sh` (local debug keysto
 Dev is the only environment that is deployed today; **#388** defines the release
 environment's tags when it creates it.
 
-**Tag source:** Woodpecker **`compute-version`** → **`.release-tag`** (plain semver `MAJOR.MINOR.PATCH`, e.g. `0.3.0`).
+**Tag source:** Woodpecker **`compute-version`** → [`scripts/release-version.sh`](../scripts/release-version.sh) → **`.release-tag`** (plain semver `MAJOR.MINOR.PATCH`, patch = pipeline number, e.g. `0.67.472`). `tag-release` pushes the same name as an annotated git tag; the server rejects a name that already exists, so tags are immutable.
 
 ### OCI image metadata
 

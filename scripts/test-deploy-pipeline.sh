@@ -16,7 +16,9 @@
 #      deployment, and every step that changes dev depends on it;
 #   3. no step depends on a step that runs on fewer events than it does.
 #      Woodpecker prunes steps whose `when` does not match, so such a dependency
-#      would name a step that no longer exists and fail the whole config.
+#      would name a step that no longer exists and fail the whole config;
+#   4. web, android and deploy all version with scripts/release-version.sh,
+#      so the three workflows of one pipeline agree on its release tag.
 
 set -euo pipefail
 
@@ -76,10 +78,11 @@ check(
     push_steps == PUSH_PATH,
     f"push runs exactly {sorted(PUSH_PATH)} (got {sorted(push_steps)})",
 )
-check(
-    steps.get("tag-release", {}).get("settings", {}).get("mode") == "push-tag",
-    "tag-release pushes the release tag",
-)
+def pushes_tag(step):
+    return any("release-version.sh push-tag" in c for c in step.get("commands", []) or [])
+
+
+check(pushes_tag(steps.get("tag-release", {})), "tag-release pushes the release tag")
 check(
     "verify-release-images" in steps.get("tag-release", {}).get("depends_on", []),
     "tag-release waits for verify-release-images",
@@ -165,8 +168,7 @@ for name in sorted(DEV_CHANGING):
         f"{name} runs after validate-deployment",
     )
 check(
-    not any(steps[n].get("settings", {}).get("mode") == "push-tag"
-            for n in steps if "deployment" in events(steps[n])),
+    not any(pushes_tag(steps[n]) for n in steps if "deployment" in events(steps[n])),
     "the deployment path pushes no tag (a deployable commit is already tagged)",
 )
 
@@ -179,6 +181,25 @@ for name, step in steps.items():
                 events(step) <= events(steps[dep]),
                 f"{name}: {dep} runs on every event {name} does",
             )
+
+print("==> every workflow versions with scripts/release-version.sh (#462)")
+# The release-versions plugin allocated highest-tag + 1, so two pipelines on one
+# line got the same tag; the script uses the pipeline number. A workflow left on
+# the plugin would compute a different tag from its siblings.
+for path in (".woodpecker/web.yml", ".woodpecker/android.yml", ".woodpecker/deploy.yml"):
+    with open(path) as handle:
+        raw = handle.read()
+    workflow = yaml.safe_load(raw)
+    check("release-versions" not in raw, f"{path} does not use the release-versions plugin")
+    compute = workflow["steps"].get("compute-version", {})
+    check(
+        any("release-version.sh compute" in c for c in compute.get("commands", []) or []),
+        f"{path} compute-version runs release-version.sh compute",
+    )
+    check(
+        (compute.get("environment") or {}).get("GITHUB_TOKEN", {}).get("from_secret") == "github_token",
+        f"{path} compute-version gets the github_token (private repo)",
+    )
 
 if failures:
     print(f"\ndeploy pipeline validation FAILED ({len(failures)} check(s))")

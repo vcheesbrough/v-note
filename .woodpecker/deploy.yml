@@ -26,13 +26,15 @@
 # that is what it changes. A master-only auto-deploy would bring back the
 # duplicated push path and overwrite whichever branch is on dev at every merge.
 #
-# The push path still tags. The release-versions plugin reuses a commit's
-# existing tag and otherwise allocates the next patch on the line, so a push that
-# did not tag would hand the same patch to every later push and the image tags
-# would overwrite each other. A tag now means "built and passed checks, web and
-# android" — no longer "deployed and smoke-tested on dev"; the smokes gate the
-# manual deployment instead. And the tag is what a deployment checks for: a
-# commit without one never went green, so there is nothing tested to deploy.
+# The push path still tags, and the tag is what a deployment looks for. The
+# release tag is Cargo.toml's major.minor plus the pipeline number as the patch
+# (scripts/release-version.sh) — unique per pipeline, so parallel builds never
+# share an image tag. A deployment has a pipeline number of its own, so it finds
+# the tag its commit was built under on the commit itself, and only a green push
+# pipeline puts one there: a commit without one never went green, so there is
+# nothing tested to deploy. A tag therefore means "built and passed checks, web
+# and android" — no longer "deployed and smoke-tested on dev"; the smokes gate
+# the manual deployment instead.
 # See checks.yml for why the push pipeline is split into workflows.
 
 when:
@@ -53,13 +55,15 @@ depends_on:
 steps:
   compute-version:
     depends_on: []
-    pull: true
-    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
-    settings:
-      mode: compute
-      major_minor_source: cargo
-      github_token:
+    image: &release-version-image alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    environment: &release-version-environment
+      GITHUB_TOKEN:
         from_secret: github_token
+    commands:
+      # git is unpinned for the reason given on the apk lines in deploy.yml: the
+      # base image is digest-pinned, and Alpine drops superseded versions.
+      - apk add --no-cache git
+      - ./scripts/release-version.sh compute
 
   validate-deployment:
     when:
@@ -75,10 +79,11 @@ steps:
           exit 1
         fi
 
-  # This workflow computed its release tag itself — workflows share nothing. It
-  # matches the tag web and android built with unless another pipeline pushed a tag
-  # on this line in between, and then it would name *another commit's* images.
-  # Refuse to tag or roll out anything whose revision label is not this commit.
+  # This workflow computed its release tag itself — workflows share nothing. With
+  # the pipeline number as the patch it matches the tag web and android built
+  # with, and no other pipeline can build under it; this check makes that a
+  # verified fact rather than an assumption before anything is tagged or rolled
+  # out: refuse any image whose revision label is not this commit.
   #
   # On a deployment it first requires the tag to have been *reused*: only a green
   # push pipeline tags a commit, so a freshly allocated tag means this commit was
@@ -423,10 +428,8 @@ steps:
       - event: push
     depends_on:
       - verify-release-images
-    pull: true
-    image: *version-plugin
-    settings:
-      mode: push-tag
-      major_minor_source: cargo
-      github_token:
-        from_secret: github_token
+    image: *release-version-image
+    environment: *release-version-environment
+    commands:
+      - apk add --no-cache git
+      - ./scripts/release-version.sh push-tag

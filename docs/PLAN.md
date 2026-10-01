@@ -230,7 +230,7 @@ Locked engineering/ops conventions — product behaviour stays in **Decisions ma
 | --- | --- | --- | --- |
 | **Pre-MVP** | Any iteration before **`vertical-slice-mvp`** closes | **`0.N.P`** | Dev images only (`0.N.P-<sha>`); no prod MVP tag yet |
 | **MVP release** | MVP completion card merged (today **#151**) | **`1.0.0`** on **`main`** | **`v1.0.0`** — closes `vertical-slice-mvp` |
-| **Post-MVP** | Iterations after **`1.0.0`** on **`main`** | **`1.N.P`** | Prod **`v1.N.P`** (or patch) per bored `compute-version` |
+| **Post-MVP** | Iterations after **`1.0.0`** on **`main`** | **`1.N.P`** | Prod **`v1.N.P`** (or patch); CI tags are `1.N.<pipeline>` |
 
 - **Iteration `N`** (board/branch) is **global and sequential** — assigned when work starts; **not** assumed to equal card count or a fixed pre-MVP total.
 - **Patch `P`:** bump only on the active **`feat/iteration-N-…`** branch; start each iteration at **`P=0`**.
@@ -276,7 +276,7 @@ The authoritative definition is the four workflow files in **[`.woodpecker/`](..
 | **checks** | **rust-test** | `Dockerfile.rust-ci --target test` — **`cargo test -p protocol -p frontend -p server`**, one invocation |
 | **checks** | **deploy-script-validation** | `scripts/test-deploy-v-note.sh` — the deploy script's parameter guards |
 | **checks** | **android-build-box-pin** | `scripts/check-android-build-box-image.sh` — every file naming the build-box image agrees with the `.ref` |
-| **web**, **android**, **deploy** | **compute-version** | Release-versions plugin, `major_minor_source: cargo` → **`.release-tag`**. Each workflow computes its own (workflows share nothing); a commit's tag is reused, so they agree |
+| **web**, **android**, **deploy** | **compute-version** | `scripts/release-version.sh compute` → **`.release-tag`**: `major.minor` from `Cargo.toml`, patch = Woodpecker pipeline number (#462; the release-versions plugin's highest-tag + 1 could repeat across parallel pipelines). Each workflow computes its own (workflows share nothing); they share the pipeline number, and a commit's existing tag is reused, so they agree |
 | **web** | **build-web** | `Dockerfile.web` — **Trunk** SPA build + server, run as `./v-note-server` (#379); image metadata and container-health checks; push `registry.desync.link/v-note:{release}` |
 | **web** | **e2e-web** | `e2e/docker-compose.test.yml` (+ the android-apk overlay) — Playwright against the pushed image |
 | **android** | **build-android** | `Dockerfile.android --target apk` — **Gradle** APK + unit tests; image metadata check; push `registry.desync.link/v-note-android:{release}` |
