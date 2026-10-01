@@ -108,7 +108,7 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   documented re-enable path still works.
 - **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
   `checks` (lint, rust-test, deploy-script-validation, deploy-pipeline-validation,
-  grafana-dashboard-validation, android-build-box-pin),
+  grafana-dashboard-validation, lane-key-validation, android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
   ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `deploy`
   (verify-release-images → tag-release) runs only when all three succeed.
