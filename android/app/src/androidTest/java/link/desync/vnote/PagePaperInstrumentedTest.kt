@@ -5,7 +5,7 @@ import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -36,7 +36,6 @@ import java.net.InetAddress
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -99,7 +98,7 @@ class PagePaperInstrumentedTest {
     private val composeRule = createAndroidComposeRule<MainActivity>()
 
     @get:Rule
-    val rules: TestRule = RuleChain.outerRule(environmentRule).around(composeRule)
+    val rules: TestRule = RuleChain.outerRule(SnapshotThreadGuard()).around(environmentRule).around(composeRule)
 
     @Test
     fun paletteOpensSendsSetPaperAndLeavesTheDrawingToolSelected() {
@@ -281,7 +280,7 @@ class PagePaperInstrumentedTest {
         openEditorWithoutLease()
         assertTrue(
             "edit lease granted; messages=$pageMessages",
-            leaseGranted.await(5, TimeUnit.SECONDS),
+            composeRule.awaitLatch(leaseGranted, 5_000),
         )
     }
 
@@ -299,7 +298,7 @@ class PagePaperInstrumentedTest {
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
         assertTrue(
             "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
-            seedDelivered.await(5, TimeUnit.SECONDS),
+            composeRule.awaitLatch(seedDelivered, 5_000),
         )
         composeRule.awaitInkPixels { it[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()] != Color.White }
     }
@@ -307,16 +306,7 @@ class PagePaperInstrumentedTest {
     private fun awaitMutation(
         type: String,
         timeoutMillis: Long = 5_000,
-    ): JSONObject? {
-        val deadline = System.currentTimeMillis() + timeoutMillis
-        while (System.currentTimeMillis() < deadline) {
-            val message = mutations.poll(200, TimeUnit.MILLISECONDS) ?: continue
-            if (message.getString("type") == type) {
-                return message
-            }
-        }
-        return null
-    }
+    ): JSONObject? = composeRule.awaitQueued(mutations, timeoutMillis) { it.getString("type") == type }
 
     private var welcomePaper: String = "none"
 

@@ -2,7 +2,7 @@ package link.desync.vnote
 
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertTextEquals
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -82,7 +82,7 @@ class ServerHealthInstrumentedTest {
     private val composeRule = createAndroidComposeRule<MainActivity>()
 
     @get:Rule
-    val rules: TestRule = RuleChain.outerRule(environmentRule).around(composeRule)
+    val rules: TestRule = RuleChain.outerRule(SnapshotThreadGuard()).around(environmentRule).around(composeRule)
 
     @Test
     fun aTransientHealthFailureIsRetriedNotReported() {

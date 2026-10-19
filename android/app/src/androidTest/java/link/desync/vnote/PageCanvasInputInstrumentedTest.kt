@@ -10,7 +10,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
@@ -44,7 +44,6 @@ import java.net.InetAddress
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
 class PageCanvasInputInstrumentedTest {
@@ -91,7 +90,7 @@ class PageCanvasInputInstrumentedTest {
     private val composeRule = createAndroidComposeRule<MainActivity>()
 
     @get:Rule
-    val rules: TestRule = RuleChain.outerRule(environmentRule).around(composeRule)
+    val rules: TestRule = RuleChain.outerRule(SnapshotThreadGuard()).around(environmentRule).around(composeRule)
 
     @Test
     fun explicitEraserHidesAndCommitsHitBeforeStylusLift() {
@@ -435,11 +434,11 @@ class PageCanvasInputInstrumentedTest {
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
         assertTrue(
             "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
-            seedDelivered.await(5, TimeUnit.SECONDS),
+            composeRule.awaitLatch(seedDelivered, 5_000),
         )
         assertTrue(
             "edit lease granted; requests=$requestPaths messages=$pageMessages",
-            leaseGranted.await(5, TimeUnit.SECONDS),
+            composeRule.awaitLatch(leaseGranted, 5_000),
         )
         composeRule.awaitInkPixels { hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }
     }
@@ -529,15 +528,7 @@ class PageCanvasInputInstrumentedTest {
     private fun awaitMutation(
         type: String,
         timeoutMillis: Long = 5_000,
-    ): JSONObject? {
-        val deadline = System.currentTimeMillis() + timeoutMillis
-        while (System.currentTimeMillis() < deadline) {
-            val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(1)
-            val message = mutations.poll(remaining, TimeUnit.MILLISECONDS) ?: return null
-            if (message.getString("type") == type) return message
-        }
-        return null
-    }
+    ): JSONObject? = composeRule.awaitQueued(mutations, timeoutMillis) { it.getString("type") == type }
 
     private fun sendStylus(
         action: Int,
