@@ -1,5 +1,6 @@
 package link.desync.vnote.ink
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -8,11 +9,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalIconToggleButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -70,10 +73,29 @@ fun PageCanvasScreen(
         session.connect()
         onDispose { session.disconnect() }
     }
+    // Leaving drops ink the server has not acknowledged — held while the lease
+    // or the connection was missing (#390), or sent and not yet echoed — so
+    // ask first. With nothing unsent, back leaves at once, as it always did.
+    var unsentOnLeave by remember(page.id) { mutableStateOf<Int?>(null) }
+    val requestLeave = {
+        val unsent = session.unsentStrokeCount
+        if (unsent > 0) unsentOnLeave = unsent else onBack()
+    }
+    BackHandler(onBack = requestLeave)
+    unsentOnLeave?.let { unsent ->
+        UnsentInkDialog(
+            strokes = unsent,
+            onStay = { unsentOnLeave = null },
+            onLeave = {
+                unsentOnLeave = null
+                onBack()
+            },
+        )
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         VNoteTopBar {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = requestLeave) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back to library")
             }
             Text(
@@ -152,4 +174,27 @@ fun PageCanvasScreen(
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
     }
+}
+
+@Composable
+private fun UnsentInkDialog(
+    strokes: Int,
+    onStay: () -> Unit,
+    onLeave: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onStay,
+        modifier = Modifier.testTag("unsent-ink-dialog"),
+        title = { Text("Unsent ink") },
+        text = {
+            val what = if (strokes == 1) "1 stroke hasn't" else "$strokes strokes haven't"
+            Text("$what reached the server and will be lost if you leave.")
+        },
+        confirmButton = {
+            TextButton(onClick = onStay, modifier = Modifier.testTag("unsent-ink-stay")) { Text("Stay") }
+        },
+        dismissButton = {
+            TextButton(onClick = onLeave, modifier = Modifier.testTag("unsent-ink-leave")) { Text("Leave anyway") }
+        },
+    )
 }

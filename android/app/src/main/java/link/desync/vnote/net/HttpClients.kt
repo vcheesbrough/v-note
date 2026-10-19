@@ -26,8 +26,10 @@ fun interface HostGuard {
 // In the app [hostGuard] is null and the builder is exactly
 // `OkHttpClient.Builder()`, so production clients are unchanged. The
 // instrumentation runner installs a guard before `Application.onCreate`; every
-// client built after that refuses non-loopback hosts before it resolves or
-// connects anything, so no test can reach the real dev deployment unnoticed.
+// client built after that refuses a call whose request targets a non-loopback
+// host before it resolves or connects anything, so no test can reach the real
+// dev deployment unnoticed. Redirect and auth follow-up hops are not checked:
+// OkHttp follows them inside the application chain (PR #72 review).
 object HttpClients {
     @Volatile
     var hostGuard: HostGuard? = null

@@ -906,6 +906,93 @@ class PageInkInstrumentedTest {
     }
 
     /**
+     * PR #72 review: a batch sent under a valid lease whose socket dropped
+     * before the echo may never have reached the server. If the reconnect's
+     * `welcome` names another holder, that batch is kept — only never-sent
+     * ink is discarded — and re-sent under the same `client_batch_id` once
+     * the lease frees and is granted (#279).
+     */
+    @Test
+    fun aSentButUnackedBatchSurvivesAnotherHolderAndIsResentWhenTheLeaseFrees() {
+        val firstCommit = AtomicReference<JSONObject>()
+        openPage { webSocket, type ->
+            if (type == "subscribe") webSocket.send("""{"type":"synced","last_seq":0}""")
+        }
+        dropOnCommit(firstCommit)
+        val second = AtomicReference<WebSocket>()
+        val recommits = CopyOnWriteArrayList<JSONObject>()
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            second.set(webSocket)
+                            webSocket.send(
+                                """{"type":"welcome","session_id":"me-again","last_seq":0,"lease_holder":"other"}""",
+                            )
+                        }
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            val message = JSONObject(text)
+                            when (message.getString("type")) {
+                                "subscribe" ->
+                                    webSocket.send(
+                                        """{"type":"page-replay","page_id":"page_1","last_seq":0,"batches":[],"tombstones":[]}""",
+                                    )
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "commit-batch" -> {
+                                    recommits += message
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "stroke-batch")
+                                            .put("seq", 1)
+                                            .put("client_batch_id", message.getString("client_batch_id"))
+                                            .put("strokes", message.getJSONArray("strokes"))
+                                            .toString(),
+                                    )
+                                }
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
+        )
+
+        val session = openSession()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+        val stroke = Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16)))
+        onMain { session.commitStroke(stroke) }
+
+        assertTrue(
+            "reconnected to a page another session holds",
+            awaitUntil(timeoutMs = 10_000) { session.statusBanner == PageInkSession.LEASE_BLOCKED },
+        )
+        assertEquals("the sent batch is kept", 1, onMain { session.pendingBatchCount })
+        assertEquals("and still drawn", listOf(stroke.id), onMain { session.strokes.map { it.id } })
+        assertEquals("nothing re-sent while blocked", 0, recommits.size)
+
+        // The other holder lets go: this session takes the lease and re-sends.
+        second.get().send("""{"type":"lease-changed"}""")
+        assertTrue("re-sent once the lease is granted", awaitUntil { recommits.size == 1 })
+        assertEquals(
+            "under the same client_batch_id",
+            firstCommit.get().getString("client_batch_id"),
+            recommits[0].getString("client_batch_id"),
+        )
+        assertTrue("confirmed by the echo", awaitUntil { onMain { session.pendingBatchCount == 0 } })
+        assertEquals(listOf(stroke.id), onMain { session.strokes.map { it.id } })
+
+        session.disconnect()
+    }
+
+    /**
      * Makes the *first* enqueued page drop its socket (1013) on the first
      * `commit-batch`, recording the commit — the in-flight batch a lagged or
      * failed connection leaves unacknowledged. MockWebServer serves responses

@@ -79,6 +79,18 @@ class PageInkSession(
     private val seenBatchIds = mutableSetOf<String>()
     private val confirmedStrokes = mutableListOf<Stroke>()
     private val pendingBatches = linkedMapOf<String, List<Stroke>>()
+
+    // The subset of [pendingBatches] that no socket has ever been sent: ink
+    // drawn before the lease was granted or while disconnected (#390). Only
+    // this ink is dropped when another editor turns out to hold the lease; a
+    // batch already sent under a valid lease may have been stored, and stays
+    // pending so it is re-sent when the lease is ours again (#279).
+    private val neverSentBatchIds = linkedSetOf<String>()
+
+    // Strokes the server has not yet acknowledged — never sent, or sent and
+    // awaiting their echo. Leaving the page now would lose them.
+    val unsentStrokeCount: Int
+        get() = pendingBatches.values.sumOf { it.size }
     private val pendingErasures = linkedMapOf<String, Set<String>>()
     private var socket: PageSocket? = null
     private var leaseRenewJob: Job? = null
@@ -184,6 +196,13 @@ class PageInkSession(
 
     fun disconnect() {
         closing = true
+        if (pendingBatches.isNotEmpty()) {
+            AppLog.w(
+                TAG,
+                "leaving the page discards unsent ink: strokes=$unsentStrokeCount",
+                context = screen,
+            )
+        }
         reconnectJob?.cancel()
         reconnectJob = null
         failStrokeSpans("page closed")
@@ -220,6 +239,7 @@ class PageInkSession(
         if (canEdit && activeSocket != null) {
             activeSocket.commitBatch(clientBatchId, submitted)
         } else {
+            neverSentBatchIds += clientBatchId
             resendPendingOnLease = true
             AppLog.i(TAG, "stroke held until the edit lease is granted: pending=${pendingBatches.size}", context = screen)
         }
@@ -398,12 +418,16 @@ class PageInkSession(
             context = screen,
         )
         pendingBatches.forEach { (clientBatchId, strokes) -> activeSocket.commitBatch(clientBatchId, strokes) }
+        neverSentBatchIds.clear()
         pendingErasures.forEach { (clientMutationId, ids) -> activeSocket.commitTombstones(clientMutationId, ids.toList()) }
     }
 
     private fun onLeaseDenied() {
         AppLog.i(TAG, "edit lease denied", context = screen)
         clearPendingErasures()
+        // A denial answers this socket's own commit or acquire: everything
+        // pending is refused, sent or not.
+        discardPendingBatches()
         revertUnconfirmedPaper()
         refuseLease()
     }
@@ -432,22 +456,33 @@ class PageInkSession(
     }
 
     // Another editor holds the lease. Ink drawn while this session waited for
-    // it was never accepted, so it leaves the canvas rather than sitting there
-    // looking saved; the banner says why.
+    // it was never sent, so it leaves the canvas rather than sitting there
+    // looking saved; the banner says why. Ink a dropped socket sent under a
+    // valid lease and never saw echoed stays pending: it is re-sent if the
+    // lease comes back (#279).
     private fun refuseLease() {
         canEdit = false
         stopLeaseRenewal()
-        if (pendingBatches.isNotEmpty()) {
-            AppLog.i(
-                TAG,
-                "discarding held strokes: another session holds the edit lease: batches=${pendingBatches.size}",
-                context = screen,
-            )
-        }
-        discardPendingBatches()
-        resendPendingOnLease = false
+        discardNeverSentBatches()
+        resendPendingOnLease = pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()
         inkRefused = LEASE_BLOCKED
         statusBanner = LEASE_BLOCKED
+    }
+
+    private fun discardNeverSentBatches() {
+        val held = neverSentBatchIds.filter { it in pendingBatches }
+        neverSentBatchIds.clear()
+        if (held.isEmpty()) return
+        AppLog.i(
+            TAG,
+            "discarding held strokes: another session holds the edit lease: batches=${held.size}",
+            context = screen,
+        )
+        held.forEach { clientBatchId ->
+            pendingBatches.remove(clientBatchId)
+            strokeSpans.remove(clientBatchId)?.failed("discarded")
+        }
+        publishRenderableStrokes()
     }
 
     private fun onFailure(event: PageEvent.Failure) {
@@ -554,6 +589,7 @@ class PageInkSession(
 
     private fun discardPendingBatches() {
         failStrokeSpans("discarded")
+        neverSentBatchIds.clear()
         if (pendingBatches.isNotEmpty()) {
             pendingBatches.clear()
             publishRenderableStrokes()
