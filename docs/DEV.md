@@ -418,6 +418,14 @@ Compose instrumented tests use the **v2** rule (`androidx.compose.ui.test.junit4
 Canvas input tests (`PageCanvasInputInstrumentedTest`) send `MotionEvent`s straight into the activity's decor view, which is enough for stylus and finger routing but **skips window routing**: an open popup (the pen palette) or a system window (the status bar) never sees them. A test about which window a touch lands in — a popup swallowing it, or the API 36 edge-to-edge status bar covering the top bar — must inject through the window manager (`Instrumentation.sendPointerSync`), as the #390 palette and back-arrow tests do. That call refuses a touch aimed at a window the app does not own, which is how the status-bar overlap showed up.
 >>>>>>> 631037c (fix(android): stop losing the first pen stroke and back-arrow taps (#390))
 
+**Instrumented tests never leave the device (#464).** They run under `link.desync.vnote.VNoteTestRunner` (the stock `AndroidJUnitRunner` plus `TestNetwork`, both in `androidTest`), which acts before `Application.onCreate`:
+
+- **The app's own defaults point at loopback.** `net.Endpoints.serverBaseUrl` (the flavor's `BASE_URL` in the app) becomes `http://127.0.0.1:9`, so the telemetry exporter `VNoteApplication` installs, and an activity launched without `MainActivity.apiClientFactory`, fail on the device instead of polling `v-notes-dev.desync.link` with a test's fake token.
+- **Every other non-loopback request fails the run.** All HTTP clients are built by `net.HttpClients` (REST, both WebSockets, `/health`, thumbnails, telemetry, the token endpoint, AppAuth discovery). Under the runner they carry a guard that refuses any host other than `localhost`/127.0.0.0/8/`::1` before DNS or connect, logs it under `VNoteTestNetwork`, and crashes the test process so the running test is reported failed with the refused URL. Point the code under test at a `MockWebServer` on `127.0.0.1` instead. In the app there is no guard, so each client is exactly what its call site configures. Under the runner the guard is the last application interceptor, so it never shows up as the caller in a `TracingInterceptor` span's `code.*` attributes.
+- **The one exemption is explicit:** the `DensePageSeeder` measurement fixture calls `TestNetwork.allowRealNetworkForMeasurement()` because it seeds a real environment on purpose. CI never runs it (`@MeasurementFixture`).
+- **A test that swaps telemetry** (`Telemetry.install(recording)`) no longer leaves the replaced runtime's export loop running: `install` stops the runtime it replaces, and swapping back restarts it.
+- There is no test-only network security config: changing the build type would ripple through the CI lanes and lane keys, and the guard already covers AppAuth's `HttpURLConnection` through its `ConnectionBuilder`.
+
 ### Emulator (WSL2 / Hyper-V)
 
 On **Windows + WSL2**, do **not** install the **Android Emulator hypervisor driver (AEHD)**. It conflicts with Hyper-V/WSL2 and often fails with:

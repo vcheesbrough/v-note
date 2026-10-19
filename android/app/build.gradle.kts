@@ -33,7 +33,10 @@ android {
         targetSdk = 36
         versionCode = appVersionCode
         versionName = appVersionName
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // The stock runner plus the loopback-only network guard (#464):
+        // androidTest's VNoteTestRunner and TestNetwork. scripts/
+        // run-android-instrumented-ci.sh names it too.
+        testInstrumentationRunner = "link.desync.vnote.VNoteTestRunner"
         // Required by net.openid.appauth manifest merger (HTTPS App Links use a separate intent filter).
         manifestPlaceholders["appAuthRedirectScheme"] = "link.desync.vnote"
     }

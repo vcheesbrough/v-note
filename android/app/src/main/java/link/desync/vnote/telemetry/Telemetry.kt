@@ -78,7 +78,9 @@ internal interface Transport {
 // the export loop. [transport] null means export is off (every unit test that
 // does not care): spans and logs are accepted and discarded.
 class TelemetryRuntime internal constructor(
-    transport: Transport?,
+    // Kept so an instrumented test can check where the installed exporter
+    // points (#464); nothing else reads it.
+    internal val transport: Transport?,
     serviceVersion: String = "unknown",
     // Where the state-change lines go: Logcat in the app, a list in tests.
     localLog: (String) -> Unit = {},
@@ -87,7 +89,10 @@ class TelemetryRuntime internal constructor(
     private val clock: () -> Long = ::nowUnixNanos,
 ) {
     private val queue = transport?.let { ExportQueue(it, clock, serviceVersion, localLog, jitter) }
-    private var scheduler: ScheduledExecutorService? = null
+
+    // The background export thread; null with export off. Stopped by
+    // [Telemetry.install] when another runtime replaces this one (#464).
+    internal val exportLoop = queue?.let { ExportLoop(it::tick) }
 
     // The span enclosing everything the current screen does. Read only by
     // [screen]; nothing else consults "the current" anything.
@@ -99,18 +104,8 @@ class TelemetryRuntime internal constructor(
     fun now(): Long = clock()
 
     // Starts the export loop, fetching configuration first. Idempotent.
-    @Synchronized
     fun start(intervalMs: Long = EXPORT_INTERVAL_MS) {
-        val queue = queue ?: return
-        if (scheduler != null) return
-        scheduler =
-            Executors
-                .newSingleThreadScheduledExecutor { runnable ->
-                    Thread(runnable, "vnote-telemetry").apply { isDaemon = true }
-                }.also { executor ->
-                    executor.execute(queue::tick)
-                    executor.scheduleWithFixedDelay(queue::tick, intervalMs, intervalMs, TimeUnit.MILLISECONDS)
-                }
+        exportLoop?.start(intervalMs)
     }
 
     fun screen(): SpanContext = screenRoot
@@ -168,8 +163,7 @@ class TelemetryRuntime internal constructor(
     // Exports now, on the export thread. For the app going to the background:
     // the radio is likely still up from whatever the user just did.
     fun flush() {
-        val queue = queue ?: return
-        runCatching { scheduler?.execute(queue::tick) }
+        exportLoop?.runNow()
     }
 
     // Sends [crash] now, by itself, and waits up to [timeoutMs]. Only for the
@@ -192,6 +186,44 @@ class TelemetryRuntime internal constructor(
     // One tick — configure if needed, then export — on the calling thread. For tests.
     internal fun exportNow() {
         queue?.tick()
+    }
+}
+
+// The thread a runtime exports on: [tick] at once, then every interval.
+// Stoppable and restartable (#464), so a test that swaps runtimes leaves no
+// loop running behind the one it installed. What is queued stays queued.
+internal class ExportLoop(
+    private val tick: () -> Unit,
+) {
+    private var scheduler: ScheduledExecutorService? = null
+
+    val isRunning: Boolean
+        @Synchronized get() = scheduler != null
+
+    // Idempotent.
+    @Synchronized
+    fun start(intervalMs: Long) {
+        if (scheduler != null) return
+        scheduler =
+            Executors
+                .newSingleThreadScheduledExecutor { runnable ->
+                    Thread(runnable, "vnote-telemetry").apply { isDaemon = true }
+                }.also { executor ->
+                    executor.execute(tick)
+                    executor.scheduleWithFixedDelay(tick, intervalMs, intervalMs, TimeUnit.MILLISECONDS)
+                }
+    }
+
+    // One tick now, on the loop's thread; nothing if it is not running.
+    @Synchronized
+    fun runNow() {
+        runCatching { scheduler?.execute(tick) }
+    }
+
+    @Synchronized
+    fun stop() {
+        scheduler?.shutdownNow()
+        scheduler = null
     }
 }
 
@@ -419,8 +451,15 @@ object Telemetry {
     var runtime: TelemetryRuntime = TelemetryRuntime(transport = null)
         private set
 
+    // The runtime it replaces is stopped (#464): in the app that is the
+    // inert pre-install one, which has no loop to stop, but a test that swaps
+    // in a recording runtime would otherwise leave the app's export loop
+    // running behind it — and its own behind the app's when it swaps back.
+    @Synchronized
     fun install(installed: TelemetryRuntime) {
+        val previous = runtime
         runtime = installed
+        if (previous !== installed) previous.exportLoop?.stop()
         installed.start()
     }
 

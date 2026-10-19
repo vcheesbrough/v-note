@@ -7,6 +7,7 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import link.desync.vnote.auth.TokenStore
+import link.desync.vnote.net.Endpoints
 import link.desync.vnote.telemetry.CrashHandler
 import link.desync.vnote.telemetry.OpenSpan
 import link.desync.vnote.telemetry.OtlpHttpTransport
@@ -37,7 +38,9 @@ class VNoteApplication : Application() {
         Telemetry.install(
             TelemetryRuntime(
                 OtlpHttpTransport(
-                    BuildConfig.BASE_URL,
+                    // The flavor's server; a loopback address under
+                    // instrumentation (#464), set before this runs.
+                    Endpoints.serverBaseUrl,
                     accessToken = { tokenStore?.accessToken() },
                     accessTokenExpiry = { tokenStore?.accessTokenExpiryEpochSeconds() },
                 ),

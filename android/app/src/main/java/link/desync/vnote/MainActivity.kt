@@ -37,6 +37,7 @@ import link.desync.vnote.ink.PaperPreferences
 import link.desync.vnote.ink.normalizedSamsungSpenAction
 import link.desync.vnote.library.LibraryStateHolder
 import link.desync.vnote.library.ServerHealthProbe
+import link.desync.vnote.net.Endpoints
 import link.desync.vnote.telemetry.AppLog
 import link.desync.vnote.ui.theme.VNoteTheme
 
@@ -88,7 +89,7 @@ class MainActivity : ComponentActivity() {
         authRepository = AuthRepository(applicationContext, authConfig, tokenStore)
         apiClient =
             apiClientFactory?.invoke(tokenStore, authRepository)
-                ?: OkHttpApiClient(BuildConfig.BASE_URL, tokenStore, authRepository)
+                ?: OkHttpApiClient(Endpoints.serverBaseUrl, tokenStore, authRepository)
         healthProbe = serverHealthProbe(apiClient)
         library =
             LibraryStateHolder(

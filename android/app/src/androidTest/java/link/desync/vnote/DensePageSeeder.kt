@@ -63,6 +63,9 @@ class DensePageSeeder {
             "measurement fixture — pass `-e strokes <n>` to run it",
             strokesArg != null,
         )
+        // The one deliberate exception to the test network guard (#464): this
+        // fixture writes to whatever real environment the flavor points at.
+        TestNetwork.allowRealNetworkForMeasurement()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val tokenStore = TokenStore(context)
         assertTrue(

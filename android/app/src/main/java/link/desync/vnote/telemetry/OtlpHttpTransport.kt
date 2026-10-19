@@ -1,5 +1,6 @@
 package link.desync.vnote.telemetry
 
+import link.desync.vnote.net.HttpClients
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -52,13 +53,12 @@ internal class OtlpHttpTransport(
     private val accessTokenExpiry: () -> Long? = { null },
     private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / MILLIS_PER_SECOND },
     private val http: OkHttpClient =
-        OkHttpClient
-            .Builder()
-            .callTimeout(EXPORT_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .followRedirects(false)
-            .build(),
+        HttpClients.build {
+            callTimeout(EXPORT_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            followRedirects(false)
+        },
 ) : Transport {
-    private val configUrl = "${serverBaseUrl.trimEnd('/')}/api/telemetry/config"
+    internal val configUrl = "${serverBaseUrl.trimEnd('/')}/api/telemetry/config"
     private val json = "application/json".toMediaType()
 
     override fun isReady(): Boolean = usableToken() != null
