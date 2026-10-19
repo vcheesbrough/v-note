@@ -13,7 +13,9 @@ SYSTEM_IMAGE="${SYSTEM_IMAGE:-system-images;android-${ANDROID_API_LEVEL};google_
 BOOT_TIMEOUT_SEC="${BOOT_TIMEOUT_SEC:-900}"
 APP_APK="${APP_APK:-/workspace/android/app/build/outputs/apk/dev/debug/app-dev-debug.apk}"
 TEST_APK="${TEST_APK:-/workspace/android/app/build/outputs/apk/androidTest/dev/debug/app-dev-debug-androidTest.apk}"
-TEST_RUNNER="${TEST_RUNNER:-link.desync.vnote.dev.test/androidx.test.runner.AndroidJUnitRunner}"
+# The app's own runner (#464): AndroidJUnitRunner plus the loopback-only network
+# guard. Must match testInstrumentationRunner in android/app/build.gradle.kts.
+TEST_RUNNER="${TEST_RUNNER:-link.desync.vnote.dev.test/link.desync.vnote.VNoteTestRunner}"
 # Measurement fixtures are run by hand against a real device, never by CI. They
 # are excluded here rather than skipped at runtime, because the result check
 # below treats *any* negative status code as a failure — including the -4 an

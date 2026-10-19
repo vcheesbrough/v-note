@@ -7,7 +7,7 @@ import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -38,7 +38,6 @@ import org.junit.runner.RunWith
 import java.net.InetAddress
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -101,7 +100,7 @@ class PageLibraryOrderingInstrumentedTest {
     private val composeRule = createAndroidComposeRule<MainActivity>()
 
     @get:Rule
-    val rules: TestRule = RuleChain.outerRule(environmentRule).around(composeRule)
+    val rules: TestRule = RuleChain.outerRule(SnapshotThreadGuard()).around(environmentRule).around(composeRule)
 
     /**
      * A close the *server* starts — a restart or a deploy — must surface as a
@@ -203,7 +202,7 @@ class PageLibraryOrderingInstrumentedTest {
 
         composeRule.onNodeWithTag("drawing-tool").assertIsDisplayed().assertIsSelected()
         composeRule.onNodeWithTag("eraser-tool").assertIsDisplayed().assertIsNotSelected()
-        assertTrue("editor lease granted", leaseGranted.await(5, TimeUnit.SECONDS))
+        assertTrue("editor lease granted", composeRule.awaitLatch(leaseGranted, 5_000))
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("tool-palette").assertDoesNotExist()
         assertEquals(48.dp, composeRule.onNodeWithTag("drawing-tool").getUnclippedBoundsInRoot().width())
@@ -227,8 +226,11 @@ class PageLibraryOrderingInstrumentedTest {
         ).forEach { color -> composeRule.onNodeWithTag("swatch-$color").assertIsDisplayed() }
         assertEquals(48.dp, composeRule.onNodeWithTag("swatch-#006400").getUnclippedBoundsInRoot().width())
 
-        composeRule.onNodeWithTag("swatch-#C62828").performClick().assertIsSelected()
-        composeRule.onNodeWithTag("tool-palette").assertIsDisplayed()
+        composeRule.onNodeWithTag("swatch-#C62828").performClick()
+        // Picking a colour closes the palette (#390); reopen it for the width.
+        composeRule.onNodeWithTag("tool-palette").assertDoesNotExist()
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule.onNodeWithTag("swatch-#C62828").assertIsSelected()
         composeRule
             .onNodeWithTag("tool-width-slider")
             .performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->
@@ -251,7 +253,9 @@ class PageLibraryOrderingInstrumentedTest {
     fun drawingSettingsPersistAcrossPagesAndActivityRecreation() {
         openPage("page_old")
         composeRule.onNodeWithTag("drawing-tool").performClick()
-        composeRule.onNodeWithTag("swatch-#C62828").performClick().assertIsSelected()
+        composeRule.onNodeWithTag("swatch-#C62828").performClick()
+        // Picking a colour closes the palette (#390); reopen it for the width.
+        composeRule.onNodeWithTag("drawing-tool").performClick()
         composeRule
             .onNodeWithTag("tool-width-slider")
             .performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->

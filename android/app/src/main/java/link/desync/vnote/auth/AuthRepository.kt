@@ -6,8 +6,10 @@ import android.content.Intent
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import link.desync.vnote.net.HttpClients
 import link.desync.vnote.telemetry.AppLog
 import link.desync.vnote.telemetry.Telemetry
+import net.openid.appauth.AppAuthConfiguration
 import net.openid.appauth.AuthorizationException
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationResponse
@@ -16,7 +18,6 @@ import net.openid.appauth.AuthorizationServiceConfiguration
 import net.openid.appauth.ResponseTypeValues
 import net.openid.appauth.TokenRequest
 import okhttp3.FormBody
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import kotlin.coroutines.resume
@@ -28,8 +29,16 @@ open class AuthRepository(
     private val tokenStore: TokenStore,
     private val serviceConfigurationOverride: AuthorizationServiceConfiguration? = null,
 ) {
-    private val authService = AuthorizationService(context)
-    private val http = OkHttpClient()
+    // Both through [HttpClients] (#464), so the instrumentation runner's
+    // network guard covers the token endpoint and AppAuth's discovery fetch.
+    // In the app there is no guard: a default `AuthorizationService` and a
+    // plain client, as before.
+    private val appAuthConnections = HttpClients.appAuthConnectionBuilder()
+    private val authService =
+        appAuthConnections?.let { connections ->
+            AuthorizationService(context, AppAuthConfiguration.Builder().setConnectionBuilder(connections).build())
+        } ?: AuthorizationService(context)
+    private val http = HttpClients.build()
 
     suspend fun discoverConfiguration(): AuthorizationServiceConfiguration =
         serviceConfigurationOverride
@@ -37,19 +46,25 @@ open class AuthRepository(
 
     private suspend fun fetchConfiguration(): AuthorizationServiceConfiguration =
         suspendCoroutine { continuation ->
-            AuthorizationServiceConfiguration.fetchFromIssuer(
-                Uri.parse(config.issuerUrl),
-            ) { configuration, error ->
-                when {
-                    configuration != null -> continuation.resume(configuration)
-                    else ->
-                        continuation.resumeWith(
-                            Result.failure(
-                                error
-                                    ?: IllegalStateException("OIDC discovery failed for ${config.issuerUrl}"),
-                            ),
-                        )
+            val callback =
+                AuthorizationServiceConfiguration.RetrieveConfigurationCallback { configuration, error ->
+                    when {
+                        configuration != null -> continuation.resume(configuration)
+                        else ->
+                            continuation.resumeWith(
+                                Result.failure(
+                                    error
+                                        ?: IllegalStateException("OIDC discovery failed for ${config.issuerUrl}"),
+                                ),
+                            )
+                    }
                 }
+            val issuer = Uri.parse(config.issuerUrl)
+            val connections = appAuthConnections
+            if (connections != null) {
+                AuthorizationServiceConfiguration.fetchFromIssuer(issuer, callback, connections)
+            } else {
+                AuthorizationServiceConfiguration.fetchFromIssuer(issuer, callback)
             }
         }
 

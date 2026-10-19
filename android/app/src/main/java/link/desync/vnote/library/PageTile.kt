@@ -35,6 +35,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.model.ThumbnailMetadata
@@ -147,15 +149,20 @@ private fun PagePreview(
     unavailable: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Pinned to the main thread (#465): the fetch hops to IO, and in the
+    // Compose test harness this composition-scoped coroutine would otherwise
+    // resume — and write the bitmap state — on that IO worker.
     val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = thumbnail, key2 = unavailable) {
-        value =
-            if (!unavailable && thumbnail is ThumbnailMetadata.Available) {
-                apiClient.fetchThumbnail(thumbnail.url).getOrNull()?.let { bytes ->
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        withContext(Dispatchers.Main.immediate) {
+            value =
+                if (!unavailable && thumbnail is ThumbnailMetadata.Available) {
+                    apiClient.fetchThumbnail(thumbnail.url).getOrNull()?.let { bytes ->
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    }
+                } else {
+                    null
                 }
-            } else {
-                null
-            }
+        }
     }
     val failedColor = MaterialTheme.colorScheme.errorContainer
     Box(

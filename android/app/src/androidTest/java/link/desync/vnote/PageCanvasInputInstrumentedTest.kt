@@ -6,14 +6,21 @@ import android.view.View
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PixelMap
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
+import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import link.desync.vnote.api.ApiClient
@@ -44,7 +51,8 @@ import java.net.InetAddress
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
 class PageCanvasInputInstrumentedTest {
@@ -53,6 +61,12 @@ class PageCanvasInputInstrumentedTest {
     private lateinit var apiClient: ApiClient
     private val seedDelivered = CountDownLatch(1)
     private val leaseGranted = CountDownLatch(1)
+    private val leaseRequested = CountDownLatch(1)
+
+    // When set, `acquire-lease` is parked rather than answered, so a test can
+    // ink in the window before the grant (#390); [grantDeferredLease] answers it.
+    private val deferLease = AtomicBoolean(false)
+    private val deferredLeaseSocket = AtomicReference<WebSocket>()
     private val mutations = LinkedBlockingQueue<JSONObject>()
     private val requestPaths = ConcurrentLinkedQueue<String>()
     private val pageMessages = ConcurrentLinkedQueue<String>()
@@ -91,7 +105,7 @@ class PageCanvasInputInstrumentedTest {
     private val composeRule = createAndroidComposeRule<MainActivity>()
 
     @get:Rule
-    val rules: TestRule = RuleChain.outerRule(environmentRule).around(composeRule)
+    val rules: TestRule = RuleChain.outerRule(SnapshotThreadGuard()).around(environmentRule).around(composeRule)
 
     @Test
     fun explicitEraserHidesAndCommitsHitBeforeStylusLift() {
@@ -363,6 +377,381 @@ class PageCanvasInputInstrumentedTest {
         assertTrue("v2 tap renders a visible dot", greenThickness(pixels, 300, 300) > 2)
     }
 
+    /**
+     * #390: the lease is granted a round trip after the page is drawn. A stroke
+     * made in that window used to be refused at pen-down; it is now drawn,
+     * held, and sent the moment the lease arrives.
+     */
+    @Test
+    fun strokeDrawnBeforeTheLeaseIsGrantedIsCommittedOnceGranted() {
+        deferLease.set(true)
+        openEditor(awaitLease = false)
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 240f, LIVE_STROKE_Y, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_MOVE, 340f, LIVE_STROKE_Y, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_UP, 440f, LIVE_STROKE_Y, downTime = downTime)
+
+        val held = composeRule.awaitInkPixels { hasInkAt(it, 340, LIVE_STROKE_Y.toInt()) }
+        assertTrue("held stroke stays on the canvas", hasInkAt(held, 340, LIVE_STROKE_Y.toInt()))
+        assertNull("nothing is sent without the lease", awaitMutation("commit-batch", 500))
+
+        grantDeferredLease()
+        val commit = awaitMutation("commit-batch")
+        assertNotNull("held stroke is committed once the lease is granted", commit)
+        val points = commit!!.getJSONArray("strokes").getJSONObject(0).getJSONArray("points")
+        assertEquals("the whole stroke, from its first sample", 240.0, points.getJSONObject(0).getDouble("x"), 1.0)
+        assertNull("sent once", awaitMutation("commit-batch", 500))
+    }
+
+    /**
+     * #390: a pen that lands while a finger (or palm) is already down arrives
+     * as ACTION_POINTER_DOWN on a stream that began with the finger. It draws —
+     * from its own pointer's coordinates — instead of joining the pan.
+     */
+    @Test
+    fun stylusLandingWhileAFingerIsDownCommitsAStroke() {
+        openEditor()
+        val finger = TestPointer(id = 0, toolType = MotionEvent.TOOL_TYPE_FINGER, x = 600f, y = 500f)
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendPointers(MotionEvent.ACTION_DOWN, listOf(finger), downTime = downTime)
+
+        fun pen(x: Float) = TestPointer(id = 1, toolType = MotionEvent.TOOL_TYPE_STYLUS, x = x, y = LIVE_STROKE_Y)
+        sendPointers(MotionEvent.ACTION_POINTER_DOWN, listOf(finger, pen(240f)), actionIndex = 1, downTime = downTime)
+        for (x in 260..440 step 30) {
+            sendPointers(MotionEvent.ACTION_MOVE, listOf(finger, pen(x.toFloat())), downTime = downTime)
+        }
+        sendPointers(MotionEvent.ACTION_POINTER_UP, listOf(finger, pen(440f)), actionIndex = 1, downTime = downTime)
+        sendPointers(MotionEvent.ACTION_UP, listOf(finger), downTime = downTime)
+
+        val commit = awaitMutation("commit-batch")
+        assertNotNull("the pen's stroke is committed", commit)
+        val points = commit!!.getJSONArray("strokes").getJSONObject(0).getJSONArray("points")
+        assertTrue("down+moves+up captured", points.length() >= 3)
+        for (index in 0 until points.length()) {
+            val point = points.getJSONObject(index)
+            assertEquals("point $index is the pen's, not the finger's", LIVE_STROKE_Y.toDouble(), point.getDouble("y"), 1.0)
+        }
+        assertEquals(240.0, points.getJSONObject(0).getDouble("x"), 1.0)
+        assertEquals(440.0, points.getJSONObject(points.length() - 1).getDouble("x"), 1.0)
+
+        val pixels = composeRule.awaitInkPixels { hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }
+        assertTrue("the resting finger did not pan the page", hasInkAt(pixels, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()))
+    }
+
+    /** #390: writing straight after a finger fling, while the page still glides. */
+    @Test
+    fun stylusStrokeRightAfterAFingerFlingCommits() {
+        openEditor()
+        composeRule.onNodeWithTag("ink-canvas").performTouchInput {
+            swipe(start = Offset(700f, 600f), end = Offset(200f, 600f), durationMillis = 80)
+        }
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 240f, LIVE_STROKE_Y, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_MOVE, 340f, LIVE_STROKE_Y, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_UP, 440f, LIVE_STROKE_Y, downTime = downTime)
+
+        assertNotNull("the stroke after the fling is committed", awaitMutation("commit-batch"))
+    }
+
+    /**
+     * #390: picking a colour closes the palette, and the next pen stroke — sent
+     * through the window manager, as a real one is — draws in that colour
+     * rather than being spent dismissing the palette.
+     */
+    @Test
+    fun pickingAColourClosesThePaletteAndTheNextStrokeCommits() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule.onNodeWithTag("tool-palette").assertIsDisplayed()
+        composeRule.onNodeWithTag("swatch-#C62828").performClick()
+        awaitPaletteClosed()
+
+        injectStylusStroke(fromX = 240f, toX = 440f, y = LIVE_STROKE_Y)
+
+        val commit = awaitMutation("commit-batch")
+        assertNotNull("the first stroke after picking a colour is committed", commit)
+        val style = commit!!.getJSONArray("strokes").getJSONObject(0).getJSONObject("style")
+        assertEquals("#C62828", style.getJSONObject("parameters").getString("color"))
+    }
+
+    /**
+     * #390: the palette stays open while the width is adjusted, and a pen
+     * stroke on the page then both closes it and draws. A focusable popup spent
+     * that stroke on dismissing itself.
+     */
+    @Test
+    fun aStrokeWhileThePaletteIsOpenClosesItAndCommits() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule
+            .onNodeWithTag("tool-width-slider")
+            .performSemanticsAction(SemanticsActions.SetProgress) { setProgress -> setProgress(8.5f) }
+        composeRule.onNodeWithTag("tool-palette").assertIsDisplayed()
+
+        injectStylusStroke(fromX = 100f, toX = 300f, y = LIVE_STROKE_Y)
+
+        assertNotNull("the stroke is committed, not swallowed", awaitMutation("commit-batch"))
+        awaitPaletteClosed()
+    }
+
+    /** #390: the back arrow answers the first tap after a colour is picked. */
+    @Test
+    fun backArrowRespondsRightAfterPickingAColour() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule.onNodeWithTag("swatch-#C62828").performClick()
+
+        injectTap(backArrowCenter())
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("page-tile-page_input").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("page-tile-page_input").assertIsDisplayed()
+    }
+
+    /** #390: and while the palette is still open, after a width change. */
+    @Test
+    fun backArrowRespondsWhileThePaletteIsOpen() {
+        openEditor()
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule
+            .onNodeWithTag("tool-width-slider")
+            .performSemanticsAction(SemanticsActions.SetProgress) { setProgress -> setProgress(8.5f) }
+        composeRule.onNodeWithTag("tool-palette").assertIsDisplayed()
+
+        injectTap(backArrowCenter())
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("page-tile-page_input").fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    /**
+     * PR #72 review: ink the server has not acknowledged lives only in memory,
+     * so leaving with it asks first. This server never echoes, so a stroke
+     * stays unacknowledged. System back asks too, and Stay keeps the page.
+     */
+    @Test
+    fun systemBackWithUnsentInkAsksAndStayKeepsThePage() {
+        openEditor()
+        drawUnacknowledgedStroke()
+
+        Espresso.pressBack()
+
+        composeRule.onNodeWithTag("unsent-ink-dialog").assertIsDisplayed()
+        composeRule.onNodeWithText("1 stroke hasn't reached the server and will be lost if you leave.").assertIsDisplayed()
+        composeRule.onNodeWithTag("unsent-ink-stay").performClick()
+        composeRule.onNodeWithTag("unsent-ink-dialog").assertDoesNotExist()
+        composeRule.onNodeWithTag("ink-canvas").assertIsDisplayed()
+    }
+
+    /** PR #72 review: Leave anyway, from the back arrow, leaves the page. */
+    @Test
+    fun backArrowWithUnsentInkLeavesOnlyWhenConfirmed() {
+        openEditor()
+        drawUnacknowledgedStroke()
+
+        composeRule.onNodeWithContentDescription("Back to library").performClick()
+        composeRule.onNodeWithTag("unsent-ink-dialog").assertIsDisplayed()
+        composeRule.onNodeWithTag("ink-canvas").assertIsDisplayed()
+        composeRule.onNodeWithTag("unsent-ink-leave").performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("page-tile-page_input").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("unsent-ink-dialog").assertDoesNotExist()
+    }
+
+    /** PR #72 review: with nothing unsent, back leaves at once — no dialog. */
+    @Test
+    fun backWithNoUnsentInkLeavesImmediately() {
+        openEditor()
+
+        Espresso.pressBack()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("page-tile-page_input").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("unsent-ink-dialog").assertDoesNotExist()
+    }
+
+    private fun drawUnacknowledgedStroke() {
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 240f, LIVE_STROKE_Y, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_MOVE, 340f, LIVE_STROKE_Y, downTime = downTime)
+        sendStylus(MotionEvent.ACTION_UP, 440f, LIVE_STROKE_Y, downTime = downTime)
+        assertNotNull("stroke sent, and never echoed", awaitMutation("commit-batch"))
+    }
+
+    private fun backArrowCenter(): Offset =
+        composeRule
+            .onNodeWithContentDescription("Back to library")
+            .fetchSemanticsNode()
+            .boundsInWindow
+            .center
+
+    private fun awaitPaletteClosed() {
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule
+                .onAllNodesWithTag("tool-palette")
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+    }
+
+    private data class TestPointer(
+        val id: Int,
+        val toolType: Int,
+        val x: Float,
+        val y: Float,
+    )
+
+    // Canvas-local px to screen px, the space the window manager injects in.
+    private fun canvasToScreen(
+        localX: Float,
+        localY: Float,
+    ): Offset {
+        val canvas = composeRule.onNodeWithTag("ink-canvas").getUnclippedBoundsInRoot()
+        val density = composeRule.activity.resources.displayMetrics.density
+        val contentLocation = IntArray(2)
+        composeRule.activity
+            .findViewById<View>(android.R.id.content)
+            .getLocationOnScreen(contentLocation)
+        return Offset(
+            contentLocation[0] + canvas.left.value * density + localX,
+            contentLocation[1] + canvas.top.value * density + localY,
+        )
+    }
+
+    // One multi-pointer event on the canvas, dispatched like [sendStylus].
+    private fun sendPointers(
+        action: Int,
+        pointers: List<TestPointer>,
+        actionIndex: Int = 0,
+        downTime: Long,
+    ) {
+        val properties =
+            pointers
+                .map { pointer ->
+                    MotionEvent.PointerProperties().apply {
+                        id = pointer.id
+                        toolType = pointer.toolType
+                    }
+                }.toTypedArray()
+        val coordinates =
+            pointers
+                .map { pointer ->
+                    val screen = canvasToScreen(pointer.x, pointer.y)
+                    MotionEvent.PointerCoords().apply {
+                        x = screen.x
+                        y = screen.y
+                        pressure = 1f
+                        size = 0.1f
+                    }
+                }.toTypedArray()
+        val event =
+            MotionEvent.obtain(
+                downTime,
+                android.os.SystemClock.uptimeMillis(),
+                action or (actionIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                pointers.size,
+                properties,
+                coordinates,
+                0,
+                0,
+                1f,
+                1f,
+                0,
+                0,
+                InputDevice.SOURCE_TOUCHSCREEN or InputDevice.SOURCE_STYLUS,
+                0,
+            )
+        val decor = composeRule.activity.window.decorView
+        val decorLocation = IntArray(2)
+        decor.getLocationOnScreen(decorLocation)
+        event.offsetLocation(-decorLocation[0].toFloat(), -decorLocation[1].toFloat())
+        composeRule.runOnUiThread {
+            assertTrue("app window consumed the event", decor.dispatchTouchEvent(event))
+        }
+        event.recycle()
+        android.os.SystemClock.sleep(16)
+    }
+
+    // A pen stroke injected through the window manager rather than straight
+    // into this window, so an open popup sees it exactly as it would a real one.
+    private fun injectStylusStroke(
+        fromX: Float,
+        toX: Float,
+        y: Float,
+    ) {
+        composeRule.waitForIdle()
+        val downTime = android.os.SystemClock.uptimeMillis()
+        val xs = listOf(fromX, (fromX + toX) / 2f, toX)
+        xs.forEachIndexed { index, x ->
+            val action =
+                when (index) {
+                    0 -> MotionEvent.ACTION_DOWN
+                    xs.lastIndex -> MotionEvent.ACTION_UP
+                    else -> MotionEvent.ACTION_MOVE
+                }
+            injectThroughWindowManager(action, canvasToScreen(x, y), MotionEvent.TOOL_TYPE_STYLUS, InputDevice.SOURCE_STYLUS, downTime)
+        }
+    }
+
+    // A finger tap at [windowPoint] (main-window coordinates), through the window manager.
+    private fun injectTap(windowPoint: Offset) {
+        composeRule.waitForIdle()
+        val windowLocation = IntArray(2)
+        composeRule.activity.window.decorView
+            .getLocationOnScreen(windowLocation)
+        val screen = Offset(windowPoint.x + windowLocation[0], windowPoint.y + windowLocation[1])
+        val downTime = android.os.SystemClock.uptimeMillis()
+        injectThroughWindowManager(MotionEvent.ACTION_DOWN, screen, MotionEvent.TOOL_TYPE_FINGER, InputDevice.SOURCE_TOUCHSCREEN, downTime)
+        injectThroughWindowManager(MotionEvent.ACTION_UP, screen, MotionEvent.TOOL_TYPE_FINGER, InputDevice.SOURCE_TOUCHSCREEN, downTime)
+    }
+
+    private fun injectThroughWindowManager(
+        action: Int,
+        screen: Offset,
+        toolType: Int,
+        source: Int,
+        downTime: Long,
+    ) {
+        val event =
+            MotionEvent.obtain(
+                downTime,
+                android.os.SystemClock.uptimeMillis(),
+                action,
+                1,
+                arrayOf(
+                    MotionEvent.PointerProperties().apply {
+                        id = 0
+                        this.toolType = toolType
+                    },
+                ),
+                arrayOf(
+                    MotionEvent.PointerCoords().apply {
+                        x = screen.x
+                        y = screen.y
+                        pressure = 1f
+                        size = 0.1f
+                    },
+                ),
+                0,
+                0,
+                1f,
+                1f,
+                0,
+                0,
+                source,
+                0,
+            )
+        InstrumentationRegistry.getInstrumentation().sendPointerSync(event)
+        event.recycle()
+    }
+
     private fun sendStylusMoveWithHistory(
         current: Triple<Float, Float, Float>,
         historical: List<Triple<Float, Float, Float>>,
@@ -424,7 +813,7 @@ class PageCanvasInputInstrumentedTest {
         android.os.SystemClock.sleep(16)
     }
 
-    private fun openEditor() {
+    private fun openEditor(awaitLease: Boolean = true) {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             runCatching {
                 composeRule.onNodeWithTag("page-tile-page_input").assertIsDisplayed()
@@ -435,13 +824,25 @@ class PageCanvasInputInstrumentedTest {
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
         assertTrue(
             "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
-            seedDelivered.await(5, TimeUnit.SECONDS),
+            composeRule.awaitLatch(seedDelivered, 5_000),
         )
         assertTrue(
-            "edit lease granted; requests=$requestPaths messages=$pageMessages",
-            leaseGranted.await(5, TimeUnit.SECONDS),
+            "edit lease requested; requests=$requestPaths messages=$pageMessages",
+            composeRule.awaitLatch(leaseRequested, 5_000),
         )
+        if (awaitLease) {
+            assertTrue(
+                "edit lease granted; requests=$requestPaths messages=$pageMessages",
+                composeRule.awaitLatch(leaseGranted, 5_000),
+            )
+        }
         composeRule.awaitInkPixels { hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }
+    }
+
+    private fun grantDeferredLease() {
+        val socket = checkNotNull(deferredLeaseSocket.get()) { "no lease request was parked" }
+        socket.send("""{"type":"lease-granted"}""")
+        leaseGranted.countDown()
     }
 
     /**
@@ -529,15 +930,7 @@ class PageCanvasInputInstrumentedTest {
     private fun awaitMutation(
         type: String,
         timeoutMillis: Long = 5_000,
-    ): JSONObject? {
-        val deadline = System.currentTimeMillis() + timeoutMillis
-        while (System.currentTimeMillis() < deadline) {
-            val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(1)
-            val message = mutations.poll(remaining, TimeUnit.MILLISECONDS) ?: return null
-            if (message.getString("type") == type) return message
-        }
-        return null
-    }
+    ): JSONObject? = composeRule.awaitQueued(mutations, timeoutMillis) { it.getString("type") == type }
 
     private fun sendStylus(
         action: Int,
@@ -671,8 +1064,13 @@ class PageCanvasInputInstrumentedTest {
                                 seedDelivered.countDown()
                             }
                             "acquire-lease" -> {
-                                webSocket.send("""{"type":"lease-granted"}""")
-                                leaseGranted.countDown()
+                                if (deferLease.get()) {
+                                    deferredLeaseSocket.set(webSocket)
+                                } else {
+                                    webSocket.send("""{"type":"lease-granted"}""")
+                                    leaseGranted.countDown()
+                                }
+                                leaseRequested.countDown()
                             }
                             "commit-batch" -> mutations.offer(message)
                             "commit-tombstones" -> mutations.offer(message)

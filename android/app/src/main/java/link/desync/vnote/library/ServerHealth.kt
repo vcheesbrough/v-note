@@ -1,12 +1,14 @@
 package link.desync.vnote.library
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.coroutines.CoroutineContext
 
 // The server's `/health` as the library menu reports it (#186).
 sealed interface ServerHealth {
@@ -73,9 +75,19 @@ class ServerHealthProbe(
 // ever finishing, leaving a stale result up. A re-check after a healthy
 // result keeps showing it until the new verdict is in; one after a failure
 // shows [ServerHealth.Checking] instead of the old failure.
+//
+// The probe runs on [stateContext], the main thread by default, whatever
+// [scope] dispatches to (#465). The scope is a composition's, and the probe's
+// request hops to an IO thread and back: on a dispatcher that resumes where it
+// was woken — the Compose test harness's — the verdict was written, and the
+// `collectAsState` reading it applied, on that IO thread, which crashed the
+// instrumented suite with "Detected multithreaded access to
+// SnapshotStateObserver". Pinning it here keeps the state on the UI thread
+// whichever scope the screen hands in.
 class ServerHealthMonitor(
     private val probe: ServerHealthProbe,
     private val scope: CoroutineScope,
+    private val stateContext: CoroutineContext = Dispatchers.Main.immediate,
     private val onGiveUp: (reason: String) -> Unit = {},
 ) {
     private val mutableState = MutableStateFlow<ServerHealth>(ServerHealth.Checking)
@@ -87,7 +99,7 @@ class ServerHealthMonitor(
         if (inFlight?.isActive == true) return
         if (mutableState.value !is ServerHealth.Healthy) mutableState.value = ServerHealth.Checking
         inFlight =
-            scope.launch {
+            scope.launch(stateContext) {
                 val result = probe.probe()
                 if (result is ServerHealth.Unhealthy) onGiveUp(result.reason)
                 mutableState.value = result

@@ -5,9 +5,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -27,7 +32,21 @@ internal fun VNoteTopBar(
     modifier: Modifier = Modifier,
     content: @Composable RowScope.() -> Unit,
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
+    // The app targets SDK 36, so from Android 15 the window is drawn edge to
+    // edge and the status bar sits over the top of the content. Without this
+    // inset the back arrow lay under the status bar, whose window took the
+    // taps meant for it (#390). The bar's ground still runs up behind the
+    // status bar; only its controls move down. Below Android 15 the window
+    // already stops short of the status bar and this inset is zero.
+    Column(
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+                ),
+    ) {
         Row(
             modifier =
                 Modifier

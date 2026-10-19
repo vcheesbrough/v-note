@@ -90,6 +90,21 @@ class TelemetryInstrumentedTest {
         assertFalse(Telemetry.isExporting)
     }
 
+    // #464: the exporter the Application installed asks the runner's loopback
+    // address for its configuration, never the flavor's real server — with
+    // this test's fake token in the store, it would otherwise poll dev.
+    @Test
+    fun theInstalledExporterAsksTheTestServerNotTheDevHost() {
+        val transport = Telemetry.runtime.transport as OtlpHttpTransport
+        assertEquals("${TestNetwork.SERVER_BASE_URL}/api/telemetry/config", transport.configUrl)
+        assertFalse(transport.configUrl.startsWith(BuildConfig.BASE_URL))
+
+        // A real fetch, with the token setUp stored: refused on the device
+        // (nothing listens there), and nothing the guard had to stop.
+        val violations = TestNetwork.collectViolations { assertEquals(ConfigFetch.NotYet, transport.fetchConfig()) }
+        assertTrue(violations.isEmpty())
+    }
+
     @Test
     fun restCallsCarryAValidTraceparentBesideTheRequestId() {
         server.enqueue(

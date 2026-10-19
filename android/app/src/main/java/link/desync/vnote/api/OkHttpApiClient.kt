@@ -13,13 +13,13 @@ import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.MeProfile
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.net.HttpClients
 import link.desync.vnote.telemetry.AppLog
 import link.desync.vnote.telemetry.TRACEPARENT_HEADER
 import link.desync.vnote.telemetry.TracingInterceptor
 import link.desync.vnote.telemetry.parseTraceparent
 import link.desync.vnote.telemetry.traced
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -46,11 +46,7 @@ class OkHttpApiClient(
     private val tokenStore: TokenStore,
     private val authRepository: AuthRepository,
 ) : ApiClient {
-    private val http =
-        OkHttpClient
-            .Builder()
-            .addInterceptor(TracingInterceptor())
-            .build()
+    private val http = HttpClients.build { addInterceptor(TracingInterceptor()) }
     private val healthCheck =
         HealthCheck(
             http = http,

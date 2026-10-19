@@ -410,6 +410,47 @@ class TelemetryRuntimeTest {
         assertTrue(delegated)
     }
 
+    // #464: a test that swaps in a recording runtime must not leave the app's
+    // export loop polling behind it, nor its own behind the app's afterwards.
+    @Test
+    fun installingARuntimeStopsTheExportLoopOfTheOneItReplaces() {
+        val previous = Telemetry.runtime
+        val first = TelemetryRuntime(FakeTransport(ready = false))
+        val second = TelemetryRuntime(FakeTransport(ready = false))
+        val firstLoop = checkNotNull(first.exportLoop)
+        val secondLoop = checkNotNull(second.exportLoop)
+        try {
+            Telemetry.install(first)
+            assertTrue(firstLoop.isRunning)
+
+            Telemetry.install(second)
+            assertFalse(firstLoop.isRunning)
+            assertTrue(secondLoop.isRunning)
+
+            Telemetry.install(first)
+            assertTrue("swapping back starts it again", firstLoop.isRunning)
+            assertFalse(secondLoop.isRunning)
+        } finally {
+            Telemetry.install(previous)
+            firstLoop.stop()
+            secondLoop.stop()
+        }
+    }
+
+    @Test
+    fun stopIsIdempotentAndAnInertRuntimeHasNoLoop() {
+        val running = TelemetryRuntime(FakeTransport(ready = false))
+        running.start()
+        val loop = checkNotNull(running.exportLoop)
+        loop.stop()
+        loop.stop()
+        assertFalse(loop.isRunning)
+        running.flush()
+        assertFalse("a flush does not restart it", loop.isRunning)
+
+        assertNull(TelemetryRuntime(transport = null).exportLoop)
+    }
+
     @Test
     fun throwableAttributesOmitTheStackUnlessAsked() {
         val attributes = throwableAttributes(RuntimeException("x"))
