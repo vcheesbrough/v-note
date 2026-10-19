@@ -144,7 +144,7 @@ fun PageCanvasScreen(
         InkCanvas(
             strokes = session.strokes,
             paper = session.paper,
-            canEdit = session.canEdit,
+            inkBlocked = session.inkBlocked,
             selectedTool = selectedTool,
             drawingStyle = drawingStyle,
             onStrokeFinished = session::commitStroke,

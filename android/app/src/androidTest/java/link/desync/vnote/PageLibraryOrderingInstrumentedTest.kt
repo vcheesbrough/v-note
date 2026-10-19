@@ -226,8 +226,11 @@ class PageLibraryOrderingInstrumentedTest {
         ).forEach { color -> composeRule.onNodeWithTag("swatch-$color").assertIsDisplayed() }
         assertEquals(48.dp, composeRule.onNodeWithTag("swatch-#006400").getUnclippedBoundsInRoot().width())
 
-        composeRule.onNodeWithTag("swatch-#C62828").performClick().assertIsSelected()
-        composeRule.onNodeWithTag("tool-palette").assertIsDisplayed()
+        composeRule.onNodeWithTag("swatch-#C62828").performClick()
+        // Picking a colour closes the palette (#390); reopen it for the width.
+        composeRule.onNodeWithTag("tool-palette").assertDoesNotExist()
+        composeRule.onNodeWithTag("drawing-tool").performClick()
+        composeRule.onNodeWithTag("swatch-#C62828").assertIsSelected()
         composeRule
             .onNodeWithTag("tool-width-slider")
             .performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->
@@ -250,7 +253,9 @@ class PageLibraryOrderingInstrumentedTest {
     fun drawingSettingsPersistAcrossPagesAndActivityRecreation() {
         openPage("page_old")
         composeRule.onNodeWithTag("drawing-tool").performClick()
-        composeRule.onNodeWithTag("swatch-#C62828").performClick().assertIsSelected()
+        composeRule.onNodeWithTag("swatch-#C62828").performClick()
+        // Picking a colour closes the palette (#390); reopen it for the width.
+        composeRule.onNodeWithTag("drawing-tool").performClick()
         composeRule
             .onNodeWithTag("tool-width-slider")
             .performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->

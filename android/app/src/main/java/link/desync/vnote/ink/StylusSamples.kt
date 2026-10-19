@@ -7,14 +7,16 @@ import androidx.compose.ui.geometry.Offset
 import link.desync.vnote.model.StrokePoint
 
 // World-space stroke samples from stylus events, including coalesced history and
-// normalised pressure.
+// normalised pressure. [pointerIndex] picks the stylus out of a multi-pointer
+// event: a pen that lands while a finger or palm is already down is not index 0.
 
 internal fun MotionEvent.toWorldPoint(
     viewport: ViewportTransform,
     startTime: Long,
     pressure: Double? = null,
+    pointerIndex: Int = 0,
 ): StrokePoint {
-    val world = viewport.toWorld(Offset(x, y))
+    val world = viewport.toWorld(Offset(getX(pointerIndex), getY(pointerIndex)))
     return StrokePoint(world.x.toDouble(), world.y.toDouble(), eventTime - startTime, pressure)
 }
 
@@ -26,8 +28,9 @@ internal fun MotionEvent.historicalWorldPoint(
     viewport: ViewportTransform,
     startTime: Long,
     pressure: Double?,
+    pointerIndex: Int = 0,
 ): StrokePoint {
-    val world = viewport.toWorld(Offset(getHistoricalX(index), getHistoricalY(index)))
+    val world = viewport.toWorld(Offset(getHistoricalX(pointerIndex, index), getHistoricalY(pointerIndex, index)))
     return StrokePoint(
         world.x.toDouble(),
         world.y.toDouble(),
@@ -49,9 +52,13 @@ internal fun normalizePressure(
     return raw.toDouble().coerceIn(0.0, 1.0)
 }
 
-internal fun MotionEvent.capturedPressure(capturesPressure: Boolean): Double? = normalizePressure(pressure, capturesPressure)
+internal fun MotionEvent.capturedPressure(
+    capturesPressure: Boolean,
+    pointerIndex: Int = 0,
+): Double? = normalizePressure(getPressure(pointerIndex), capturesPressure)
 
 internal fun MotionEvent.capturedHistoricalPressure(
     index: Int,
     capturesPressure: Boolean,
-): Double? = normalizePressure(getHistoricalPressure(index), capturesPressure)
+    pointerIndex: Int = 0,
+): Double? = normalizePressure(getHistoricalPressure(pointerIndex, index), capturesPressure)

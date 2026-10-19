@@ -439,8 +439,16 @@ class PageInkInstrumentedTest {
         session.disconnect()
     }
 
+    /**
+     * #390: another editor holds the lease. Ink drawn while this session was
+     * still connecting was only held, so it leaves the canvas when `welcome`
+     * names the other holder; ink drawn after that is dropped outright. None of
+     * it reaches the server.
+     */
     @Test
     fun blocksInkWhenAnotherSessionHoldsLease() {
+        val welcomeGate = CountDownLatch(1)
+        val commits = CopyOnWriteArrayList<String>()
         server.enqueue(
             MockResponse
                 .Builder()
@@ -450,6 +458,7 @@ class PageInkInstrumentedTest {
                             webSocket: WebSocket,
                             response: okhttp3.Response,
                         ) {
+                            welcomeGate.await(5, TimeUnit.SECONDS)
                             webSocket.send(
                                 """{"type":"welcome","session_id":"me","last_seq":0,"lease_holder":"other"}""",
                             )
@@ -461,6 +470,7 @@ class PageInkInstrumentedTest {
                         ) {
                             when (JSONObject(text).getString("type")) {
                                 "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                                "commit-batch" -> commits += text
                                 "release-lease" -> webSocket.close(1000, "lease released")
                             }
                         }
@@ -471,11 +481,97 @@ class PageInkInstrumentedTest {
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
         session.connect()
 
+        val early = Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16)))
+        onMain { session.commitStroke(early) }
+        assertEquals("ink drawn while connecting is held on the canvas", listOf(early.id), onMain { session.strokes.map { it.id } })
+        welcomeGate.countDown()
+
         assertTrue(
             "blocked banner shown",
             awaitUntil { session.statusBanner == PageInkSession.LEASE_BLOCKED },
         )
+        assertTrue(
+            "held ink discarded",
+            awaitUntil { onMain { session.strokes.isEmpty() && session.pendingBatchCount == 0 } },
+        )
         assertEquals(false, session.canEdit)
+
+        onMain { session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)))) }
+        assertEquals("ink drawn while blocked is dropped", 0, onMain { session.strokes.size + session.pendingBatchCount })
+        Thread.sleep(300)
+        assertEquals("no ink reached the server", 0, commits.size)
+
+        session.disconnect()
+    }
+
+    /**
+     * #390: the lease arrives a round trip after the page is drawn. A stroke
+     * finished before then is drawn and held — not refused — and sent exactly
+     * once when the grant lands.
+     */
+    @Test
+    fun aStrokeDrawnBeforeTheLeaseIsGrantedIsHeldThenSentOnce() {
+        val leaseSocket = AtomicReference<WebSocket>()
+        val commits = CopyOnWriteArrayList<JSONObject>()
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                        }
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            val message = JSONObject(text)
+                            when (message.getString("type")) {
+                                "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                                // Parked: the test grants it once a stroke is held.
+                                "acquire-lease" -> leaseSocket.set(webSocket)
+                                "commit-batch" -> {
+                                    commits += message
+                                    webSocket.send(
+                                        JSONObject()
+                                            .put("type", "stroke-batch")
+                                            .put("seq", 1)
+                                            .put("client_batch_id", message.getString("client_batch_id"))
+                                            .put("strokes", message.getJSONArray("strokes"))
+                                            .toString(),
+                                    )
+                                }
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                            }
+                        }
+                    },
+                ).build(),
+        )
+
+        val session = openSession()
+        assertTrue("lease requested", awaitUntil { leaseSocket.get() != null })
+        val stroke = Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16)))
+        onMain { session.commitStroke(stroke) }
+
+        assertEquals("held stroke is drawn", listOf(stroke.id), onMain { session.strokes.map { it.id } })
+        assertEquals("and waits", 1, onMain { session.pendingBatchCount })
+        Thread.sleep(300)
+        assertEquals("nothing is sent before the grant", 0, commits.size)
+
+        leaseSocket.get().send("""{"type":"lease-granted"}""")
+        assertTrue("sent once granted", awaitUntil { commits.size == 1 })
+        assertEquals(
+            stroke.id,
+            commits[0].getJSONArray("strokes").getJSONObject(0).getString("id"),
+        )
+        assertTrue("confirmed by the echo", awaitUntil { onMain { session.pendingBatchCount == 0 } })
+        Thread.sleep(300)
+        assertEquals("sent exactly once", 1, commits.size)
+        assertEquals(listOf(stroke.id), onMain { session.strokes.map { it.id } })
 
         session.disconnect()
     }
@@ -770,6 +866,46 @@ class PageInkInstrumentedTest {
     }
 
     /**
+     * #390: strokes drawn while the socket is down are held, then sent in the
+     * order they were drawn once the next socket holds the lease — once each.
+     */
+    @Test
+    fun strokesDrawnWhileDisconnectedAreSentInOrderAfterTheNextLease() {
+        val first = AtomicReference<WebSocket>()
+        openPage(first) { webSocket, type ->
+            if (type == "subscribe") webSocket.send("""{"type":"synced","last_seq":0}""")
+        }
+        val commits = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = null, commits = commits)
+
+        val session = openSession()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+        first.get().close(1013, "lagged")
+        assertTrue("disconnected", awaitUntil { !session.canEdit })
+
+        val strokes =
+            listOf(
+                Stroke(points = listOf(StrokePoint(1.0, 2.0, 0))),
+                Stroke(points = listOf(StrokePoint(3.0, 4.0, 0))),
+            )
+        onMain { strokes.forEach(session::commitStroke) }
+        assertEquals("held strokes are drawn", strokes.map { it.id }, onMain { session.strokes.map { it.id } })
+
+        assertTrue("both sent on the new socket", awaitUntil(timeoutMs = 10_000) { commits.size == 2 })
+        assertEquals(
+            "in the order they were drawn",
+            strokes.map { it.id },
+            commits.map { it.getJSONArray("strokes").getJSONObject(0).getString("id") },
+        )
+        assertTrue("confirmed by the echoes", awaitUntil { onMain { session.pendingBatchCount == 0 } })
+        Thread.sleep(300)
+        assertEquals("each sent once", 2, commits.size)
+        assertEquals(strokes.map { it.id }, onMain { session.strokes.map { it.id } })
+
+        session.disconnect()
+    }
+
+    /**
      * Makes the *first* enqueued page drop its socket (1013) on the first
      * `commit-batch`, recording the commit — the in-flight batch a lagged or
      * failed connection leaves unacknowledged. MockWebServer serves responses
@@ -947,6 +1083,13 @@ class PageInkInstrumentedTest {
         val batches = (0 until batchCount).joinToString(",") { replayBatchBody(it) }
         return """{"type":"page-replay","page_id":"page_1","last_seq":$batchCount,""" +
             """"batches":[$batches],"tombstones":$tombstones}"""
+    }
+
+    // Session state is written on the main thread; read and drive it there too.
+    private fun <T> onMain(block: () -> T): T {
+        val result = AtomicReference<T>()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync { result.set(block()) }
+        return result.get()
     }
 
     private fun awaitUntil(
