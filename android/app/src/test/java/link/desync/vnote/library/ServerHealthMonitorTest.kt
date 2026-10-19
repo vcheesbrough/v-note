@@ -28,6 +28,7 @@ class ServerHealthMonitorTest {
                 ),
             scope = scope,
             onGiveUp = { givenUp += it },
+            stateContext = Dispatchers.Unconfined,
         )
 
     @After
