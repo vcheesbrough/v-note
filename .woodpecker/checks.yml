@@ -92,9 +92,10 @@ steps:
     commands:
       - apk add --no-cache python3 py3-yaml bash git
       - ./scripts/test-deploy-pipeline.sh
-      # The lane-key gates' wiring (#467) — skip first, mark only after a passed
-      # test run — is workflow shape too, checked here for the python+yaml.
-      - ./scripts/test-lane-key-wiring.sh
+      # The lane-skip gates' wiring (#467, #476): check before the gated step,
+      # the skip guard first, mark only after a pass. Workflow shape too,
+      # checked here for the python+yaml.
+      - ./scripts/test-lane-wiring.sh
 
   # scripts/smoke-oidc-login.sh is the post-deploy gate #372 was missing, and it
   # runs only against live infrastructure — so a broken assertion in it would be
@@ -154,19 +155,31 @@ steps:
     commands:
       - ./scripts/test-alloy-config.sh
 
-  # The lane keys (#467) decide whether e2e-web and the emulator lanes run at
-  # all, so a key that misses an input is a green that never tested the change.
-  # test-lane-key.sh pins which changes move which key, the marker round trip,
-  # and that every path a lane's workflow or e2e compose file reads is covered;
-  # test-lane-key-context.sh holds the .dockerignore matcher to what BuildKit
-  # actually sends as each lane's context, hence the docker socket.
-  lane-key-validation:
+  # The lane keys decide whether e2e-web and the emulator lanes run at all, so
+  # a key that misses an input is a green that never tested the change. The
+  # lane-skip plugin owns the key, its .dockerignore matcher and the markers,
+  # and tests them in its own repo (#475). What stays here is v-note's policy
+  # over .woodpecker/lanes.yml: `verify` fails on a declared input HEAD lacks,
+  # and the same pinned image lists each lane's covered files (`files` mode)
+  # for lane-key-validation to check every path the workflows and e2e compose
+  # files reference against. Same image as the gates, so the list is exactly
+  # what the gates hash.
+  lane-files:
     depends_on: []
-    image: *docker-image
-    volumes: *docker-socket
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
     commands:
-      - ./scripts/test-lane-key.sh
-      - ./scripts/test-lane-key-context.sh
+      - PLUGIN_MODE=verify /plugin
+      - mkdir -p .lane/files
+      - PLUGIN_MODE=files PLUGIN_LANE=web /plugin >.lane/files/web.txt
+      - PLUGIN_MODE=files PLUGIN_LANE=android /plugin >.lane/files/android.txt
+
+  lane-key-validation:
+    depends_on:
+      - lane-files
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    commands:
+      - apk add --no-cache bash git
+      - ./scripts/test-lane-inputs.sh
 
   # Every file that names the android-build-box image must agree with
   # scripts/android-build-box-image.ref.

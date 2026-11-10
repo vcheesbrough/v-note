@@ -562,44 +562,58 @@ GitHub status below reflects all of them. `checks` gates Rust with clippy (`-D w
 plus the `[workspace.lints]` ratchet in `Cargo.toml` / `clippy.toml`) and rustfmt;
 `android` gates Kotlin with ktlint, detekt and Android Lint inside `build-android`.
 
-**Unchanged lanes skip their tests (#467).** `e2e-web` and both instrumented
-steps begin with `scripts/lane-key.sh skip <step>`. The lane key is a sha256 over
-every file the lane reads at `HEAD`: the tracked files its Dockerfile-specific
-`.dockerignore` admits, plus the extras declared in `lane_extras` (the Dockerfile,
-the workflow file, `e2e/` and `deploy/grafana` for web, …). If
-`refs/ci/green/<step>/<key>` exists on GitHub, the step logs
-`lane-key: SKIPPING`, the commit, branch and pipeline that passed, and exits 0;
-otherwise it runs and `lane-key.sh mark <step>` records the marker on success.
+**Unchanged lanes skip their tests (#467, #476).** The [lane-skip plugin](https://github.com/vcheesbrough/woodpecker-plugin-lane-skip)
+decides, from the lanes in [`.woodpecker/lanes.yml`](../.woodpecker/lanes.yml).
+A lane's key is a sha256 over every file the lane reads at `HEAD`: the tracked
+files its Dockerfile-specific `.dockerignore` admits, the lane's `inputs`
+(`e2e/` and `deploy/grafana` for web, the build-box pin for android, each
+workflow file, …), and implicitly `lanes.yml`, the Dockerfile and its ignore
+file. Each workflow wires it in three parts:
+
+1. `lane-check` (mode `check`) writes `.lane/<step>.key`, plus `.lane/<step>.skip`
+   when `refs/ci/green/<step>/<key>` already exists on GitHub. Any error means
+   run.
+2. The gated step's first command is the guard
+   `[ ! -e .lane/<step>.skip ] || { cat .lane/<step>.skip; exit 0; }`. On a
+   skip it prints the commit, branch and pipeline that passed, then exits 0.
+3. `lane-mark-<step>` (mode `mark`) depends on the gated step, so it runs only
+   after a pass, and records the key `check` computed before the tests ran.
+
 So a docs-only push skips both lanes, an Android-only change skips e2e, an
 e2e/server change skips the emulators, and the master merge of a branch synced
 with master skips both. `build-web` and `build-android` always run, so every
-pipeline still ships images under its own release tag. The tests:
+pipeline still publishes images under its own version. The tests here are
+v-note's policy over its lanes; the key, the matcher and the markers are the
+plugin's, tested in its own repo:
 
-- `scripts/test-lane-key.sh`: which changes move which key; the marker round
-  trip; that every path a lane's workflow or e2e compose file names literally
-  (a tracked file, or a tracked directory written with a `/`) is covered.
-  Paths built from variables are not visible to it.
-- `scripts/test-lane-key-wiring.sh` (in `deploy-pipeline-validation`): the
-  workflow wiring. Each gated step's first command is the skip guard, and it
-  calls `mark` once, only after a passed test run.
-- `scripts/test-lane-key-context.sh`: the `.dockerignore` matcher against
-  BuildKit's real context.
+- `scripts/test-lane-inputs.sh` (checks step `lane-key-validation`, after
+  `lane-files` lists each lane's covered files with the pinned plugin in
+  `files` mode): every path a lane's workflow or e2e compose file names
+  literally (a tracked file, or a tracked directory written with a `/`) is
+  covered. Paths built from variables are not visible to it; declare them in
+  `lanes.yml`.
+- `scripts/test-lane-wiring.sh` (in `deploy-pipeline-validation`): the
+  three-part wiring above, for exactly `e2e-web` and both instrumented lanes.
 
-The other two run in the `lane-key-validation` checks step.
-
-Force a full run with a manual pipeline and the variable `FULL_RUN=1`. Print a
-lane's key and files locally with `scripts/lane-key.sh key web` /
-`scripts/lane-key.sh files android`. The key reads the committed tree, not the
-working tree.
-
-**Markers accumulate.** CI never deletes them. Each pipeline whose inputs
-changed adds up to three refs under `refs/ci/green/`, and each keeps its tested
-commit reachable on GitHub. Deleting a marker is always safe: it only costs that
-step one re-run. To clean up, list what would go, then delete it:
+Force a full run with a manual pipeline and the variable `FULL_RUN=1`. List a
+lane's covered files locally (the plugin reads the committed tree, not the
+working tree):
 
 ```bash
-DRY_RUN=1 CI_REPO=vcheesbrough/v-note GITHUB_TOKEN=$(gh auth token) scripts/lane-key.sh prune 30
-CI_REPO=vcheesbrough/v-note GITHUB_TOKEN=$(gh auth token) scripts/lane-key.sh prune 30
+docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_LANE=web \
+  ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+```
+
+**Markers accumulate.** Each pipeline whose inputs changed adds up to three
+refs under `refs/ci/green/`, and each keeps its tested commit reachable on
+GitHub. Deleting a marker is always safe: it only costs that step one re-run.
+To clean up by hand, list what would go, then delete it:
+
+```bash
+docker run --rm -e PLUGIN_MODE=prune -e PLUGIN_DAYS=30 -e PLUGIN_DRY_RUN=true \
+  -e CI_REPO=vcheesbrough/v-note -e PLUGIN_GITHUB_TOKEN="$(gh auth token)" \
+  ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+# then again without PLUGIN_DRY_RUN
 ```
 
 The e2e stack waits on the app's healthcheck (`service_healthy`), so a container

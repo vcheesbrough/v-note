@@ -1,0 +1,31 @@
+# Lanes for the lane-skip plugin (#476, replacing #467's scripts/lane-key.sh).
+#
+# A lane's key is a sha256 over the blobs of every tracked file its tests read:
+# the files its Dockerfile's `.dockerignore` admits into the build context, the
+# `inputs` below, and implicitly this file, the Dockerfile and its ignore file.
+# When a step's key has already passed (a marker at refs/ci/green/<step>/<key>
+# on GitHub), the step skips. A key that misses an input is a green that never
+# tested the change, so every path a lane's workflow or e2e compose files
+# reference must be covered: scripts/test-lane-inputs.sh (checks:
+# lane-key-validation) fails until it is. A path assembled from a variable is
+# invisible to that scan, so declare it here by hand.
+#
+# Step names are the markers' names, not Woodpecker step names: the instrumented
+# lanes are android-instrumented-api-29/-36 in android.yml.
+lanes:
+  web:
+    context: Dockerfile.web
+    inputs:
+      - e2e
+      - deploy/grafana
+      - scripts/check-image-metadata.sh
+      - scripts/test-container-health.sh
+      - .woodpecker/web.yml
+    steps: [e2e-web]
+  android:
+    context: Dockerfile.android
+    inputs:
+      - scripts/android-build-box-image.ref
+      - scripts/check-image-metadata.sh
+      - .woodpecker/android.yml
+    steps: [android-api-29, android-api-36]

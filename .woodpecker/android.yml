@@ -51,25 +51,34 @@ steps:
         echo "timing: docker build Dockerfile.android (apk) took $$(( $$(date +%s) - $$START ))s"
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
 
+  # Decides whether each emulator lane runs (lane-skip, #476; lanes in
+  # .woodpecker/lanes.yml): writes .lane/<step>.key, plus .lane/<step>.skip when
+  # that key already passed. Any error means run; FULL_RUN=1 on a manual
+  # pipeline forces a run.
+  lane-check:
+    depends_on: []
+    image: &lane-skip ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+    settings:
+      mode: check
+      steps: [android-api-29, android-api-36]
+      github_token:
+        from_secret: github_token
+
   # The emulator lanes are the most expensive steps in the pipeline, so each one
-  # skips — test image build and emulator run alike — when its lane key has
-  # already passed (#467, scripts/lane-key.sh): nothing the lane reads changed
-  # since a green run. build-android above always runs, so the APK that ships
-  # still carries this pipeline's version. FULL_RUN=1 on a manual pipeline
-  # runs them regardless.
+  # skips, test image build and emulator run alike, when its lane key has
+  # already passed: nothing the lane reads changed since a green run.
+  # build-android above always runs, so the APK that ships still carries this
+  # pipeline's version.
   android-instrumented-api-29:
     depends_on:
       - version
+      - lane-check
     image: *docker-image
     volumes: *docker-socket
     environment: &android-instrumented-environment
       ANDROID_API_LEVEL: "29"
-      # Reads and writes the lane-key markers (refs/ci/green/…).
-      GITHUB_TOKEN:
-        from_secret: github_token
     commands: &android-instrumented-commands
-      - |
-        if ./scripts/lane-key.sh skip "android-api-$$ANDROID_API_LEVEL"; then exit 0; fi
+      - '[ ! -e .lane/android-api-$$ANDROID_API_LEVEL.skip ] || { cat .lane/android-api-$$ANDROID_API_LEVEL.skip; exit 0; }'
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
@@ -94,14 +103,37 @@ steps:
           docker run --rm --privileged v-note-android-instrumented:$$CI_COMMIT_SHA-api$$ANDROID_API_LEVEL
         fi
         echo "timing: Android API $$ANDROID_API_LEVEL instrumented docker run took $$(( $$(date +%s) - $$START ))s"
-      - ./scripts/lane-key.sh mark "android-api-$$ANDROID_API_LEVEL"
 
   android-instrumented-api-36:
     depends_on:
       - version
+      - lane-check
     image: *docker-image
     volumes: *docker-socket
     environment:
       <<: *android-instrumented-environment
       ANDROID_API_LEVEL: "36"
     commands: *android-instrumented-commands
+
+  # Record each lane's pass: mark the key lane-check computed before the tests
+  # ran. Each runs only when its lane succeeded (or skipped, reporting "already
+  # marked"); warns but never fails once the step is known.
+  lane-mark-android-api-29:
+    depends_on:
+      - android-instrumented-api-29
+    image: *lane-skip
+    settings:
+      mode: mark
+      step: android-api-29
+      github_token:
+        from_secret: github_token
+
+  lane-mark-android-api-36:
+    depends_on:
+      - android-instrumented-api-36
+    image: *lane-skip
+    settings:
+      mode: mark
+      step: android-api-36
+      github_token:
+        from_secret: github_token
