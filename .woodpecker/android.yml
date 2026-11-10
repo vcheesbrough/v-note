@@ -11,35 +11,28 @@ when:
   - event: [push, manual]
 
 steps:
-  # Workflows share nothing, so each computes its own release tag — see web.yml.
-  compute-version:
+  # Finds the version this pipeline already claimed, or claims it (see web.yml).
+  version:
     depends_on: []
-    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-    environment:
-      GITHUB_TOKEN:
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.2.0@sha256:9d5b3541aa143727f8c68c8c8f1d36557d999d3c857c4581be43363c8ff78c94
+    settings:
+      mode: version
+      major_minor_source: cargo
+      github_token:
         from_secret: github_token
-    commands:
-      # git is unpinned for the reason given on the apk lines in verify-tag-deploy.yml: the
-      # base image is digest-pinned, and Alpine drops superseded versions.
-      - apk add --no-cache git
-      - ./scripts/release-version.sh compute
 
   build-android:
     depends_on:
-      - compute-version
+      - version
     # mingc/android-build-box as a Woodpecker step image does not attach stdout to logs.
     # docker run -v $CI_WORKSPACE fails when the agent workspace is a named volume, not a
     # host path — use docker build (context over API) like build-web.
     image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
+    # Built and gated locally, not pushed: verify-tag-deploy's `publish` pushes
+    # it after every test, like build-web's image (see web.yml).
     commands:
-      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/v-note-android:$$RELEASE_TAG
@@ -57,19 +50,16 @@ steps:
           -t "$$IMAGE" .
         echo "timing: docker build Dockerfile.android (apk) took $$(( $$(date +%s) - $$START ))s"
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-        START=$$(date +%s)
-        docker push "$$IMAGE"
-        echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
 
   # The emulator lanes are the most expensive steps in the pipeline, so each one
   # skips — test image build and emulator run alike — when its lane key has
   # already passed (#467, scripts/lane-key.sh): nothing the lane reads changed
   # since a green run. build-android above always runs, so the APK that ships
-  # still carries this pipeline's release tag. FULL_RUN=1 on a manual pipeline
+  # still carries this pipeline's version. FULL_RUN=1 on a manual pipeline
   # runs them regardless.
   android-instrumented-api-29:
     depends_on:
-      - compute-version
+      - version
     image: *docker-image
     volumes: *docker-socket
     environment: &android-instrumented-environment
@@ -108,7 +98,7 @@ steps:
 
   android-instrumented-api-36:
     depends_on:
-      - compute-version
+      - version
     image: *docker-image
     volumes: *docker-socket
     environment:

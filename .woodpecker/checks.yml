@@ -81,20 +81,17 @@ steps:
 
   # verify-tag-deploy.yml holds two paths chosen per step by `when`, and only Woodpecker
   # reads it — a step that drifts onto `push` redeploys shared dev from every
-  # branch again (#462). This asserts the push path only builds, verifies and
-  # tags, that everything touching dev runs on a `deployment` after the image
-  # check, and that no dependency is pruned out from under a step.
-  #
-  # release-version.sh rides along: it computes the tag every image is built,
-  # verified and deployed under, and pushes it — run here against a local bare
-  # repository with real git, so a regression is found before it tags anything.
+  # branch again (#462). This asserts the push path only versions and publishes,
+  # that everything touching dev (tag included) runs on a `deployment` after
+  # `resolve`, that the three workflows version on one pinned plugin image, and
+  # that no dependency is pruned out from under a step. The versioning logic
+  # itself is the release-versions plugin's, tested in its own repo (#476).
   deploy-pipeline-validation:
     depends_on: []
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
     commands:
       - apk add --no-cache python3 py3-yaml bash git
       - ./scripts/test-deploy-pipeline.sh
-      - ./scripts/test-release-version.sh
       # The lane-key gates' wiring (#467) — skip first, mark only after a passed
       # test run — is workflow shape too, checked here for the python+yaml.
       - ./scripts/test-lane-key-wiring.sh

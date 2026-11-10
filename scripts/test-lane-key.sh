@@ -20,7 +20,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 # Referenced by a lane's steps but deliberately outside its key.
-NOT_INPUTS='scripts/release-version.sh'
+NOT_INPUTS=''
 
 failed=0
 pass() { echo "ok: $*"; }
@@ -86,7 +86,7 @@ expect_keys "AGENTS.md change" same same append AGENTS.md
 expect_keys "CLAUDE.md change" same same append CLAUDE.md
 expect_keys "README.md change" same same append README.md
 expect_keys ".woodpecker/checks.yml change" same same append .woodpecker/checks.yml
-expect_keys "release-version.sh change" same same append scripts/release-version.sh
+expect_keys "deploy script change" same same append scripts/deploy-v-note.sh
 expect_keys "deploy/docker-compose.yml change" same same append deploy/docker-compose.yml
 expect_keys "server integration test change" same same append "$(first crates/server/tests)"
 expect_keys "android/ change" changed same append "$(first android)"

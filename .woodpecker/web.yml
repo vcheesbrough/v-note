@@ -5,40 +5,36 @@ when:
   - event: [push, manual]
 
 steps:
-  # Workflows share nothing, so each computes its own release tag:
-  # scripts/release-version.sh reuses the tag already on this commit, or takes
-  # Cargo.toml's major.minor with the pipeline number as the patch. Every workflow
-  # of one pipeline sees the same number, so they agree, and no two pipelines can
-  # compute the same tag (#462). verify-tag-deploy.yml still verifies the images' revision
-  # label before it tags or rolls anything out.
-  compute-version:
+  # The release-versions plugin (#476, the agent-shared release-flow contract)
+  # owns the version: Cargo.toml's MAJOR.MINOR plus the next number on that line,
+  # claimed by creating refs/builds/<version> on GitHub, which refuses an existing
+  # name, so racing pipelines never share a version (#462). Every workflow of one
+  # pipeline runs this step and finds the number its pipeline already claimed, so
+  # web, android and verify-tag-deploy agree. Writes .release-tag.
+  version:
     depends_on: []
-    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-    environment:
-      GITHUB_TOKEN:
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.2.0@sha256:9d5b3541aa143727f8c68c8c8f1d36557d999d3c857c4581be43363c8ff78c94
+    settings:
+      mode: version
+      major_minor_source: cargo
+      github_token:
         from_secret: github_token
-    commands:
-      # git is unpinned for the reason given on the apk lines in verify-tag-deploy.yml: the
-      # base image is digest-pinned, and Alpine drops superseded versions.
-      - apk add --no-cache git
-      - ./scripts/release-version.sh compute
 
+  # Builds and gates the image locally; it is not pushed here. verify-tag-deploy's
+  # `publish` pushes it once checks, web and android have all passed, so the
+  # registry only ever holds tested builds (release-flow). That step runs on the
+  # same agent's daemon, where this image stays.
   build-web:
     depends_on:
-      - compute-version
+      - version
     image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
       # Needed by the cargo layers to fetch the private sovereign-config git dep.
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
-      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/v-note:$$RELEASE_TAG
@@ -55,18 +51,15 @@ steps:
         # support image is held to — this is the check that caught the missing
         # authors/vendor labels the old --label flags never set.
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-        # Both gated before the push: the deploy step and the e2e stack below now
+        # Both gated before publish: the deploy step and the e2e stack below
         # wait on this image's own healthcheck, so an image whose probe is broken
         # would not fail loudly — it would hang until a timeout.
         ./scripts/test-container-health.sh "$$IMAGE"
-        START=$$(date +%s)
-        docker push "$$IMAGE"
-        echo "timing: docker push $$IMAGE took $$(( $$(date +%s) - $$START ))s"
 
   # Skips — support image build and stack alike — when the web lane key has
   # already passed (#467, scripts/lane-key.sh): nothing the image or the suite
   # reads changed since a green run. build-web above always runs, so the image
-  # that ships still carries this pipeline's release tag and passed its own
+  # that ships still carries this pipeline's version and passed its own
   # metadata and health gates. FULL_RUN=1 on a manual pipeline runs it anyway.
   e2e-web:
     depends_on:

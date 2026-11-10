@@ -620,13 +620,13 @@ gh api repos/vcheesbrough/v-note/commits/$SHA/status --jq '.state'
 Two version numbers, deliberately:
 
 - **Cargo `major.minor.patch`** in root `Cargo.toml` — source of `major.minor` only; the patch digit is a placeholder. The Android build reads it straight from `Cargo.toml` at Gradle configuration time (`android/buildSrc/src/main/kotlin/WorkspaceVersion.kt`). `./scripts/sync-version.sh` also copies it to `version.txt`; that file is gitignored, regenerated at build time, and not used for `versionName`, because Gradle only writes it after AGP has already read the version (#327).
-- **CI release tag** (`compute-version` → [`scripts/release-version.sh`](../scripts/release-version.sh) → `.release-tag`) — `major.minor` from cargo + **the Woodpecker pipeline number as the patch** (e.g. `0.67.472`), or the release tag the commit already carries. Pipeline numbers are unique and every workflow of one pipeline shares one, so parallel builds never share a tag (#462 — it was highest tag + 1 until then, which two pipelines could both compute). Patches therefore jump; only their order means anything. This is the real deployed version (image tag, server `APP_VERSION`, `/api/meta`).
+- **CI version** (the release-versions plugin's `version` step → `.release-tag`, #476): `major.minor` from cargo + **the next number on that line**, starting at 0 (e.g. `0.72.0`, `0.72.1`, …). Each build claims its number by creating `refs/builds/<version>` on GitHub, which refuses a taken name, so parallel builds never share one (#462). Every workflow of one pipeline finds the same claimed number. A failed build uses its number up, so gaps mark failed builds. A branch builds its own `0.N.x` while master keeps its line. A deployment's `resolve` reuses this version and never builds; the git tag is written on the first deploy (agent-shared `release-flow`). This is the real deployed version (image tag, server `APP_VERSION`, `/api/meta`). `0.67.x`–`0.71.x` used the pipeline number as the patch instead.
 
 CI injects the release tag into both clients via **`V_NOTE_RELEASE`** (`--build-arg` → Dockerfile `ENV`) so the version watermark matches the deployed release:
 
 - **SPA:** `option_env!("V_NOTE_RELEASE")` (frontend), falls back to `CARGO_PKG_VERSION`.
 - **Android:** `V_NOTE_RELEASE` (`build.gradle.kts` → `WorkspaceVersion`) if set, otherwise the root `Cargo.toml` version. If neither gives a version, the build fails instead of using a placeholder. The derivation is unit-tested with `:buildSrc:test`, which CI runs in the `Dockerfile.android` builder stage.
 
-Local builds (`just build-android`, `cargo`/`trunk` directly) don't set `V_NOTE_RELEASE`, so the watermark shows the cargo version (e.g. `0.4.0`) — fine for dev. A CI build of the same commit shows the real tag (e.g. `0.4.472`).
+Local builds (`just build-android`, `cargo`/`trunk` directly) don't set `V_NOTE_RELEASE`, so the watermark shows the cargo version (e.g. `0.4.0`) — fine for dev. A CI build of the same commit shows the real version (e.g. `0.4.3`).
 
 See [`PLAN.md`](PLAN.md) **Engineering workflows** → **Versioning** and **Client–server version alignment**.
