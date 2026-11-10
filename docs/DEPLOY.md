@@ -498,8 +498,10 @@ the deploy's layer — not a second copy. Local compose generates its own
 `POSTGRES_PASSWORD` on the developer's machine, because that is a different
 database.
 
-The provider is pinned to tag **2.46.418**, the sovereign-config server version
-deployed when it was last bumped. Since 2.25 the provider **negotiates** a protocol
+The provider is pinned to tag **2.48.428**. That is ahead of the deployed server
+(2.46.418), which is fine for a library: it is the first release whose
+`SovereignConfigSource` reports the negotiated protocol version (#527). Unlike the
+deploy CLI, the provider need not match the server. Since 2.25 the provider **negotiates** a protocol
 version with the server on connect and fails closed only when they share none, so
 a server upgrade no longer requires rebuilding v-note: a build keeps working until
 the server *retires* every protocol version it speaks — an announced, observable
@@ -507,6 +509,13 @@ event. Bumping the pin is still worthwhile to pick up client fixes; when you do,
 read the `## Upgrade` section of sovereign-config's `README.md` at the new tag for
 source-breaking changes to the client crates, and compare against the live version
 (sovereign-config MCP `status`, or the unauthenticated gRPC `System.GetVersion`).
+
+**Which protocol version the server speaks** is logged once at startup, after
+telemetry is up: `sovereign-config protocol negotiated` with field
+`sovereign_config_protocol_version` (e.g. `v5`). It reaches Loki on both egresses.
+Before a sovereign-config protocol retirement, check that every v-note container
+logs a version that is staying. There is no such line when the sovereign source is
+disabled (local dev, e2e).
 
 ### Compose env vars that remain (per deployment)
 

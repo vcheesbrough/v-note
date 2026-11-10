@@ -4,7 +4,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use server::build_app_router;
 use server::config::{
     AndroidConfig, ClientTelemetryConfig, DatabaseConfig, ObservabilityConfig, OidcConfig,
-    RealtimeConfig, ServerConfig, build_config, load_group,
+    RealtimeConfig, ServerConfig, build_config, load_group, log_sovereign_protocol,
 };
 use server::observability::{init_tracing, run_metrics_server};
 
@@ -20,7 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is scheduled yet, so there is nothing for spawn_blocking to unblock. Any
     // missing/invalid value fails here. Each group is loaded + validated from its own
     // sub-branch, then handed to the feature that owns it — features only see their DTO.
-    let cfg = build_config()?;
+    let built = build_config()?;
+    let cfg = built.config;
     let observability = load_group::<ObservabilityConfig>(&cfg, "observability")?;
     let database = load_group::<DatabaseConfig>(&cfg, "database")?;
     let oidc = load_group::<OidcConfig>(&cfg, "oidc")?;
@@ -35,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         telemetry_guard.exports_traces(),
         telemetry_guard.exports_logs(),
     );
+    log_sovereign_protocol(built.sovereign_protocol_version);
     let metrics_addr = observability.metrics_socket_addr();
 
     let app = build_app_router(
