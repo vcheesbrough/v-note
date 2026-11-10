@@ -121,26 +121,58 @@ pub fn sovereign_source_enabled() -> bool {
         .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
 }
 
+/// What [`build_config`] assembled, and what its sovereign-config layer spoke.
+pub struct BuiltConfig {
+    pub config: Config,
+    /// The protocol version the sovereign-config load negotiated (`"v5"`), which
+    /// is what the service's per-version counters attribute this server to.
+    /// `None` when the sovereign source is disabled (local dev / e2e).
+    pub sovereign_protocol_version: Option<&'static str>,
+}
+
 /// Assemble the layered `config::Config`.
 ///
 /// This **blocks** while the sovereign-config source connects and reveals secrets
 /// (on its own dedicated I/O thread), so call it once at startup — from
 /// `spawn_blocking` when on an async runtime.
-pub fn build_config() -> Result<Config, ConfigError> {
+pub fn build_config() -> Result<BuiltConfig, ConfigError> {
     let mut builder = Config::builder();
     builder = apply_defaults(builder)?;
 
     // Both sources are trimmed: whitespace is never meaningful in a config leaf and
     // is silently destructive in at least one place (see `Trimmed`).
-    if sovereign_source_enabled() {
-        builder = builder.add_source(Trimmed(
-            SovereignConfigSource::initialise_from_default_environment(),
-        ));
+    //
+    // A clone of the sovereign source is kept: `config` loads through its own
+    // clone, and clones share the negotiated protocol version, which is read
+    // after the build because nothing can log it yet (#527).
+    let sovereign =
+        sovereign_source_enabled().then(SovereignConfigSource::initialise_from_default_environment);
+    if let Some(source) = &sovereign {
+        builder = builder.add_source(Trimmed(source.clone()));
     }
 
     builder = builder.add_source(Trimmed(env_source()));
 
-    builder.build().map_err(ConfigError::Build)
+    let config = builder.build().map_err(ConfigError::Build)?;
+    Ok(BuiltConfig {
+        config,
+        sovereign_protocol_version: sovereign.and_then(|source| source.protocol_version()),
+    })
+}
+
+/// One startup line naming the sovereign-config protocol version this server
+/// negotiated (#527), so which version it speaks is answerable from its own logs
+/// — the evidence a sovereign-config protocol retirement waits on. Emitted after
+/// the subscriber is installed, like
+/// [`ObservabilityConfig::log_resolved`], because config is loaded before
+/// telemetry exists. Nothing when the sovereign source is disabled.
+pub fn log_sovereign_protocol(version: Option<&str>) {
+    if let Some(version) = version {
+        tracing::info!(
+            sovereign_config_protocol_version = version,
+            "sovereign-config protocol negotiated",
+        );
+    }
 }
 
 /// The environment override layer. `VNOTE__OIDC__CLIENT-ID` → `oidc.client-id`.

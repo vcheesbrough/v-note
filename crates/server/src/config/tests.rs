@@ -1185,3 +1185,57 @@ fn retired_ingress_leaves_are_ignored() {
     .expect("loads");
     assert_eq!(telemetry.ingest_endpoint(), None);
 }
+
+/// Captures what `emit` logs as the JSON lines the deployed server writes.
+fn captured_json_logs(emit: impl FnOnce()) -> Vec<serde_json::Value> {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, emit);
+    let bytes = buffer.0.lock().unwrap().clone();
+    String::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each log line is JSON"))
+        .collect()
+}
+
+/// #527: the negotiated sovereign-config protocol version reaches the logs as a
+/// stable field, so which version this server speaks is answerable from Loki.
+#[test]
+fn startup_logs_the_negotiated_sovereign_protocol_version() {
+    let lines = captured_json_logs(|| log_sovereign_protocol(Some("v5")));
+    let [line] = lines.as_slice() else {
+        panic!("expected one line, got {lines:?}");
+    };
+    assert_eq!(line["level"], "INFO");
+    assert_eq!(line["fields"]["sovereign_config_protocol_version"], "v5");
+    assert_eq!(
+        line["fields"]["message"],
+        "sovereign-config protocol negotiated"
+    );
+}
+
+/// With the sovereign source disabled (local dev, e2e) nothing was negotiated,
+/// and a line claiming a version would be false.
+#[test]
+fn startup_logs_nothing_when_no_sovereign_protocol_was_negotiated() {
+    assert!(captured_json_logs(|| log_sovereign_protocol(None)).is_empty());
+}
