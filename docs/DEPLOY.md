@@ -177,7 +177,7 @@ runs.
 #### The CLI comes from the step image
 
 The pipeline does **not** install the CLI. The deploy step (`deploy-dev`) runs in
-`registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf4909…1827`
+`registry.desync.link/sovereign-config-cli:2.46.418@sha256:68761657…1de`
 (its `image` in `.woodpecker/verify-tag-deploy.yml`): the docker CLI image with the
 sovereign-config CLI baked in, published by the operator. It carries everything
 the step uses — Docker with the compose plugin, `sh`, and the busybox tools
@@ -193,8 +193,8 @@ image, because a host file drifts from the server silently while a pin changes
 only by commit.
 
 **The CLI must match the running server**, so bump the image's tag and digest
-together, as a commit, when the server is upgraded (verified at pin time: 2.30.2
-against 2.30.2). The other client pinned to the
+together, as a commit, when the server is upgraded (verified at pin time: 2.46.418
+against 2.46.418). The other client pinned to the
 server is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
 [Runtime config](#runtime-config-sovereign-config)); check the live version
 (sovereign-config MCP `status`) before relocking it.
@@ -498,7 +498,7 @@ the deploy's layer — not a second copy. Local compose generates its own
 `POSTGRES_PASSWORD` on the developer's machine, because that is a different
 database.
 
-The provider is pinned to tag **2.30.2**, the sovereign-config server version
+The provider is pinned to tag **2.46.418**, the sovereign-config server version
 deployed when it was last bumped. Since 2.25 the provider **negotiates** a protocol
 version with the server on connect and fails closed only when they share none, so
 a server upgrade no longer requires rebuilding v-note: a build keeps working until

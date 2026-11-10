@@ -56,7 +56,7 @@ serde_json.workspace = true
 # PKCE S256 challenge (RFC 7636) and the SPA's CSP script hashes (#444) —
 # not a general crypto dependency.
 sha2 = "0.11"
-sovereign-config-provider = { git = "https://github.com/vcheesbrough/sovereign-config", tag = "2.30.2", features = ["config"] }
+sovereign-config-provider = { git = "https://github.com/vcheesbrough/sovereign-config", tag = "2.46.418", features = ["config"] }
 # 0.9 deleted the combined runtime+TLS features; `runtime-tokio` + `tls-rustls-ring`
 # is the exact expansion of the 0.8 `runtime-tokio-rustls` this replaced (ring +
 # webpki roots), so the TLS stack is unchanged.
