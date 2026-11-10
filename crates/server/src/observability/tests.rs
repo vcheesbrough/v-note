@@ -882,4 +882,36 @@ mod otlp_logs {
             assert!(!super::super::is_exporter_internal(target), "{target}");
         }
     }
+
+    /// #527: the negotiated sovereign-config protocol version reaches both
+    /// egresses under the default filters as a stable, top-level field, so
+    /// which version this server speaks is answerable from Loki.
+    #[test]
+    fn startup_logs_the_negotiated_sovereign_protocol_version() {
+        const MESSAGE: &str = "sovereign-config protocol negotiated";
+        let harness = Harness::new(default_filters());
+        harness.run(|| crate::config::log_sovereign_protocol(Some("v5")));
+
+        let line = harness.stdout.line(MESSAGE);
+        assert_eq!(line["level"], "INFO");
+        assert_eq!(line["sovereign_config_protocol_version"], "v5");
+
+        let log = harness.exported_log(MESSAGE);
+        let version = log
+            .record
+            .attributes_iter()
+            .find(|(key, _)| key.as_str() == "sovereign_config_protocol_version")
+            .map(|(_, value)| value.clone());
+        assert_eq!(version, Some(text("v5")));
+    }
+
+    /// With the sovereign source disabled (local dev, e2e) nothing was
+    /// negotiated, and a line claiming a version would be false.
+    #[test]
+    fn startup_logs_nothing_when_no_sovereign_protocol_was_negotiated() {
+        let harness = Harness::new(default_filters());
+        harness.run(|| crate::config::log_sovereign_protocol(None));
+        assert!(harness.stdout.lines().is_empty());
+        assert!(harness.exported_logs().is_empty());
+    }
 }
