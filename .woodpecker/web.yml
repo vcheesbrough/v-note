@@ -56,7 +56,9 @@ steps:
         # would not fail loudly — it would hang until a timeout.
         ./scripts/test-container-health.sh "$$IMAGE"
 
-  # Decides whether e2e-web runs (lane-skip, #476; lanes in .woodpecker/lanes.yml):
+  # Decides whether e2e-web runs (lane-skip, #476; lanes in the repo-root
+  # lanes.yml, which cannot live in .woodpecker/: Woodpecker parses every file
+  # there as a workflow, so the plugin's default path is not used):
   # writes .lane/e2e-web.key, plus .lane/e2e-web.skip when that key already
   # passed. Any error means run; FULL_RUN=1 on a manual pipeline forces a run.
   lane-check:
@@ -64,6 +66,7 @@ steps:
     image: &lane-skip ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
     settings:
       mode: check
+      config: lanes.yml
       steps: [e2e-web]
       github_token:
         from_secret: github_token
@@ -112,6 +115,7 @@ steps:
     image: *lane-skip
     settings:
       mode: mark
+      config: lanes.yml
       step: e2e-web
       github_token:
         from_secret: github_token

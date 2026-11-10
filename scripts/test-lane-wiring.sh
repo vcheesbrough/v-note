@@ -7,7 +7,7 @@
 # pipeline with that key skip silently. This enforces:
 #   1. the gated steps (those opening with a skip guard) are exactly e2e-web
 #      and both Android instrumented lanes, and each lane step name appears in
-#      .woodpecker/lanes.yml;
+#      lanes.yml;
 #   2. a gated step's first command is the skip guard for its own lane step,
 #      so a skip ends the step before anything else runs;
 #   3. it depends on a lane-check step (mode check) in the same workflow whose
@@ -15,8 +15,10 @@
 #   4. exactly one mark step (mode mark) records that lane step, and it depends
 #      directly on the gated step and has no `when: status` override, so
 #      Woodpecker runs it only after the gated step succeeded;
-#   5. every lane-skip step gets github_token (markers on the private repo),
-#      and all of them use one image pinned by digest.
+#   5. every lane-skip step gets github_token (markers on the private repo)
+#      and names `config: lanes.yml` (the plugin's default, .woodpecker/lanes.yml,
+#      is parsed by Woodpecker as a workflow and breaks every pipeline), and all
+#      of them use one image pinned by digest.
 # Negative cases mutate the parsed workflows to prove each rule bites.
 
 set -euo pipefail
@@ -74,6 +76,8 @@ def check(workflows, lanes):
             token = (step.get("settings") or {}).get("github_token")
             if token != {"from_secret": "github_token"}:
                 problems.append(f"{path} {name}: github_token is not from_secret github_token")
+            if (step.get("settings") or {}).get("config") != "lanes.yml":
+                problems.append(f"{path} {name}: config is not lanes.yml")
         for name, step in steps.items():
             commands = [str(c) for c in step.get("commands") or []]
             reads_skip = re.compile(r"\.lane/\S+\.skip")
@@ -129,8 +133,8 @@ def check(workflows, lanes):
     return problems
 
 
-workflows = {p: yaml.safe_load(open(p)) for p in glob.glob(".woodpecker/*.yml") if not p.endswith("lanes.yml")}
-lanes = yaml.safe_load(open(".woodpecker/lanes.yml"))
+workflows = {p: yaml.safe_load(open(p)) for p in glob.glob(".woodpecker/*.yml")}
+lanes = yaml.safe_load(open("lanes.yml"))
 failed = False
 
 
@@ -176,6 +180,10 @@ def drop_token(step):
     step["settings"].pop("github_token")
 
 
+def default_config(step):
+    step["settings"].pop("config")
+
+
 def unpinned(step):
     step["image"] = "ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:latest"
 
@@ -188,6 +196,7 @@ cases = [
     ("mark depending on the wrong step", ".woodpecker/web.yml", "lane-mark-e2e-web", mark_unrelated),
     ("check without github_token", ".woodpecker/web.yml", "lane-check", drop_token),
     ("unpinned plugin image", ".woodpecker/android.yml", "lane-check", unpinned),
+    ("mark falling back to the default config path", ".woodpecker/android.yml", "lane-mark-android-api-29", default_config),
 ]
 for label, path, step, change in cases:
     found = mutated(path, step, change)

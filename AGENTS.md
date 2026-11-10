@@ -160,7 +160,7 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   - **All push workflows, including `e2e-web` and both Android lanes, must be green** before an iteration is done.
   - **Lane keys skip unchanged tests (#467, #476).** The lane-skip plugin
     hashes exactly what each lane reads (the files the lane's `.dockerignore`
-    admits, plus its `inputs` in [`.woodpecker/lanes.yml`](.woodpecker/lanes.yml)
+    admits, plus its `inputs` in [`lanes.yml`](lanes.yml)
     such as `e2e/`). `e2e-web` and each Android instrumented step then exit
     green when that key already passed: docs-only pushes, the other lane's
     changes, and the master merge of an already-synced branch. A skipped step

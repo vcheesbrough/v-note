@@ -52,7 +52,7 @@ steps:
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
 
   # Decides whether each emulator lane runs (lane-skip, #476; lanes in
-  # .woodpecker/lanes.yml): writes .lane/<step>.key, plus .lane/<step>.skip when
+  # lanes.yml): writes .lane/<step>.key, plus .lane/<step>.skip when
   # that key already passed. Any error means run; FULL_RUN=1 on a manual
   # pipeline forces a run.
   lane-check:
@@ -60,6 +60,7 @@ steps:
     image: &lane-skip ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
     settings:
       mode: check
+      config: lanes.yml
       steps: [android-api-29, android-api-36]
       github_token:
         from_secret: github_token
@@ -124,6 +125,7 @@ steps:
     image: *lane-skip
     settings:
       mode: mark
+      config: lanes.yml
       step: android-api-29
       github_token:
         from_secret: github_token
@@ -134,6 +136,7 @@ steps:
     image: *lane-skip
     settings:
       mode: mark
+      config: lanes.yml
       step: android-api-36
       github_token:
         from_secret: github_token

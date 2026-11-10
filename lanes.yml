@@ -1,5 +1,10 @@
 # Lanes for the lane-skip plugin (#476, replacing #467's scripts/lane-key.sh).
 #
+# At the repo root, not the plugin's default .woodpecker/lanes.yml: Woodpecker
+# parses every .yml in .woodpecker/ as a workflow, and this file broke every
+# pipeline there. Every lane-skip step therefore sets `config: lanes.yml`
+# (scripts/test-lane-wiring.sh holds that).
+#
 # A lane's key is a sha256 over the blobs of every tracked file its tests read:
 # the files its Dockerfile's `.dockerignore` admits into the build context, the
 # `inputs` below, and implicitly this file, the Dockerfile and its ignore file.

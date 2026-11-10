@@ -4,7 +4,7 @@
 # The lane-skip plugin skips e2e-web and the emulator lanes when their key has
 # already passed, so a key that misses an input is a green that never tested
 # the change. The plugin owns the key itself (and its tests); this is v-note's
-# policy over .woodpecker/lanes.yml: every repo path a lane's workflow names,
+# policy over lanes.yml: every repo path a lane's workflow names,
 # and every path its e2e compose files reach outside e2e/, must be covered.
 #
 # The covered files come from the plugin, never from a copy of its matcher:
@@ -12,7 +12,7 @@
 # writes one list per lane to $LANE_FILES (default .lane/files/<lane>.txt).
 # Locally:
 #   for lane in web android; do
-#     docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_LANE=$lane \
+#     docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_CONFIG=lanes.yml -e PLUGIN_LANE=$lane \
 #       <lane-skip image from .woodpecker/checks.yml> >.lane/files/$lane.txt
 #   done
 #
@@ -103,7 +103,7 @@ for lane in android web; do
     pass "$lane: every referenced path is in its key or declared not an input"
   else
     fail "$lane: referenced but not in its key:$missing — add it to the lane's" \
-      "inputs in .woodpecker/lanes.yml, or to NOT_INPUTS here if it truly cannot affect the tests"
+      "inputs in lanes.yml, or to NOT_INPUTS here if it truly cannot affect the tests"
   fi
 done
 

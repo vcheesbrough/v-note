@@ -563,7 +563,7 @@ plus the `[workspace.lints]` ratchet in `Cargo.toml` / `clippy.toml`) and rustfm
 `android` gates Kotlin with ktlint, detekt and Android Lint inside `build-android`.
 
 **Unchanged lanes skip their tests (#467, #476).** The [lane-skip plugin](https://github.com/vcheesbrough/woodpecker-plugin-lane-skip)
-decides, from the lanes in [`.woodpecker/lanes.yml`](../.woodpecker/lanes.yml).
+decides, from the lanes in [`lanes.yml`](../lanes.yml).
 A lane's key is a sha256 over every file the lane reads at `HEAD`: the tracked
 files its Dockerfile-specific `.dockerignore` admits, the lane's `inputs`
 (`e2e/` and `deploy/grafana` for web, the build-box pin for android, each
@@ -600,7 +600,7 @@ lane's covered files locally (the plugin reads the committed tree, not the
 working tree):
 
 ```bash
-docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_LANE=web \
+docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_CONFIG=lanes.yml -e PLUGIN_LANE=web \
   ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
 ```
 

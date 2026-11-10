@@ -159,7 +159,7 @@ steps:
   # a key that misses an input is a green that never tested the change. The
   # lane-skip plugin owns the key, its .dockerignore matcher and the markers,
   # and tests them in its own repo (#475). What stays here is v-note's policy
-  # over .woodpecker/lanes.yml: `verify` fails on a declared input HEAD lacks,
+  # over lanes.yml: `verify` fails on a declared input HEAD lacks,
   # and the same pinned image lists each lane's covered files (`files` mode)
   # for lane-key-validation to check every path the workflows and e2e compose
   # files reference against. Same image as the gates, so the list is exactly
@@ -168,10 +168,10 @@ steps:
     depends_on: []
     image: ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
     commands:
-      - PLUGIN_MODE=verify /plugin
+      - PLUGIN_MODE=verify PLUGIN_CONFIG=lanes.yml /plugin
       - mkdir -p .lane/files
-      - PLUGIN_MODE=files PLUGIN_LANE=web /plugin >.lane/files/web.txt
-      - PLUGIN_MODE=files PLUGIN_LANE=android /plugin >.lane/files/android.txt
+      - PLUGIN_MODE=files PLUGIN_CONFIG=lanes.yml PLUGIN_LANE=web /plugin >.lane/files/web.txt
+      - PLUGIN_MODE=files PLUGIN_CONFIG=lanes.yml PLUGIN_LANE=android /plugin >.lane/files/android.txt
 
   lane-key-validation:
     depends_on:
