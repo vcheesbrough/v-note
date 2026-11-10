@@ -206,8 +206,8 @@ steps:
     #
     # The CLI must match the running sovereign-config server, so this pin moves
     # when the server does: bump the tag and digest together, deliberately, as a
-    # commit. Verified at pin time: CLI 2.30.2 against server 2.30.2.
-    image: registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf49099830f99b6dbc421527f13fd3f32e1156ed62c9d26987d26c256d1827
+    # commit. Verified at pin time: CLI 2.46.418 against server 2.46.418.
+    image: registry.desync.link/sovereign-config-cli:2.46.418@sha256:68761657b20cedc7064be7808565f36fdcec58d221034de6196f4ea0f51ce1de
     volumes: *docker-socket
     # The whole dev environment. deploy-v-note.sh takes no arguments and knows nothing about which
     # environment it is deploying — every environment-specific value reaches it
