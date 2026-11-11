@@ -16,7 +16,8 @@
 #      directly on the gated step and has no `when: status` override, so
 #      Woodpecker runs it only after the gated step succeeded;
 #   5. every lane-skip step gets github_token (markers on the private repo)
-#      and names `config: lanes.yml` (the plugin's default, .woodpecker/lanes.yml,
+#      and, unless it is the cron's `prune` (which reads no lanes, #469), names
+#      `config: lanes.yml` (the plugin's default, .woodpecker/lanes.yml,
 #      is parsed by Woodpecker as a workflow and breaks every pipeline), and all
 #      of them use one image pinned by digest.
 # Negative cases mutate the parsed workflows to prove each rule bites.
@@ -76,8 +77,9 @@ def check(workflows, lanes):
             token = (step.get("settings") or {}).get("github_token")
             if token != {"from_secret": "github_token"}:
                 problems.append(f"{path} {name}: github_token is not from_secret github_token")
-            # Only check and mark read lanes.yml; prune (#469) works on markers alone.
-            if (step.get("settings") or {}).get("mode") in ("check", "mark") and (
+            # prune (#469) works on markers alone; every other mode, and a step with
+            # no or a misspelt mode, must name lanes.yml.
+            if (step.get("settings") or {}).get("mode") != "prune" and (
                 step.get("settings") or {}
             ).get("config") != "lanes.yml":
                 problems.append(f"{path} {name}: config is not lanes.yml")
@@ -187,6 +189,10 @@ def default_config(step):
     step["settings"].pop("config")
 
 
+def prune_step_unnamed_mode(step):
+    step["settings"]["mode"] = "prnue"
+
+
 def unpinned(step):
     step["image"] = "ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:latest"
 
@@ -200,6 +206,7 @@ cases = [
     ("check without github_token", ".woodpecker/web.yml", "lane-check", drop_token),
     ("unpinned plugin image", ".woodpecker/android.yml", "lane-check", unpinned),
     ("mark falling back to the default config path", ".woodpecker/android.yml", "lane-mark-android-api-29", default_config),
+    ("a misspelt prune mode escaping the config rule", ".woodpecker/prune-lane-markers.yml", "prune", prune_step_unnamed_mode),
 ]
 for label, path, step, change in cases:
     found = mutated(path, step, change)

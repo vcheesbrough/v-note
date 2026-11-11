@@ -614,7 +614,9 @@ and logs the count (`N of M markers are older than 30 days`, `deleted N markers`
 only costs that step one re-run. `scripts/test-cron-pipeline.sh` (checks:
 `deploy-pipeline-validation`) holds that the workflow runs on that cron only and
 only prunes, and that no other workflow admits the `cron` event, so the schedule
-never starts a build. The cron is registered in Woodpecker (repo settings →
+never starts a build. `github_token` reaches the cron because the sovereign-config
+Woodpecker broker, which serves every v-note secret, exposes each one to `cron`
+(and `manual`) as well as push, tag, release and deployment. The cron is registered in Woodpecker (repo settings →
 Crons, or `POST /api/repos/<id>/cron` with `{"name":"prune-lane-markers",
 "branch":"master","schedule":"@weekly"}`); "Run now" there fires it by hand.
 
