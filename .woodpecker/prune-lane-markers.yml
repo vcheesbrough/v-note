@@ -1,0 +1,29 @@
+# Weekly cleanup of the lane-skip green markers (#469).
+#
+# lane-mark-* (web.yml, android.yml) writes one marker per gated step per
+# pipeline whose lane inputs changed, at refs/ci/green/<step>/<key> on GitHub,
+# and each keeps its tested commit reachable. Nothing else deletes them. This
+# deletes those older than 30 days and logs the count ("N of M markers are older
+# than 30 days", "deleted N markers"). 30 days is long enough that an active
+# branch's markers survive; deleting a marker is always safe anyway, it only
+# costs that step one re-run.
+#
+# Runs on the `prune-lane-markers` cron only (registered in Woodpecker; see
+# docs/DEV.md). Every other workflow filters on push/manual/deployment, so a
+# cron runs nothing else; scripts/test-cron-pipeline.sh holds both sides of that.
+# Needs no clone: prune reads the markers straight from the remote.
+
+when:
+  - event: cron
+    cron: prune-lane-markers
+
+skip_clone: true
+
+steps:
+  prune:
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+    settings:
+      mode: prune
+      days: 30
+      github_token:
+        from_secret: github_token

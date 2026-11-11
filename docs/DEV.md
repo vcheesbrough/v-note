@@ -604,10 +604,23 @@ docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_CONFIG=lanes.y
   ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
 ```
 
-**Markers accumulate.** Each pipeline whose inputs changed adds up to three
-refs under `refs/ci/green/`, and each keeps its tested commit reachable on
-GitHub. Deleting a marker is always safe: it only costs that step one re-run.
-To clean up by hand, list what would go, then delete it:
+**Markers are pruned weekly (#469).** Each pipeline whose inputs changed adds up
+to three refs under `refs/ci/green/`, and each keeps its tested commit reachable
+on GitHub. The Woodpecker cron **`prune-lane-markers`** (weekly, on `master`)
+runs [`.woodpecker/prune-lane-markers.yml`](../.woodpecker/prune-lane-markers.yml),
+the plugin's `prune` mode with `days: 30`. It deletes markers older than 30 days
+and logs the count (`N of M markers are older than 30 days`, `deleted N markers`).
+30 days keeps an active branch's markers. Deleting a marker is always safe: it
+only costs that step one re-run. `scripts/test-cron-pipeline.sh` (checks:
+`deploy-pipeline-validation`) holds that the workflow runs on that cron only and
+only prunes, and that no other workflow admits the `cron` event, so the schedule
+never starts a build. `github_token` reaches the cron because the sovereign-config
+Woodpecker broker, which serves every v-note secret, exposes each one to `cron`
+(and `manual`) as well as push, tag, release and deployment. The cron is registered in Woodpecker (repo settings →
+Crons, or `POST /api/repos/<id>/cron` with `{"name":"prune-lane-markers",
+"branch":"master","schedule":"@weekly"}`); "Run now" there fires it by hand.
+
+The manual fallback lists what would go, then deletes it:
 
 ```bash
 docker run --rm -e PLUGIN_MODE=prune -e PLUGIN_DAYS=30 -e PLUGIN_DRY_RUN=true \

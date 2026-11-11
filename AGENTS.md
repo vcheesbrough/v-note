@@ -166,7 +166,9 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
     changes, and the master merge of an already-synced branch. A skipped step
     still counts as green: it prints the commit and pipeline that passed.
     Images are **always** built, so versions and deploys are unaffected.
-    Markers live at `refs/ci/green/<step>/<key>` on GitHub. **Run a manual
+    Markers live at `refs/ci/green/<step>/<key>` on GitHub; the weekly cron
+    `prune-lane-markers` (#469) deletes those older than 30 days, and it is the
+    only workflow that runs on `cron`. **Run a manual
     pipeline with `FULL_RUN=1`** to force every lane (flake hunting, a
     suspected stale key). When a lane's step starts reading a new path outside
     its build context, add it to that lane's `inputs`. If the path is written
