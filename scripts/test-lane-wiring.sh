@@ -76,7 +76,10 @@ def check(workflows, lanes):
             token = (step.get("settings") or {}).get("github_token")
             if token != {"from_secret": "github_token"}:
                 problems.append(f"{path} {name}: github_token is not from_secret github_token")
-            if (step.get("settings") or {}).get("config") != "lanes.yml":
+            # Only check and mark read lanes.yml; prune (#469) works on markers alone.
+            if (step.get("settings") or {}).get("mode") in ("check", "mark") and (
+                step.get("settings") or {}
+            ).get("config") != "lanes.yml":
                 problems.append(f"{path} {name}: config is not lanes.yml")
         for name, step in steps.items():
             commands = [str(c) for c in step.get("commands") or []]

@@ -96,6 +96,9 @@ steps:
       # the skip guard first, mark only after a pass. Workflow shape too,
       # checked here for the python+yaml.
       - ./scripts/test-lane-wiring.sh
+      # v-note's first cron (#469): prune-lane-markers runs on its cron only
+      # and only prunes, and no other workflow admits the cron event.
+      - ./scripts/test-cron-pipeline.sh
 
   # scripts/smoke-oidc-login.sh is the post-deploy gate #372 was missing, and it
   # runs only against live infrastructure — so a broken assertion in it would be
