@@ -75,7 +75,10 @@ undeclared_refs() {
   missing=""
   for p in $(lane_refs "$1"); do
     echo "$NOT_INPUTS" | grep -qxF "$p" && continue
-    grep -qE "^$(printf '%s' "$p" | sed 's/[.[\*^$]/\\&/g')(/|$)" "$covered" && continue
+    # Covered when a listed file is the path itself or lies under it. Literal
+    # comparison: a path may hold regex metacharacters such as `+`.
+    awk -v p="$p" '$0 == p || index($0, p "/") == 1 { found = 1; exit } END { exit !found }' "$covered" \
+      && continue
     missing="$missing $p"
   done
   echo "$missing"
