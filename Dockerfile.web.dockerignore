@@ -50,3 +50,6 @@ version.txt
 .idea/
 .vscode/
 .cursor/
+
+# lane-skip decision files (#476): never committed, never in an image.
+.lane/

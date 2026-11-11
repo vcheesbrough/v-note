@@ -1,20 +1,20 @@
-# verify-tag-deploy workflow: verify and tag on push, deploy dev on a deployment.
-#   Push:       after checks, web and android all pass → compute-version →
-#               verify-release-images → tag-release
-#   Deployment: validate-deployment ∥ compute-version → verify-release-images →
-#               apply-authentik-blueprint-dev → attach-sqltool-outpost-dev →
-#               deploy-dev → smoke-oidc-login-dev ∥ smoke-sql-console-dev ∥
-#               smoke-web-live-dev ∥ publish-grafana-dashboard
+# verify-tag-deploy workflow: publish on push, deploy and tag on a deployment.
+# Versioning follows the agent-shared release-flow contract, enforced by the
+# release-versions plugin (#476):
+#   Push/manual: after checks, web and android all pass → version → publish
+#   Deployment:  resolve → apply-authentik-blueprint-dev →
+#                attach-sqltool-outpost-dev → deploy-dev → tag ∥
+#                smoke-oidc-login-dev ∥ smoke-sql-console-dev ∥
+#                smoke-web-live-dev ∥ publish-grafana-dashboard
 # Dev is the only deploy target (#392); a production environment is deferred to
 # #388, which re-adds the steps for it.
 #
-# A push never deploys (#462). It builds, tests and tags; dev — shared and
-# last-deploy-wins — changes only when someone asks for it with a manual
-# deployment (target `dev`) of a commit whose push pipeline went green, from any
-# branch. Until #462 every push on every branch applied the blueprint and
-# redeployed dev, so parallel iterations queued behind each other's deploys and
-# overwrote each other's dev. The deploy steps themselves are unchanged; only the
-# event that runs them is.
+# A push never deploys (#462). It builds, tests and publishes; dev, which is
+# shared and last-deploy-wins, changes only when someone asks for it with a
+# manual deployment (target `dev`) of a commit whose push pipeline published,
+# from any branch. Until #462 every push on every branch applied the blueprint
+# and redeployed dev, so parallel iterations queued behind each other's deploys
+# and overwrote each other's dev.
 #
 # That includes master, deliberately: a merge does not deploy either. The cost is
 # that the live smokes (#372 login, #299 SQL console, #179 signed-in web) no
@@ -26,24 +26,31 @@
 # that is what it changes. A master-only auto-deploy would bring back the
 # duplicated push path and overwrite whichever branch is on dev at every merge.
 #
-# The push path still tags, and the tag is what a deployment looks for. The
-# release tag is Cargo.toml's major.minor plus the pipeline number as the patch
-# (scripts/release-version.sh) — unique per pipeline, so parallel builds never
-# share an image tag. A deployment has a pipeline number of its own, so it finds
-# the tag its commit was built under on the commit itself, and only a green push
-# pipeline puts one there: a commit without one never went green, so there is
-# nothing tested to deploy. A tag therefore means "built and passed checks, web
-# and android" — no longer "deployed and smoke-tested on dev"; the smokes gate
-# the manual deployment instead.
+# The version is Cargo.toml's MAJOR.MINOR plus the next number on that line,
+# claimed by `version` creating refs/builds/<version> on GitHub, so parallel
+# builds never share one; a failed build uses its number up. `publish` pushes
+# both images under it only after checks, web and android have all passed, so
+# the registry holds tested builds only. A git tag no longer means "passed CI":
+# since #476 it means "this build was deployed", written by `tag` once
+# deploy-dev succeeds, whatever the smokes then find. A deployment never builds:
+# `resolve` picks the commit's tagged build, else its newest published build,
+# and refuses a commit that has none. Tags written under the old
+# pipeline-number rule still count as deployed builds.
+#
+# `publish` pushes images that build-web and build-android left in the agent's
+# docker daemon. That holds while every workflow of a pipeline runs on the one
+# agent (true since #476 was written); on a second agent it fails loudly
+# ("is not in the local docker daemon"), never silently.
 # See checks.yml for why the push pipeline is split into workflows.
 
 when:
-  - event: [push, deployment]
+  - event: [push, manual, deployment]
 
 # `optional` because a deployment event builds nothing: checks, web and android
 # only run on push/manual, and a non-optional dependency on a workflow that is not
-# part of the pipeline would stop manual deploys. On push all three are present,
-# so they are enforced — this workflow runs only if every one of them succeeded.
+# part of the pipeline would stop manual deploys. On push and manual all three are
+# present, so they are enforced: this workflow runs only if every one of them
+# succeeded, which is what makes `publish` publish tested builds only.
 depends_on:
   - name: checks
     optional: true
@@ -53,70 +60,60 @@ depends_on:
     optional: true
 
 steps:
-  compute-version:
+  # Finds the version web and android already claimed for this pipeline.
+  version:
+    when:
+      - event: [push, manual]
     depends_on: []
-    image: &release-version-image alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-    environment: &release-version-environment
-      GITHUB_TOKEN:
+    image: &release-versions ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.2.0@sha256:9d5b3541aa143727f8c68c8c8f1d36557d999d3c857c4581be43363c8ff78c94
+    settings:
+      mode: version
+      major_minor_source: cargo
+      github_token:
         from_secret: github_token
-    commands:
-      # git is unpinned for the reason given on the apk lines in verify-tag-deploy.yml: the
-      # base image is digest-pinned, and Alpine drops superseded versions.
-      - apk add --no-cache git
-      - ./scripts/release-version.sh compute
 
-  validate-deployment:
+  # Pushes both images as <image>:<version>, once, after every test. Before the
+  # first push it checks that each local image carries this version and this
+  # commit in its OCI labels and is not already in the registry, so a refusal
+  # publishes nothing and a version is never overwritten.
+  publish:
+    when:
+      - event: [push, manual]
+    depends_on:
+      - version
+    image: *release-versions
+    volumes: &docker-socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    settings:
+      mode: publish
+      images: &images
+        - registry.desync.link/v-note
+        - registry.desync.link/v-note-android
+      registry_username: &registry-username
+        from_secret: zot_ci_user
+      registry_password: &registry-password
+        from_secret: zot_ci_password
+
+  # Chooses what a deployment ships, and is the only step that may: the commit's
+  # release tag if it has one (it was deployed before), else its newest published
+  # build. It refuses a commit with no published build (its push pipeline failed
+  # or has not finished), a target not in `environments`, and images whose labels
+  # name another build. Writes .release-tag. `dev` is the only target, from any
+  # branch; #388 adds prod here.
+  resolve:
     when:
       - event: deployment
     depends_on: []
-    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-    commands:
-      - |
-        if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ]; then
-          echo "ERROR: deploy target must be 'dev' (got: '$$CI_PIPELINE_DEPLOY_TARGET')"
-          echo "       dev is the only environment that exists; a production"
-          echo "       environment is deferred to #388, which re-adds its target."
-          exit 1
-        fi
-
-  # This workflow computed its release tag itself — workflows share nothing. With
-  # the pipeline number as the patch it matches the tag web and android built
-  # with, and no other pipeline can build under it; this check makes that a
-  # verified fact rather than an assumption before anything is tagged or rolled
-  # out: refuse any image whose revision label is not this commit.
-  #
-  # On a deployment it first requires the tag to have been *reused*: only a green
-  # push pipeline tags a commit, so a freshly allocated tag means this commit was
-  # never built and tested — or its push is still running — and there are no
-  # images of its own to deploy.
-  verify-release-images:
-    when:
-      - event: [push, deployment]
-    depends_on:
-      - compute-version
-    image: &docker-image docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
-    volumes: &docker-socket
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-    commands:
-      - |
-        if [ "$$CI_PIPELINE_EVENT" = "deployment" ] && [ "$$(cat .release-tag-reused)" != "true" ]; then
-          echo "ERROR: commit $$CI_COMMIT_SHA has no release tag, so no push pipeline"
-          echo "       built and tested it (or its push pipeline has not finished)."
-          echo "       Deploy a commit whose push pipeline is green."
-          exit 1
-        fi
-      - echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - |
-        RELEASE_TAG=$$(cat .release-tag)
-        for REPO in registry.desync.link/v-note registry.desync.link/v-note-android; do
-          docker pull --quiet "$$REPO:$$RELEASE_TAG"
-          ./scripts/check-image-metadata.sh "$$REPO:$$RELEASE_TAG" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-        done
+    image: *release-versions
+    settings:
+      mode: resolve
+      images: *images
+      environments:
+        dev: {}
+      github_token:
+        from_secret: github_token
+      registry_username: *registry-username
+      registry_password: *registry-password
 
   # One step per target, each applying only that environment's blueprint (#274).
   # A single file covering every environment meant a manual deployment from a
@@ -136,8 +133,7 @@ steps:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
-      - validate-deployment
-      - verify-release-images
+      - resolve
     pull: true
     image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0@sha256:9f262c4390205b5629e9af7560f4e492f0155395a429153703ba351206d9d975
     settings:
@@ -194,12 +190,11 @@ steps:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
-      - validate-deployment
-      - compute-version
+      - resolve
       - apply-authentik-blueprint-dev
       - attach-sqltool-outpost-dev
     # The docker CLI image with the sovereign-config CLI baked in, published by
-    # the operator. It replaces `*docker-image` for the step that runs
+    # the operator. It replaces the plain docker CLI image for the step that runs
     # `sovereign-config render`, and carries everything else it uses: Docker
     # 27.5.1 with the compose plugin (v2.33.0), sh and the busybox tools
     # deploy-v-note.sh needs. Pinned by digest like every other image here.
@@ -418,18 +413,19 @@ steps:
       # is published by an operator with scripts/publish-grafana-alerts.sh;
       # re-add it here once the grant lands.
 
-  # Push only, after the images are verified: the workflow-level depends_on has
-  # already required checks, web and android to pass, so this commit's build is
-  # tested and its tag is what a later deployment looks for (see the header).
-  # There is no tag step on the deployment path — a deployable commit is already
-  # tagged, and push-tag would only report that.
-  tag-release:
+  # The git tag means "this build was deployed" (release-flow). Written once
+  # deploy-dev succeeds, beside the smokes rather than after them: a deploy whose
+  # smokes fail was still deployed, and the failing smoke fails the pipeline,
+  # never the tag. A no-op when the commit already carries the tag, so every
+  # later deployment of the commit, to any target, ships the same build.
+  tag:
     when:
-      - event: push
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
-      - verify-release-images
-    image: *release-version-image
-    environment: *release-version-environment
-    commands:
-      - apk add --no-cache git
-      - ./scripts/release-version.sh push-tag
+      - deploy-dev
+    image: *release-versions
+    settings:
+      mode: tag
+      github_token:
+        from_secret: github_token

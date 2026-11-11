@@ -57,3 +57,6 @@ lcov.info
 .claude/
 .cursor/mcp.json
 *.bak
+
+# lane-skip decision files (#476): never committed, never in an image.
+.lane/

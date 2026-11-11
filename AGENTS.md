@@ -39,8 +39,16 @@ Kotlin (Compose) Android, Authentik OIDC. Locked decisions live in
   sequential** (highest existing `N` + 1 across Done + In Progress).
 - **Pre-MVP** (before **`vertical-slice-mvp`** closes on trunk): `0.N.0`.
 - **MVP release:** when the **MVP-completion card** (**#151** today) merges to
-  trunk, set the workspace to `1.0.0` and tag `v1.0.0`.
+  trunk, set the workspace to `1.0.0`; the first build claims `1.0.0` and its
+  first deploy writes the tag. Never tag by hand.
 - **Post-MVP:** `1.N.P`, `N` continuing from the last pre-MVP iteration.
+- **Patch `P` and every git tag belong to the release-versions plugin (#476)**,
+  following the agent-shared **`release-flow`** skill: `P` is the next number on
+  the `MAJOR.MINOR` line, claimed per build as `refs/builds/<version>` on GitHub
+  (gaps are failed builds), and a tag means **"this build was deployed"**,
+  written by the deployment's `tag` step. A branch builds `0.N.x` while master
+  keeps its own line. Never create, move or delete a tag or a `refs/builds/*` /
+  `refs/build-pipelines/*` ref by hand.
 - **Do not assume** a fixed backbone — new MVP iterations may be inserted before
   release; the backbone is **not** frozen at **#145–#151**. Discover new
   iterations → `create_card` in TODO and update the **Kanban card map** in the
@@ -65,8 +73,9 @@ request** — ticket update **or** plan update **or** implementation. **Verify
 before writing** facts into a card/plan by reading **this repo's** pipeline,
 plugins, and scripts; do not copy formats from **bored** or other repos unless
 v-note uses the same mechanism. Use placeholders like **`{release}`** and define
-them once (v-note: Woodpecker **`compute-version`** → **`.release-tag`**, plain
-semver `MAJOR.MINOR.PATCH`).
+them once (v-note: the release-versions plugin's **`version`** step (build) or
+**`resolve`** step (deployment) → **`.release-tag`**, plain semver
+`MAJOR.MINOR.PATCH`).
 
 **If you overstepped** (repo edited when only the card should change): revert
 repo changes immediately; keep or fix the card; do not "finish" the
@@ -108,18 +117,28 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   documented re-enable path still works.
 - **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
   `checks` (lint, rust-test, deploy-script-validation, deploy-pipeline-validation,
-  grafana-dashboard-validation, lane-key-validation, android-build-box-pin),
+  grafana-dashboard-validation, lane-files → lane-key-validation, android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
   ktlint, detekt and Android Lint — plus API 29/36 instrumented) run in parallel; `verify-tag-deploy`
-  (verify-release-images → tag-release) runs only when all three succeed.
-  **A push never deploys dev (#462)** — it builds, tests and tags, on any branch,
-  without touching shared infrastructure, so parallel iterations' pipelines do not
-  queue behind or overwrite each other's dev. **Dev is deployed by a manual
-  Woodpecker deployment** (target `dev`) of a commit whose push pipeline is green,
-  from **any branch**: verify-release-images (refuses an untagged commit) →
-  blueprint → outpost → deploy-dev → smoke-oidc-login ∥ smoke-sql-console ∥
-  smoke-web-live ∥ dashboard publish. A deployment applies `blueprint-dev.yaml`
-  to shared Authentik and redeploys dev, and the last deployment wins.
+  (version → publish) runs only when all three succeed. Each workflow starts
+  with the release-versions plugin's `version` step, and all of them agree on
+  the one version their pipeline claimed. The images are built and tested
+  locally and only `publish` pushes them, so the registry holds tested builds
+  only (#476, agent-shared `release-flow`).
+  **A push never deploys dev (#462)** — it builds, tests and publishes, on any
+  branch, without touching shared infrastructure, and it **never tags**, so
+  parallel iterations' pipelines do not queue behind or overwrite each other's
+  dev. **Dev is deployed by a manual Woodpecker deployment** (target `dev`) of a
+  commit whose push pipeline published, from **any branch**: resolve (the
+  commit's tagged build, else its newest published one; refuses a commit with
+  none) → blueprint → outpost → deploy-dev → tag ∥ smoke-oidc-login ∥
+  smoke-sql-console ∥ smoke-web-live ∥ dashboard publish. A deployment applies
+  `blueprint-dev.yaml` to shared Authentik and redeploys dev, and the last
+  deployment wins. **A tag means the build was deployed**, written once
+  deploy-dev succeeds whatever the smokes find; which version runs where is
+  `git ls-remote --tags origin` (deployed) and `git ls-remote origin
+  'refs/builds/*'` (built). Agents may start dev deployments (Woodpecker API, as
+  the MCP has no deploy action) when a card's change needs the live check.
   `smoke-web-live-dev` (#179) signs in to dev through the **real** Authentik as
   the blueprint's `v-note-smoke-dev` user and inks a page (`e2e/live/`, its own
   Playwright config — never part of the mock-IdP suite); it fails the deployment.
@@ -139,21 +158,22 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   - `docker build -f Dockerfile.web -t v-note:ci-local --secret id=github_token,env=GITHUB_TOKEN .`
   - `TEST_IMAGE=v-note:ci-local docker compose -f e2e/docker-compose.test.yml -f e2e/docker-compose.android-apk.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
   - **All push workflows, including `e2e-web` and both Android lanes, must be green** before an iteration is done.
-  - **Lane keys skip unchanged tests (#467).** `e2e-web` and each Android
-    instrumented step hash exactly what their lane reads
-    ([`scripts/lane-key.sh`](scripts/lane-key.sh): the files the lane's
-    `.dockerignore` admits, plus declared extras such as `e2e/`) and exit green
-    with a `lane-key: SKIPPING` line when that key already passed — docs-only
-    pushes, the other lane's changes, and the master merge of an
-    already-synced branch. A skipped step still counts as green: it names the
-    commit and pipeline that passed. Images are **always** built, so release
-    tags and deploys are unaffected. Markers live at `refs/ci/green/<step>/<key>`
-    on GitHub. **Run a manual pipeline with `FULL_RUN=1`** to force every lane
-    (flake hunting, a suspected stale key). When a lane's step starts reading a
-    new path outside its build context, add it to `lane_extras`. If the path is
-    written literally in the lane's workflow or e2e compose files,
-    `lane-key-validation` in `checks` fails until you do. A path assembled from
-    a variable is invisible to that check, so declare it by hand.
+  - **Lane keys skip unchanged tests (#467, #476).** The lane-skip plugin
+    hashes exactly what each lane reads (the files the lane's `.dockerignore`
+    admits, plus its `inputs` in [`lanes.yml`](lanes.yml)
+    such as `e2e/`). `e2e-web` and each Android instrumented step then exit
+    green when that key already passed: docs-only pushes, the other lane's
+    changes, and the master merge of an already-synced branch. A skipped step
+    still counts as green: it prints the commit and pipeline that passed.
+    Images are **always** built, so versions and deploys are unaffected.
+    Markers live at `refs/ci/green/<step>/<key>` on GitHub. **Run a manual
+    pipeline with `FULL_RUN=1`** to force every lane (flake hunting, a
+    suspected stale key). When a lane's step starts reading a new path outside
+    its build context, add it to that lane's `inputs`. If the path is written
+    literally in the lane's workflow or e2e compose files, `lane-key-validation`
+    in `checks` fails until you do. A path assembled from a variable is
+    invisible to that check, so declare it by hand. The wiring (check, guard
+    first, mark only after a pass) is held by `scripts/test-lane-wiring.sh`.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see
   [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**). Contract/unit tests
