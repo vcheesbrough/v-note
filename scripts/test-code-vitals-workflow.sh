@@ -39,7 +39,10 @@ def check(workflows):
     if workflow is None:
         return [f"{CODE_VITALS} is missing"]
     when = workflow.get("when")
+    # No rules (absent or an empty list) means no limit: every event runs it.
     rules = when if isinstance(when, list) else [when or {}]
+    if not rules:
+        problems.append(f"{CODE_VITALS}: an empty `when` runs on every event")
     for rule in rules:
         if set(as_list(rule.get("event"))) != {"push", "manual"}:
             problems.append(f"{CODE_VITALS}: runs on {rule.get('event')!r}, not push/manual only")
@@ -107,6 +110,18 @@ def second_step(w):
     w[CODE_VITALS]["steps"]["more"] = dict(step(w))
 
 
+def empty_when(w):
+    w[CODE_VITALS]["when"] = []
+
+
+def waits_on_others(w):
+    w[CODE_VITALS]["depends_on"] = ["checks"]
+
+
+def step_waits(w):
+    step(w)["depends_on"] = ["setup"]
+
+
 def awaited(w):
     w[".woodpecker/verify-tag-deploy.yml"]["depends_on"] = ["checks", NAME]
 
@@ -118,6 +133,9 @@ def inline_password(w):
 for name, change in [
     ("a pull request trigger", on_pull_requests),
     ("a workflow not limited to master", any_branch),
+    ("an empty when, which runs on every event", empty_when),
+    ("a workflow that waits on others", waits_on_others),
+    ("a step with depends_on", step_waits),
     ("a step that can fail the pipeline", can_fail),
     ("a second step", second_step),
     ("another workflow waiting on it", awaited),
