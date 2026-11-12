@@ -194,7 +194,9 @@ steps:
       - apply-authentik-blueprint-dev
       - attach-sqltool-outpost-dev
     # The docker CLI image with the sovereign-config CLI baked in, published by
-    # the operator. It replaces the plain docker CLI image for the step that runs
+    # sovereign-config's release pipeline to public GHCR (#543; it moved off
+    # registry.desync.link by digest, so this is the same image). It replaces
+    # the plain docker CLI image for the step that runs
     # `sovereign-config render`, and carries everything else it uses: Docker
     # 27.5.1 with the compose plugin (v2.33.0), sh and the busybox tools
     # deploy-v-note.sh needs. Pinned by digest like every other image here.
@@ -202,7 +204,7 @@ steps:
     # The CLI must match the running sovereign-config server, so this pin moves
     # when the server does: bump the tag and digest together, deliberately, as a
     # commit. Verified at pin time: CLI 2.46.418 against server 2.46.418.
-    image: registry.desync.link/sovereign-config-cli:2.46.418@sha256:68761657b20cedc7064be7808565f36fdcec58d221034de6196f4ea0f51ce1de
+    image: ghcr.io/vcheesbrough/sovereign-config-cli:2.46.418@sha256:68761657b20cedc7064be7808565f36fdcec58d221034de6196f4ea0f51ce1de
     volumes: *docker-socket
     # The whole dev environment. deploy-v-note.sh takes no arguments and knows nothing about which
     # environment it is deploying — every environment-specific value reaches it

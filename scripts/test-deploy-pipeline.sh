@@ -20,7 +20,10 @@
 #      would name a step that no longer exists and fail the whole config;
 #   5. web, android and verify-tag-deploy all run `version` on the same pinned
 #      plugin image, so the three workflows of one pipeline agree on its
-#      version, and only `publish` pushes images, after every test.
+#      version, and only `publish` pushes images, after every test;
+#   6. deploy-dev runs the sovereign-config CLI image from public GHCR, pinned
+#      by version and digest (#543), and no step in verify-tag-deploy pulls
+#      that image from anywhere else.
 # Negative cases mutate the parsed workflows to prove each rule bites.
 
 set -euo pipefail
@@ -36,6 +39,9 @@ import yaml
 
 PLUGIN = re.compile(
     r"^ghcr\.io/vcheesbrough/woodpecker-plugin-release-versions:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$"
+)
+CLI_IMAGE = re.compile(
+    r"^ghcr\.io/vcheesbrough/sovereign-config-cli:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$"
 )
 DEPLOY = ".woodpecker/verify-tag-deploy.yml"
 BUILDS = (".woodpecker/web.yml", ".woodpecker/android.yml")
@@ -199,6 +205,14 @@ def check(docs, raws):
     for name, step in steps.items():
         if mode(step):
             ok(step.get("image") in plugin_images, f"{name} uses the same pinned plugin image")
+
+    # 6. the CLI image comes from public GHCR, pinned by digest (#543)
+    cli = steps.get("deploy-dev", {}).get("image", "")
+    ok(CLI_IMAGE.match(cli), f"deploy-dev runs the GHCR sovereign-config CLI image pinned by digest ({cli})")
+    for name, step in steps.items():
+        image = step.get("image", "")
+        if "sovereign-config-cli" in image:
+            ok(CLI_IMAGE.match(image), f"{name} pulls the sovereign-config CLI only from GHCR by digest ({image})")
     return results
 
 
@@ -255,6 +269,24 @@ def prod_allowed(d):
     step(d, DEPLOY, "resolve")["settings"]["environments"] = {"dev": {}, "prod": {}}
 
 
+def cli_back_on_zot(d):
+    image = step(d, DEPLOY, "deploy-dev")["image"]
+    step(d, DEPLOY, "deploy-dev")["image"] = image.replace(
+        "ghcr.io/vcheesbrough/", "registry.desync.link/"
+    )
+
+
+def cli_on_zot_elsewhere(d):
+    image = step(d, DEPLOY, "deploy-dev")["image"]
+    step(d, DEPLOY, "smoke-web-live-dev")["image"] = image.replace(
+        "ghcr.io/vcheesbrough/", "registry.desync.link/"
+    )
+
+
+def cli_without_digest(d):
+    step(d, DEPLOY, "deploy-dev")["image"] = step(d, DEPLOY, "deploy-dev")["image"].split("@")[0]
+
+
 def credential_on_build_path(d):
     step(d, DEPLOY, "publish")["settings"]["extra"] = {"from_secret": "authentik_api_token"}
 
@@ -270,6 +302,9 @@ cases = [
     ("publish dropping the android image", publish_one_image),
     ("resolve allowing an unknown target", prod_allowed),
     ("a write credential on the build path", credential_on_build_path),
+    ("the CLI image back on registry.desync.link", cli_back_on_zot),
+    ("the CLI image pinned by tag only", cli_without_digest),
+    ("another step pulling the CLI from registry.desync.link", cli_on_zot_elsewhere),
 ]
 for label, mutate in cases:
     mutated = copy.deepcopy(docs)

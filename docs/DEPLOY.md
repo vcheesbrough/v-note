@@ -179,9 +179,12 @@ runs.
 #### The CLI comes from the step image
 
 The pipeline does **not** install the CLI. The deploy step (`deploy-dev`) runs in
-`registry.desync.link/sovereign-config-cli:2.46.418@sha256:68761657…1de`
+`ghcr.io/vcheesbrough/sovereign-config-cli:2.46.418@sha256:68761657…1de`
 (its `image` in `.woodpecker/verify-tag-deploy.yml`): the docker CLI image with the
-sovereign-config CLI baked in, published by the operator. It carries everything
+sovereign-config CLI baked in, published by sovereign-config's release pipeline to
+public GHCR, so the step pulls it with no registry credential. Until #543 it came
+from `registry.desync.link`; the release was copied to GHCR by digest, so the pin
+kept its digest and only the repository changed. It carries everything
 the step uses — Docker with the compose plugin, `sh`, and the busybox tools
 `deploy-v-note.sh` needs — so it is a drop-in for `docker:27-cli`. Every other
 step keeps `docker:27-cli`.
