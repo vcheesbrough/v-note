@@ -195,7 +195,8 @@ steps:
       - attach-sqltool-outpost-dev
     # The docker CLI image with the sovereign-config CLI baked in, published by
     # sovereign-config's release pipeline to public GHCR (#543; it moved off
-    # registry.desync.link by digest, so this is the same image). It replaces the plain docker CLI image for the step that runs
+    # registry.desync.link by digest, so this is the same image). It replaces
+    # the plain docker CLI image for the step that runs
     # `sovereign-config render`, and carries everything else it uses: Docker
     # 27.5.1 with the compose plugin (v2.33.0), sh and the busybox tools
     # deploy-v-note.sh needs. Pinned by digest like every other image here.

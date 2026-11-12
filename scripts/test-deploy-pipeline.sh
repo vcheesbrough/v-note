@@ -22,8 +22,8 @@
 #      plugin image, so the three workflows of one pipeline agree on its
 #      version, and only `publish` pushes images, after every test;
 #   6. deploy-dev runs the sovereign-config CLI image from public GHCR, pinned
-#      by version and digest (#543), and no step pulls that image from anywhere
-#      else.
+#      by version and digest (#543), and no step in verify-tag-deploy pulls
+#      that image from anywhere else.
 # Negative cases mutate the parsed workflows to prove each rule bites.
 
 set -euo pipefail
@@ -276,6 +276,13 @@ def cli_back_on_zot(d):
     )
 
 
+def cli_on_zot_elsewhere(d):
+    image = step(d, DEPLOY, "deploy-dev")["image"]
+    step(d, DEPLOY, "smoke-web-live-dev")["image"] = image.replace(
+        "ghcr.io/vcheesbrough/", "registry.desync.link/"
+    )
+
+
 def cli_without_digest(d):
     step(d, DEPLOY, "deploy-dev")["image"] = step(d, DEPLOY, "deploy-dev")["image"].split("@")[0]
 
@@ -297,6 +304,7 @@ cases = [
     ("a write credential on the build path", credential_on_build_path),
     ("the CLI image back on registry.desync.link", cli_back_on_zot),
     ("the CLI image pinned by tag only", cli_without_digest),
+    ("another step pulling the CLI from registry.desync.link", cli_on_zot_elsewhere),
 ]
 for label, mutate in cases:
     mutated = copy.deepcopy(docs)
