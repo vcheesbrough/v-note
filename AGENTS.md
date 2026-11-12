@@ -178,11 +178,13 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
     invisible to that check, so declare it by hand. The wiring (check, guard
     first, mark only after a pass) is held by `scripts/test-lane-wiring.sh`.
 - **`code-vitals`** ([`.woodpecker/code-vitals.yml`](.woodpecker/code-vitals.yml))
-  is a fifth workflow outside the push pipeline: on `master` pushes only, it
-  runs the code-vitals collector to record this repo's new trunk commits for
+  is a separate workflow, outside the push pipeline: on `master` pushes (and
+  manual runs on `master`), it runs the code-vitals collector to record this
+  repo's new trunk commits for
   [code-vitals](https://github.com/vcheesbrough/code-vitals). Nothing depends
   on it and its one step is `failure: ignore`, so it can never fail or hold up
-  a build; a missed run is caught up by the next. It is a copy of code-vitals'
+  a build (`scripts/test-code-vitals-workflow.sh`, in `checks`); a missed run
+  is caught up by the next. It is a copy of code-vitals'
   `deploy/measured-repo-workflow.yml` — change it there and re-copy, not here.
   It runs the moving `code-vitals-collector:stable` tag (code-vitals' approved
   digest-pinning exception) and needs `code_vitals_prod_writer_password`, a

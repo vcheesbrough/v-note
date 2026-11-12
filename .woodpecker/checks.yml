@@ -99,6 +99,9 @@ steps:
       # v-note's first cron (#469): prune-lane-markers runs on its cron only
       # and only prunes, and no other workflow admits the cron event.
       - ./scripts/test-cron-pipeline.sh
+      # code-vitals.yml (code-vitals #498) runs on master pushes only and can
+      # never block a build: one `failure: ignore` step that nothing waits on.
+      - ./scripts/test-code-vitals-workflow.sh
 
   # scripts/smoke-oidc-login.sh is the post-deploy gate #372 was missing, and it
   # runs only against live infrastructure — so a broken assertion in it would be
