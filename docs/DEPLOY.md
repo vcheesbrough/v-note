@@ -231,12 +231,13 @@ Mini points `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at the
 `from_secret: <name>` in any [`.woodpecker/`](../.woodpecker/) workflow resolves
 at `/woodpecker/shared/<name>` or `/woodpecker/repos/vcheesbrough/v-note/<name>`.
 
-v-note's **own** layer holds two leaves:
+v-note's **own** layer holds three leaves:
 
 | Repo secret key | Used for |
 | --- | --- |
 | `v_note_devops_sovereign_access_url` | `SOVEREIGN_CONFIG_URL` — read-only connection **`v-note-devops`** rooted at `/v-note/devops`, the credential `render` uses above |
 | `v_note_dev_smoke_password` | The live smoke user's password (#179): the blueprint plugin's `vars` sets it on `v-note-smoke-dev` at every apply, and `smoke-web-live-*` signs in with it. 48 random alphanumerics; see [Post-deploy smoke](#post-deploy-smoke) for rotation |
+| `code_vitals_prod_writer_password` | **Not v-note's**: an **alias** of code-vitals' prod writer password (its own layer), for [`.woodpecker/code-vitals.yml`](../.woodpecker/code-vitals.yml). Rotated in code-vitals, never here. Like every leaf in this layer, the broker hands it to *every* v-note pipeline, any branch or event — `branch: master` in the workflow does not scope it, since a branch runs its own copy — so it is protected only by who may push (code-vitals AGENTS.md § Deviations register, trust assumption) |
 
 The rest are **shared** infrastructure credentials on `/woodpecker/shared`, used
 by bored and sovereign-config too, and **not v-note's to move or remove**:

@@ -115,7 +115,8 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   `pr-self-review` subagent only (baseline §5, §3 below). The pipeline and its
   setup notes ([`docs/PR-AGENT.md`](docs/PR-AGENT.md)) are kept only so the
   documented re-enable path still works.
-- **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/):
+- **Push CI is four Woodpecker workflows** in [`.woodpecker/`](.woodpecker/)
+  (plus `code-vitals`, below):
   `checks` (lint, rust-test, deploy-script-validation, deploy-pipeline-validation,
   grafana-dashboard-validation, lane-files → lane-key-validation, android-build-box-pin),
   `web` (build-web → e2e-web) and `android` (build-android — which also gates
@@ -176,6 +177,18 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
     in `checks` fails until you do. A path assembled from a variable is
     invisible to that check, so declare it by hand. The wiring (check, guard
     first, mark only after a pass) is held by `scripts/test-lane-wiring.sh`.
+- **`code-vitals`** ([`.woodpecker/code-vitals.yml`](.woodpecker/code-vitals.yml))
+  is a separate workflow, outside the push pipeline: on `master` pushes (and
+  manual runs on `master`), it runs the code-vitals collector to record this
+  repo's new trunk commits for
+  [code-vitals](https://github.com/vcheesbrough/code-vitals). Nothing depends
+  on it and its one step is `failure: ignore`, so it can never fail or hold up
+  a build (`scripts/test-code-vitals-workflow.sh`, in `checks`); a missed run
+  is caught up by the next. It is a copy of code-vitals'
+  `deploy/measured-repo-workflow.yml` — change it there and re-copy, not here.
+  It runs the moving `code-vitals-collector:stable` tag (code-vitals' approved
+  digest-pinning exception) and needs `code_vitals_prod_writer_password`, a
+  broker alias of code-vitals' secret into this repo's layer.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see
   [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**). Contract/unit tests
