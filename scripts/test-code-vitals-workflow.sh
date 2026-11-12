@@ -7,7 +7,8 @@
 #   1. it runs on `master` push / manual only (never cron, never a PR);
 #   2. it is one step, `failure: ignore`, with no `depends_on` of its own;
 #   3. no other workflow depends on it;
-#   4. the collector's credential comes by name from the broker, never inline.
+#   4. the collector's credential comes by name from the broker, never inline;
+#   5. the step never redirects the shell's stdin (Woodpecker pipes the script in).
 # What the step does is code-vitals' to test: the file is a copy of its
 # deploy/measured-repo-workflow.yml, pinned by tests/test_measured_repo_workflow.py
 # there. Negative cases mutate the parsed workflows to prove each rule bites.
@@ -19,6 +20,7 @@ cd "$(dirname "$0")/.."
 python3 - <<'PY'
 import copy
 import glob
+import re
 import sys
 
 import yaml
@@ -58,6 +60,12 @@ def check(workflows):
             problems.append(f"{CODE_VITALS}: step {name} can fail the pipeline")
         if step.get("depends_on"):
             problems.append(f"{CODE_VITALS}: step {name} has depends_on")
+        # Woodpecker pipes the script into the shell: `exec <…` drops the rest
+        # of it and the step exits 0 having done nothing (pipeline 520).
+        for command in step.get("commands") or []:
+            for line in str(command).splitlines():
+                if re.match(r"\s*exec\b.*<", line.split("#", 1)[0]):
+                    problems.append(f"{CODE_VITALS}: step {name} redirects the shell's stdin")
         password = (step.get("environment") or {}).get("CODE_VITALS_WRITER_PASSWORD")
         if password != {"from_secret": "code_vitals_prod_writer_password"}:
             problems.append(f"{CODE_VITALS}: step {name} does not take the writer password from the broker")
@@ -126,6 +134,10 @@ def awaited(w):
     w[".woodpecker/verify-tag-deploy.yml"]["depends_on"] = ["checks", NAME]
 
 
+def takes_stdin(w):
+    step(w)["commands"] = ["set -eu\nexec < /dev/null\n" + step(w)["commands"][0]]
+
+
 def inline_password(w):
     step(w)["environment"]["CODE_VITALS_WRITER_PASSWORD"] = "hunter2"
 
@@ -140,6 +152,7 @@ for name, change in [
     ("a second step", second_step),
     ("another workflow waiting on it", awaited),
     ("an inline password", inline_password),
+    ("a step that redirects the shell's stdin", takes_stdin),
 ]:
     report(bool(mutated(change)), f"refuses {name}")
 
