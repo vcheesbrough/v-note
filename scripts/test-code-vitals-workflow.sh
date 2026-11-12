@@ -64,7 +64,8 @@ def check(workflows):
         # of it and the step exits 0 having done nothing (pipeline 520).
         for command in step.get("commands") or []:
             for line in str(command).splitlines():
-                if re.match(r"\s*exec\b.*<", line.split("#", 1)[0]):
+                # `exec` as any command on the line, not only the first.
+                if re.search(r"(?:^|[;&|(])\s*exec\b.*<", line.split("#", 1)[0]):
                     problems.append(f"{CODE_VITALS}: step {name} redirects the shell's stdin")
         password = (step.get("environment") or {}).get("CODE_VITALS_WRITER_PASSWORD")
         if password != {"from_secret": "code_vitals_prod_writer_password"}:
@@ -138,6 +139,10 @@ def takes_stdin(w):
     step(w)["commands"] = ["set -eu\nexec < /dev/null\n" + step(w)["commands"][0]]
 
 
+def takes_stdin_mid_line(w):
+    step(w)["commands"] = ["set -eu; exec < /dev/null\n" + step(w)["commands"][0]]
+
+
 def inline_password(w):
     step(w)["environment"]["CODE_VITALS_WRITER_PASSWORD"] = "hunter2"
 
@@ -153,6 +158,7 @@ for name, change in [
     ("another workflow waiting on it", awaited),
     ("an inline password", inline_password),
     ("a step that redirects the shell's stdin", takes_stdin),
+    ("the same after another command on the line", takes_stdin_mid_line),
 ]:
     report(bool(mutated(change)), f"refuses {name}")
 
