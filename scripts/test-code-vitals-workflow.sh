@@ -7,14 +7,15 @@
 #   1. it runs on `master` push / manual only (never cron, never a PR);
 #   2. it is one step, `failure: ignore`, with no `depends_on` of its own;
 #   3. no other workflow depends on it;
-#   4. the step is the code-vitals plugin (code-vitals #564) and runs no
-#      commands of its own;
+#   4. the step is the code-vitals plugin (code-vitals #564), pulled on every
+#      run (its tag moves), and runs no commands of its own;
 #   5. its settings are ones the plugin knows, its trunk is the branch the
 #      workflow runs on, and the writer password comes by name from the broker,
 #      never inline, as the only secret the step receives.
-# What the plugin does with the settings is code-vitals' to test (its
-# src/code_vitals/settings.py refuses an unknown or invalid one, which here
-# would only fail an ignored step, so 5 catches it before merge).
+# Rule 5 catches only a misspelt setting name and a wrong trunk. The values of
+# version_sources and areas, and an area-rule change without a new
+# areas.version, are validated by code-vitals (src/code_vitals/settings.py, and
+# its deploy for the version), which here would only fail an ignored step.
 # Negative cases mutate the parsed workflows to prove each rule bites.
 
 set -euo pipefail
@@ -81,6 +82,8 @@ def check(workflows):
             problems.append(f"{CODE_VITALS}: step {name} has depends_on")
         if not PLUGIN.match(str(step.get("image", ""))):
             problems.append(f"{CODE_VITALS}: step {name} is not the code-vitals plugin ({step.get('image')!r})")
+        if step.get("pull") is not True:
+            problems.append(f"{CODE_VITALS}: step {name} may run a stale copy of the moving plugin tag (no pull: true)")
         if step.get("commands") or step.get("entrypoint"):
             problems.append(f"{CODE_VITALS}: step {name} runs commands of its own")
         settings = step.get("settings") or {}
@@ -168,6 +171,10 @@ def not_the_plugin(w):
     step(w)["image"] = "registry.desync.link/code-vitals-collector:stable"
 
 
+def no_pull(w):
+    step(w).pop("pull")
+
+
 def own_commands(w):
     step(w)["commands"] = ["echo hi"]
 
@@ -196,6 +203,7 @@ for name, change in [
     ("an inline password", inline_password),
     ("a step that is not the plugin", not_the_plugin),
     ("a plugin step running its own commands", own_commands),
+    ("a moving tag without pull: true", no_pull),
     ("a setting the plugin would refuse", misspelt_setting),
     ("a trunk other than the branch it runs on", wrong_trunk),
     ("a secret beyond the writer password", extra_secret),

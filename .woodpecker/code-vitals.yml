@@ -24,8 +24,11 @@ steps:
   code-vitals:
     # Moving tag `:stable`, which code-vitals' prod deployment moves only after
     # its checks pass — the approved exception to digest pinning (code-vitals
-    # AGENTS.md § Deviations register).
+    # AGENTS.md § Deviations register). `pull: true` because Woodpecker
+    # otherwise reuses whatever `:stable` the agent already has, and the plugin
+    # starts the collector of its own version, so both would go stale.
     image: registry.desync.link/code-vitals-plugin:stable
+    pull: true
     failure: ignore
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
