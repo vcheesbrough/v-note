@@ -245,9 +245,9 @@ The rest are **shared** infrastructure credentials on `/woodpecker/shared`, used
 by bored and sovereign-config too, and **not v-note's to move or remove**:
 `zot_ci_user` / `zot_ci_password` (registry), `github_token` (version compute and
 tag push), `authentik_api_token` (blueprint apply), `grafana_api_token` (dashboard
-publish), `code_vitals_prod_writer_password` (below). The build and verify steps
-need them through the broker regardless, so aliasing them into `/v-note/devops`
-would buy nothing and widen what the devops URL can read.
+publish), and `code_vitals_prod_writer_password` (below). The build and verify
+steps need all but the last through the broker regardless, so aliasing them into
+`/v-note/devops` would buy nothing and widen what the devops URL can read.
 
 `code_vitals_prod_writer_password` is an alias of code-vitals' prod writer
 password, for the plugin step in
