@@ -7,11 +7,15 @@
 #   1. it runs on `master` push / manual only (never cron, never a PR);
 #   2. it is one step, `failure: ignore`, with no `depends_on` of its own;
 #   3. no other workflow depends on it;
-#   4. the collector's credential comes by name from the broker, never inline;
-#   5. the step never redirects the shell's stdin (Woodpecker pipes the script in).
-# What the step does is code-vitals' to test: the file is a copy of its
-# deploy/measured-repo-workflow.yml, pinned by tests/test_measured_repo_workflow.py
-# there. Negative cases mutate the parsed workflows to prove each rule bites.
+#   4. the step is the code-vitals plugin (code-vitals #564) and runs no
+#      commands of its own;
+#   5. its settings are ones the plugin knows, its trunk is the branch the
+#      workflow runs on, and the writer password comes by name from the broker,
+#      never inline, as the only secret the step receives.
+# What the plugin does with the settings is code-vitals' to test (its
+# src/code_vitals/settings.py refuses an unknown or invalid one, which here
+# would only fail an ignored step, so 5 catches it before merge).
+# Negative cases mutate the parsed workflows to prove each rule bites.
 
 set -euo pipefail
 
@@ -27,6 +31,21 @@ import yaml
 
 CODE_VITALS = ".woodpecker/code-vitals.yml"
 NAME = "code-vitals"
+PLUGIN = re.compile(r"^registry\.desync\.link/code-vitals-plugin(:[\w.-]+)?(@sha256:[0-9a-f]{64})?$")
+# code-vitals' src/code_vitals/settings.py `_KEYS`; it refuses any other.
+SETTINGS = {"trunk", "version_sources", "areas", "writer_password"}
+WRITER = {"from_secret": "code_vitals_prod_writer_password"}
+
+
+def secrets(node):
+    if isinstance(node, dict):
+        found = {node["from_secret"]} if "from_secret" in node else set()
+        for value in node.values():
+            found |= secrets(value)
+        return found
+    if isinstance(node, list):
+        return set().union(*(secrets(v) for v in node)) if node else set()
+    return set()
 
 
 def as_list(value):
@@ -60,16 +79,22 @@ def check(workflows):
             problems.append(f"{CODE_VITALS}: step {name} can fail the pipeline")
         if step.get("depends_on"):
             problems.append(f"{CODE_VITALS}: step {name} has depends_on")
-        # Woodpecker pipes the script into the shell: `exec <…` drops the rest
-        # of it and the step exits 0 having done nothing (pipeline 520).
-        for command in step.get("commands") or []:
-            for line in str(command).splitlines():
-                # `exec` as any command on the line, not only the first.
-                if re.search(r"(?:^|[;&|(])\s*exec\b.*<", line.split("#", 1)[0]):
-                    problems.append(f"{CODE_VITALS}: step {name} redirects the shell's stdin")
-        password = (step.get("environment") or {}).get("CODE_VITALS_WRITER_PASSWORD")
-        if password != {"from_secret": "code_vitals_prod_writer_password"}:
+        if not PLUGIN.match(str(step.get("image", ""))):
+            problems.append(f"{CODE_VITALS}: step {name} is not the code-vitals plugin ({step.get('image')!r})")
+        if step.get("commands") or step.get("entrypoint"):
+            problems.append(f"{CODE_VITALS}: step {name} runs commands of its own")
+        settings = step.get("settings") or {}
+        unknown = sorted(set(settings) - SETTINGS)
+        if unknown:
+            problems.append(f"{CODE_VITALS}: step {name} has setting(s) the plugin refuses: {unknown}")
+        branches = {rule.get("branch") for rule in rules}
+        if {settings.get("trunk")} != branches:
+            problems.append(f"{CODE_VITALS}: trunk {settings.get('trunk')!r} is not the branch it runs on")
+        if settings.get("writer_password") != WRITER:
             problems.append(f"{CODE_VITALS}: step {name} does not take the writer password from the broker")
+        held = secrets(step)
+        if held != {WRITER["from_secret"]}:
+            problems.append(f"{CODE_VITALS}: step {name} receives secrets {sorted(held)}, not the writer password only")
     for path, other in workflows.items():
         if path != CODE_VITALS and NAME in as_list((other or {}).get("depends_on")):
             problems.append(f"{path}: depends on {NAME}")
@@ -135,16 +160,28 @@ def awaited(w):
     w[".woodpecker/verify-tag-deploy.yml"]["depends_on"] = ["checks", NAME]
 
 
-def takes_stdin(w):
-    step(w)["commands"] = ["set -eu\nexec < /dev/null\n" + step(w)["commands"][0]]
-
-
-def takes_stdin_mid_line(w):
-    step(w)["commands"] = ["set -eu; exec < /dev/null\n" + step(w)["commands"][0]]
-
-
 def inline_password(w):
-    step(w)["environment"]["CODE_VITALS_WRITER_PASSWORD"] = "hunter2"
+    step(w)["settings"]["writer_password"] = "hunter2"
+
+
+def not_the_plugin(w):
+    step(w)["image"] = "registry.desync.link/code-vitals-collector:stable"
+
+
+def own_commands(w):
+    step(w)["commands"] = ["echo hi"]
+
+
+def misspelt_setting(w):
+    step(w)["settings"]["version_source"] = step(w)["settings"].pop("version_sources")
+
+
+def wrong_trunk(w):
+    step(w)["settings"]["trunk"] = "main"
+
+
+def extra_secret(w):
+    step(w)["environment"] = {"REGISTRY_PASSWORD": {"from_secret": "zot_ci_password"}}
 
 
 for name, change in [
@@ -157,8 +194,11 @@ for name, change in [
     ("a second step", second_step),
     ("another workflow waiting on it", awaited),
     ("an inline password", inline_password),
-    ("a step that redirects the shell's stdin", takes_stdin),
-    ("the same after another command on the line", takes_stdin_mid_line),
+    ("a step that is not the plugin", not_the_plugin),
+    ("a plugin step running its own commands", own_commands),
+    ("a setting the plugin would refuse", misspelt_setting),
+    ("a trunk other than the branch it runs on", wrong_trunk),
+    ("a secret beyond the writer password", extra_secret),
 ]:
     report(bool(mutated(change)), f"refuses {name}")
 

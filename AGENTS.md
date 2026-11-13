@@ -184,11 +184,14 @@ parameters: `OWNER=vcheesbrough`, `REPO=v-note`. Repo specifics:
   [code-vitals](https://github.com/vcheesbrough/code-vitals). Nothing depends
   on it and its one step is `failure: ignore`, so it can never fail or hold up
   a build (`scripts/test-code-vitals-workflow.sh`, in `checks`); a missed run
-  is caught up by the next. It is a copy of code-vitals'
-  `deploy/measured-repo-workflow.yml` — change it there and re-copy, not here.
-  It runs the moving `code-vitals-collector:stable` tag (code-vitals' approved
-  digest-pinning exception) and needs `code_vitals_prod_writer_password`, a
-  broker alias of code-vitals' secret into this repo's layer.
+  is caught up by the next. It is a code-vitals plugin step configured here
+  (#569, code-vitals README § Measuring a repo): its `settings:` are v-note's
+  measurement config (trunk, version sources, area rules), and code-vitals'
+  deployments re-read them from this file, so they live nowhere else. Changing
+  the area rules needs a new `areas.version`, which re-measures v-note's
+  history. It runs the moving `code-vitals-plugin:stable` tag (code-vitals'
+  approved digest-pinning exception) and takes `code_vitals_prod_writer_password`
+  from the broker's shared layer.
 - **E2E policy (locked):** every **user-facing feature** in an iteration card
   must have **automated e2e tests in CI** before that card merges (see
   [`docs/PLAN.md`](docs/PLAN.md) **E2E testing**). Contract/unit tests
