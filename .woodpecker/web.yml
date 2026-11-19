@@ -58,7 +58,7 @@ steps:
 
   # Decides whether e2e-web runs (lane-skip, #476; lanes in the repo-root
   # lanes.yml, which cannot live in .woodpecker/: Woodpecker parses every file
-  # there as a workflow, so the plugin's default path is not used):
+  # there as a workflow, so the path is named rather than left to the default):
   # writes .lane/e2e-web.key, plus .lane/e2e-web.skip when that key already
   # passed. Any error means run; FULL_RUN=1 on a manual pipeline forces a run.
   lane-check:
