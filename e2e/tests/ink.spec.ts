@@ -1041,6 +1041,11 @@ test.describe('ink page channel', () => {
     });
     const errors = result.messages.filter((m) => m.type === 'error' && m.code === 'invalid_stroke_style');
     expect(errors.length, 'both invalid commits are rejected').toBeGreaterThanOrEqual(2);
+    // Each rejection names the batch it rejected, so a client can tell which
+    // of its pending batches failed.
+    expect(errors.map((m) => m.client_mutation_id)).toEqual(
+      expect.arrayContaining(['retired-v1-style', 'bad-pressure']),
+    );
     // Neither rejected batch is sequenced/persisted.
     expect(result.messages.some((m) => m.type === 'stroke-batch' && (m.client_batch_id === 'retired-v1-style' || m.client_batch_id === 'bad-pressure'))).toBeFalsy();
   });

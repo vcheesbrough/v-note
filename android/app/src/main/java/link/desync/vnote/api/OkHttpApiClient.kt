@@ -1,5 +1,6 @@
 package link.desync.vnote.api
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import link.desync.vnote.api.codec.decodeLibraryEvent
@@ -33,6 +34,7 @@ private const val REQUEST_ID_HEADER = "X-Request-Id"
 private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
 private const val LOG_TAG = "VNoteApi"
 private const val NORMAL_CLOSURE = 1000
+private const val HTTP_UNAUTHORIZED = 401
 
 // Thumbnail URLs come from the server whole, so this is the route they match
 // rather than something derived from the URL.
@@ -195,12 +197,12 @@ class OkHttpApiClient(
                         response: Response?,
                     ) {
                         logWebSocketFailure("page realtime", response, t)
-                        listener.onError(
-                            requestFailureMessage(
-                                t.message ?: "Page connection failed",
-                                response,
-                            ),
-                        )
+                        val message = requestFailureMessage(t.message ?: "Page connection failed", response)
+                        if (response?.code == HTTP_UNAUTHORIZED) {
+                            listener.onUnauthorized(message)
+                        } else {
+                            listener.onError(message)
+                        }
                     }
 
                     // A close the *server* initiates arrives here, and OkHttp
@@ -234,6 +236,25 @@ class OkHttpApiClient(
         return PageSocket(webSocket)
     }
 
+    // Total, as the interface promises: OIDC discovery fails by throwing when
+    // the identity provider is unreachable, and the caller is a bare coroutine
+    // on the screen's scope, where an escaped exception crashes the app and
+    // loses the ink it holds. A refresh that cannot run is a refresh that
+    // failed. Cancellation still propagates.
+    override suspend fun refreshSession(): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                authRepository.refreshAccessTokenIfNeeded(force = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (
+                @Suppress("TooGenericExceptionCaught") failure: Exception,
+            ) {
+                AppLog.w(LOG_TAG, "token refresh failed", failure)
+                false
+            }
+        }
+
     override fun shutdown() {
         http.dispatcher.executorService.shutdown()
         http.connectionPool.evictAll()
@@ -263,7 +284,7 @@ class OkHttpApiClient(
                 if (refreshed) {
                     return requestMe(retryOnUnauthorized = false)
                 }
-                return Result.failure(IllegalStateException("Session expired"))
+                return Result.failure(SessionExpiredException())
             }
             if (!response.isSuccessful) {
                 logHttpFailure("GET /api/me", response)
@@ -290,7 +311,7 @@ class OkHttpApiClient(
                 if (refreshed) {
                     return makeAuthorizedApiRequest(retryOnUnauthorized = false, buildRequest)
                 }
-                return Result.failure(IllegalStateException("Session expired"))
+                return Result.failure(SessionExpiredException())
             }
             if (!response.isSuccessful) {
                 logHttpFailure("API request", response)
@@ -314,7 +335,7 @@ class OkHttpApiClient(
                 if (authRepository.refreshAccessTokenIfNeeded(force = true)) {
                     return makeAuthorizedApiRequestForBytes(false, buildRequest)
                 }
-                return Result.failure(IllegalStateException("Session expired"))
+                return Result.failure(SessionExpiredException())
             }
             if (!response.isSuccessful) {
                 logHttpFailure("thumbnail request", response)

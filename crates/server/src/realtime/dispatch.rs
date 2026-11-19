@@ -165,7 +165,7 @@ where
                 message: "strokes require a supported immutable solid_round style \
                           with in-range pressure"
                     .to_string(),
-                client_mutation_id: None,
+                client_mutation_id: Some(client_batch_id),
             },
         )
         .await;
@@ -184,7 +184,7 @@ where
                 PageServerMessage::Error {
                     code: "commit_failed".to_string(),
                     message: "could not persist strokes".to_string(),
-                    client_mutation_id: None,
+                    client_mutation_id: Some(client_batch_id),
                 },
             )
             .await;
@@ -930,7 +930,7 @@ mod tests {
                 message: "strokes require a supported immutable solid_round style with \
                           in-range pressure"
                     .to_string(),
-                client_mutation_id: None,
+                client_mutation_id: Some("batch_1".to_string()),
             }]
         );
         assert!(store.calls().is_empty());
@@ -953,7 +953,7 @@ mod tests {
             [PageServerMessage::Error {
                 code: "commit_failed".to_string(),
                 message: "could not persist strokes".to_string(),
-                client_mutation_id: None,
+                client_mutation_id: Some("batch_1".to_string()),
             }]
         );
         assert!(drain(&mut page).is_empty());

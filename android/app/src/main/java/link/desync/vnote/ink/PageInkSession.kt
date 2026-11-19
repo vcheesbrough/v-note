@@ -70,9 +70,14 @@ class PageInkSession(
     var canEdit by mutableStateOf(false)
         private set
 
-    // Non-null when there is something to surface to the user (blocked/error).
-    var statusBanner by mutableStateOf<String?>(null)
+    // Non-null when there is something to surface to the user (#150): loading,
+    // disconnected, retrying a failed commit, lease held elsewhere, session
+    // expired, or a definitive rejection. Null means sync is nominal.
+    var status by mutableStateOf<PageStatus?>(null)
         private set
+
+    // The banner's line, for callers that only need the copy.
+    val statusBanner: String? get() = status?.message
 
     private var sessionId: String? = null
     private var lastSeq: Long = 0
@@ -140,6 +145,20 @@ class PageInkSession(
     // ink they drew rather than watching it vanish on a reconnect.
     private var resendPendingOnLease = false
 
+    // A `commit_failed` is being retried (#150): the server is reachable but
+    // could not store ink. Ink is blocked — new strokes would only pile up
+    // behind the failing ones — while every pending batch is re-sent with the
+    // reconnect backoff. Re-sending is idempotent on `client_batch_id`, so a
+    // batch that did land is only re-echoed. Cleared once nothing is pending.
+    private var commitRetryJob: Job? = null
+    private var commitRetryAttempts = 0
+    private var commitRetrying = false
+
+    // Set once a 401 on the upgrade has been answered with a forced token
+    // refresh; a second 401 before the next `Welcome` means the refresh did not
+    // help and the session is gone.
+    private var refreshedAfterUnauthorized = false
+
     // Why new ink cannot be held right now, or null when it can. Set when this
     // session learns it will not get the lease on this socket — another editor
     // holds it, or the channel reported an error — and cleared whenever the
@@ -150,8 +169,26 @@ class PageInkSession(
     val inkBlocked: Boolean get() = inkRefused != null
 
     fun connect() {
-        statusBanner = CONNECTING
+        status = PageStatus(PageStatusKind.Connecting, CONNECTING)
         screen = Telemetry.startScreen("screen.page", listOf(Attribute("vnote.page_id", pageId)))
+        open()
+    }
+
+    // The banner's Retry: reconnect now instead of waiting out the backoff, and
+    // start a rejected or expired session over. Only meaningful while the page
+    // is not live; a healthy channel is left alone.
+    fun retryNow() {
+        if (closing || status?.kind !in RETRYABLE) {
+            return
+        }
+        AppLog.i(TAG, "page channel retry requested", context = screen)
+        reconnectJob?.cancel()
+        reconnectJob = null
+        stopCommitRetry()
+        refreshedAfterUnauthorized = false
+        reconnectAttempts = 0
+        inkRefused = null
+        retireSocket()
         open()
     }
 
@@ -181,16 +218,22 @@ class PageInkSession(
                         scope.launch(Dispatchers.Main) { if (generation == socketGeneration) handleDisconnected(message) }
                     }
 
+                    override fun onUnauthorized(message: String) {
+                        scope.launch(Dispatchers.Main) { if (generation == socketGeneration) handleUnauthorized(message) }
+                    }
+
                     override fun onClosed() {
-                        scope.launch(Dispatchers.Main) { if (generation == socketGeneration) handleDisconnected(DISCONNECTED) }
+                        scope.launch(Dispatchers.Main) {
+                            if (generation == socketGeneration) handleDisconnected(CLOSED_DETAIL)
+                        }
                     }
                 },
             )
         socket = opened
         if (opened == null) {
-            statusBanner = NOT_SIGNED_IN
             connectSpan?.fail(NOT_SIGNED_IN)
             connectSpan = null
+            sessionExpired(NOT_SIGNED_IN, detail = null)
         }
     }
 
@@ -205,6 +248,7 @@ class PageInkSession(
         }
         reconnectJob?.cancel()
         reconnectJob = null
+        stopCommitRetry()
         failStrokeSpans("page closed")
         stopLeaseRenewal()
         socket?.releaseLease()
@@ -300,8 +344,9 @@ class PageInkSession(
         connectSpan = null
         AppLog.i(TAG, "page channel connected", context = screen)
         sessionId = event.sessionId
-        statusBanner = null
+        status = null
         reconnectAttempts = 0
+        refreshedAfterUnauthorized = false
         // Authoritative on every (re)connect, which is what
         // self-corrects a value that went stale in the open library.
         paperState = event.paper
@@ -324,6 +369,9 @@ class PageInkSession(
             confirmedStrokes.addAll(event.strokes)
             if (pendingBatches.remove(event.clientBatchId) != null) {
                 strokeSpans.remove(event.clientBatchId)?.confirmed(event.seq)
+                if (commitRetrying && pendingBatches.isEmpty()) {
+                    commitRecovered()
+                }
             }
             if (replaying) {
                 replayBatches += 1
@@ -389,10 +437,12 @@ class PageInkSession(
     // new holder by a lease change.
     private fun onLeaseHeld() {
         canEdit = true
-        inkRefused = null
+        if (!commitRetrying) {
+            inkRefused = null
+        }
         ensureLeaseRenewal()
-        if (statusBanner == LEASE_BLOCKED) {
-            statusBanner = null
+        if (status?.kind == PageStatusKind.LeaseHeld) {
+            status = null
         }
         if (resendPendingOnLease) {
             resendPendingOnLease = false
@@ -446,8 +496,9 @@ class PageInkSession(
             canEdit -> {
                 canEdit = false
                 stopLeaseRenewal()
+                stopCommitRetry()
                 inkRefused = LEASE_BLOCKED
-                statusBanner = LEASE_BLOCKED
+                status = PageStatus(PageStatusKind.LeaseHeld, LEASE_BLOCKED)
             }
             // Another editor won while this session was still waiting for the
             // lease: what it drew in the meantime was only held, so drop it.
@@ -463,10 +514,11 @@ class PageInkSession(
     private fun refuseLease() {
         canEdit = false
         stopLeaseRenewal()
+        stopCommitRetry()
         discardNeverSentBatches()
         resendPendingOnLease = pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()
         inkRefused = LEASE_BLOCKED
-        statusBanner = LEASE_BLOCKED
+        status = PageStatus(PageStatusKind.LeaseHeld, LEASE_BLOCKED)
     }
 
     private fun discardNeverSentBatches() {
@@ -493,6 +545,10 @@ class PageInkSession(
             context = screen,
             attributes = listOf(Attribute("vnote.error_code", event.code)),
         )
+        if (event.code == COMMIT_FAILED) {
+            onCommitFailed(event)
+            return
+        }
         // A replay that ends in an error still shows whatever arrived
         // before it — `replay_failed` must not leave the page blank.
         endReplay(failure = event.code)
@@ -504,10 +560,65 @@ class PageInkSession(
         }
         canEdit = false
         stopLeaseRenewal()
+        stopCommitRetry()
         discardPendingBatches()
         resendPendingOnLease = false
         inkRefused = event.message
-        statusBanner = event.message
+        status = PageStatus(PageStatusKind.Rejected, event.message, detail = event.code)
+    }
+
+    // The server is up but could not store a batch. Nothing is discarded: the
+    // batch was not persisted (the server says so by sending this rather than
+    // an echo), and every pending batch is re-sent until the server takes them.
+    private fun onCommitFailed(event: PageEvent.Failure) {
+        commitRetrying = true
+        inkRefused = SYNC_RETRYING
+        status =
+            PageStatus(
+                PageStatusKind.Retrying,
+                SYNC_RETRYING,
+                detail = "${event.code}: ${event.message}",
+            )
+        if (commitRetryJob?.isActive == true) {
+            return
+        }
+        val delayMs = reconnectDelayMs(commitRetryAttempts++)
+        AppLog.i(TAG, "retrying failed commit: pending=${pendingBatches.size} delayMs=$delayMs", context = screen)
+        commitRetryJob =
+            scope.launch {
+                delay(delayMs)
+                val activeSocket = socket ?: return@launch
+                if (closing) return@launch
+                if (canEdit) {
+                    pendingBatches.forEach { (clientBatchId, strokes) -> activeSocket.commitBatch(clientBatchId, strokes) }
+                    neverSentBatchIds.clear()
+                } else {
+                    resendPendingOnLease = true
+                    activeSocket.acquireLease()
+                }
+            }
+    }
+
+    // Every batch the retry re-sent has been echoed: the server is storing ink
+    // again, so the canvas takes it again.
+    private fun commitRecovered() {
+        AppLog.i(TAG, "failed commit recovered after attempts=$commitRetryAttempts", context = screen)
+        stopCommitRetry()
+        if (status?.kind == PageStatusKind.Retrying) {
+            status = null
+        }
+    }
+
+    private fun stopCommitRetry() {
+        commitRetryJob?.cancel()
+        commitRetryJob = null
+        commitRetryAttempts = 0
+        if (commitRetrying) {
+            commitRetrying = false
+            if (inkRefused == SYNC_RETRYING) {
+                inkRefused = null
+            }
+        }
     }
 
     private fun ensureLeaseRenewal() {
@@ -606,11 +717,12 @@ class PageInkSession(
         // partial page rather than withholding it until the next connect.
         endReplay(failure = "disconnected")
         canEdit = false
+        stopCommitRetry()
         // Ink drawn until the next socket says otherwise is held for it.
         inkRefused = null
         stopLeaseRenewal()
         revertUnconfirmedPaper()
-        statusBanner = message
+        status = PageStatus(PageStatusKind.Disconnected, DISCONNECTED, detail = message)
         if (!closing) {
             if (pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()) {
                 resendPendingOnLease = true
@@ -619,22 +731,75 @@ class PageInkSession(
         }
     }
 
+    // The upgrade was refused with 401. One forced token refresh, then straight
+    // back in; a second refusal before the next `Welcome` means the session is
+    // gone, and retrying on a timer would only be refused again.
+    private fun handleUnauthorized(message: String) {
+        AppLog.w(TAG, "page channel refused the session: $message", context = screen)
+        connectSpan?.fail(message)
+        connectSpan = null
+        endReplay(failure = "unauthorized")
+        canEdit = false
+        stopLeaseRenewal()
+        stopCommitRetry()
+        revertUnconfirmedPaper()
+        retireSocket()
+        if (closing) return
+        if (pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()) {
+            resendPendingOnLease = true
+        }
+        if (refreshedAfterUnauthorized) {
+            sessionExpired(SESSION_EXPIRED, detail = message)
+            return
+        }
+        refreshedAfterUnauthorized = true
+        reconnectJob =
+            scope.launch {
+                val refreshed = apiClient.refreshSession()
+                if (closing) return@launch
+                if (refreshed) {
+                    AppLog.i(TAG, "token refreshed; reconnecting the page channel", context = screen)
+                    open()
+                } else {
+                    sessionExpired(SESSION_EXPIRED, detail = message)
+                }
+            }
+    }
+
+    // Nothing this session can do fixes the session itself: block ink — it
+    // could never be sent — and say so. Ink already held stays held, so a
+    // Retry after signing in elsewhere still sends it.
+    private fun sessionExpired(
+        message: String,
+        detail: String?,
+    ) {
+        AppLog.w(TAG, "page channel stopped: session expired", context = screen)
+        inkRefused = message
+        status = PageStatus(PageStatusKind.SessionExpired, message, detail = detail)
+    }
+
+    // Retire the current socket: its late callbacks are ignored, and one that
+    // reported an error without closing is closed rather than leaked.
+    private fun retireSocket() {
+        socketGeneration++
+        socket?.close()
+        socket = null
+    }
+
     private fun scheduleReconnect() {
         if (reconnectJob?.isActive == true) {
             return
         }
-        // Retire the socket that failed: its late callbacks are ignored, and one
-        // that reported an error without closing is closed rather than leaked.
-        socketGeneration++
-        socket?.close()
-        socket = null
+        retireSocket()
         val delayMs = reconnectDelayMs(reconnectAttempts++)
         reconnectJob =
             scope.launch {
                 delay(delayMs)
                 if (!closing) {
+                    // The disconnected banner stays up through the attempt: a
+                    // reconnect is not "connecting" to the user until it has
+                    // worked, and `Welcome` is what clears it.
                     AppLog.i(TAG, "page channel reconnecting", context = screen)
-                    statusBanner = CONNECTING
                     open()
                 }
             }
@@ -672,9 +837,19 @@ class PageInkSession(
         private const val LEASE_RENEW_INTERVAL_MS = 10_000L
         private const val TOMBSTONE_FAILED = "tombstone_failed"
         private const val PAPER_FAILED = "paper_failed"
+        private const val COMMIT_FAILED = "commit_failed"
+        private const val CLOSED_DETAIL = "connection closed"
+        private val RETRYABLE =
+            setOf(PageStatusKind.Disconnected, PageStatusKind.SessionExpired, PageStatusKind.Rejected)
+
+        // Copy, one line per kind of trouble (#150) so the four never read
+        // alike: someone else editing, no connection, the server failing to
+        // store ink, and a session only signing in again can fix.
         const val LEASE_BLOCKED = "Another device is editing this page"
         const val CONNECTING = "Connecting…"
-        const val DISCONNECTED = "Realtime disconnected"
+        const val DISCONNECTED = "Disconnected from the server — reconnecting"
+        const val SYNC_RETRYING = "Couldn't save your ink — retrying"
+        const val SESSION_EXPIRED = "Your session has expired — sign in again"
         const val NOT_SIGNED_IN = "Not signed in"
     }
 }

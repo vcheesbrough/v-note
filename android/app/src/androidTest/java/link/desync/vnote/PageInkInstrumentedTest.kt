@@ -10,6 +10,7 @@ import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
+import link.desync.vnote.ink.PageStatusKind
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.SolidRoundParameters
 import link.desync.vnote.model.Stroke
@@ -245,6 +246,92 @@ class PageInkInstrumentedTest {
         session.disconnect()
     }
 
+    /**
+     * #150: a `commit_failed` while connected (the server is up but could not
+     * store the batch) blocks ink and says it is retrying, keeps the stroke on
+     * the canvas, re-sends it under the same `client_batch_id`, and unblocks
+     * once the server stores and echoes it.
+     */
+    @Test
+    fun aFailedCommitBlocksInkRetriesAndUnblocksOnSuccess() {
+        val commits = CopyOnWriteArrayList<String>()
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .webSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(
+                            webSocket: WebSocket,
+                            response: okhttp3.Response,
+                        ) {
+                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                        }
+
+                        override fun onMessage(
+                            webSocket: WebSocket,
+                            text: String,
+                        ) {
+                            val message = JSONObject(text)
+                            when (message.getString("type")) {
+                                "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
+                                "release-lease" -> webSocket.close(1000, "lease released")
+                                "commit-batch" -> {
+                                    commits += message.getString("client_batch_id")
+                                    if (commits.size == 1) {
+                                        webSocket.send(
+                                            JSONObject()
+                                                .put("type", "error")
+                                                .put("code", "commit_failed")
+                                                .put("message", "could not persist strokes")
+                                                .put("client_mutation_id", message.getString("client_batch_id"))
+                                                .toString(),
+                                        )
+                                    } else {
+                                        webSocket.send(
+                                            JSONObject()
+                                                .put("type", "stroke-batch")
+                                                .put("seq", 1)
+                                                .put("client_batch_id", message.getString("client_batch_id"))
+                                                .put("strokes", message.getJSONArray("strokes"))
+                                                .toString(),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    },
+                ).build(),
+        )
+
+        val session = openSession()
+        assertTrue("lease granted", awaitUntil { session.canEdit })
+
+        session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0))))
+        assertTrue(
+            "retrying shown",
+            awaitUntil { session.status?.kind == PageStatusKind.Retrying },
+        )
+        assertEquals(PageInkSession.SYNC_RETRYING, session.statusBanner)
+        assertTrue("ink blocked while retrying", session.inkBlocked)
+        assertEquals("the failed batch is kept, not discarded", 1, session.pendingBatchCount)
+        assertEquals("and still drawn", 1, session.strokes.size)
+        // Retrying is not a disconnect and not a lost lease.
+        assertTrue("still the lease holder", session.canEdit)
+
+        assertTrue(
+            "recovered once the retry is stored",
+            awaitUntil(timeoutMs = 10_000) { session.pendingBatchCount == 0 && session.status == null },
+        )
+        assertEquals("ink unblocked", false, session.inkBlocked)
+        assertEquals("confirmed stroke rendered once", 1, session.strokes.size)
+        assertEquals("re-sent under the same id", 1, commits.toSet().size)
+        assertEquals("sent twice", 2, commits.size)
+
+        session.disconnect()
+    }
+
+    /** A definitive rejection is not retried: the batch is dropped and the banner says why. */
     @Test
     fun clearsPendingInkWhenServerRejectsCommit() {
         val commitReceived = CountDownLatch(1)
@@ -271,7 +358,7 @@ class PageInkInstrumentedTest {
                                 "commit-batch" -> {
                                     commitReceived.countDown()
                                     webSocket.send(
-                                        """{"type":"error","code":"commit_failed","message":"Commit failed"}""",
+                                        """{"type":"error","code":"invalid_stroke_style","message":"Commit rejected"}""",
                                     )
                                 }
                             }
@@ -292,9 +379,10 @@ class PageInkInstrumentedTest {
         // banner, so polling on one and immediately reading the other races the
         // remainder of that handler.
         assertTrue(
-            "commit failure shown",
-            awaitUntil { session.statusBanner == "Commit failed" },
+            "commit rejection shown",
+            awaitUntil { session.statusBanner == "Commit rejected" },
         )
+        assertEquals(PageStatusKind.Rejected, session.status?.kind)
         assertEquals("input blocked", false, session.canEdit)
 
         session.disconnect()
@@ -798,6 +886,103 @@ class PageInkInstrumentedTest {
         Thread.sleep(2_500)
 
         assertEquals("the pending reconnect never opened a socket", 1, server.requestCount)
+    }
+
+    /**
+     * #150: the server drops the socket. The banner says disconnected (not
+     * "connecting", which reads as healthy) for the whole reconnect, carries
+     * the technical cause, and clears only once the next socket welcomes.
+     */
+    @Test
+    fun aDropShowsDisconnectedUntilTheNextWelcome() {
+        openPage { webSocket, type ->
+            if (type == "acquire-lease") webSocket.close(1013, "lagged")
+        }
+        val reconnected = CountDownLatch(1)
+        openPage { _, type -> if (type == "subscribe") reconnected.countDown() }
+
+        val session = openSession()
+        assertTrue(
+            "disconnected shown",
+            awaitUntil { session.status?.kind == PageStatusKind.Disconnected },
+        )
+        assertEquals(PageInkSession.DISCONNECTED, session.statusBanner)
+        assertTrue("cause given", session.status?.detail?.isNotBlank() == true)
+        assertEquals("ink is held, not refused, while disconnected (#390)", false, session.inkBlocked)
+
+        assertTrue("reconnected", reconnected.await(5, TimeUnit.SECONDS))
+        assertTrue("banner cleared by the welcome", awaitUntil { session.status == null })
+        session.disconnect()
+    }
+
+    /**
+     * #150: a 401 on the upgrade is a stale token, not a dead network — one
+     * forced refresh, and the page reconnects at once with the new token.
+     */
+    @Test
+    fun anUnauthorizedUpgradeRefreshesTheTokenAndReconnects() {
+        server.enqueue(MockResponse.Builder().code(401).build())
+        openPage { _, _ -> }
+
+        val session = openSession()
+
+        assertTrue("connected with the refreshed token", awaitUntil { session.canEdit })
+        assertEquals("no banner once live", null, session.status)
+        assertEquals("one refused upgrade, one accepted", 2, server.requestCount)
+        session.disconnect()
+    }
+
+    /**
+     * #150 review: OIDC discovery throws when the identity provider is
+     * unreachable. A refresh that cannot run must end in the session-expired
+     * state, not escape the page's coroutine and crash the app.
+     */
+    @Test
+    fun aRefreshThatThrowsEndsInSessionExpiredRatherThanACrash() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val throwingAuth =
+            object : AuthRepository(context, AuthConfig.fromBuildConfig(), tokenStore) {
+                override suspend fun refreshAccessTokenIfNeeded(force: Boolean): Boolean =
+                    throw java.io.IOException("identity provider unreachable")
+            }
+        val client = OkHttpApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, throwingAuth)
+        server.enqueue(MockResponse.Builder().code(401).build())
+        try {
+            val session = PageInkSession(client, "page_1", CoroutineScope(Dispatchers.Main))
+            session.connect()
+
+            assertTrue(
+                "session expired shown",
+                awaitUntil { session.status?.kind == PageStatusKind.SessionExpired },
+            )
+            assertTrue("ink blocked", session.inkBlocked)
+            session.disconnect()
+        } finally {
+            client.shutdown()
+        }
+    }
+
+    /**
+     * #150: when the refreshed token is refused too, the session is gone.
+     * Ink is blocked, the banner asks for sign-in, and the page stops
+     * reconnecting — every further attempt would be refused the same way.
+     */
+    @Test
+    fun aSessionTheRefreshCannotRenewStopsAndAsksForSignIn() {
+        server.enqueue(MockResponse.Builder().code(401).build())
+        server.enqueue(MockResponse.Builder().code(401).build())
+
+        val session = openSession()
+
+        assertTrue(
+            "session expired shown",
+            awaitUntil { session.status?.kind == PageStatusKind.SessionExpired },
+        )
+        assertEquals(PageInkSession.SESSION_EXPIRED, session.statusBanner)
+        assertTrue("ink blocked", session.inkBlocked)
+        Thread.sleep(2_500)
+        assertEquals("stopped after the refreshed token was refused", 2, server.requestCount)
+        session.disconnect()
     }
 
     /**
