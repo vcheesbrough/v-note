@@ -455,6 +455,13 @@ pub enum PageServerMessage {
         holder: Option<String>,
     },
     /// Recoverable error envelope (e.g. rejected commit).
+    ///
+    /// `client_mutation_id` names the mutation that failed: the
+    /// `client_batch_id` of a `commit-batch` (`commit_failed`,
+    /// `invalid_stroke_style`) or the `client_mutation_id` of a tombstone or
+    /// paper change. `commit_failed` is transient (the store could not write;
+    /// the batch was not persisted, and re-sending it is idempotent), so a
+    /// client retries it; `invalid_stroke_style` is definitive.
     Error {
         code: String,
         message: String,

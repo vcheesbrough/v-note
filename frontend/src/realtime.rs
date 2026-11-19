@@ -1,6 +1,8 @@
 //! The two WebSocket channels: the owner-wide library feed and the per-page ink
-//! feed. Each loop reconnects forever; what an event *does* lives with the
-//! screen that shows it (`library::apply_event`, `viewer::apply_page_event`).
+//! feed. Each loop reconnects until the session is refused; what an event
+//! *does* lives with the screen that shows it (`library::apply_event`,
+//! `viewer::apply_page_event`). Each loop also keeps its channel's
+//! [`SyncState`], which is what the screen uses to show or withhold its data.
 
 use futures_util::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, futures::WebSocket};
@@ -8,55 +10,84 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use protocol::{LibraryEvent, PageServerMessage, PageSummary, Paper, StrokeBatch};
 
+use crate::sync::{ChannelError, SyncState, socket_error};
 use crate::{api, library, telemetry, viewer};
+
+/// Fixed rather than backing off: the SPA is a viewer someone is watching, and
+/// PLAN.md's reconnect rule for it is one second (#279).
+const RECONNECT_DELAY_MS: u32 = 1_000;
+
+/// Record why a channel's connection ended. Returns `false` when the loop must
+/// stop: a refused session will be refused again, so retrying every second
+/// would only fill the server's log until the user signs in.
+fn connection_lost(
+    channel: &'static str,
+    page_id: Option<&str>,
+    attempts: u32,
+    error: &ChannelError,
+    sync: RwSignal<SyncState>,
+) -> bool {
+    let keep_trying = !matches!(error, ChannelError::Unauthorized(_));
+    let mut attrs = vec![
+        telemetry::attr("vnote.channel", channel),
+        telemetry::attr("vnote.reconnect_attempt", i64::from(attempts)),
+        // Ours, never the server's: `ChannelError` details are built in this
+        // crate and carry no page content.
+        telemetry::attr("vnote.reason", error.detail().to_string()),
+    ];
+    if let Some(page_id) = page_id {
+        attrs.push(telemetry::attr("vnote.page_id", page_id.to_string()));
+    }
+    let message = if keep_trying {
+        format!("{channel} realtime connection lost; reconnecting")
+    } else {
+        format!("{channel} realtime refused the session; stopped")
+    };
+    telemetry::log(telemetry::Severity::Warn, message, attrs);
+    sync.set(error.state());
+    keep_trying
+}
 
 pub(crate) async fn library_realtime_loop(
     pages: RwSignal<Vec<PageSummary>>,
     selected_page: RwSignal<Option<PageSummary>>,
     pages_loaded: RwSignal<bool>,
-    library_error: RwSignal<Option<String>>,
+    sync: RwSignal<SyncState>,
 ) {
     // Counted rather than logged per attempt: a library left open through a
     // server restart reconnects until it succeeds, and a line each would be
     // noise. The count is what says whether this was a blip or a bad hour.
     let mut attempts: u32 = 0;
     loop {
-        if let Err(error) =
-            library_realtime_once(pages, selected_page, pages_loaded, library_error).await
-        {
-            attempts += 1;
-            telemetry::log(
-                telemetry::Severity::Warn,
-                "library realtime connection lost; reconnecting",
-                vec![
-                    telemetry::attr("vnote.channel", "library"),
-                    telemetry::attr("vnote.reconnect_attempt", i64::from(attempts)),
-                    // Ours, never the server's: these strings are all built in
-                    // this file and carry no page content.
-                    telemetry::attr("vnote.reason", error.clone()),
-                ],
-            );
-            library_error.set(Some(error));
-            TimeoutFuture::new(1_000).await;
-        } else {
-            attempts = 0;
+        // A library socket ends only by failing or closing.
+        let error = match library_connection(pages, selected_page, pages_loaded, sync).await {
+            Ok(()) => ChannelError::Transport("realtime socket closed".to_string()),
+            Err(error) => error,
+        };
+        attempts += 1;
+        if !connection_lost("library", None, attempts, &error, sync) {
+            return;
         }
+        TimeoutFuture::new(RECONNECT_DELAY_MS).await;
     }
 }
 
-async fn library_realtime_once(
+/// One connection, from ticket to close.
+async fn library_connection(
     pages: RwSignal<Vec<PageSummary>>,
     selected_page: RwSignal<Option<PageSummary>>,
     pages_loaded: RwSignal<bool>,
-    library_error: RwSignal<Option<String>>,
-) -> Result<(), String> {
+    sync: RwSignal<SyncState>,
+) -> Result<(), ChannelError> {
     // One parent per connection attempt, captured before anything awaits: a
     // reconnect after the user has changed screen belongs to the new screen,
     // and every part of *this* attempt stays together in the one it began in.
     let parent = telemetry::screen();
     let ticket = api::realtime_ticket(parent, "realtime ticket").await?;
 
-    api::load_pages(parent, pages, pages_loaded, library_error).await?;
+    // Every (re)connect refetches the list, so what the library shows after a
+    // drop is the server's, not what was on screen before it.
+    api::load_pages(parent, pages, pages_loaded).await?;
 
     let ws_url = api::realtime_url(&ticket.ticket)?;
     // Ends as soon as the socket is open rather than spanning the connection:
@@ -72,80 +103,56 @@ async fn library_realtime_once(
         Err(error) => {
             let message = format!("opening realtime socket failed: {error:?}");
             connect.fail(message.clone());
-            return Err(message);
+            return Err(ChannelError::Transport(message));
         }
     };
     telemetry::info_in(parent, "library realtime connected");
+    sync.set(SyncState::Live);
     while let Some(message) = socket.next().await {
-        let message = message.map_err(|error| format!("realtime socket failed: {error:?}"))?;
+        let message = message.map_err(|error| socket_error("realtime socket", error))?;
         if let Message::Text(text) = message {
             let event: LibraryEvent = serde_json::from_str(&text).map_err(|error| {
                 // A message the SPA cannot read is a contract break between two
                 // deployed things, which is worth an error even though the loop
                 // recovers by reconnecting.
                 telemetry::error_in(parent, "library realtime event did not parse");
-                format!("invalid realtime event: {error}")
+                ChannelError::Server(format!("invalid realtime event: {error}"))
             })?;
             library::apply_event(pages, selected_page, event);
-            library_error.set(None);
         }
     }
-
-    Err("realtime socket closed".to_string())
+    Ok(())
 }
 
-pub(crate) async fn page_realtime_loop(
-    page_id: String,
-    batches: RwSignal<Vec<StrokeBatch>>,
-    viewer_status: RwSignal<String>,
-    viewer_error: RwSignal<Option<String>>,
-    last_seq: RwSignal<u64>,
-    paper: RwSignal<Paper>,
-) -> Result<(), String> {
+/// The page channel's signals, as the viewer owns them.
+#[derive(Clone, Copy)]
+pub(crate) struct PageChannel {
+    pub(crate) batches: RwSignal<Vec<StrokeBatch>>,
+    pub(crate) status: RwSignal<String>,
+    pub(crate) sync: RwSignal<SyncState>,
+    pub(crate) last_seq: RwSignal<u64>,
+    pub(crate) paper: RwSignal<Paper>,
+}
+
+/// Follow one page until the owning effect aborts the future, or until the
+/// server refuses the session.
+pub(crate) async fn page_realtime_loop(page_id: String, channel: PageChannel) {
     let mut attempts: u32 = 0;
     loop {
-        match page_realtime_once(
-            &page_id,
-            batches,
-            viewer_status,
-            viewer_error,
-            last_seq,
-            paper,
-        )
-        .await
-        {
-            Ok(()) => {
-                attempts = 0;
-                TimeoutFuture::new(500).await;
-            }
-            Err(error) => {
-                attempts += 1;
-                telemetry::log(
-                    telemetry::Severity::Warn,
-                    "page realtime connection lost; reconnecting",
-                    vec![
-                        telemetry::attr("vnote.channel", "page"),
-                        telemetry::attr("vnote.page_id", page_id.clone()),
-                        telemetry::attr("vnote.reconnect_attempt", i64::from(attempts)),
-                        telemetry::attr("vnote.reason", error.clone()),
-                    ],
-                );
-                viewer_error.set(Some(error));
-                viewer_status.set("Reconnecting".to_string());
-                TimeoutFuture::new(1_000).await;
-            }
+        let error = match page_connection(&page_id, channel).await {
+            Ok(()) => ChannelError::Transport("page realtime socket closed".to_string()),
+            Err(error) => error,
+        };
+        attempts += 1;
+        channel.status.set("Reconnecting".to_string());
+        if !connection_lost("page", Some(&page_id), attempts, &error, channel.sync) {
+            return;
         }
+        TimeoutFuture::new(RECONNECT_DELAY_MS).await;
     }
 }
 
-async fn page_realtime_once(
-    page_id: &str,
-    batches: RwSignal<Vec<StrokeBatch>>,
-    viewer_status: RwSignal<String>,
-    viewer_error: RwSignal<Option<String>>,
-    last_seq: RwSignal<u64>,
-    paper: RwSignal<Paper>,
-) -> Result<(), String> {
+async fn page_connection(page_id: &str, channel: PageChannel) -> Result<(), ChannelError> {
     let parent = telemetry::screen();
     let ticket = api::realtime_ticket(parent, "page realtime ticket").await?;
     let ws_url = api::page_realtime_url(page_id, &ticket.ticket)?;
@@ -160,11 +167,11 @@ async fn page_realtime_once(
         Err(error) => {
             let message = format!("opening page realtime socket failed: {error:?}");
             connect.fail(message.clone());
-            return Err(message);
+            return Err(ChannelError::Transport(message));
         }
     };
     let (mut write, mut read) = socket.split();
-    let from_seq = last_seq.get_untracked();
+    let from_seq = channel.last_seq.get_untracked();
     // `from_seq` is the viewer's cursor, so this span says how much of the page
     // a reconnect had to ask for — the difference between a cheap resume and a
     // full replay.
@@ -177,9 +184,9 @@ async fn page_realtime_once(
         ))
         .await
     {
-        let message = format!("page subscribe failed: {error:?}");
-        subscribe.fail(message.clone());
-        return Err(message);
+        let error = socket_error("page subscribe", error);
+        subscribe.fail(error.detail().to_string());
+        return Err(error);
     }
     subscribe.end();
     // `debug`, not `info`: one line per (re)connect is per-request detail, and a
@@ -191,17 +198,17 @@ async fn page_realtime_once(
         format!("page realtime subscribed from seq {from_seq}"),
         Vec::new(),
     );
-    viewer_status.set("Subscribing".to_string());
+    channel.status.set("Subscribing".to_string());
 
     while let Some(message) = read.next().await {
-        let message = message.map_err(|error| format!("page realtime socket failed: {error:?}"))?;
+        let message = message.map_err(|error| socket_error("page realtime socket", error))?;
         if let Message::Text(text) = message {
             let event: PageServerMessage = serde_json::from_str(&text).map_err(|error| {
                 telemetry::error_in(parent, "page realtime event did not parse");
-                format!("invalid page realtime event: {error}")
+                ChannelError::Server(format!("invalid page realtime event: {error}"))
             })?;
-            viewer::apply_page_event(event, batches, viewer_status, viewer_error, last_seq, paper);
+            viewer::apply_page_event(event, channel)?;
         }
     }
-    Err("page realtime socket closed".to_string())
+    Ok(())
 }

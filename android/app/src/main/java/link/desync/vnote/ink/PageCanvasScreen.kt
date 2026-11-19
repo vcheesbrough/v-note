@@ -4,7 +4,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -39,9 +38,12 @@ import link.desync.vnote.ui.displayTitle
 // The open-page screen: top bar (back, title, paper, pen and eraser controls), the
 // status banner, and the ink canvas, wired to one PageInkSession.
 
-// Full-screen ink editor for one open page: top bar with back + title, an
-// optional status banner (e.g. blocked-by-another-editor), and the infinite
-// canvas. Connects the page channel on enter and releases it on exit.
+// Full-screen ink editor for one open page: top bar with back + title, the
+// sync status banner when there is trouble (#150: disconnected, retrying,
+// another editor, session expired, rejected), and the infinite canvas.
+// Connects the page channel on enter and releases it on exit. [onSignIn] is the
+// banner's action when the session expired and a refresh could not renew it:
+// leave the page and sign in again.
 @Composable
 fun PageCanvasScreen(
     apiClient: ApiClient,
@@ -49,6 +51,7 @@ fun PageCanvasScreen(
     userId: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    onSignIn: () -> Unit = onBack,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -76,19 +79,22 @@ fun PageCanvasScreen(
     // Leaving drops ink the server has not acknowledged — held while the lease
     // or the connection was missing (#390), or sent and not yet echoed — so
     // ask first. With nothing unsent, back leaves at once, as it always did.
-    var unsentOnLeave by remember(page.id) { mutableStateOf<Int?>(null) }
-    val requestLeave = {
+    // Signing in again (#150) leaves the page too, so it asks the same way.
+    var unsentOnLeave by remember(page.id) { mutableStateOf<Pair<Int, () -> Unit>?>(null) }
+    val leaveThen = { leave: () -> Unit ->
         val unsent = session.unsentStrokeCount
-        if (unsent > 0) unsentOnLeave = unsent else onBack()
+        if (unsent > 0) unsentOnLeave = unsent to leave else leave()
     }
+    val requestLeave = { leaveThen(onBack) }
+    val requestSignIn = { leaveThen(onSignIn) }
     BackHandler(onBack = requestLeave)
-    unsentOnLeave?.let { unsent ->
+    unsentOnLeave?.let { (unsent, leave) ->
         UnsentInkDialog(
             strokes = unsent,
             onStay = { unsentOnLeave = null },
             onLeave = {
                 unsentOnLeave = null
-                onBack()
+                leave()
             },
         )
     }
@@ -155,12 +161,12 @@ fun PageCanvasScreen(
                 Icon(Icons.Outlined.DeleteSweep, contentDescription = "Eraser")
             }
         }
-        session.statusBanner?.let { banner ->
-            Text(
-                banner,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
+        session.status?.let { status ->
+            PageStatusBanner(
+                status = status,
+                unsentStrokes = session.unsentStrokeCount,
+                onRetry = session::retryNow,
+                onSignIn = requestSignIn,
             )
         }
         InkCanvas(

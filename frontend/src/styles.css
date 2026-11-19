@@ -422,6 +422,59 @@ button {
   width: 100%;
 }
 
+/*
+ * A channel that is not live withholds its data (#150): the canvas is hidden,
+ * not dimmed, so ink from before a drop can never pass for the current page.
+ */
+.canvas-frame.blocked {
+  background: var(--surface-sunk);
+}
+
+.canvas-frame.blocked .ink-canvas {
+  visibility: hidden;
+}
+
+.canvas-loading {
+  left: 50%;
+  margin: 0;
+  position: absolute;
+  top: 40%;
+  transform: translateX(-50%);
+}
+
+/* Sync banner -------------------------------------------------------------- */
+
+.sync-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sync-banner p {
+  margin: 0;
+}
+
+/* A server answering with errors reads apart from an unreachable one. */
+.sync-banner.sync-error {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.sync-banner-title {
+  font-weight: 650;
+}
+
+.sync-banner-detail code {
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.sync-banner .button {
+  align-self: flex-start;
+  margin-top: 6px;
+}
+
 .version-watermark {
   bottom: 8px;
   color: rgba(29, 32, 38, 0.4);

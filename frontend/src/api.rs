@@ -14,6 +14,7 @@ use protocol::{
     RealtimeTicketResponse,
 };
 
+use crate::sync::ChannelError;
 use crate::telemetry::{self, Parent, SpanHandle};
 
 const TRACEPARENT_HEADER: &str = "traceparent";
@@ -74,7 +75,7 @@ async fn send(request: RequestBuilder) -> Result<gloo_net::http::Response, gloo_
 pub(crate) async fn realtime_ticket(
     parent: Parent,
     context: &str,
-) -> Result<RealtimeTicketResponse, String> {
+) -> Result<RealtimeTicketResponse, ChannelError> {
     let (request, span) = start(
         parent,
         "POST",
@@ -88,13 +89,13 @@ pub(crate) async fn realtime_ticket(
             let message = format!("{context} failed: {error}");
             span.fail(message.clone());
             telemetry::warn_in(ctx, format!("realtime ticket request failed ({context})"));
-            return Err(message);
+            return Err(ChannelError::Transport(message));
         }
     };
     let span = span.attr("http.response.status_code", response.status());
     if !response.ok() {
-        let message = format!("{context} failed: HTTP {}", response.status());
-        span.fail(message.clone());
+        let error = ChannelError::from_status(context, response.status());
+        span.fail(error.detail().to_string());
         telemetry::warn_in(
             ctx,
             format!(
@@ -102,7 +103,7 @@ pub(crate) async fn realtime_ticket(
                 response.status()
             ),
         );
-        return Err(message);
+        return Err(error);
     }
     match response.json::<RealtimeTicketResponse>().await {
         Ok(ticket) => {
@@ -116,7 +117,7 @@ pub(crate) async fn realtime_ticket(
                 ctx,
                 format!("realtime ticket response did not parse ({context})"),
             );
-            Err(message)
+            Err(ChannelError::Server(message))
         }
     }
 }
@@ -192,8 +193,7 @@ pub(crate) async fn load_pages(
     parent: Parent,
     pages: RwSignal<Vec<PageSummary>>,
     pages_loaded: RwSignal<bool>,
-    library_error: RwSignal<Option<String>>,
-) -> Result<(), String> {
+) -> Result<(), ChannelError> {
     let (request, span) = start(parent, "GET", "/api/pages", "/api/pages");
     let ctx = span.context();
     let response = match send(request).await {
@@ -202,18 +202,18 @@ pub(crate) async fn load_pages(
             let message = format!("loading pages failed: {error}");
             span.fail(message.clone());
             telemetry::warn_in(ctx, "loading pages failed: transport error");
-            return Err(message);
+            return Err(ChannelError::Transport(message));
         }
     };
     let span = span.attr("http.response.status_code", response.status());
     if !response.ok() {
-        let message = format!("loading pages failed: HTTP {}", response.status());
-        span.fail(message.clone());
+        let error = ChannelError::from_status("loading pages", response.status());
+        span.fail(error.detail().to_string());
         telemetry::error_in(
             ctx,
             format!("loading pages failed: HTTP {}", response.status()),
         );
-        return Err(message);
+        return Err(error);
     }
     let body = match response.json::<ListPagesResponse>().await {
         Ok(body) => body,
@@ -221,14 +221,13 @@ pub(crate) async fn load_pages(
             let message = format!("invalid pages response: {error}");
             span.fail(message.clone());
             telemetry::error_in(ctx, "pages response did not parse");
-            return Err(message);
+            return Err(ChannelError::Server(message));
         }
     };
     // A count, not the pages: titles are the user's content.
     span.attr("vnote.page_count", body.pages.len() as i64).end();
     pages.set(body.pages);
     pages_loaded.set(true);
-    library_error.set(None);
     Ok(())
 }
 
@@ -269,12 +268,13 @@ pub(crate) async fn delete_page(parent: Parent, page_id: &str) -> Result<(), Str
     Ok(())
 }
 
-pub(crate) fn realtime_url(ticket: &str) -> Result<String, String> {
-    websocket_url(&format!("/api/realtime?ticket={ticket}"))
+pub(crate) fn realtime_url(ticket: &str) -> Result<String, ChannelError> {
+    websocket_url(&format!("/api/realtime?ticket={ticket}")).map_err(ChannelError::Transport)
 }
 
-pub(crate) fn page_realtime_url(page_id: &str, ticket: &str) -> Result<String, String> {
+pub(crate) fn page_realtime_url(page_id: &str, ticket: &str) -> Result<String, ChannelError> {
     websocket_url(&format!("/api/pages/{page_id}/realtime?ticket={ticket}"))
+        .map_err(ChannelError::Transport)
 }
 
 fn websocket_url(path_and_query: &str) -> Result<String, String> {

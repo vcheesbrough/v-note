@@ -12,6 +12,7 @@ mod library;
 mod realtime;
 mod render;
 mod route;
+mod sync;
 mod telemetry;
 mod viewer;
 
@@ -22,6 +23,7 @@ use wasm_bindgen::JsCast;
 
 use crate::library::{approximate_relative_datetime, page_has_title, remove_page, thumbnail_key};
 use crate::route::{Leave, Route};
+use crate::sync::{SyncBanner, SyncState};
 use crate::viewer::InkViewer;
 
 /// What `/api/me` has told us so far: `None` while the request is in flight,
@@ -183,7 +185,6 @@ fn PageTile(
         |title| format!("Delete {title}"),
     );
     let thumbnail = page.thumbnail.clone();
-    let thumbnail_unavailable = library_error.get_untracked().is_some();
 
     view! {
         <li class="page-tile">
@@ -194,20 +195,17 @@ fn PageTile(
                 route::push(&Route::Page(page.id.clone()));
                 selected_page.set(Some(page));
             }>
-            {match (thumbnail_unavailable, thumbnail) {
-                (true, _) => view! {
-                    <div class="page-preview thumbnail-failed" aria-label="Thumbnail unavailable while realtime is disconnected"></div>
-                }.into_any(),
-                (false, ThumbnailMetadata::Available { url, .. }) => view! {
+            {match thumbnail {
+                ThumbnailMetadata::Available { url, .. } => view! {
                     <img class="page-preview" src=url alt="" />
                 }.into_any(),
-                (false, ThumbnailMetadata::Generating { .. }) => view! {
+                ThumbnailMetadata::Generating { .. } => view! {
                     <div class="page-preview thumbnail-generating" aria-label="Thumbnail generating"></div>
                 }.into_any(),
-                (false, ThumbnailMetadata::Failed { .. }) => view! {
+                ThumbnailMetadata::Failed { .. } => view! {
                     <div class="page-preview thumbnail-failed" aria-label="Thumbnail unavailable"></div>
                 }.into_any(),
-                (false, ThumbnailMetadata::Empty) => view! {
+                ThumbnailMetadata::Empty => view! {
                     <div class="page-preview thumbnail-empty" aria-label="Empty page"></div>
                 }.into_any(),
             }}
@@ -244,24 +242,33 @@ fn PageTile(
 /// The library body under the top bar: the error banner, the page grid (or the
 /// empty state that stands in for it), and the build footer. Rendered signed
 /// out too, with no pages — signing in fills it rather than replacing it.
+///
+/// Signed in, the grid shows only while the library channel is live (#150):
+/// after a drop the list may already be wrong, so it is withheld behind the
+/// sync banner until a reconnect has refetched it.
 #[component]
 fn Library(
     me: RwSignal<Session>,
     meta: RwSignal<Option<Result<MetaResponse, String>>>,
     pages: RwSignal<Vec<PageSummary>>,
     selected_page: RwSignal<Option<PageSummary>>,
+    library_sync: RwSignal<SyncState>,
     library_error: RwSignal<Option<String>>,
     route_notice: RwSignal<Option<String>>,
 ) -> impl IntoView {
     view! {
         <section class="library-shell" aria-label="Page library">
             // Why the address bar did not open what it named. Its own signal
-            // because it outlives a reconnect: `library_error` is the live
-            // transport's state and every successful reload clears it.
+            // because it outlives a reconnect.
             {move || route_notice.get().map(|notice| view! {
                 <p class="alert" role="alert">{notice}</p>
             })}
 
+            {move || matches!(me.get(), Some(Ok(_))).then(|| view! {
+                <SyncBanner state=library_sync.into() subject="Your library" />
+            })}
+
+            // A failed action (delete), not the channel: the list is still live.
             {move || library_error.get().map(|error| view! {
                 <p class="alert" role="alert">{error}</p>
             })}
@@ -289,6 +296,13 @@ fn Library(
                         <h2 class="section-title">"Unable to determine authentication state"</h2>
                     </div>
                 }.into_any(),
+                Some(Ok(_)) if library_sync.with(|sync| matches!(sync, SyncState::Connecting)) => view! {
+                    <div class="state-panel" aria-live="polite">
+                        <p class="eyebrow">"Library"</p>
+                        <h2 class="section-title">"Loading your pages"</h2>
+                    </div>
+                }.into_any(),
+                Some(Ok(_)) if !library_sync.with(SyncState::is_live) => ().into_any(),
                 Some(Ok(_)) if pages.get().is_empty() => view! {
                     <div class="state-panel">
                         <p class="eyebrow">"No pages"</p>
@@ -299,10 +313,7 @@ fn Library(
                 Some(Ok(_)) => view! {
                     <ul class="page-grid">
                         <For
-                            each=move || {
-                                library_error.track();
-                                pages.get()
-                            }
+                            each=move || pages.get()
                             // `updated_at` is in the key so a page-updated event (which only
                             // bumps the timestamp) rebuilds the row, refreshing the captured
                             // "Updated …" age label and the click-handler's page snapshot.
@@ -336,6 +347,10 @@ fn App() -> impl IntoView {
     let me = RwSignal::new(None::<Result<MeResponse, u16>>);
     let pages = RwSignal::new(Vec::<PageSummary>::new());
     let selected_page = RwSignal::new(None::<PageSummary>);
+    // The library channel, which also owns loading the list: every (re)connect
+    // refetches it before the grid is shown.
+    let library_sync = RwSignal::new(SyncState::Connecting);
+    // A failed library action (delete).
     let library_error = RwSignal::new(None::<String>);
     // Why a route did not open what it named — a deep link to a page this
     // owner does not have.
@@ -406,19 +421,11 @@ fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         if matches!(me.get(), Some(Ok(_))) {
-            let parent = telemetry::screen();
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Err(error) =
-                    api::load_pages(parent, pages, pages_loaded, library_error).await
-                {
-                    library_error.set(Some(error));
-                }
-            });
             wasm_bindgen_futures::spawn_local(realtime::library_realtime_loop(
                 pages,
                 selected_page,
                 pages_loaded,
-                library_error,
+                library_sync,
             ));
         }
     });
@@ -497,7 +504,7 @@ fn App() -> impl IntoView {
                 }.into_any(),
                 None => view! {
                     <LibraryBar me=me />
-                    <Library me=me meta=meta pages=pages selected_page=selected_page library_error=library_error route_notice=route_notice />
+                    <Library me=me meta=meta pages=pages selected_page=selected_page library_sync=library_sync library_error=library_error route_notice=route_notice />
                 }.into_any(),
             }}
         </main>
