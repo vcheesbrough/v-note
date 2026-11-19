@@ -1,5 +1,6 @@
 package link.desync.vnote.api
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import link.desync.vnote.api.codec.decodeLibraryEvent
@@ -235,7 +236,24 @@ class OkHttpApiClient(
         return PageSocket(webSocket)
     }
 
-    override suspend fun refreshSession(): Boolean = withContext(Dispatchers.IO) { authRepository.refreshAccessTokenIfNeeded(force = true) }
+    // Total, as the interface promises: OIDC discovery fails by throwing when
+    // the identity provider is unreachable, and the caller is a bare coroutine
+    // on the screen's scope, where an escaped exception crashes the app and
+    // loses the ink it holds. A refresh that cannot run is a refresh that
+    // failed. Cancellation still propagates.
+    override suspend fun refreshSession(): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                authRepository.refreshAccessTokenIfNeeded(force = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (
+                @Suppress("TooGenericExceptionCaught") failure: Exception,
+            ) {
+                AppLog.w(LOG_TAG, "token refresh failed", failure)
+                false
+            }
+        }
 
     override fun shutdown() {
         http.dispatcher.executorService.shutdown()

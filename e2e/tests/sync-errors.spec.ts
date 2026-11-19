@@ -52,7 +52,19 @@ test.describe('SPA disconnect and sync errors', () => {
       await expect.poll(() => tickets.refused, { timeout: 5_000 }).toBeGreaterThan(0);
       await expect(canvas).toBeHidden();
 
+      // The server is back. Hold the reconnect's replay frame: the socket is
+      // open and welcomed, but until the replay lands the canvas would show
+      // pre-drop ink as if it were current, so it must stay hidden.
+      sockets.holdReplay = true;
+      const before = sockets.count();
       tickets.mode = 'pass';
+      await expect.poll(() => sockets.count(), { timeout: 10_000 }).toBeGreaterThan(before);
+      await expect.poll(() => sockets.held(), { timeout: 10_000 }).toBeGreaterThan(0);
+      await expect(page.locator('.live-status')).toContainText('Connected');
+      await expect(canvas).toBeHidden();
+      await expect(banner).toBeVisible();
+
+      sockets.release();
       await expect(banner).toHaveCount(0, { timeout: 10_000 });
       await expect(canvas).toBeVisible();
       await expect.poll(() => strokeCount(page)).toBe(2);
@@ -140,6 +152,7 @@ test.describe('SPA disconnect and sync errors', () => {
   test('the library hides its pages while its channel is down', async ({ page, request }) => {
     const title = uniqueTitle('sync-library');
     const pageId = await createPage(request, title);
+    let missedId: string | undefined;
     try {
       const sockets = await routeSockets(page, LIBRARY_SOCKET);
       const tickets = await controlTickets(page);
@@ -156,11 +169,18 @@ test.describe('SPA disconnect and sync errors', () => {
       await expect(banner).toContainText('Your library is hidden');
       await expect(tile).toHaveCount(0);
 
+      // Created while the library socket is down: its `page-created` event is
+      // never delivered, so only the reconnect's refetch can show it.
+      const missedTitle = uniqueTitle('sync-library-missed');
+      missedId = await createPage(request, missedTitle);
+
       tickets.mode = 'pass';
       await expect(banner).toHaveCount(0, { timeout: 10_000 });
       await expect(tile).toBeVisible();
+      await expect(page.getByRole('button', { name: `Open ${missedTitle}`, exact: true })).toBeVisible();
     } finally {
       await deletePage(request, pageId);
+      if (missedId) await deletePage(request, missedId);
     }
   });
 });
@@ -179,14 +199,21 @@ async function openLiveViewer(page: Page, pageId: string) {
   return { locator, sockets, tickets };
 }
 
-/** Every socket the page opens to [pattern], forwarded to the real server. */
+/**
+ * Every socket the page opens to [pattern], forwarded to the real server.
+ * While `holdReplay` is set, a `page-replay` frame from the server is kept
+ * back in `held` instead of reaching the page; `release()` delivers it.
+ */
 async function routeSockets(page: Page, pattern: RegExp) {
   const routes: WebSocketRoute[] = [];
-  await page.routeWebSocket(pattern, (ws) => {
-    ws.connectToServer();
-    routes.push(ws);
-  });
-  return {
+  const held: { route: WebSocketRoute; message: string | Buffer }[] = [];
+  const control = {
+    holdReplay: false,
+    held: () => held.length,
+    release: () => {
+      control.holdReplay = false;
+      for (const { route, message } of held.splice(0)) route.send(message);
+    },
     count: () => routes.length,
     last: () => {
       const route = routes.at(-1);
@@ -194,6 +221,21 @@ async function routeSockets(page: Page, pattern: RegExp) {
       return route;
     },
   };
+  await page.routeWebSocket(pattern, (ws) => {
+    const server = ws.connectToServer();
+    // Handling the server's side turns off its automatic forwarding, so
+    // everything not held is passed on by hand. The page's side still
+    // forwards on its own.
+    server.onMessage((message) => {
+      if (control.holdReplay && typeof message === 'string' && message.includes('"type":"page-replay"')) {
+        held.push({ route: ws, message });
+        return;
+      }
+      ws.send(message);
+    });
+    routes.push(ws);
+  });
+  return control;
 }
 
 type TicketMode = 'pass' | 'unreachable' | 'server-error' | 'unauthorized';

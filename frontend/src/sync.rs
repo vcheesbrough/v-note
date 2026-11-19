@@ -56,9 +56,10 @@ impl ChannelError {
         }
     }
 
-    /// The technical detail, for the banner and for telemetry. Built in this
-    /// crate from statuses, close codes and server error codes, so it never
-    /// carries page content.
+    /// The technical detail, for the banner and for telemetry: HTTP statuses,
+    /// close codes and reasons, the server's error code and fixed message, and
+    /// parse positions. Never page content — a parse error is described by
+    /// [`parse_error`], not by serde's message, which can quote the value.
     pub(crate) fn detail(&self) -> &str {
         match self {
             Self::Transport(detail) | Self::Server(detail) | Self::Unauthorized(detail) => detail,
@@ -73,6 +74,18 @@ impl ChannelError {
             Self::Unauthorized(_) => SyncState::SessionExpired,
         }
     }
+}
+
+/// A message this build could not read. Only serde's category and position:
+/// its `Display` can quote the offending value, and library events carry page
+/// titles (the server's parser says the same of ink, `socket.rs`).
+pub(crate) fn parse_error(context: &str, error: &serde_json::Error) -> ChannelError {
+    ChannelError::Server(format!(
+        "{context} did not parse ({:?} at line {} column {})",
+        error.classify(),
+        error.line(),
+        error.column()
+    ))
 }
 
 /// Map a socket stream error to a [`ChannelError`], keeping the close code and
@@ -181,6 +194,20 @@ mod tests {
         );
         assert_eq!(kind(&SyncState::Failed(String::new())), Some("sync-error"));
         assert_eq!(kind(&SyncState::SessionExpired), Some("session-expired"));
+    }
+
+    #[test]
+    fn a_parse_error_never_quotes_the_value() {
+        let error = serde_json::from_str::<protocol::LibraryEvent>(
+            r#"{"type":"page-created","page":{"title":"my private title"}}"#,
+        )
+        .expect_err("not a valid event");
+        let detail = parse_error("realtime event", &error).detail().to_string();
+        assert!(!detail.contains("private"), "{detail}");
+        assert!(
+            detail.starts_with("realtime event did not parse ("),
+            "{detail}"
+        );
     }
 
     #[test]

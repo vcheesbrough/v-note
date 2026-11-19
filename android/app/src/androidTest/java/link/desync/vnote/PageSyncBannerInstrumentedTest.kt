@@ -114,16 +114,20 @@ class PageSyncBannerInstrumentedTest {
         awaitTag("page-status-disconnected")
         composeRule.onNodeWithText(PageInkSession.DISCONNECTED).assertIsDisplayed()
         composeRule.onNodeWithTag("page-status-detail").assertIsDisplayed()
-        // A failed attempt does not flip the banner to a benign "connecting".
-        val attempts = pageUpgrades.get()
-        composeRule.waitUntil(timeoutMillis = 10_000) { pageUpgrades.get() > attempts }
+        // Let the backoff grow (1 + 2 + 4 s of refused attempts) so the next
+        // automatic attempt is 8 s away: a reconnect inside the window below
+        // can only be Retry's. A failed attempt does not flip the banner to a
+        // benign "connecting" meanwhile.
+        composeRule.waitUntil(timeoutMillis = 15_000) { pageUpgrades.get() >= 4 }
         composeRule.onNodeWithTag("page-status-disconnected").assertIsDisplayed()
 
         pageMode = PageMode.Healthy
         serverUp.set(true)
+        val before = pageUpgrades.get()
         composeRule.onNodeWithTag("page-status-retry").performClick()
 
-        awaitTagGone("page-status-disconnected")
+        composeRule.waitUntil(timeoutMillis = 2_000) { pageUpgrades.get() > before }
+        awaitTagGone("page-status-disconnected", timeoutMillis = 2_000)
         assertNoBanner()
     }
 
@@ -148,6 +152,10 @@ class PageSyncBannerInstrumentedTest {
         composeRule.onNodeWithText(PageInkSession.SESSION_EXPIRED).assertIsDisplayed()
         composeRule.onNodeWithTag("page-status-sign-in").assertIsDisplayed()
         composeRule.onAllNodesWithTag("page-status-disconnected").assertCountEquals(0)
+        // Not clicked here: Sign in starts OIDC discovery against the real
+        // identity provider, which the test network guard refuses by crashing
+        // the run. The button's callback is asserted in
+        // PageStatusBannerInstrumentedTest.
     }
 
     private fun openPage() {
@@ -161,8 +169,11 @@ class PageSyncBannerInstrumentedTest {
         }
     }
 
-    private fun awaitTagGone(tag: String) {
-        composeRule.waitUntil(timeoutMillis = 10_000) {
+    private fun awaitTagGone(
+        tag: String,
+        timeoutMillis: Long = 10_000,
+    ) {
+        composeRule.waitUntil(timeoutMillis = timeoutMillis) {
             composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isEmpty()
         }
     }
@@ -185,7 +196,7 @@ class PageSyncBannerInstrumentedTest {
                             """{"pages":[{"id":"$PAGE_ID","title":"Banner test",""" +
                                 """"created_at":"2026-11-19T00:00:00Z","updated_at":"2026-11-19T00:00:00Z"}]}""",
                         )
-                    "/api/realtime" -> MockResponse.Builder().webSocketUpgrade(object : WebSocketListener() {}).build()
+                    "/api/realtime" -> MockResponse.Builder().webSocketUpgrade(answeringCloses()).build()
                     "/api/pages/$PAGE_ID/realtime" -> pageUpgrade()
                     else -> MockResponse(code = 404)
                 }
@@ -229,6 +240,19 @@ class PageSyncBannerInstrumentedTest {
                 }
             }
 
+            override fun onClosing(
+                webSocket: WebSocket,
+                code: Int,
+                reason: String,
+            ) {
+                webSocket.close(code, reason)
+            }
+        }
+
+    // A socket the app closes must be answered, or MockWebServer's close waits
+    // on the half-closed connection and fails the test in teardown.
+    private fun answeringCloses() =
+        object : WebSocketListener() {
             override fun onClosing(
                 webSocket: WebSocket,
                 code: Int,

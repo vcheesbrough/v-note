@@ -10,7 +10,7 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use protocol::{LibraryEvent, PageServerMessage, PageSummary, Paper, StrokeBatch};
 
-use crate::sync::{ChannelError, SyncState, socket_error};
+use crate::sync::{ChannelError, SyncState, parse_error, socket_error};
 use crate::{api, library, telemetry, viewer};
 
 /// Fixed rather than backing off: the SPA is a viewer someone is watching, and
@@ -31,8 +31,7 @@ fn connection_lost(
     let mut attrs = vec![
         telemetry::attr("vnote.channel", channel),
         telemetry::attr("vnote.reconnect_attempt", i64::from(attempts)),
-        // Ours, never the server's: `ChannelError` details are built in this
-        // crate and carry no page content.
+        // Never page content: see `ChannelError::detail`.
         telemetry::attr("vnote.reason", error.detail().to_string()),
     ];
     if let Some(page_id) = page_id {
@@ -116,7 +115,7 @@ async fn library_connection(
                 // deployed things, which is worth an error even though the loop
                 // recovers by reconnecting.
                 telemetry::error_in(parent, "library realtime event did not parse");
-                ChannelError::Server(format!("invalid realtime event: {error}"))
+                parse_error("realtime event", &error)
             })?;
             library::apply_event(pages, selected_page, event);
         }
@@ -205,7 +204,7 @@ async fn page_connection(page_id: &str, channel: PageChannel) -> Result<(), Chan
         if let Message::Text(text) = message {
             let event: PageServerMessage = serde_json::from_str(&text).map_err(|error| {
                 telemetry::error_in(parent, "page realtime event did not parse");
-                ChannelError::Server(format!("invalid page realtime event: {error}"))
+                parse_error("page realtime event", &error)
             })?;
             viewer::apply_page_event(event, channel)?;
         }

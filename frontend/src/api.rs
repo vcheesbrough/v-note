@@ -14,7 +14,7 @@ use protocol::{
     RealtimeTicketResponse,
 };
 
-use crate::sync::ChannelError;
+use crate::sync::{ChannelError, parse_error};
 use crate::telemetry::{self, Parent, SpanHandle};
 
 const TRACEPARENT_HEADER: &str = "traceparent";
@@ -65,6 +65,14 @@ async fn send(request: RequestBuilder) -> Result<gloo_net::http::Response, gloo_
     request.build()?.send().await
 }
 
+/// A response body that did not parse, described without quoting it.
+fn response_parse_error(context: &str, error: &gloo_net::Error) -> ChannelError {
+    match error {
+        gloo_net::Error::SerdeError(error) => parse_error(context, error),
+        _ => ChannelError::Server(format!("{context} could not be read")),
+    }
+}
+
 /// `POST /api/realtime-ticket`: the short-lived credential both WebSocket
 /// channels present, since a browser socket cannot carry a bearer header.
 /// `context` names the caller in the error, as before the two copies merged.
@@ -111,13 +119,13 @@ pub(crate) async fn realtime_ticket(
             Ok(ticket)
         }
         Err(error) => {
-            let message = format!("invalid {context}: {error}");
-            span.fail(message.clone());
+            let error = response_parse_error(context, &error);
+            span.fail(error.detail().to_string());
             telemetry::error_in(
                 ctx,
                 format!("realtime ticket response did not parse ({context})"),
             );
-            Err(ChannelError::Server(message))
+            Err(error)
         }
     }
 }
@@ -218,10 +226,11 @@ pub(crate) async fn load_pages(
     let body = match response.json::<ListPagesResponse>().await {
         Ok(body) => body,
         Err(error) => {
-            let message = format!("invalid pages response: {error}");
-            span.fail(message.clone());
+            // The list carries page titles, so serde's message stays out.
+            let error = response_parse_error("pages response", &error);
+            span.fail(error.detail().to_string());
             telemetry::error_in(ctx, "pages response did not parse");
-            return Err(ChannelError::Server(message));
+            return Err(error);
         }
     };
     // A count, not the pages: titles are the user's content.

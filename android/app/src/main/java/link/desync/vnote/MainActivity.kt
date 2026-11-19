@@ -256,9 +256,12 @@ class MainActivity : ComponentActivity() {
                     library.start()
                 },
                 onFailure = { error ->
-                    // Only a refused session signs the user out (#150). An
-                    // unreachable or failing server keeps the stored tokens,
-                    // so Retry picks up where the user was once it is back.
+                    // Only a refused session signs the user out (#150). A
+                    // server that answers with an error keeps the stored
+                    // tokens, so Retry picks up where the user was once it
+                    // recovers. (An unreachable server throws out of
+                    // `fetchMe` before reaching here — a pre-existing gap,
+                    // tracked on its own card.)
                     if (error is SessionExpiredException) {
                         AppLog.w(TAG, "session check refused; signing out locally", error)
                         authRepository.signOutLocal()

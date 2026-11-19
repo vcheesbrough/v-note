@@ -933,6 +933,36 @@ class PageInkInstrumentedTest {
     }
 
     /**
+     * #150 review: OIDC discovery throws when the identity provider is
+     * unreachable. A refresh that cannot run must end in the session-expired
+     * state, not escape the page's coroutine and crash the app.
+     */
+    @Test
+    fun aRefreshThatThrowsEndsInSessionExpiredRatherThanACrash() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val throwingAuth =
+            object : AuthRepository(context, AuthConfig.fromBuildConfig(), tokenStore) {
+                override suspend fun refreshAccessTokenIfNeeded(force: Boolean): Boolean =
+                    throw java.io.IOException("identity provider unreachable")
+            }
+        val client = OkHttpApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, throwingAuth)
+        server.enqueue(MockResponse.Builder().code(401).build())
+        try {
+            val session = PageInkSession(client, "page_1", CoroutineScope(Dispatchers.Main))
+            session.connect()
+
+            assertTrue(
+                "session expired shown",
+                awaitUntil { session.status?.kind == PageStatusKind.SessionExpired },
+            )
+            assertTrue("ink blocked", session.inkBlocked)
+            session.disconnect()
+        } finally {
+            client.shutdown()
+        }
+    }
+
+    /**
      * #150: when the refreshed token is refused too, the session is gone.
      * Ink is blocked, the banner asks for sign-in, and the page stops
      * reconnecting — every further attempt would be refused the same way.
