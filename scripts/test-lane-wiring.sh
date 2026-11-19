@@ -17,9 +17,10 @@
 #      Woodpecker runs it only after the gated step succeeded;
 #   5. every lane-skip step gets github_token (markers on the private repo)
 #      and, unless it is the cron's `prune` (which reads no lanes, #469), names
-#      `config: lanes.yml` (the plugin's default, .woodpecker/lanes.yml,
-#      is parsed by Woodpecker as a workflow and breaks every pipeline), and all
-#      of them use one image pinned by digest.
+#      `config: lanes.yml` (before lane-skip 0.2.0 the default was
+#      .woodpecker/lanes.yml, which Woodpecker parses as a workflow and which
+#      breaks every pipeline; naming the path keeps it out of there whatever
+#      the default), and all of them use one image pinned by digest.
 # Negative cases mutate the parsed workflows to prove each rule bites.
 
 set -euo pipefail
