@@ -198,10 +198,15 @@ mod tests {
 
     #[test]
     fn a_parse_error_never_quotes_the_value() {
+        // A string where a struct belongs: serde's own message quotes it.
         let error = serde_json::from_str::<protocol::LibraryEvent>(
-            r#"{"type":"page-created","page":{"title":"my private title"}}"#,
+            r#"{"type":"page-created","page":"my private title"}"#,
         )
         .expect_err("not a valid event");
+        assert!(
+            error.to_string().contains("private"),
+            "the input must be one serde quotes, or this proves nothing: {error}"
+        );
         let detail = parse_error("realtime event", &error).detail().to_string();
         assert!(!detail.contains("private"), "{detail}");
         assert!(
