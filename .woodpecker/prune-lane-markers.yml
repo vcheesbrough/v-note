@@ -21,7 +21,7 @@ skip_clone: true
 
 steps:
   prune:
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.2.0@sha256:ff87a9e78feb3099668e37710b7c63d91044f8da3dc96ec8bec1d7c7e5dea870
     settings:
       mode: prune
       days: 30

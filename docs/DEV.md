@@ -601,7 +601,7 @@ working tree):
 
 ```bash
 docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_CONFIG=lanes.yml -e PLUGIN_LANE=web \
-  ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+  ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.2.0@sha256:ff87a9e78feb3099668e37710b7c63d91044f8da3dc96ec8bec1d7c7e5dea870
 ```
 
 **Markers are pruned weekly (#469).** Each pipeline whose inputs changed adds up
@@ -625,7 +625,7 @@ The manual fallback lists what would go, then deletes it:
 ```bash
 docker run --rm -e PLUGIN_MODE=prune -e PLUGIN_DAYS=30 -e PLUGIN_DRY_RUN=true \
   -e CI_REPO=vcheesbrough/v-note -e PLUGIN_GITHUB_TOKEN="$(gh auth token)" \
-  ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+  ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.2.0@sha256:ff87a9e78feb3099668e37710b7c63d91044f8da3dc96ec8bec1d7c7e5dea870
 # then again without PLUGIN_DRY_RUN
 ```
 
