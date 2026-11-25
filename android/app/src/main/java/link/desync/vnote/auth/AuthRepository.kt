@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import link.desync.vnote.net.HttpClients
@@ -20,6 +21,7 @@ import net.openid.appauth.TokenRequest
 import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONObject
+import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -117,7 +119,22 @@ open class AuthRepository(
         if (refreshToken.isBlank()) {
             return false
         }
-        val serviceConfig = discoverConfiguration()
+        // Offline (airplane mode) the identity provider cannot be reached at
+        // all, and discovery fails by throwing — out of `reloadSession`'s bare
+        // coroutine, which crashed the app (#150). Not reaching the provider
+        // is not a refused session: report the refresh as not done and keep
+        // the tokens, so the session survives until the network is back.
+        val serviceConfig =
+            try {
+                discoverConfiguration()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (
+                @Suppress("TooGenericExceptionCaught") unreachable: Exception,
+            ) {
+                AppLog.w(TAG, "token refresh skipped: identity provider unreachable", unreachable)
+                return false
+            }
         val request =
             TokenRequest
                 .Builder(serviceConfig, config.clientId)
@@ -126,8 +143,12 @@ open class AuthRepository(
                 .build()
         return performTokenRequest(request, "auth.token_refresh").fold(
             onSuccess = { true },
-            onFailure = {
-                tokenStore.clear()
+            onFailure = { failure ->
+                // Only an answer from the provider refusing the refresh token
+                // ends the session; a request that never reached it does not.
+                if (failure !is IOException) {
+                    tokenStore.clear()
+                }
                 false
             },
         )

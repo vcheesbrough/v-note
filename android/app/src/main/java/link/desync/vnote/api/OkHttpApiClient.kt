@@ -27,6 +27,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -72,12 +73,12 @@ class OkHttpApiClient(
     override suspend fun checkHealth(): Result<Unit> = withContext(Dispatchers.IO) { healthCheck.check() }
 
     override suspend fun fetchMe(): Result<MeProfile> =
-        withContext(Dispatchers.IO) {
+        reachingServer {
             requestMe(retryOnUnauthorized = true)
         }
 
     override suspend fun listPages(): Result<List<PageSummary>> =
-        withContext(Dispatchers.IO) {
+        reachingServer {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 authorizedRequest("$baseUrl/api/pages", token, "/api/pages")
                     .get()
@@ -89,7 +90,7 @@ class OkHttpApiClient(
         title: String?,
         paper: Paper,
     ): Result<PageSummary> =
-        withContext(Dispatchers.IO) {
+        reachingServer {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 val body = encodeCreatePage(title, paper).toRequestBody(jsonMediaType)
                 authorizedRequest("$baseUrl/api/pages", token, "/api/pages")
@@ -99,7 +100,7 @@ class OkHttpApiClient(
         }
 
     override suspend fun deletePage(pageId: String): Result<Unit> =
-        withContext(Dispatchers.IO) {
+        reachingServer {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
                 authorizedRequest("$baseUrl/api/pages/$pageId", token, "/api/pages/{page_id}")
                     .delete()
@@ -108,8 +109,8 @@ class OkHttpApiClient(
         }
 
     override suspend fun fetchThumbnail(url: String): Result<ByteArray> =
-        withContext(Dispatchers.IO) {
-            thumbnailCache[url]?.let { return@withContext Result.success(it) }
+        reachingServer {
+            thumbnailCache[url]?.let { return@reachingServer Result.success(it) }
             makeAuthorizedApiRequestForBytes(retryOnUnauthorized = true) { token ->
                 authorizedRequest("$baseUrl$url", token, THUMBNAIL_ROUTE).get().build()
             }.onSuccess { bytes -> thumbnailCache[url] = bytes }
@@ -138,12 +139,7 @@ class OkHttpApiClient(
                     response: Response?,
                 ) {
                     logWebSocketFailure("library realtime", response, t)
-                    listener.onError(
-                        requestFailureMessage(
-                            t.message ?: "Realtime connection failed",
-                            response,
-                        ),
-                    )
+                    listener.onError(socketFailureMessage(t, response, "Realtime connection failed"))
                 }
 
                 // Same handshake reply as the page channel: unanswered, a
@@ -197,7 +193,7 @@ class OkHttpApiClient(
                         response: Response?,
                     ) {
                         logWebSocketFailure("page realtime", response, t)
-                        val message = requestFailureMessage(t.message ?: "Page connection failed", response)
+                        val message = socketFailureMessage(t, response, "Page connection failed")
                         if (response?.code == HTTP_UNAUTHORIZED) {
                             listener.onUnauthorized(message)
                         } else {
@@ -260,6 +256,21 @@ class OkHttpApiClient(
         http.connectionPool.evictAll()
         http.cache?.close()
     }
+
+    // Run one REST call on IO, returning a request that never reached the
+    // server — airplane mode, no route, DNS, refused, timed out — as a failed
+    // [Result] like an HTTP error, never as a throw. Every caller is a bare
+    // coroutine on the UI (session check, library refetch, create, delete,
+    // thumbnails), where an escaped `IOException` crashes the app (#150).
+    private suspend fun <T> reachingServer(call: suspend () -> Result<T>): Result<T> =
+        withContext(Dispatchers.IO) {
+            try {
+                call()
+            } catch (unreachable: IOException) {
+                AppLog.d(LOG_TAG, "request did not reach the server: ${unreachable.javaClass.simpleName}")
+                Result.failure(ServerUnreachableException(unreachable))
+            }
+        }
 
     private fun wsBaseUrl(): String =
         when {
@@ -359,6 +370,20 @@ class OkHttpApiClient(
             .header("Authorization", "Bearer $token")
             .header(REQUEST_ID_HEADER, requestId())
             .traced(route)
+
+    // Why a socket failed, in the same words as a REST call that could not
+    // reach the server (#150): with no HTTP response there was no server to
+    // answer — airplane mode, no route, refused — and the banner says so.
+    private fun socketFailureMessage(
+        failure: Throwable,
+        response: Response?,
+        fallback: String,
+    ): String =
+        if (response == null && failure is IOException) {
+            ServerUnreachableException(failure).message.orEmpty()
+        } else {
+            requestFailureMessage(failure.message ?: fallback, response)
+        }
 
     private fun requestFailureMessage(
         prefix: String,

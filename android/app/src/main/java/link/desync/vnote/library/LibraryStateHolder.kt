@@ -165,6 +165,21 @@ internal class LibraryStateHolder(
 
     private fun connect() {
         val generation = ++connectionGeneration
+        // A failure — no network, refused, reset — ends the socket as surely
+        // as a close does, and OkHttp reports only one of the two. Both
+        // reconnect (#150): reconnecting only on a clean close left the
+        // library stale for good after airplane mode.
+        val reconnectAfter = { message: String ->
+            if (channelMayReconnect(generation, connectionGeneration, isSignedIn())) {
+                runOnUiThread { error = message }
+                reconnectScope.launch {
+                    delay(1_000)
+                    if (channelMayReconnect(generation, connectionGeneration, isSignedIn()) && loadSnapshot(generation)) {
+                        connect()
+                    }
+                }
+            }
+        }
         librarySocket?.close(1000, "reconnecting")
         librarySocket =
             apiClient.openLibrarySocket(
@@ -174,17 +189,11 @@ internal class LibraryStateHolder(
                     }
 
                     override fun onError(message: String) {
-                        runOnUiThread { error = message }
+                        reconnectAfter(message)
                     }
 
                     override fun onClosed() {
-                        if (!channelMayReconnect(generation, connectionGeneration, isSignedIn())) return
-                        runOnUiThread { error = "Realtime disconnected" }
-                        reconnectScope.launch {
-                            delay(1_000)
-                            if (!channelMayReconnect(generation, connectionGeneration, isSignedIn())) return@launch
-                            if (loadSnapshot(generation)) connect()
-                        }
+                        reconnectAfter("Realtime disconnected")
                     }
                 },
             )

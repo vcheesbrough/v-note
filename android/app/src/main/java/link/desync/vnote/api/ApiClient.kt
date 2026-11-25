@@ -57,6 +57,16 @@ interface ApiClient {
 // unreachable or failing server must never sign the user out.
 class SessionExpiredException : IllegalStateException("Session expired")
 
+// The request never reached the server: no network (airplane mode), no route,
+// DNS, a refused or timed-out connection. Says so in words a user can act on,
+// with the transport's own message as the detail.
+class ServerUnreachableException(
+    cause: java.io.IOException,
+) : java.io.IOException(
+        "Can't reach the server (${cause.message ?: cause.javaClass.simpleName})",
+        cause,
+    )
+
 interface LibraryEventListener {
     fun onEvent(event: LibraryEvent)
 

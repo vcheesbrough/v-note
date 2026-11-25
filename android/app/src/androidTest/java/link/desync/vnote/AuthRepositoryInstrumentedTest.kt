@@ -15,6 +15,7 @@ import net.openid.appauth.AuthorizationServiceConfiguration
 import net.openid.appauth.ResponseTypeValues
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -139,6 +140,90 @@ class AuthRepositoryInstrumentedTest {
         assertTrue(body.contains("grant_type=refresh_token"))
         assertTrue(body.contains("refresh_token=old-refresh"))
     }
+
+    /** The provider answered and refused the refresh token: the session is over. */
+    @Test
+    fun aRefusedRefreshSignsOut() {
+        tokenStore.saveTokens(accessToken = "stale-access", refreshToken = "revoked", accessTokenExpiryEpochSeconds = 1L)
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(400)
+                .body("""{"error":"invalid_grant"}""")
+                .addHeader("Content-Type", "application/json")
+                .build(),
+        )
+
+        val refreshed = runBlocking { authRepository.refreshAccessTokenIfNeeded() }
+
+        assertEquals(false, refreshed)
+        assertNull("refused: tokens cleared", tokenStore.refreshToken())
+    }
+
+    /**
+     * #150: offline (airplane mode) the token endpoint cannot be reached. That
+     * is not a refusal — the session must survive until the network is back.
+     */
+    @Test
+    fun anUnreachableTokenEndpointKeepsTheSession() {
+        tokenStore.saveTokens(accessToken = "stale-access", refreshToken = "kept", accessTokenExpiryEpochSeconds = 1L)
+        val offline =
+            repository(
+                serviceConfigurationOverride =
+                    AuthorizationServiceConfiguration(
+                        Uri.parse("https://auth.example.test/authorize"),
+                        Uri.parse("${TestNetwork.SERVER_BASE_URL}/token"),
+                    ),
+            )
+        try {
+            val refreshed = runBlocking { offline.refreshAccessTokenIfNeeded() }
+
+            assertEquals(false, refreshed)
+            assertEquals("kept", tokenStore.refreshToken())
+            assertEquals("stale-access", tokenStore.accessToken())
+        } finally {
+            offline.shutdown()
+        }
+    }
+
+    /**
+     * #150: OIDC discovery fails by throwing when the provider is unreachable.
+     * The refresh must report failure and keep the session, not throw: its
+     * caller at startup is a bare coroutine, where a throw crashed the app.
+     */
+    @Test
+    fun anUnreachableDiscoveryKeepsTheSessionWithoutThrowing() {
+        tokenStore.saveTokens(accessToken = "stale-access", refreshToken = "kept", accessTokenExpiryEpochSeconds = 1L)
+        // https, as on a device: AppAuth refuses an http issuer outright, before
+        // any network, which is not what an offline device sees.
+        val offline = repository(issuerUrl = "https://127.0.0.1:9/application/o/v-note-dev/")
+        try {
+            val refreshed = runBlocking { offline.refreshAccessTokenIfNeeded() }
+
+            assertEquals(false, refreshed)
+            assertEquals("kept", tokenStore.refreshToken())
+        } finally {
+            offline.shutdown()
+        }
+    }
+
+    private fun repository(
+        issuerUrl: String = "https://auth.example.test/application/o/v-note-dev/",
+        serviceConfigurationOverride: AuthorizationServiceConfiguration? = null,
+    ): AuthRepository =
+        AuthRepository(
+            context = InstrumentationRegistry.getInstrumentation().targetContext,
+            config =
+                AuthConfig(
+                    issuerUrl = issuerUrl,
+                    clientId = "v-note-dev",
+                    redirectUri = "https://v-notes-dev.desync.link/auth/mobile/callback",
+                    endSessionUrl = "https://auth.example.test/end-session/",
+                    scopes = "openid profile email offline_access v-note:dev:access",
+                ),
+            tokenStore = tokenStore,
+            serviceConfigurationOverride = serviceConfigurationOverride,
+        )
 
     private fun authorizationResponseIntent(code: String): android.content.Intent {
         val request =
