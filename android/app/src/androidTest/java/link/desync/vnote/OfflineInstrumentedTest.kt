@@ -1,6 +1,8 @@
 package link.desync.vnote
 
 import android.os.Build
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -137,9 +139,18 @@ class OfflineInstrumentedTest {
         server.start(InetAddress.getByName("127.0.0.1"), port)
         serverClosed = false
 
-        composeRule.waitUntil(timeoutMillis = 15_000) {
-            composeRule.onAllNodesWithText("reach the server", substring = true).fetchSemanticsNodes().isEmpty() &&
-                composeRule.onAllNodesWithText("Failed to connect", substring = true).fetchSemanticsNodes().isEmpty()
+        val recovered =
+            runCatching {
+                composeRule.waitUntil(timeoutMillis = 30_000) { unreachableTexts().isEmpty() }
+            }
+        // CI keeps only the tail of the log, so a bare timeout says nothing:
+        // say what the library still shows and what the server saw.
+        check(recovered.isSuccess) {
+            "library did not recover after coming back online: still showing ${unreachableTexts()}; " +
+                "after the restart the server saw ${server.requestCount} requests: " +
+                generateSequence { server.takeRequest(0, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                    .take(20)
+                    .joinToString { it.url.encodedPath }
         }
         composeRule.onNodeWithTag("page-tile-$PAGE_ID").assertExists()
     }
@@ -156,6 +167,19 @@ class OfflineInstrumentedTest {
         stayAlive()
         assertNotNull("an unreachable server never signs the user out", tokenStore.accessToken())
     }
+
+    private fun unreachableTexts(): List<String> =
+        listOf("reach the server", "Failed to connect").flatMap { text ->
+            composeRule
+                .onAllNodesWithText(text, substring = true)
+                .fetchSemanticsNodes()
+                .flatMap { node ->
+                    node.config
+                        .getOrNull(SemanticsProperties.Text)
+                        .orEmpty()
+                        .map { it.text }
+                }
+        }
 
     private fun awaitText(
         text: String,
