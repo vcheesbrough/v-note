@@ -28,6 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.api.OkHttpApiClient
+import link.desync.vnote.api.SessionExpiredException
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
@@ -115,6 +116,10 @@ class MainActivity : ComponentActivity() {
                                 page = selectedPage,
                                 userId = session.profile.sub,
                                 onBack = { library.closePage() },
+                                onSignIn = {
+                                    library.closePage()
+                                    signIn()
+                                },
                             )
                         } else {
                             AppScreen(
@@ -251,8 +256,16 @@ class MainActivity : ComponentActivity() {
                     library.start()
                 },
                 onFailure = { error ->
-                    AppLog.w(TAG, "session check failed; signing out locally", error)
-                    authRepository.signOutLocal()
+                    // Only a refused session signs the user out (#150). A
+                    // failing or unreachable server (no network, airplane
+                    // mode) keeps the stored tokens, so Retry picks up where
+                    // the user was once it is back.
+                    if (error is SessionExpiredException) {
+                        AppLog.w(TAG, "session check refused; signing out locally", error)
+                        authRepository.signOutLocal()
+                    } else {
+                        AppLog.w(TAG, "session check failed; keeping the session", error)
+                    }
                     sessionState.value =
                         SessionState.Error(error.message ?: "Session check failed")
                 },

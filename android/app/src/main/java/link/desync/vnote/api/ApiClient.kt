@@ -43,8 +43,29 @@ interface ApiClient {
         listener: PageEventListener,
     ): PageSocket?
 
+    // Force a token refresh after the server refused the current one (a 401
+    // on a WebSocket upgrade, which OkHttp cannot retry the way REST calls
+    // are). True when a fresh token is now stored. A client with no session to
+    // refresh — a test fake — refreshes nothing.
+    suspend fun refreshSession(): Boolean = false
+
     fun shutdown()
 }
+
+// The server refused the session and refreshing the token did not fix it.
+// Distinct from every other failure: only this one means "sign in again" — an
+// unreachable or failing server must never sign the user out.
+class SessionExpiredException : IllegalStateException("Session expired")
+
+// The request never reached the server: no network (airplane mode), no route,
+// DNS, a refused or timed-out connection. Says so in words a user can act on,
+// with the transport's own message as the detail.
+class ServerUnreachableException(
+    cause: java.io.IOException,
+) : java.io.IOException(
+        "Can't reach the server (${cause.message ?: cause.javaClass.simpleName})",
+        cause,
+    )
 
 interface LibraryEventListener {
     fun onEvent(event: LibraryEvent)
@@ -58,6 +79,11 @@ interface PageEventListener {
     fun onEvent(event: PageEvent)
 
     fun onError(message: String)
+
+    // The upgrade was refused with 401: the access token is no longer valid.
+    // Told apart from [onError] because reconnecting with the same token can
+    // never succeed.
+    fun onUnauthorized(message: String) = onError(message)
 
     fun onClosed()
 }

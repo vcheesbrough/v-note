@@ -14,6 +14,7 @@ use protocol::{PageServerMessage, PageSummary, Paper, StrokeBatch, TombstoneBatc
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, PointerEvent, WheelEvent};
 
+use crate::sync::{ChannelError, SyncBanner, SyncState};
 use crate::{library, realtime, render};
 
 /// The viewer opens fully zoomed out; `every_paper_is_visible_at_minimum_canvas_scale`
@@ -23,14 +24,7 @@ const MAX_CANVAS_SCALE: f64 = 4.0;
 const WHEEL_ZOOM_STEP: f64 = 1.0163963568148535;
 
 /// The page-channel state the viewer renders. `Copy`, like the signals it holds.
-#[derive(Clone, Copy)]
-struct PageFeed {
-    batches: RwSignal<Vec<StrokeBatch>>,
-    status: RwSignal<String>,
-    error: RwSignal<Option<String>>,
-    last_seq: RwSignal<u64>,
-    paper: RwSignal<Paper>,
-}
+type PageFeed = realtime::PageChannel;
 
 /// Pan and zoom of the viewer canvas, in CSS pixels, plus the drag in progress.
 #[derive(Clone, Copy)]
@@ -147,37 +141,20 @@ fn zoom_offset(offset: f64, canvas: f64, old_scale: f64, new_scale: f64) -> f64 
 /// cleaned up, which aborts the loop.
 fn follow_page_channel(page_id: String, initial_paper: Paper, feed: PageFeed) {
     feed.batches.set(Vec::new());
-    feed.error.set(None);
+    feed.sync.set(SyncState::Connecting);
     feed.status.set("Connecting".to_string());
     feed.last_seq.set(0);
     feed.paper.set(initial_paper);
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
     on_cleanup(move || abort_handle.abort());
     wasm_bindgen_futures::spawn_local(async move {
-        if let Ok(Err(error)) = Abortable::new(
-            realtime::page_realtime_loop(
-                page_id,
-                feed.batches,
-                feed.status,
-                feed.error,
-                feed.last_seq,
-                feed.paper,
-            ),
+        // Aborted is the only `Err`; the loop's own ending (a refused
+        // session) has already set the state the viewer shows.
+        let _ = Abortable::new(
+            realtime::page_realtime_loop(page_id, feed),
             abort_registration,
         )
-        .await
-        {
-            // The page channel gave up rather than reconnecting: the viewer is
-            // now showing ink that will not update, and nothing on the server
-            // knows. This is the SPA half of #150's disconnect UX.
-            crate::telemetry::log(
-                crate::telemetry::Severity::Error,
-                "page channel disconnected; viewer is stale",
-                vec![crate::telemetry::attr("vnote.reason", error.clone())],
-            );
-            feed.error.set(Some(error));
-            feed.status.set("Disconnected".to_string());
-        }
+        .await;
     });
 }
 
@@ -189,10 +166,15 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
     let feed = PageFeed {
         batches: RwSignal::new(Vec::new()),
         status: RwSignal::new("Connecting".to_string()),
-        error: RwSignal::new(None),
+        sync: RwSignal::new(SyncState::Connecting),
         last_seq: RwSignal::new(0),
         paper: RwSignal::new(page.paper),
     };
+    // The canvas is shown only while the channel is live (#150). Ink on screen
+    // from before a drop is not hidden behind a warning but withheld entirely:
+    // the SPA has no stale view, and a reconnect unblocks only once its replay
+    // has caught the canvas up with the server.
+    let live = Memo::new(move |_| feed.sync.with(SyncState::is_live));
     let pan_zoom = PanZoom::new();
     let canvas_resize_tick = RwSignal::new(0_u64);
     let initial_paper = page.paper;
@@ -254,11 +236,12 @@ pub(crate) fn InkViewer(page: PageSummary, on_close: Callback<()>) -> impl IntoV
                 </div>
             </header>
 
-            {move || feed.error.get().map(|error| view! {
-                <p class="alert" role="alert">{error}</p>
-            })}
+            <SyncBanner state=feed.sync.into() subject="This page" />
 
-            <div class="canvas-frame">
+            <div class=move || if live.get() { "canvas-frame" } else { "canvas-frame blocked" } data-testid="canvas-frame">
+            {move || matches!(feed.sync.get(), SyncState::Connecting).then(|| view! {
+                <p class="canvas-loading muted" aria-live="polite">"Loading live ink…"</p>
+            })}
             <canvas
                 node_ref=canvas
                 aria-label="Read-only ink canvas"
@@ -311,14 +294,25 @@ fn next_viewer_paper(current: Paper, event: &PageServerMessage) -> Paper {
     }
 }
 
+/// Apply one page-channel event. An `Err` ends the connection so the loop
+/// reconnects: every server error a viewer can receive (`replay_failed`,
+/// `welcome_failed`, `bad_message`) means what it shows can no longer be
+/// trusted, and a fresh subscribe from its cursor is what repairs that.
+///
+/// Only a replay frame (or `synced`) makes the channel live. `Welcome` alone
+/// does not: until the replay lands, the canvas would show ink from before
+/// the drop as if it were current.
 pub(crate) fn apply_page_event(
     event: PageServerMessage,
-    batches: RwSignal<Vec<StrokeBatch>>,
-    viewer_status: RwSignal<String>,
-    viewer_error: RwSignal<Option<String>>,
-    last_seq: RwSignal<u64>,
-    paper: RwSignal<Paper>,
-) {
+    feed: PageFeed,
+) -> Result<(), ChannelError> {
+    let PageFeed {
+        batches,
+        status: viewer_status,
+        sync,
+        last_seq,
+        paper,
+    } = feed;
     let next_paper = next_viewer_paper(paper.get_untracked(), &event);
     if next_paper != paper.get_untracked() {
         paper.set(next_paper);
@@ -333,7 +327,6 @@ pub(crate) fn apply_page_event(
             batches.update(|items| insert_batch(items, batch));
             last_seq.update(|current| *current = (*current).max(seq));
             viewer_status.set("Live".to_string());
-            viewer_error.set(None);
             mark_ink_applied(seq);
         }
         // The whole replay in one frame (#323), carrying the `last_seq` that
@@ -353,32 +346,34 @@ pub(crate) fn apply_page_event(
             });
             last_seq.update(|current| *current = (*current).max(seq));
             viewer_status.set("Synced".to_string());
-            viewer_error.set(None);
+            sync.set(SyncState::Live);
             mark_ink_applied(seq);
         }
         PageServerMessage::Synced { last_seq: seq } => {
             last_seq.update(|current| *current = (*current).max(seq));
             viewer_status.set("Synced".to_string());
-            viewer_error.set(None);
+            sync.set(SyncState::Live);
         }
         PageServerMessage::TombstoneBatch(tombstones) => {
             let removed = tombstoned_ids(std::slice::from_ref(&tombstones));
             batches.update(|items| retain_surviving(items, &removed));
             viewer_status.set("Live".to_string());
         }
-        PageServerMessage::Error { message, .. } => {
+        PageServerMessage::Error { code, message, .. } => {
             // The server's own words, which is the point — this is the one
             // place a server-side page error becomes visible from the client
             // side, and it already went through the server's own logging.
             crate::telemetry::log(
                 crate::telemetry::Severity::Error,
                 "page channel reported an error",
-                vec![crate::telemetry::attr(
-                    "vnote.server_message",
-                    message.clone(),
-                )],
+                vec![
+                    crate::telemetry::attr("vnote.server_code", code.clone()),
+                    crate::telemetry::attr("vnote.server_message", message.clone()),
+                ],
             );
-            viewer_error.set(Some(message));
+            return Err(ChannelError::Server(format!(
+                "server error {code}: {message}"
+            )));
         }
         // Paper is handled by `next_viewer_paper` above; the SPA is a read-only
         // viewer, so leases never affect what it renders.
@@ -387,6 +382,7 @@ pub(crate) fn apply_page_event(
         | PageServerMessage::LeaseDenied { .. }
         | PageServerMessage::LeaseChanged { .. } => {}
     }
+    Ok(())
 }
 
 /// Every stroke id the given tombstone batches erase.
