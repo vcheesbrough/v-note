@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "console_error_panic_hook",
  "futures-util",
@@ -1467,6 +1467,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -2766,7 +2767,7 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "protocol"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "jsonschema",
  "serde",
@@ -3108,6 +3109,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -3470,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "axum 0.8.9",
  "axum-extra",
@@ -3725,8 +3727,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-client"
-version = "2.48.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.48.428#e71b53f455ed596d70a13a67030595980cee4e59"
+version = "3.1.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.1.1#1139d5c4e0982cc6bbda0cfd73201fd9f381c43b"
 dependencies = [
  "async-trait",
  "sovereign-config-core",
@@ -3735,8 +3737,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-core"
-version = "2.48.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.48.428#e71b53f455ed596d70a13a67030595980cee4e59"
+version = "3.1.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.1.1#1139d5c4e0982cc6bbda0cfd73201fd9f381c43b"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3747,11 +3749,12 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-native"
-version = "2.48.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.48.428#e71b53f455ed596d70a13a67030595980cee4e59"
+version = "3.1.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.1.1#1139d5c4e0982cc6bbda0cfd73201fd9f381c43b"
 dependencies = [
  "async-trait",
  "http",
+ "prost 0.13.5",
  "prost-types 0.13.5",
  "reqwest 0.12.28",
  "rustix",
@@ -3768,8 +3771,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-proto"
-version = "2.48.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.48.428#e71b53f455ed596d70a13a67030595980cee4e59"
+version = "3.1.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.1.1#1139d5c4e0982cc6bbda0cfd73201fd9f381c43b"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -3780,8 +3783,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-provider"
-version = "2.48.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.48.428#e71b53f455ed596d70a13a67030595980cee4e59"
+version = "3.1.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.1.1#1139d5c4e0982cc6bbda0cfd73201fd9f381c43b"
 dependencies = [
  "async-trait",
  "config",

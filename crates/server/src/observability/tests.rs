@@ -890,11 +890,11 @@ mod otlp_logs {
     fn startup_logs_the_negotiated_sovereign_protocol_version() {
         const MESSAGE: &str = "sovereign-config protocol negotiated";
         let harness = Harness::new(default_filters());
-        harness.run(|| crate::config::log_sovereign_protocol(Some("v5")));
+        harness.run(|| crate::config::log_sovereign_protocol(Some("v6")));
 
         let line = harness.stdout.line(MESSAGE);
         assert_eq!(line["level"], "INFO");
-        assert_eq!(line["sovereign_config_protocol_version"], "v5");
+        assert_eq!(line["sovereign_config_protocol_version"], "v6");
 
         let log = harness.exported_log(MESSAGE);
         let version = log
@@ -902,7 +902,7 @@ mod otlp_logs {
             .attributes_iter()
             .find(|(key, _)| key.as_str() == "sovereign_config_protocol_version")
             .map(|(_, value)| value.clone());
-        assert_eq!(version, Some(text("v5")));
+        assert_eq!(version, Some(text("v6")));
     }
 
     /// With the sovereign source disabled (local dev, e2e) nothing was

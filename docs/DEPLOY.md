@@ -179,7 +179,7 @@ runs.
 #### The CLI comes from the step image
 
 The pipeline does **not** install the CLI. The deploy step (`deploy-dev`) runs in
-`ghcr.io/vcheesbrough/sovereign-config-cli:2.46.418@sha256:68761657…1de`
+`ghcr.io/vcheesbrough/sovereign-config-cli:3.1.1@sha256:a1e181a5…d99a`
 (its `image` in `.woodpecker/verify-tag-deploy.yml`): the docker CLI image with the
 sovereign-config CLI baked in, published by sovereign-config's release pipeline to
 public GHCR, so the step pulls it with no registry credential. Until #543 it came
@@ -198,8 +198,8 @@ image, because a host file drifts from the server silently while a pin changes
 only by commit.
 
 **The CLI must match the running server**, so bump the image's tag and digest
-together, as a commit, when the server is upgraded (verified at pin time: 2.46.418
-against 2.46.418). The other client pinned to the
+together, as a commit, when the server is upgraded (verified at pin time: 3.1.1
+against 3.1.1, protocol v6). The other client pinned to the
 server is `sovereign-config-provider` in `crates/server/Cargo.toml` (see
 [Runtime config](#runtime-config-sovereign-config)); check the live version
 (sovereign-config MCP `status`) before relocking it.
@@ -512,9 +512,10 @@ the deploy's layer — not a second copy. Local compose generates its own
 `POSTGRES_PASSWORD` on the developer's machine, because that is a different
 database.
 
-The provider is pinned to tag **2.48.428**. That is ahead of the deployed server
-(2.46.418), which is fine for a library: it is the first release whose
-`SovereignConfigSource` reports the negotiated protocol version (#527). Unlike the
+The provider is pinned to tag **3.1.1**, the deployed server's version (#608). It
+speaks protocol `v6` over Connect; 3.0 deprecated `v3`–`v5` (from
+2027-01-01) and sovereign-config #594 retires them, so the 2.x pin had to move.
+It still reports the negotiated protocol version (#527), now `v6`. Unlike the
 deploy CLI, the provider need not match the server. Since 2.25 the provider **negotiates** a protocol
 version with the server on connect and fails closed only when they share none, so
 a server upgrade no longer requires rebuilding v-note: a build keeps working until
@@ -526,7 +527,7 @@ source-breaking changes to the client crates, and compare against the live versi
 
 **Which protocol version the server speaks** is logged once at startup, after
 telemetry is up: `sovereign-config protocol negotiated` with field
-`sovereign_config_protocol_version` (e.g. `v5`). It reaches Loki on both egresses.
+`sovereign_config_protocol_version` (e.g. `v6`). It reaches Loki on both egresses.
 Before a sovereign-config protocol retirement, check that every v-note container
 logs a version that is staying. There is no such line when the sovereign source is
 disabled (local dev, e2e).
