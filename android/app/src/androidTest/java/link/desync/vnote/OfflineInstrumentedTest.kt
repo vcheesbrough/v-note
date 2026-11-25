@@ -49,10 +49,6 @@ class OfflineInstrumentedTest {
     private lateinit var apiClient: ApiClient
     private var serverClosed = false
 
-    // Where the app is pointed. A closed loopback port stands in for a server
-    // that was unreachable from the start.
-    private var baseUrlOverride: String? = null
-
     private val environmentRule =
         object : ExternalResource() {
             override fun before() {
@@ -75,7 +71,7 @@ class OfflineInstrumentedTest {
                 )
                 MainActivity.apiClientFactory = { store, authRepository ->
                     // The identity provider is off-network as well: refreshing fails.
-                    object : ApiClient by OkHttpApiClient(baseUrlOverride ?: serverUrl, store, authRepository) {
+                    object : ApiClient by OkHttpApiClient(serverUrl, store, authRepository) {
                         override suspend fun refreshSession(): Boolean = false
                     }.also { apiClient = it }
                 }
@@ -132,12 +128,7 @@ class OfflineInstrumentedTest {
         awaitText("reach the server")
         stayAlive()
 
-        // Airplane mode off and the server answering again on the same address.
-        setAirplaneMode(false)
-        server = MockWebServer()
-        server.dispatcher = dispatcher()
-        server.start(InetAddress.getByName("127.0.0.1"), port)
-        serverClosed = false
+        comeBackOnline(port)
 
         val recovered =
             runCatching {
@@ -155,17 +146,37 @@ class OfflineInstrumentedTest {
         composeRule.onNodeWithTag("page-tile-$PAGE_ID").assertExists()
     }
 
+    /**
+     * #589: the app starts with the server unreachable. The session check
+     * fails without crashing or signing out, and Retry signs straight in
+     * once the server is back.
+     */
     @Test
-    fun startingOfflineShowsAnErrorAndKeepsTheSession() {
-        // Relaunch pointed at a port nothing listens on.
-        baseUrlOverride = TestNetwork.SERVER_BASE_URL
-        setAirplaneMode(true)
+    fun startingOfflineKeepsTheSessionAndRetrySignsInOnceBack() {
+        val port = server.port
+        goOffline()
+        // Relaunch with nothing listening on the server's address.
         composeRule.activityRule.scenario.recreate()
 
         awaitText("reach the server", timeoutMillis = 20_000)
         composeRule.onNodeWithText("Retry").assertExists()
         stayAlive()
         assertNotNull("an unreachable server never signs the user out", tokenStore.accessToken())
+
+        comeBackOnline(port)
+        composeRule.onNodeWithText("Retry").performClick()
+
+        awaitTag("page-tile-$PAGE_ID")
+        assertNotNull("signed in on the kept session", tokenStore.accessToken())
+    }
+
+    // Airplane mode off and the server answering again on the same address.
+    private fun comeBackOnline(port: Int) {
+        setAirplaneMode(false)
+        server = MockWebServer()
+        server.dispatcher = dispatcher()
+        server.start(InetAddress.getByName("127.0.0.1"), port)
+        serverClosed = false
     }
 
     private fun unreachableTexts(): List<String> =
