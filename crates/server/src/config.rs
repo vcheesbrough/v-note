@@ -124,7 +124,7 @@ pub fn sovereign_source_enabled() -> bool {
 /// What [`build_config`] assembled, and what its sovereign-config layer spoke.
 pub struct BuiltConfig {
     pub config: Config,
-    /// The protocol version the sovereign-config load negotiated (`"v5"`), which
+    /// The protocol version the sovereign-config load negotiated (`"v6"` since #608), which
     /// is what the service's per-version counters attribute this server to.
     /// `None` when the sovereign source is disabled (local dev / e2e).
     pub sovereign_protocol_version: Option<&'static str>,
