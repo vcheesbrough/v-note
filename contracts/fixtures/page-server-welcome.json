@@ -2,6 +2,5 @@
   "type": "welcome",
   "session_id": "session_abcdef0123456789",
   "last_seq": 2,
-  "lease_holder": "session_fedcba9876543210",
   "paper": "squared-small"
 }

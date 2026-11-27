@@ -242,7 +242,6 @@ async function commitOneBatch(page: Page, pageId: string, ticket: string, client
         await new Promise((resolve) => setTimeout(resolve, 150));
       };
       await send({ type: 'subscribe', from_seq: 0 });
-      await send({ type: 'acquire-lease' });
       await send({
         type: 'commit-batch',
         client_batch_id: clientBatchId,

@@ -271,8 +271,6 @@ class OfflineInstrumentedTest {
             ) {
                 when (JSONObject(text).getString("type")) {
                     "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
-                    "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
-                    "release-lease" -> webSocket.close(1000, "lease released")
                 }
             }
 

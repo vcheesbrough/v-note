@@ -2,7 +2,7 @@ package link.desync.vnote.ink
 
 // What the open page's banner says, and why (#150). Each kind is a different
 // thing for the user to do — wait, wait while ink is retried, sign in again,
-// or edit somewhere else — so the kinds are kept apart rather than flattened
+// or retry — so the kinds are kept apart rather than flattened
 // into one error string. No status at all means sync is nominal.
 enum class PageStatusKind(
     // Stable value for the banner's test tag, so a UI test can tell the kinds
@@ -13,15 +13,13 @@ enum class PageStatusKind(
     Connecting("connecting"),
 
     // The server could not be reached or the socket dropped. Reconnecting; ink
-    // drawn meanwhile is held in memory and sent once the lease is back (#390).
+    // drawn meanwhile is held in memory and sent once the page channel has
+    // caught up again (#390).
     Disconnected("disconnected"),
 
     // Connected, but the server failed to store ink (`commit_failed`). Ink is
     // blocked while the held batches are re-sent with backoff.
     Retrying("retrying"),
-
-    // Another session holds the page's edit lease.
-    LeaseHeld("lease-held"),
 
     // The server refused this device's session and a token refresh could not
     // fix it. Only signing in again can.

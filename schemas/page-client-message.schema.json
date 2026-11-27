@@ -15,30 +15,6 @@
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type"],
-      "properties": {
-        "type": { "const": "acquire-lease" }
-      }
-    },
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["type"],
-      "properties": {
-        "type": { "const": "renew-lease" }
-      }
-    },
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["type"],
-      "properties": {
-        "type": { "const": "release-lease" }
-      }
-    },
-    {
-      "type": "object",
-      "additionalProperties": false,
       "required": ["type", "client_batch_id", "strokes"],
       "properties": {
         "type": { "const": "commit-batch" },

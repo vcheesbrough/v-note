@@ -51,7 +51,7 @@ internal fun PageStatusBanner(
                 // Held ink is not saved ink: say how much is waiting, so a
                 // banner over a page full of fresh strokes cannot read as
                 // "all synced except the connection".
-                if (unsentStrokes > 0 && status.kind != PageStatusKind.LeaseHeld) {
+                if (unsentStrokes > 0) {
                     val what = if (unsentStrokes == 1) "1 stroke" else "$unsentStrokes strokes"
                     Text(
                         "$what not yet saved",
@@ -74,9 +74,9 @@ internal fun PageStatusBanner(
                     TextButton(onClick = onSignIn, modifier = Modifier.testTag("page-status-sign-in")) { Text("Sign in") }
                 PageStatusKind.Disconnected, PageStatusKind.Rejected ->
                     TextButton(onClick = onRetry, modifier = Modifier.testTag("page-status-retry")) { Text("Retry") }
-                // Retrying already retries; connecting and lease-held have
-                // nothing for the user to do but wait.
-                PageStatusKind.Connecting, PageStatusKind.Retrying, PageStatusKind.LeaseHeld -> Unit
+                // Retrying already retries; connecting has nothing for the
+                // user to do but wait.
+                PageStatusKind.Connecting, PageStatusKind.Retrying -> Unit
             }
         }
     }

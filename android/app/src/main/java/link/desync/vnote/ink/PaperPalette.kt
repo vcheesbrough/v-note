@@ -37,8 +37,8 @@ import androidx.compose.ui.unit.dp
  *
  * Paper is **not** a [CanvasTool] — `checked` binds to the palette's own open
  * state and never touches `selectedTool`, so picking paper leaves the pen or
- * eraser exactly as it was. Disabled without the edit lease, which the existing
- * lease banner already explains.
+ * eraser exactly as it was. Disabled until the page channel has caught up,
+ * which the status banner already explains.
  */
 @Composable
 internal fun PaperControl(

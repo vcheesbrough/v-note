@@ -3,6 +3,7 @@ package link.desync.vnote
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
@@ -40,7 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Paper on the real Compose surface: the palette, the wire message it sends,
- * the pixels it paints behind seeded ink, the lease gate, and the sticky
+ * the pixels it paints behind seeded ink, the catch-up gate, and the sticky
  * new-page default.
  */
 @RunWith(AndroidJUnit4::class)
@@ -49,14 +50,13 @@ class PagePaperInstrumentedTest {
     private lateinit var tokenStore: TokenStore
     private lateinit var apiClient: ApiClient
     private val seedDelivered = CountDownLatch(1)
-    private val leaseGranted = CountDownLatch(1)
     private val mutations = LinkedBlockingQueue<JSONObject>()
     private val createRequestBodies = ConcurrentLinkedQueue<String>()
     private val requestPaths = ConcurrentLinkedQueue<String>()
     private val pageMessages = ConcurrentLinkedQueue<String>()
 
-    /** When true the page socket denies the lease instead of granting it. */
-    private val denyLease = AtomicBoolean(false)
+    /** When true the page socket never answers `subscribe`: the page never catches up. */
+    private val holdReplay = AtomicBoolean(false)
 
     /** When true `set-paper` is answered with a `paper_failed` error. */
     private val failPaper = AtomicBoolean(false)
@@ -157,11 +157,14 @@ class PagePaperInstrumentedTest {
         assertTrue("Welcome-carried paper is rendered", countPaperPixels(pixels) > 0)
     }
 
-    /** Without the edit lease the control is disabled; the lease banner explains why. */
+    /**
+     * Until the page has caught up the control is disabled; the connecting
+     * banner explains why. There is no edit lease to wait for (#630).
+     */
     @Test
-    fun leaseDeniedDisablesThePaperControl() {
-        denyLease.set(true)
-        openEditorWithoutLease()
+    fun thePaperControlIsDisabledUntilThePageCatchesUp() {
+        holdReplay.set(true)
+        openPageTile()
         composeRule.onNodeWithTag("paper-tool").assertIsNotEnabled()
     }
 
@@ -277,14 +280,21 @@ class PagePaperInstrumentedTest {
     }
 
     private fun openEditor() {
-        openEditorWithoutLease()
+        openPageTile()
         assertTrue(
-            "edit lease granted; messages=$pageMessages",
-            composeRule.awaitLatch(leaseGranted, 5_000),
+            "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
+            composeRule.awaitLatch(seedDelivered, 5_000),
         )
+        composeRule.awaitInkPixels { it[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()] != Color.White }
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runCatching {
+                composeRule.onNodeWithTag("paper-tool").assertIsEnabled()
+                true
+            }.getOrDefault(false)
+        }
     }
 
-    private fun openEditorWithoutLease() {
+    private fun openPageTile() {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             runCatching {
                 composeRule.onNodeWithTag("page-tile-page_paper").assertIsDisplayed()
@@ -296,11 +306,6 @@ class PagePaperInstrumentedTest {
         // `await` is not a synchronization point, so a composition failure here
         // would otherwise surface only as an unexplained timeout.
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
-        assertTrue(
-            "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
-            composeRule.awaitLatch(seedDelivered, 5_000),
-        )
-        composeRule.awaitInkPixels { it[SEED_ASSERTION_X, SEED_STROKE_Y.toInt()] != Color.White }
     }
 
     private fun awaitMutation(
@@ -372,17 +377,11 @@ class PagePaperInstrumentedTest {
                         pageMessages.add(text)
                         val message = JSONObject(text)
                         when (message.getString("type")) {
-                            "subscribe" -> {
-                                webSocket.send(seedStrokeBatch)
-                                webSocket.send("""{"type":"synced","last_seq":1}""")
-                                seedDelivered.countDown()
-                            }
-                            "acquire-lease" ->
-                                if (denyLease.get()) {
-                                    webSocket.send("""{"type":"lease-denied","holder":"other-device"}""")
-                                } else {
-                                    webSocket.send("""{"type":"lease-granted"}""")
-                                    leaseGranted.countDown()
+                            "subscribe" ->
+                                if (!holdReplay.get()) {
+                                    webSocket.send(seedStrokeBatch)
+                                    webSocket.send("""{"type":"synced","last_seq":1}""")
+                                    seedDelivered.countDown()
                                 }
                             "set-paper" -> {
                                 mutations.offer(message)
@@ -407,7 +406,6 @@ class PagePaperInstrumentedTest {
                                     )
                                 }
                             }
-                            "release-lease" -> webSocket.close(1000, "lease released")
                         }
                     }
 

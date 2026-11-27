@@ -14,7 +14,7 @@ pub use paper::{
     paper_marks, paper_texture_alpha, paper_texture_tile, preview_viewport, visit_paper_marks,
 };
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// The request-correlation header. Clients send one per HTTP call and WSS
 /// handshake; the server echoes it on the response and stamps it on every log
@@ -352,10 +352,11 @@ pub struct PageReplay {
 // ---- Page channel (per-`page_id` WSS) ------------------------------------
 //
 // Bidirectional, one duplex connection per open page. The client subscribes
-// for gap-fill/snapshot, acquires the single-editor edit lease, and commits
-// coalesced stroke batches; the server fans out ordered deltas to the owner's
-// sibling sessions on that page (see `docs/PLAN.md` → Wire protocol v1,
-// Multi-device / concurrent edit).
+// for gap-fill/snapshot and commits coalesced stroke batches, tombstones and
+// paper changes; the server fans out ordered deltas to every session on that
+// page, the sender included. Any number of sessions may edit one page at once
+// (no edit lease since v8, #630): see `docs/PLAN.md` → Wire protocol v1,
+// Multi-device / concurrent edit, for the merge rules.
 
 /// Client → server messages on the page channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -364,12 +365,6 @@ pub enum PageClientMessage {
     /// Sent right after connect: request gap-fill of batches with `seq > from_seq`
     /// (`from_seq = 0` ⇒ full snapshot).
     Subscribe { from_seq: u64 },
-    /// Request the single-editor edit lease before inking.
-    AcquireLease,
-    /// Renew the single-editor edit lease while this page remains active.
-    RenewLease,
-    /// Voluntarily release the edit lease (navigation away).
-    ReleaseLease,
     /// Commit a coalesced stroke batch (idempotent by `client_batch_id`).
     CommitBatch {
         client_batch_id: String,
@@ -380,10 +375,9 @@ pub enum PageClientMessage {
         client_mutation_id: String,
         stroke_ids: Vec<String>,
     },
-    /// Change the page's paper. Requires the edit lease — paper is a visible
-    /// page mutation that bumps the revision, mints a thumbnail and re-sorts the
-    /// library, exactly the class the single-editor invariant governs.
-    /// `client_mutation_id` exists purely so an `Error` can be correlated back.
+    /// Change the page's paper. Any session may; concurrent changes converge
+    /// on the last arrival. `client_mutation_id` exists purely so an `Error`
+    /// can be correlated back.
     SetPaper {
         client_mutation_id: String,
         paper: Paper,
@@ -396,9 +390,6 @@ impl PageClientMessage {
     pub fn message_type(&self) -> &'static str {
         match self {
             Self::Subscribe { .. } => "subscribe",
-            Self::AcquireLease => "acquire-lease",
-            Self::RenewLease => "renew-lease",
-            Self::ReleaseLease => "release-lease",
             Self::CommitBatch { .. } => "commit-batch",
             Self::CommitTombstones { .. } => "commit-tombstones",
             Self::SetPaper { .. } => "set-paper",
@@ -411,12 +402,10 @@ impl PageClientMessage {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum PageServerMessage {
     /// First message after connect: session identity, persisted head `seq`,
-    /// and the current lease holder (if any).
+    /// and the page's paper.
     Welcome {
         session_id: String,
         last_seq: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        lease_holder: Option<String>,
         /// The page's current paper, so the page channel is self-sufficient
         /// after a reconnect. Defaulted on read, so pre-v5 welcome payloads
         /// still parse.
@@ -436,23 +425,12 @@ pub enum PageServerMessage {
     Synced {
         last_seq: u64,
     },
-    /// This session now holds the edit lease.
-    LeaseGranted,
-    /// The edit lease is held by another session; ink is blocked.
-    LeaseDenied {
-        holder: String,
-    },
     /// The page's paper is now `paper` as of `revision`. Broadcast on a real
     /// change; also sent directly as an ack when a `SetPaper` names the paper
     /// already in force, so a racing client still converges.
     PaperChanged {
         paper: Paper,
         revision: u64,
-    },
-    /// Broadcast when the page's lease holder changes (or clears → omitted).
-    LeaseChanged {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        holder: Option<String>,
     },
     /// Recoverable error envelope (e.g. rejected commit).
     ///
@@ -480,10 +458,7 @@ impl PageServerMessage {
             Self::PageReplay(_) => "page-replay",
             Self::TombstoneBatch(_) => "tombstone-batch",
             Self::Synced { .. } => "synced",
-            Self::LeaseGranted => "lease-granted",
-            Self::LeaseDenied { .. } => "lease-denied",
             Self::PaperChanged { .. } => "paper-changed",
-            Self::LeaseChanged { .. } => "lease-changed",
             Self::Error { .. } => "error",
         }
     }

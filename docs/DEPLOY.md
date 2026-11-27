@@ -1017,7 +1017,7 @@ real browser through the real flow:
 | Sign in | `/auth/login` → Authentik identification (`uidField`) → password stage → back on the SPA, signed in |
 | `/api/me` | 200, and `email` is the smoke user's (`V_NOTE_SMOKE_EMAIL`) |
 | Create a page | `POST /api/pages`; the page is in the library after a reload |
-| Draw a stroke | A stroke batch committed over the page channel (ticket → WSS → lease → commit), echoed with a `seq` |
+| Draw a stroke | A stroke batch committed over the page channel (ticket → WSS → commit), echoed with a `seq` |
 | Persistence | After a reload the page opens at `seq 1`, the stroke is on the canvas, and a fresh `subscribe` replays it from Postgres |
 | Clean up | The page is deleted (`204`) and gone from the list |
 | Sign out | `/auth/logout` clears the cookie; `/api/me` from the same browser is `401` |

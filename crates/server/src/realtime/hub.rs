@@ -1,5 +1,5 @@
-//! In-process realtime state: tickets, per-owner and per-page broadcast
-//! channels, and the single-editor edit lease. No transport, no SQL.
+//! In-process realtime state: tickets and per-owner and per-page broadcast
+//! channels. No transport, no SQL.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -22,14 +22,12 @@ pub(super) const LIBRARY_CHANNEL_CAPACITY: usize = 64;
 /// `v_note_realtime_events_total{result="lagged"}` is the signal for revisiting
 /// this; the lag log line carries how many messages were skipped.
 pub(super) const PAGE_CHANNEL_CAPACITY: usize = 256;
-const LEASE_TTL_SECONDS: i64 = 30;
 
 #[derive(Default)]
 pub struct RealtimeHub {
     tickets: Mutex<HashMap<String, Ticket>>,
     library_channels: Mutex<HashMap<String, broadcast::Sender<Fanout<LibraryEvent>>>>,
     page_channels: Mutex<HashMap<String, broadcast::Sender<Fanout<PageServerMessage>>>>,
-    leases: Mutex<HashMap<String, Lease>>,
 }
 
 /// A broadcast message plus the trace context of whoever published it. Each
@@ -54,8 +52,8 @@ impl<T> Fanout<T> {
 
 /// The span for sending one fanned-out message to one socket: a child of the
 /// publisher's trace and linked to the receiving connection, which is the
-/// current span. Its own trace when the publisher had none (e.g. a lease
-/// released on disconnect outside any request).
+/// current span. Its own trace when the publisher had none (e.g. an event
+/// published outside any request).
 pub(super) fn fanout_delivery_span(
     channel: &'static str,
     message_type: &'static str,
@@ -90,16 +88,6 @@ struct Ticket {
 pub(super) struct RedeemedTicket {
     pub(super) owner_id: String,
     pub(super) origin: SpanContext,
-}
-
-struct Lease {
-    holder: String,
-    expires_at: DateTime<Utc>,
-}
-
-pub(super) enum LeaseOutcome {
-    Granted,
-    Denied { holder: String },
 }
 
 impl RealtimeHub {
@@ -220,84 +208,6 @@ impl RealtimeHub {
             "page message published"
         );
     }
-
-    /// Acquire (or renew, for the current holder) the single-editor edit lease.
-    pub(super) fn acquire_lease(&self, page_id: &str, session_id: &str) -> LeaseOutcome {
-        let now = Utc::now();
-        let mut leases = self.leases.lock().expect("lease mutex poisoned");
-        if let Some(existing) = leases.get(page_id)
-            && existing.expires_at <= now
-        {
-            tracing::info!(
-                page_id = %page_id,
-                holder = %existing.holder,
-                "edit lease expired"
-            );
-            leases.remove(page_id);
-        }
-        match leases.get_mut(page_id) {
-            // A renewal: every commit renews, so this is deliberately silent.
-            Some(existing) if existing.holder == session_id => {
-                existing.expires_at = now + Duration::seconds(LEASE_TTL_SECONDS);
-                LeaseOutcome::Granted
-            }
-            Some(existing) => {
-                // The `lease_denied` counter says how often; this says who held
-                // it against whom, which the counter cannot.
-                tracing::warn!(
-                    page_id = %page_id,
-                    session_id = %session_id,
-                    holder = %existing.holder,
-                    "edit lease denied: another session holds it"
-                );
-                LeaseOutcome::Denied {
-                    holder: existing.holder.clone(),
-                }
-            }
-            None => {
-                tracing::info!(page_id = %page_id, session_id = %session_id, "edit lease granted");
-                leases.insert(
-                    page_id.to_string(),
-                    Lease {
-                        holder: session_id.to_string(),
-                        expires_at: now + Duration::seconds(LEASE_TTL_SECONDS),
-                    },
-                );
-                LeaseOutcome::Granted
-            }
-        }
-    }
-
-    /// Release the lease if held by `session_id`; returns true when released.
-    pub(super) fn release_lease(&self, page_id: &str, session_id: &str) -> bool {
-        let mut leases = self.leases.lock().expect("lease mutex poisoned");
-        match leases.get(page_id) {
-            Some(existing) if existing.holder == session_id => {
-                leases.remove(page_id);
-                tracing::info!(page_id = %page_id, session_id = %session_id, "edit lease released");
-                true
-            }
-            _ => false,
-        }
-    }
-
-    pub(super) fn current_lease_holder(&self, page_id: &str) -> Option<String> {
-        let now = Utc::now();
-        let mut leases = self.leases.lock().expect("lease mutex poisoned");
-        match leases.get(page_id) {
-            Some(existing) if existing.expires_at > now => Some(existing.holder.clone()),
-            Some(existing) => {
-                tracing::info!(
-                    page_id = %page_id,
-                    holder = %existing.holder,
-                    "edit lease expired"
-                );
-                leases.remove(page_id);
-                None
-            }
-            None => None,
-        }
-    }
 }
 
 pub(super) fn random_hex(bytes: usize) -> String {
@@ -335,12 +245,13 @@ mod tests {
             let hub = RealtimeHub::default();
             let mut receiver = hub.subscribe_page("page_1");
             let publisher = tracing::info_span!("commit-batch");
-            publisher.in_scope(|| hub.publish_page("page_1", PageServerMessage::LeaseGranted));
+            let synced = PageServerMessage::Synced { last_seq: 1 };
+            publisher.in_scope(|| hub.publish_page("page_1", synced.clone()));
 
             let Fanout { message, origin } = receiver
                 .try_recv()
                 .expect("the published message should reach the subscriber");
-            assert_eq!(message, PageServerMessage::LeaseGranted);
+            assert_eq!(message, synced);
             assert_eq!(origin.trace_id().to_string(), trace_id(&publisher));
 
             let delivery = fanout_delivery_span("page", message.message_type(), &origin);
@@ -447,41 +358,5 @@ mod tests {
             let delivery = fanout_delivery_span("library", message.message_type(), &origin);
             assert_ne!(trace_id(&delivery), "00000000000000000000000000000000");
         });
-    }
-
-    #[test]
-    fn edit_lease_grants_then_blocks_second_session() {
-        let hub = RealtimeHub::default();
-
-        // First session acquires; the holder may renew freely.
-        assert!(matches!(
-            hub.acquire_lease("page_1", "session_a"),
-            LeaseOutcome::Granted
-        ));
-        assert!(matches!(
-            hub.acquire_lease("page_1", "session_a"),
-            LeaseOutcome::Granted
-        ));
-
-        // A second session is blocked and told the current holder.
-        match hub.acquire_lease("page_1", "session_b") {
-            LeaseOutcome::Denied { holder } => assert_eq!(holder, "session_a"),
-            LeaseOutcome::Granted => panic!("second session should be blocked"),
-        }
-        assert_eq!(
-            hub.current_lease_holder("page_1").as_deref(),
-            Some("session_a")
-        );
-
-        // A non-holder cannot release the lease.
-        assert!(!hub.release_lease("page_1", "session_b"));
-
-        // The holder releases and the page frees up for the next session.
-        assert!(hub.release_lease("page_1", "session_a"));
-        assert_eq!(hub.current_lease_holder("page_1"), None);
-        assert!(matches!(
-            hub.acquire_lease("page_1", "session_b"),
-            LeaseOutcome::Granted
-        ));
     }
 }

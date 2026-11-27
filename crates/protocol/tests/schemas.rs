@@ -294,13 +294,11 @@ fn server_samples() -> Vec<PageServerMessage> {
         PageServerMessage::Welcome {
             session_id: "session_a".to_string(),
             last_seq: 7,
-            lease_holder: Some("session_b".to_string()),
             paper: Paper::SquaredSmall,
         },
         PageServerMessage::Welcome {
             session_id: "session_a".to_string(),
             last_seq: 0,
-            lease_holder: None,
             paper: Paper::None,
         },
         PageServerMessage::StrokeBatch(sample_batch()),
@@ -313,18 +311,10 @@ fn server_samples() -> Vec<PageServerMessage> {
         }),
         PageServerMessage::TombstoneBatch(sample_tombstones()),
         PageServerMessage::Synced { last_seq: 7 },
-        PageServerMessage::LeaseGranted,
-        PageServerMessage::LeaseDenied {
-            holder: "session_b".to_string(),
-        },
         PageServerMessage::PaperChanged {
             paper: Paper::RuledWide,
             revision: 2,
         },
-        PageServerMessage::LeaseChanged {
-            holder: Some("session_b".to_string()),
-        },
-        PageServerMessage::LeaseChanged { holder: None },
         PageServerMessage::Error {
             code: "batch_rejected".to_string(),
             message: "stroke width out of range".to_string(),
@@ -345,10 +335,7 @@ fn server_samples() -> Vec<PageServerMessage> {
             | PageServerMessage::PageReplay(_)
             | PageServerMessage::TombstoneBatch(_)
             | PageServerMessage::Synced { .. }
-            | PageServerMessage::LeaseGranted
-            | PageServerMessage::LeaseDenied { .. }
             | PageServerMessage::PaperChanged { .. }
-            | PageServerMessage::LeaseChanged { .. }
             | PageServerMessage::Error { .. } => {}
         }
     }
@@ -358,9 +345,6 @@ fn server_samples() -> Vec<PageServerMessage> {
 fn client_samples() -> Vec<PageClientMessage> {
     let samples = vec![
         PageClientMessage::Subscribe { from_seq: 0 },
-        PageClientMessage::AcquireLease,
-        PageClientMessage::RenewLease,
-        PageClientMessage::ReleaseLease,
         PageClientMessage::CommitBatch {
             client_batch_id: "batch_sample".to_string(),
             strokes: vec![sample_stroke()],
@@ -377,9 +361,6 @@ fn client_samples() -> Vec<PageClientMessage> {
     for sample in &samples {
         match sample {
             PageClientMessage::Subscribe { .. }
-            | PageClientMessage::AcquireLease
-            | PageClientMessage::RenewLease
-            | PageClientMessage::ReleaseLease
             | PageClientMessage::CommitBatch { .. }
             | PageClientMessage::CommitTombstones { .. }
             | PageClientMessage::SetPaper { .. } => {}
@@ -498,4 +479,47 @@ fn library_event_variants_match_schema() {
         &library_samples(),
         LibraryEvent::message_type,
     );
+}
+
+/// Protocol v8 (#630) retired the edit lease. Its messages are gone from both
+/// directions — the schemas and serde alike reject them — and `welcome` no
+/// longer carries a holder, so no client can be built against any of it.
+#[test]
+fn the_retired_edit_lease_messages_are_rejected() {
+    let schemas = schemas();
+    let registry = registry(&schemas);
+    let client = validator(&registry, "page-client-message.schema.json");
+    for retired in ["acquire-lease", "renew-lease", "release-lease"] {
+        let message = json!({ "type": retired });
+        assert!(
+            !errors(&client, &message).is_empty(),
+            "{retired} must fail the client schema"
+        );
+        assert!(
+            serde_json::from_value::<PageClientMessage>(message).is_err(),
+            "{retired} must not parse as a client message"
+        );
+    }
+    let server = validator(&registry, "page-server-message.schema.json");
+    for retired in [
+        json!({ "type": "lease-granted" }),
+        json!({ "type": "lease-denied", "holder": "session_b" }),
+        json!({ "type": "lease-changed", "holder": "session_b" }),
+        json!({ "type": "welcome", "session_id": "s", "last_seq": 0, "lease_holder": "session_b" }),
+    ] {
+        assert!(
+            !errors(&server, &retired).is_empty(),
+            "{retired} must fail the server schema"
+        );
+    }
+    for retired in [
+        json!({ "type": "lease-granted" }),
+        json!({ "type": "lease-denied", "holder": "session_b" }),
+        json!({ "type": "lease-changed" }),
+    ] {
+        assert!(
+            serde_json::from_value::<PageServerMessage>(retired.clone()).is_err(),
+            "{retired} must not parse as a server message"
+        );
+    }
 }

@@ -1,5 +1,5 @@
-//! What each inbound page-channel message does: lease handling, commits,
-//! paper changes, and replay. Transport-agnostic — replies go to any
+//! What each inbound page-channel message does: commits, paper changes, and
+//! replay. Transport-agnostic — replies go to any
 //! `Sink<Frame>`, persistence goes through [`PageStore`] — so every message
 //! type is unit-tested below against an in-memory store.
 
@@ -14,7 +14,6 @@ use protocol::{
 
 use yawc::frame::Frame;
 
-use super::hub::LeaseOutcome;
 use super::store::PageStore;
 use crate::AppState;
 
@@ -51,12 +50,6 @@ where
             )
             .await
         }
-        PageClientMessage::AcquireLease => acquire_lease(ctx, sender).await,
-        PageClientMessage::RenewLease => renew_lease(ctx, sender).await,
-        PageClientMessage::ReleaseLease => {
-            release_lease(ctx);
-            true
-        }
         PageClientMessage::CommitBatch {
             client_batch_id,
             strokes,
@@ -72,61 +65,6 @@ where
     }
 }
 
-async fn acquire_lease<S, Tx>(ctx: &PageContext<'_, S>, sender: &mut Tx) -> bool
-where
-    Tx: Sink<Frame> + Unpin,
-{
-    match ctx
-        .state
-        .realtime
-        .acquire_lease(ctx.page_id, ctx.session_id)
-    {
-        LeaseOutcome::Granted => {
-            ctx.state.realtime.publish_page(
-                ctx.page_id,
-                PageServerMessage::LeaseChanged {
-                    holder: Some(ctx.session_id.to_string()),
-                },
-            );
-            send_page(sender, PageServerMessage::LeaseGranted).await
-        }
-        LeaseOutcome::Denied { holder } => {
-            crate::observability::metrics().record_realtime_event("page", "lease_denied");
-            send_page(sender, PageServerMessage::LeaseDenied { holder }).await
-        }
-    }
-}
-
-async fn renew_lease<S, Tx>(ctx: &PageContext<'_, S>, sender: &mut Tx) -> bool
-where
-    Tx: Sink<Frame> + Unpin,
-{
-    match ctx
-        .state
-        .realtime
-        .acquire_lease(ctx.page_id, ctx.session_id)
-    {
-        LeaseOutcome::Granted => send_page(sender, PageServerMessage::LeaseGranted).await,
-        LeaseOutcome::Denied { holder } => {
-            crate::observability::metrics().record_realtime_event("page", "lease_denied");
-            send_page(sender, PageServerMessage::LeaseDenied { holder }).await
-        }
-    }
-}
-
-fn release_lease<S>(ctx: &PageContext<'_, S>) {
-    if ctx
-        .state
-        .realtime
-        .release_lease(ctx.page_id, ctx.session_id)
-    {
-        ctx.state.realtime.publish_page(
-            ctx.page_id,
-            PageServerMessage::LeaseChanged { holder: None },
-        );
-    }
-}
-
 async fn commit_batch<S, Tx>(
     ctx: &PageContext<'_, S>,
     sender: &mut Tx,
@@ -137,16 +75,6 @@ where
     S: PageStore,
     Tx: Sink<Frame> + Unpin,
 {
-    // Single active editor: only the lease holder may ink. Acquiring
-    // also renews the holder's lease on each commit.
-    if let LeaseOutcome::Denied { holder } = ctx
-        .state
-        .realtime
-        .acquire_lease(ctx.page_id, ctx.session_id)
-    {
-        crate::observability::metrics().record_realtime_event("page", "lease_denied");
-        return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
-    }
     if strokes
         .iter()
         .any(|stroke| stroke.id.is_empty() || stroke.validate().is_err())
@@ -238,14 +166,6 @@ where
     S: PageStore,
     Tx: Sink<Frame> + Unpin,
 {
-    if let LeaseOutcome::Denied { holder } = ctx
-        .state
-        .realtime
-        .acquire_lease(ctx.page_id, ctx.session_id)
-    {
-        crate::observability::metrics().record_realtime_event("page", "lease_denied");
-        return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
-    }
     let persisted = match ctx
         .store
         .persist_tombstones(ctx.page_id, &client_mutation_id, &stroke_ids)
@@ -304,18 +224,9 @@ where
     S: PageStore,
     Tx: Sink<Frame> + Unpin,
 {
-    // Paper is a visible page mutation that bumps the revision, mints a
-    // thumbnail and re-sorts the library — exactly the class the
-    // single-editor invariant governs. Acquiring also renews the holder's
-    // lease, identically to CommitBatch/CommitTombstones.
-    if let LeaseOutcome::Denied { holder } = ctx
-        .state
-        .realtime
-        .acquire_lease(ctx.page_id, ctx.session_id)
-    {
-        crate::observability::metrics().record_realtime_event("page", "lease_denied");
-        return send_page(sender, PageServerMessage::LeaseDenied { holder }).await;
-    }
+    // Any session may set the paper. Concurrent changes converge on the last
+    // arrival: the store serialises them under the page lock, and each real
+    // change is broadcast to every session, the sender included.
     let persisted = match ctx.store.persist_paper(ctx.page_id, paper).await {
         Ok(persisted) => persisted,
         Err(error) => {
@@ -606,11 +517,10 @@ mod tests {
     //! Every page-channel message type against an in-memory [`PageStore`].
     //!
     //! `send_page_frame_records_the_bytes_it_sent` asserts an exact
-    //! process-wide frame count for `lease-changed`, which dispatch only ever
-    //! broadcasts and never sends as a reply, so no other test here moves it.
-    //! Tests asserting exact deltas on the `lease_denied` counter or the
-    //! thumbnail queue-depth gauge hold [`METRICS_LOCK`], as does every other
-    //! test that moves either.
+    //! process-wide frame count for `welcome`, which only the socket sends,
+    //! outside every unit test, so no other test in this binary moves it.
+    //! Tests asserting exact deltas on the thumbnail queue-depth gauge hold
+    //! [`METRICS_LOCK`], as does every other test that moves it.
 
     use std::sync::Mutex;
 
@@ -752,11 +662,21 @@ mod tests {
         store: &FakeStore,
         message: PageClientMessage,
     ) -> (bool, Vec<PageServerMessage>) {
+        handle_as(state, store, SESSION, message).await
+    }
+
+    /// [`handle`], from `session_id` instead of [`SESSION`].
+    async fn handle_as(
+        state: &AppState,
+        store: &FakeStore,
+        session_id: &str,
+        message: PageClientMessage,
+    ) -> (bool, Vec<PageServerMessage>) {
         let ctx = PageContext {
             state,
             store,
             page_id: PAGE,
-            session_id: SESSION,
+            session_id,
         };
         let mut sink: Vec<Frame> = Vec::new();
         let keep_open =
@@ -832,20 +752,13 @@ mod tests {
         }
     }
 
-    /// One of each lease-guarded mutation, labelled for assertion messages.
+    /// One of each page mutation, labelled for assertion messages.
     fn every_mutation() -> [(&'static str, PageClientMessage); 3] {
         [
             ("commit-batch", commit(&["kept"])),
             ("commit-tombstones", erase_message()),
             ("set-paper", set_paper_message()),
         ]
-    }
-
-    fn hold_lease(state: &AppState, session_id: &str) {
-        assert!(matches!(
-            state.realtime.acquire_lease(PAGE, session_id),
-            LeaseOutcome::Granted
-        ));
     }
 
     // ---- commit-batch -------------------------------------------------------
@@ -879,33 +792,47 @@ mod tests {
         assert_eq!(drain(&mut library), [page_updated()]);
     }
 
+    /// #630: there is no edit lease. Two sessions on the same page each reach
+    /// the store with every mutation, in arrival order, and each change is
+    /// fanned out to every session on the page — the other device included.
     #[tokio::test]
-    async fn every_mutation_without_the_lease_is_denied_and_counted_before_reaching_the_store() {
-        let _metrics = METRICS_LOCK.lock().await;
-        let metrics = crate::observability::metrics();
+    async fn every_mutation_from_two_sessions_on_one_page_reaches_the_store_and_fans_out() {
         let state = AppState::for_tests();
-        hold_lease(&state, "session_b");
 
         for (name, message) in every_mutation() {
-            let before = metrics.realtime_event_count("page", "lease_denied");
-            let store = FakeStore::default();
+            let mut page = state.realtime.subscribe_page(PAGE);
+            for session in ["session_a", "session_b"] {
+                let store = FakeStore {
+                    batch: Mutex::new(Some(Ok(persisted_batch(vec![fixture_stroke("kept")])))),
+                    tombstones: Mutex::new(Some(Ok(persisted_tombstones()))),
+                    paper: Mutex::new(Some(Ok(persisted_paper(true)))),
+                    ..FakeStore::default()
+                };
 
-            let (keep_open, replies) = handle(&state, &store, message).await;
+                let (keep_open, replies) =
+                    handle_as(&state, &store, session, message.clone()).await;
 
-            assert!(keep_open, "{name}");
-            assert_eq!(
-                replies,
-                [PageServerMessage::LeaseDenied {
-                    holder: "session_b".to_string()
-                }],
-                "{name}"
-            );
-            assert!(store.calls().is_empty(), "{name}");
-            assert_eq!(
-                metrics.realtime_event_count("page", "lease_denied"),
-                before + 1,
-                "{name} should count its lease denial"
-            );
+                assert!(keep_open, "{name} from {session}");
+                assert!(
+                    replies.is_empty(),
+                    "{name} from {session} is acknowledged by its fan-out: {replies:?}"
+                );
+                assert_eq!(
+                    store.calls().len(),
+                    1,
+                    "{name} from {session} reached the store"
+                );
+            }
+            let fanned_out: Vec<&'static str> = drain(&mut page)
+                .iter()
+                .map(PageServerMessage::message_type)
+                .collect();
+            let expected = match name {
+                "commit-batch" => "stroke-batch",
+                "commit-tombstones" => "tombstone-batch",
+                _ => "paper-changed",
+            };
+            assert_eq!(fanned_out, [expected, expected], "{name}");
         }
     }
 
@@ -1089,23 +1016,6 @@ mod tests {
         assert_eq!(paper.level, tracing::Level::INFO);
         assert_eq!(paper.field("paper"), Some("ruled-wide"));
         assert_eq!(paper.field("page_id"), Some(PAGE));
-    }
-
-    #[tokio::test]
-    async fn a_denied_lease_warns_with_the_session_that_holds_it() {
-        // Moves the `lease_denied` counter other tests assert exact deltas on.
-        let _metrics = METRICS_LOCK.lock().await;
-        let (_guard, logs) = crate::observability::log_capture::capture();
-        let state = AppState::for_tests();
-        hold_lease(&state, "session_other");
-
-        handle(&state, &FakeStore::default(), commit(&["kept"])).await;
-
-        let denied = logs.only("edit lease denied: another session holds it");
-        assert_eq!(denied.level, tracing::Level::WARN);
-        assert_eq!(denied.field("holder"), Some("session_other"));
-        assert_eq!(denied.field("session_id"), Some(SESSION));
-        assert_eq!(denied.field("page_id"), Some(PAGE));
     }
 
     // ---- commit-tombstones --------------------------------------------------
@@ -1417,121 +1327,6 @@ mod tests {
         );
     }
 
-    // ---- leases -------------------------------------------------------------
-
-    #[tokio::test]
-    async fn acquiring_a_free_lease_replies_granted_and_announces_the_new_holder() {
-        let state = AppState::for_tests();
-        let mut page = state.realtime.subscribe_page(PAGE);
-
-        let (keep_open, replies) = handle(
-            &state,
-            &FakeStore::default(),
-            PageClientMessage::AcquireLease,
-        )
-        .await;
-
-        assert!(keep_open);
-        assert_eq!(replies, [PageServerMessage::LeaseGranted]);
-        assert_eq!(
-            drain(&mut page),
-            [PageServerMessage::LeaseChanged {
-                holder: Some(SESSION.to_string())
-            }]
-        );
-        assert_eq!(
-            state.realtime.current_lease_holder(PAGE).as_deref(),
-            Some(SESSION)
-        );
-    }
-
-    #[tokio::test]
-    async fn renewing_a_held_lease_replies_granted_without_a_broadcast() {
-        let state = AppState::for_tests();
-        hold_lease(&state, SESSION);
-        let mut page = state.realtime.subscribe_page(PAGE);
-
-        let (keep_open, replies) =
-            handle(&state, &FakeStore::default(), PageClientMessage::RenewLease).await;
-
-        assert!(keep_open);
-        assert_eq!(replies, [PageServerMessage::LeaseGranted]);
-        assert!(drain(&mut page).is_empty(), "a renewal changes no holder");
-    }
-
-    #[tokio::test]
-    async fn acquiring_or_renewing_a_lease_another_session_holds_is_denied() {
-        let _metrics = METRICS_LOCK.lock().await;
-        let metrics = crate::observability::metrics();
-        let before = metrics.realtime_event_count("page", "lease_denied");
-        let state = AppState::for_tests();
-        hold_lease(&state, "session_b");
-        let mut page = state.realtime.subscribe_page(PAGE);
-
-        for message in [
-            PageClientMessage::AcquireLease,
-            PageClientMessage::RenewLease,
-        ] {
-            let (keep_open, replies) = handle(&state, &FakeStore::default(), message).await;
-            assert!(keep_open);
-            assert_eq!(
-                replies,
-                [PageServerMessage::LeaseDenied {
-                    holder: "session_b".to_string()
-                }]
-            );
-        }
-        assert!(drain(&mut page).is_empty());
-        assert_eq!(
-            metrics.realtime_event_count("page", "lease_denied"),
-            before + 2
-        );
-    }
-
-    #[tokio::test]
-    async fn releasing_a_held_lease_tells_every_session_the_page_is_free() {
-        let state = AppState::for_tests();
-        hold_lease(&state, SESSION);
-        let mut page = state.realtime.subscribe_page(PAGE);
-
-        let (keep_open, replies) = handle(
-            &state,
-            &FakeStore::default(),
-            PageClientMessage::ReleaseLease,
-        )
-        .await;
-
-        assert!(keep_open);
-        assert!(replies.is_empty());
-        assert_eq!(
-            drain(&mut page),
-            [PageServerMessage::LeaseChanged { holder: None }]
-        );
-        assert_eq!(state.realtime.current_lease_holder(PAGE), None);
-    }
-
-    #[tokio::test]
-    async fn only_the_holder_can_release_a_lease() {
-        let state = AppState::for_tests();
-        hold_lease(&state, "session_b");
-        let mut page = state.realtime.subscribe_page(PAGE);
-
-        let (keep_open, replies) = handle(
-            &state,
-            &FakeStore::default(),
-            PageClientMessage::ReleaseLease,
-        )
-        .await;
-
-        assert!(keep_open);
-        assert!(replies.is_empty());
-        assert!(drain(&mut page).is_empty());
-        assert_eq!(
-            state.realtime.current_lease_holder(PAGE).as_deref(),
-            Some("session_b")
-        );
-    }
-
     // ---- frame chokepoint ---------------------------------------------------
 
     // `send_page_frame` is generic over the sink precisely so the chokepoint can
@@ -1539,20 +1334,28 @@ mod tests {
     #[tokio::test]
     async fn send_page_frame_records_the_bytes_it_sent() {
         let metrics = crate::observability::metrics();
-        let before = metrics.realtime_message_count("page", "lease-changed");
+        let before = metrics.realtime_message_count("page", "welcome");
         let mut sink: Vec<Frame> = Vec::new();
+        let welcome = PageServerMessage::Welcome {
+            session_id: SESSION.to_string(),
+            last_seq: 3,
+            paper: Paper::None,
+        };
 
-        let bytes = send_page_frame(&mut sink, PageServerMessage::LeaseChanged { holder: None })
+        let bytes = send_page_frame(&mut sink, welcome)
             .await
             .expect("a Vec sink never fails");
 
         let frames = text_frames(&sink);
-        assert_eq!(frames, [r#"{"type":"lease-changed"}"#]);
+        assert_eq!(
+            frames,
+            [r#"{"type":"welcome","session_id":"session_a","last_seq":3,"paper":"none"}"#]
+        );
         assert_eq!(bytes, frames[0].len());
-        // No other test in this binary sends `lease-changed` as a frame, so the delta on the
+        // No other test in this binary sends `welcome` as a frame, so the delta on the
         // process-wide histogram is exact.
         assert_eq!(
-            metrics.realtime_message_count("page", "lease-changed"),
+            metrics.realtime_message_count("page", "welcome"),
             before + 1
         );
     }

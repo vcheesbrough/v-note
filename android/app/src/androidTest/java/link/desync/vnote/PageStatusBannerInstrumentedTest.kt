@@ -66,14 +66,14 @@ class PageStatusBannerInstrumentedTest {
         composeRule.onAllNodesWithTag("page-status-unsent").assertCountEquals(0)
     }
 
+    // #630: with the edit lease gone, there is no "another device is editing"
+    // kind left to show — every banner is about this device's own sync.
     @Test
-    fun anotherEditorsLeaseDoesNotCountHeldInk() {
-        // Ink held while another device edits is discarded, not waiting to
-        // be saved, so the banner must not promise it.
-        show(PageStatus(PageStatusKind.LeaseHeld, "Another device is editing this page"), unsent = 2)
-        composeRule.onAllNodesWithTag("page-status-unsent").assertCountEquals(0)
-        composeRule.onAllNodesWithTag("page-status-retry").assertCountEquals(0)
-        composeRule.onAllNodesWithTag("page-status-sign-in").assertCountEquals(0)
+    fun noBannerKindIsAboutAnotherEditor() {
+        assertEquals(
+            listOf("connecting", "disconnected", "retrying", "session-expired", "rejected"),
+            PageStatusKind.entries.map { it.tag },
+        )
     }
 
     @Test

@@ -22,8 +22,9 @@ import link.desync.vnote.telemetry.Telemetry
 import java.util.UUID
 
 // Drives one open page's ink channel: connects the WSS, replays persisted
-// strokes (gap-fill), tracks the single-editor edit lease, and commits new
-// strokes. Exposes Compose state for the canvas. Always-online MVP — a full
+// strokes (gap-fill), commits new strokes, and applies other devices' strokes,
+// erasures and paper live as they arrive — any number of devices may edit one
+// page at once (#630). Exposes Compose state for the canvas. Always-online MVP — a full
 // disconnect/error UX lands in a later card — but it does reconnect on its own
 // after any close it did not ask for (#279), resubscribing from its cursor.
 class PageInkSession(
@@ -66,13 +67,15 @@ class PageInkSession(
     internal val pendingBatchCount: Int
         get() = pendingBatches.size
 
-    // True only while this session holds the edit lease.
+    // True while this session's socket is live and caught up: welcomed, and
+    // its `subscribe` replay applied. Edits made otherwise are held (ink) or
+    // not offered (erase, paper).
     var canEdit by mutableStateOf(false)
         private set
 
     // Non-null when there is something to surface to the user (#150): loading,
-    // disconnected, retrying a failed commit, lease held elsewhere, session
-    // expired, or a definitive rejection. Null means sync is nominal.
+    // disconnected, retrying a failed commit, session expired, or a definitive
+    // rejection. Null means sync is nominal.
     var status by mutableStateOf<PageStatus?>(null)
         private set
 
@@ -85,20 +88,12 @@ class PageInkSession(
     private val confirmedStrokes = mutableListOf<Stroke>()
     private val pendingBatches = linkedMapOf<String, List<Stroke>>()
 
-    // The subset of [pendingBatches] that no socket has ever been sent: ink
-    // drawn before the lease was granted or while disconnected (#390). Only
-    // this ink is dropped when another editor turns out to hold the lease; a
-    // batch already sent under a valid lease may have been stored, and stays
-    // pending so it is re-sent when the lease is ours again (#279).
-    private val neverSentBatchIds = linkedSetOf<String>()
-
     // Strokes the server has not yet acknowledged — never sent, or sent and
     // awaiting their echo. Leaving the page now would lose them.
     val unsentStrokeCount: Int
         get() = pendingBatches.values.sumOf { it.size }
     private val pendingErasures = linkedMapOf<String, Set<String>>()
     private var socket: PageSocket? = null
-    private var leaseRenewJob: Job? = null
 
     // True from `subscribe` until the server's `synced`.
     //
@@ -137,13 +132,15 @@ class PageInkSession(
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
 
-    // Set when a socket drops with ink or erasures still unacknowledged, and
-    // consumed once the next socket holds the lease again. Both commits are
+    // Set when ink is held — drawn before the socket caught up, or while
+    // disconnected — or a socket drops with ink or erasures still
+    // unacknowledged, and consumed once the next socket has caught up. Both
+    // commits are
     // idempotent on the server (keyed by `client_batch_id` / `client_mutation_id`,
     // a retry is re-echoed rather than stored twice), so re-sending is safe
     // whether or not the dropped socket's commit landed — and the user keeps
     // ink they drew rather than watching it vanish on a reconnect.
-    private var resendPendingOnLease = false
+    private var resendPendingOnSync = false
 
     // A `commit_failed` is being retried (#150): the server is reachable but
     // could not store ink. Ink is blocked — new strokes would only pile up
@@ -160,9 +157,9 @@ class PageInkSession(
     private var refreshedAfterUnauthorized = false
 
     // Why new ink cannot be held right now, or null when it can. Set when this
-    // session learns it will not get the lease on this socket — another editor
-    // holds it, or the channel reported an error — and cleared whenever the
-    // lease may come back (it is free, ours, or a reconnect will ask again).
+    // session learns its ink cannot be stored — the channel reported an error,
+    // a commit is being retried, or the session expired — and cleared once ink
+    // can flow again.
     private var inkRefused by mutableStateOf<String?>(null)
 
     // True while new ink would be dropped, so the canvas does not draw it.
@@ -195,7 +192,7 @@ class PageInkSession(
     // Opens a page socket. Everything the session has already confirmed —
     // strokes, `lastSeq`, seen batch ids — is kept, so a reconnect's
     // `subscribe(lastSeq)` asks only for what it missed and `Welcome` restores
-    // the paper and lease holder.
+    // the paper.
     private fun open() {
         val generation = ++socketGeneration
         connectSpan = Telemetry.span("realtime.connect", screen).attr("vnote.channel", "page")
@@ -250,8 +247,6 @@ class PageInkSession(
         reconnectJob = null
         stopCommitRetry()
         failStrokeSpans("page closed")
-        stopLeaseRenewal()
-        socket?.releaseLease()
         socket?.close()
         socket = null
     }
@@ -259,13 +254,13 @@ class PageInkSession(
     // Commit a freshly captured stroke; it enters committed state only once
     // the server echoes it back with its assigned seq.
     //
-    // Ink is never refused just because the lease has not arrived yet (#390):
-    // the lease is granted a round trip after the page is drawn, and is lost on
-    // every reconnect, and a pen that touches down in that window used to lose
-    // its whole stroke. Such a stroke is held — drawn, and queued in
-    // [pendingBatches] — and sent by [resendPending] once the lease is held.
-    // Only when this session knows it cannot edit (another editor holds the
-    // lease, or the channel failed) is the stroke dropped.
+    // Ink is never refused just because the socket has not caught up yet
+    // (#390): the replay lands a round trip after the page is drawn, and again
+    // on every reconnect, and a pen that touches down in that window used to
+    // lose its whole stroke. Such a stroke is held — drawn, and queued in
+    // [pendingBatches] — and sent by [resendPending] once the replay is
+    // applied. Only when this session knows its ink cannot be stored (the
+    // channel failed, or the session expired) is the stroke dropped.
     fun commitStroke(stroke: Stroke) {
         if (stroke.points.isEmpty()) {
             return
@@ -283,21 +278,21 @@ class PageInkSession(
         if (canEdit && activeSocket != null) {
             activeSocket.commitBatch(clientBatchId, submitted)
         } else {
-            neverSentBatchIds += clientBatchId
-            resendPendingOnLease = true
-            AppLog.i(TAG, "stroke held until the edit lease is granted: pending=${pendingBatches.size}", context = screen)
+            resendPendingOnSync = true
+            AppLog.i(TAG, "stroke held until the page channel catches up: pending=${pendingBatches.size}", context = screen)
         }
     }
 
     // Change the page's paper. Optimistic so the canvas repaints immediately;
-    // the server's `PaperChanged` confirms it, while `paper_failed`, a lease
-    // denial, or a disconnect all revert to the last confirmed value. Gated on
-    // the edit lease, exactly like ink.
+    // the server's `PaperChanged` confirms it, while `paper_failed` or a
+    // disconnect revert to the last confirmed value. Another device's change
+    // arriving meanwhile simply wins if it lands later: paper is last arrival
+    // wins, and every session applies each `PaperChanged` in server order.
     //
     // Durable side effects are deferred to [onPaperConfirmed] rather than run
-    // here: a dispatched change can still be refused (`paper_failed`,
-    // `lease-denied`) or lost to a disconnect, and a caller must not persist a
-    // choice the server never put in force.
+    // here: a dispatched change can still be refused (`paper_failed`) or lost
+    // to a disconnect, and a caller must not persist a choice the server never
+    // put in force.
     fun setPaper(next: Paper) {
         if (!canEdit) {
             return
@@ -332,9 +327,6 @@ class PageInkSession(
             is PageEvent.Synced -> onSynced(event)
             is PageEvent.TombstoneBatch -> onTombstoneBatch(event)
             is PageEvent.PaperChanged -> onPaperChanged(event)
-            PageEvent.LeaseGranted -> onLeaseHeld()
-            is PageEvent.LeaseDenied -> onLeaseDenied()
-            is PageEvent.LeaseChanged -> onLeaseChanged(event)
             is PageEvent.Failure -> onFailure(event)
         }
     }
@@ -353,17 +345,22 @@ class PageInkSession(
         confirmedPaper = event.paper
         // A fresh connection supersedes anything still in flight.
         pendingPaper = null
-        // Catch up on persisted ink, then take the lease if it is free.
+        if (!commitRetrying) {
+            inkRefused = null
+        }
+        // Catch up on persisted ink; [onSynced] opens the page for editing.
         beginReplay()
         socket?.subscribe(lastSeq)
-        if (event.leaseHolder == null || event.leaseHolder == sessionId) {
-            inkRefused = null
-            socket?.acquireLease()
-        } else {
-            refuseLease()
-        }
     }
 
+    // Every committed batch, whoever drew it: this session's own echo, a
+    // replayed one, or another device's, fanned out live while this user may be
+    // mid-stroke. Applying it only changes [strokes] — the committed layer —
+    // never the stroke under the nib, which the canvas owns until pen-up.
+    // Stacking order is server arrival order: confirmed batches stack in the
+    // order the page channel delivers them, which is the order the server
+    // stored them, with this session's still-pending ink drawn on top until
+    // its own echo puts it in place.
     private fun onStrokeBatch(event: PageEvent.StrokeBatch) {
         if (seenBatchIds.add(event.clientBatchId)) {
             confirmedStrokes.addAll(event.strokes)
@@ -404,6 +401,7 @@ class PageInkSession(
             lastSeq = event.lastSeq
         }
         endReplay()
+        onCaughtUp()
     }
 
     private fun onTombstoneBatch(event: PageEvent.TombstoneBatch) {
@@ -433,108 +431,36 @@ class PageInkSession(
         }
     }
 
-    // This session holds the edit lease: granted directly, or announced as the
-    // new holder by a lease change.
-    private fun onLeaseHeld() {
+    // The socket is welcomed and its replay applied: edits flow from here on.
+    private fun onCaughtUp() {
+        if (socket == null) {
+            return
+        }
         canEdit = true
-        if (!commitRetrying) {
-            inkRefused = null
-        }
-        ensureLeaseRenewal()
-        if (status?.kind == PageStatusKind.LeaseHeld) {
-            status = null
-        }
-        if (resendPendingOnLease) {
-            resendPendingOnLease = false
+        if (resendPendingOnSync) {
+            resendPendingOnSync = false
             resendPending()
         }
     }
 
-    // Commit what is still pending once the lease is held: strokes drawn
-    // before it was granted (#390), and what a previous socket never
-    // acknowledged (#279). The replay has already run by now —
-    // `lease-granted` answers an `acquire-lease` sent after `subscribe`, and
-    // the channel is ordered — so a batch the server did store has been
-    // confirmed and removed from [pendingBatches], and ink a replayed
-    // tombstone erased has been dropped from it. What is left is exactly what
-    // the server may never have seen, in the order it was drawn.
+    // Commit what is still pending once the socket has caught up: strokes
+    // drawn before it did (#390), and what a previous socket never
+    // acknowledged (#279). The replay has already been applied, so a batch the
+    // server did store has been confirmed and removed from [pendingBatches],
+    // and ink a replayed tombstone erased has been dropped from it. What is
+    // left is exactly what the server may never have seen, in the order it was
+    // drawn.
     private fun resendPending() {
         val activeSocket = socket ?: return
         if (pendingBatches.isEmpty() && pendingErasures.isEmpty()) return
         AppLog.i(
             TAG,
-            "sending held or unacknowledged edits now the lease is held: " +
+            "sending held or unacknowledged edits now the page channel has caught up: " +
                 "batches=${pendingBatches.size} erasures=${pendingErasures.size}",
             context = screen,
         )
         pendingBatches.forEach { (clientBatchId, strokes) -> activeSocket.commitBatch(clientBatchId, strokes) }
-        neverSentBatchIds.clear()
         pendingErasures.forEach { (clientMutationId, ids) -> activeSocket.commitTombstones(clientMutationId, ids.toList()) }
-    }
-
-    private fun onLeaseDenied() {
-        AppLog.i(TAG, "edit lease denied", context = screen)
-        clearPendingErasures()
-        // A denial answers this socket's own commit or acquire: everything
-        // pending is refused, sent or not.
-        discardPendingBatches()
-        revertUnconfirmedPaper()
-        refuseLease()
-    }
-
-    private fun onLeaseChanged(event: PageEvent.LeaseChanged) {
-        val holder = event.holder
-        when {
-            // Lease freed elsewhere — try to take it so this editor can ink.
-            holder == null -> {
-                inkRefused = null
-                socket?.acquireLease()
-            }
-            holder == sessionId -> onLeaseHeld()
-            // Taken from under a session that held it: ink already sent stays
-            // pending — the server answers it — but nothing new is accepted.
-            canEdit -> {
-                canEdit = false
-                stopLeaseRenewal()
-                stopCommitRetry()
-                inkRefused = LEASE_BLOCKED
-                status = PageStatus(PageStatusKind.LeaseHeld, LEASE_BLOCKED)
-            }
-            // Another editor won while this session was still waiting for the
-            // lease: what it drew in the meantime was only held, so drop it.
-            else -> refuseLease()
-        }
-    }
-
-    // Another editor holds the lease. Ink drawn while this session waited for
-    // it was never sent, so it leaves the canvas rather than sitting there
-    // looking saved; the banner says why. Ink a dropped socket sent under a
-    // valid lease and never saw echoed stays pending: it is re-sent if the
-    // lease comes back (#279).
-    private fun refuseLease() {
-        canEdit = false
-        stopLeaseRenewal()
-        stopCommitRetry()
-        discardNeverSentBatches()
-        resendPendingOnLease = pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()
-        inkRefused = LEASE_BLOCKED
-        status = PageStatus(PageStatusKind.LeaseHeld, LEASE_BLOCKED)
-    }
-
-    private fun discardNeverSentBatches() {
-        val held = neverSentBatchIds.filter { it in pendingBatches }
-        neverSentBatchIds.clear()
-        if (held.isEmpty()) return
-        AppLog.i(
-            TAG,
-            "discarding held strokes: another session holds the edit lease: batches=${held.size}",
-            context = screen,
-        )
-        held.forEach { clientBatchId ->
-            pendingBatches.remove(clientBatchId)
-            strokeSpans.remove(clientBatchId)?.failed("discarded")
-        }
-        publishRenderableStrokes()
     }
 
     private fun onFailure(event: PageEvent.Failure) {
@@ -559,10 +485,9 @@ class PageInkSession(
             revertUnconfirmedPaper()
         }
         canEdit = false
-        stopLeaseRenewal()
         stopCommitRetry()
         discardPendingBatches()
-        resendPendingOnLease = false
+        resendPendingOnSync = false
         inkRefused = event.message
         status = PageStatus(PageStatusKind.Rejected, event.message, detail = event.code)
     }
@@ -591,10 +516,9 @@ class PageInkSession(
                 if (closing) return@launch
                 if (canEdit) {
                     pendingBatches.forEach { (clientBatchId, strokes) -> activeSocket.commitBatch(clientBatchId, strokes) }
-                    neverSentBatchIds.clear()
                 } else {
-                    resendPendingOnLease = true
-                    activeSocket.acquireLease()
+                    // Not caught up yet: the replay's end sends them.
+                    resendPendingOnSync = true
                 }
             }
     }
@@ -619,27 +543,6 @@ class PageInkSession(
                 inkRefused = null
             }
         }
-    }
-
-    private fun ensureLeaseRenewal() {
-        if (leaseRenewJob?.isActive == true) {
-            return
-        }
-        leaseRenewJob =
-            scope.launch {
-                while (true) {
-                    delay(LEASE_RENEW_INTERVAL_MS)
-                    if (!canEdit) {
-                        break
-                    }
-                    socket?.renewLease() ?: break
-                }
-            }
-    }
-
-    private fun stopLeaseRenewal() {
-        leaseRenewJob?.cancel()
-        leaseRenewJob = null
     }
 
     private fun beginReplay() {
@@ -691,16 +594,8 @@ class PageInkSession(
         publishRenderableStrokes()
     }
 
-    private fun clearPendingErasures() {
-        if (pendingErasures.isNotEmpty()) {
-            pendingErasures.clear()
-            publishRenderableStrokes()
-        }
-    }
-
     private fun discardPendingBatches() {
         failStrokeSpans("discarded")
-        neverSentBatchIds.clear()
         if (pendingBatches.isNotEmpty()) {
             pendingBatches.clear()
             publishRenderableStrokes()
@@ -720,12 +615,11 @@ class PageInkSession(
         stopCommitRetry()
         // Ink drawn until the next socket says otherwise is held for it.
         inkRefused = null
-        stopLeaseRenewal()
         revertUnconfirmedPaper()
         status = PageStatus(PageStatusKind.Disconnected, DISCONNECTED, detail = message)
         if (!closing) {
             if (pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()) {
-                resendPendingOnLease = true
+                resendPendingOnSync = true
             }
             scheduleReconnect()
         }
@@ -740,13 +634,12 @@ class PageInkSession(
         connectSpan = null
         endReplay(failure = "unauthorized")
         canEdit = false
-        stopLeaseRenewal()
         stopCommitRetry()
         revertUnconfirmedPaper()
         retireSocket()
         if (closing) return
         if (pendingBatches.isNotEmpty() || pendingErasures.isNotEmpty()) {
-            resendPendingOnLease = true
+            resendPendingOnSync = true
         }
         if (refreshedAfterUnauthorized) {
             sessionExpired(SESSION_EXPIRED, detail = message)
@@ -810,10 +703,8 @@ class PageInkSession(
         strokeSpans.clear()
     }
 
-    // Drop an optimistic paper the server never acknowledged. `paper_failed` is
-    // only one of three ways that can happen: the lease can transfer between
-    // this control rendering and the server handling the message (answered with
-    // `lease-denied`, not an error), and the socket can close before any reply.
+    // Drop an optimistic paper the server never acknowledged: `paper_failed`,
+    // or the socket closing before any reply.
     // Without this the canvas would keep showing paper that was never stored,
     // until the next `Welcome` reasserted the authoritative value.
     private fun revertUnconfirmedPaper() {
@@ -834,7 +725,6 @@ class PageInkSession(
         private const val RECONNECT_MAX_MS = 30_000L
         private const val RECONNECT_MAX_DOUBLINGS = 5
         private const val TAG = "PageInkSession"
-        private const val LEASE_RENEW_INTERVAL_MS = 10_000L
         private const val TOMBSTONE_FAILED = "tombstone_failed"
         private const val PAPER_FAILED = "paper_failed"
         private const val COMMIT_FAILED = "commit_failed"
@@ -842,10 +732,9 @@ class PageInkSession(
         private val RETRYABLE =
             setOf(PageStatusKind.Disconnected, PageStatusKind.SessionExpired, PageStatusKind.Rejected)
 
-        // Copy, one line per kind of trouble (#150) so the four never read
-        // alike: someone else editing, no connection, the server failing to
-        // store ink, and a session only signing in again can fix.
-        const val LEASE_BLOCKED = "Another device is editing this page"
+        // Copy, one line per kind of trouble (#150) so they never read alike:
+        // no connection, the server failing to store ink, and a session only
+        // signing in again can fix.
         const val CONNECTING = "Connecting…"
         const val DISCONNECTED = "Disconnected from the server — reconnecting"
         const val SYNC_RETRYING = "Couldn't save your ink — retrying"

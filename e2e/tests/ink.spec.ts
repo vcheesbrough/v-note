@@ -2,8 +2,9 @@ import { expect, request, test, type APIRequestContext, type Page } from '../csp
 
 // Ink (page channel) e2e. Drives the per-page WSS from a real browser context
 // using a short-lived realtime ticket (the SPA auth path) — no extra npm deps.
-// Covers commit + sequencing, persistence/snapshot, gap-fill, the single-editor
-// edit lease, owner isolation, and SPA Canvas2D live replay.
+// Covers commit + sequencing, persistence/snapshot, gap-fill, concurrent editing
+// by two sessions (no edit lease since protocol v8, #630), owner isolation, and
+// SPA Canvas2D live replay.
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/', { waitUntil: 'load' });
@@ -65,7 +66,6 @@ test.describe('ink page channel', () => {
       pageId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: {
@@ -103,7 +103,6 @@ test.describe('ink page channel', () => {
       pageId,
       ticket: ticket2,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: {
@@ -132,7 +131,6 @@ test.describe('ink page channel', () => {
       pageId,
       ticket: ticket3,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         ...Array.from({ length: 10 }, (_, index) => ({
           delayMs: 60,
           message: {
@@ -202,7 +200,6 @@ test.describe('ink page channel', () => {
       pageId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: { type: 'commit-batch', client_batch_id: 'dense-ink-1', strokes: [...anchors, ...letters] },
@@ -353,7 +350,6 @@ test.describe('ink page channel', () => {
       pageId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: { type: 'commit-batch', client_batch_id: 'pen-weight-1', strokes: [...anchors, ...lines] },
@@ -440,7 +436,6 @@ test.describe('ink page channel', () => {
       ticket,
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 150, message: { type: 'commit-batch', client_batch_id: clientBatchId, strokes: sampleStrokes() } },
       ],
       settleMs: 900,
@@ -448,7 +443,7 @@ test.describe('ink page channel', () => {
 
     expect(result.opened).toBeTruthy();
     expect(result.messages.find((m) => m.type === 'welcome')).toBeTruthy();
-    expect(result.messages.some((m) => m.type === 'lease-granted')).toBeTruthy();
+    expect(result.messages.filter((m) => m.type === 'error'), 'a lone session inks without asking first').toEqual([]);
 
     const echoed = result.messages.find(
       (m) => m.type === 'stroke-batch' && m.client_batch_id === clientBatchId,
@@ -467,7 +462,6 @@ test.describe('ink page channel', () => {
       ticket: ticket1,
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 150, message: { type: 'commit-batch', client_batch_id: 'b1', strokes: sampleStrokes() } },
         { delayMs: 150, message: { type: 'commit-batch', client_batch_id: 'b2', strokes: sampleStrokes() } },
       ],
@@ -511,7 +505,6 @@ test.describe('ink page channel', () => {
       ticket: await realtimeTicket(request),
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 150,
           message: {
@@ -565,7 +558,6 @@ test.describe('ink page channel', () => {
       ticket: await realtimeTicket(request),
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 150,
           message: {
@@ -633,7 +625,6 @@ test.describe('ink page channel', () => {
       ticket: await realtimeTicket(request),
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         ...Array.from({ length: batchCount }, (_, index) => ({
           delayMs: 10,
           message: {
@@ -730,7 +721,6 @@ test.describe('ink page channel', () => {
       ticket,
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 100, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: { type: 'commit-batch', client_batch_id: 'deflate-1', strokes: sampleStrokes('stroke_deflate_1') },
@@ -783,7 +773,6 @@ test.describe('ink page channel', () => {
       ticket,
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 150,
           message: {
@@ -861,7 +850,6 @@ test.describe('ink page channel', () => {
       pageId: olderId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'resort-edit', strokes: sampleStrokes() } },
       ],
       settleMs: 250,
@@ -902,7 +890,6 @@ test.describe('ink page channel', () => {
       pageId: targetId,
       ticket: await realtimeTicket(request),
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'erase-seed', strokes: sampleStrokes(strokeId) } },
       ],
       settleMs: 250,
@@ -911,7 +898,6 @@ test.describe('ink page channel', () => {
       pageId: otherId,
       ticket: await realtimeTicket(request),
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'erase-bump', strokes: sampleStrokes() } },
       ],
       settleMs: 250,
@@ -928,7 +914,6 @@ test.describe('ink page channel', () => {
       pageId: targetId,
       ticket: await realtimeTicket(request),
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 100, message: { type: 'commit-tombstones', client_mutation_id: 'erase-resort', stroke_ids: [strokeId] } },
       ],
       settleMs: 250,
@@ -959,7 +944,6 @@ test.describe('ink page channel', () => {
       ticket,
       actions: [
         { delayMs: 50, message: { type: 'subscribe', from_seq: 0 } },
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 150,
           message: { type: 'commit-batch', client_batch_id: 'batch_spa_pressure', strokes: pressureRampStroke() },
@@ -1033,7 +1017,6 @@ test.describe('ink page channel', () => {
       pageId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'retired-v1-style', strokes: [retiredV1] } },
         { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'bad-pressure', strokes: [badPressure] } },
       ],
@@ -1050,14 +1033,29 @@ test.describe('ink page channel', () => {
     expect(result.messages.some((m) => m.type === 'stroke-batch' && (m.client_batch_id === 'retired-v1-style' || m.client_batch_id === 'bad-pressure'))).toBeFalsy();
   });
 
-  test('blocks a second session from inking while the lease is held', async ({ page, request }) => {
-    const pageId = await createPage(request, uniqueTitle('ink-lease'));
+  // #630: there is no edit lease. Two editing sessions on one page ink and
+  // erase at the same time; neither is refused, each receives the other's
+  // edits live, and an open SPA viewer — like a fresh replay — ends on the
+  // union, with the erased stroke gone whichever order the edits landed in.
+  test('two sessions edit one page at once and every viewer converges on the union', async ({ page, request }) => {
+    const title = uniqueTitle('ink-concurrent');
+    const pageId = await createPage(request, title);
+    const openPage = page.getByRole('button', { name: `Open ${title}`, exact: true });
+    await openPage.waitFor({ state: 'visible', timeout: 5_000 }).catch(async () => {
+      await page.reload({ waitUntil: 'load' });
+      await expect(openPage).toBeVisible({ timeout: 5_000 });
+    });
+    await openPage.click();
+    await expect(page.getByText(/Synced · seq 0|Live · seq 0/)).toBeVisible({ timeout: 5_000 });
+
     const ticketA = await realtimeTicket(request);
     const ticketB = await realtimeTicket(request);
+    const strokeA = sampleViewerStrokes('concurrent-a')[0];
+    const strokeB = sampleViewerStrokes('concurrent-b')[0];
+    const strokeShared = sampleViewerStrokes('concurrent-shared')[0];
 
-    // Two concurrent page sockets for the same owner: A holds the lease, B is denied.
     const result = await page.evaluate(
-      async ({ pageId, ticketA, ticketB }) => {
+      async ({ pageId, ticketA, ticketB, strokeA, strokeB, strokeShared }) => {
         const wsUrl = (ticket: string) =>
           `${location.origin.replace(/^http/, 'ws')}/api/pages/${pageId}/realtime?ticket=${encodeURIComponent(ticket)}`;
         const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1070,39 +1068,65 @@ test.describe('ink page channel', () => {
             ws.addEventListener('error', () => resolve({ ws: null, messages }));
             setTimeout(() => resolve({ ws: null, messages }), 3000);
           });
-
         const a = await open(ticketA);
-        if (!a.ws) return { error: 'A failed to open' };
-        a.ws.send(JSON.stringify({ type: 'subscribe', from_seq: 0 }));
-        a.ws.send(JSON.stringify({ type: 'acquire-lease' }));
-        await wait(300);
-
         const b = await open(ticketB);
-        if (!b.ws) {
-          a.ws.close();
-          return { error: 'B failed to open' };
-        }
+        if (!a.ws || !b.ws) return { error: 'a page socket failed to open' };
+        a.ws.send(JSON.stringify({ type: 'subscribe', from_seq: 0 }));
         b.ws.send(JSON.stringify({ type: 'subscribe', from_seq: 0 }));
-        b.ws.send(JSON.stringify({ type: 'acquire-lease' }));
-        await wait(300);
+        await wait(200);
 
-        const bWelcome = b.messages.find((m) => m.type === 'welcome');
-        const result = {
-          aGranted: a.messages.some((m) => m.type === 'lease-granted'),
-          bDenied: b.messages.some((m) => m.type === 'lease-denied'),
-          bWelcomeHolderPresent: Boolean(bWelcome && bWelcome.lease_holder),
+        // A seeds a stroke both devices hold, then A draws while B erases it:
+        // the two edits race, sent without waiting on each other.
+        a.ws.send(JSON.stringify({ type: 'commit-batch', client_batch_id: 'concurrent-shared', strokes: [strokeShared] }));
+        await wait(200);
+        a.ws.send(JSON.stringify({ type: 'commit-batch', client_batch_id: 'concurrent-a', strokes: [strokeA] }));
+        b.ws.send(JSON.stringify({ type: 'commit-batch', client_batch_id: 'concurrent-b', strokes: [strokeB] }));
+        b.ws.send(
+          JSON.stringify({ type: 'commit-tombstones', client_mutation_id: 'concurrent-erase', stroke_ids: [strokeShared.id] }),
+        );
+        await wait(600);
+
+        const batchIds = (messages: any[]) =>
+          messages.filter((m) => m.type === 'stroke-batch').map((m) => m.client_batch_id).sort();
+        const erased = (messages: any[]) =>
+          messages.some((m) => m.type === 'tombstone-batch' && m.stroke_ids.includes(strokeShared.id));
+        const refused = (messages: any[]) => messages.filter((m) => m.type === 'error' || String(m.type).startsWith('lease'));
+        const outcome = {
+          aBatches: batchIds(a.messages),
+          bBatches: batchIds(b.messages),
+          aSawErase: erased(a.messages),
+          bSawErase: erased(b.messages),
+          refused: [...refused(a.messages), ...refused(b.messages)],
+          welcomeKeys: Object.keys(a.messages.find((m) => m.type === 'welcome') ?? {}).sort(),
         };
         a.ws.close();
         b.ws.close();
-        return result;
+        return outcome;
       },
-      { pageId, ticketA, ticketB },
+      { pageId, ticketA, ticketB, strokeA, strokeB, strokeShared },
     );
 
     expect(result.error).toBeUndefined();
-    expect(result.aGranted).toBeTruthy();
-    expect(result.bDenied).toBeTruthy();
-    expect(result.bWelcomeHolderPresent).toBeTruthy();
+    expect(result.refused, 'no session is refused for editing alongside another').toEqual([]);
+    const all = ['concurrent-a', 'concurrent-b', 'concurrent-shared'];
+    expect(result.aBatches, 'A sees its own ink and B\'s, live').toEqual(all);
+    expect(result.bBatches, 'B sees its own ink and A\'s, live').toEqual(all);
+    expect(result.aSawErase && result.bSawErase, 'both see the erasure').toBeTruthy();
+    expect(result.welcomeKeys, 'welcome names no lease holder').toEqual(['last_seq', 'paper', 'session_id', 'type']);
+
+    // The canonical page is the union minus the erased stroke…
+    const snapshot = await driveSocket(page, {
+      pageId,
+      ticket: await realtimeTicket(request),
+      actions: [{ delayMs: 50, message: { type: 'subscribe', from_seq: 0 } }],
+      settleMs: 500,
+    });
+    const { batches, tombstones } = replay(snapshot.messages);
+    const erasedIds = new Set(tombstones.flatMap((t: any) => t.stroke_ids));
+    const visible = batches.flatMap((batch: any) => batch.strokes.map((s: any) => s.id)).filter((id: string) => !erasedIds.has(id));
+    expect(visible.sort()).toEqual([strokeA.id, strokeB.id].sort());
+    // …and so is what the open SPA viewer drew, live.
+    await expect.poll(() => page.evaluate(() => (window as any).__vNoteInkStrokeCount)).toBe(2);
   });
 
   // #279. The SPA viewer is made a genuinely slow subscriber: its renderer's
@@ -1139,7 +1163,6 @@ test.describe('ink page channel', () => {
       pageId,
       ticket: await realtimeTicket(request),
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         { delayMs: 100, message: { type: 'commit-batch', client_batch_id: 'lag-seed', strokes: sampleViewerStrokes('lag-seed-stroke') } },
       ],
       settleMs: 250,
@@ -1171,19 +1194,18 @@ test.describe('ink page channel', () => {
         const url = `${location.origin.replace(/^http/, 'ws')}/api/pages/${pageId}/realtime?ticket=${encodeURIComponent(ticket)}`;
         const ws = new WebSocket(url);
         const echoed = new Set<string>();
-        let granted = false;
+        let welcomed = false;
         ws.addEventListener('message', (event) => {
           const message = JSON.parse(event.data);
           if (message.type === 'stroke-batch') echoed.add(message.client_batch_id);
-          if (message.type === 'lease-granted') granted = true;
+          if (message.type === 'welcome') welcomed = true;
         });
         await new Promise((resolve, reject) => {
           ws.addEventListener('open', resolve);
           ws.addEventListener('error', reject);
         });
         const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-        ws.send(JSON.stringify({ type: 'acquire-lease' }));
-        while (!granted) await wait(10);
+        while (!welcomed) await wait(10);
 
         const style = {
           tool_kind: 'solid_round',

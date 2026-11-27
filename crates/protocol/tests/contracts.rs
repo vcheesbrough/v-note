@@ -328,10 +328,6 @@ fn deserializes_page_channel_fixtures() {
         }
         other => panic!("expected page-replay, got {other:?}"),
     }
-
-    let denied: PageServerMessage = serde_json::from_str(&fixture("page-server-lease-denied.json"))
-        .expect("lease-denied fixture should parse");
-    assert!(matches!(denied, PageServerMessage::LeaseDenied { .. }));
 }
 
 /// A replay frame has delete-wins already applied by the server, so no stroke

@@ -45,7 +45,7 @@ fn assert_labels_match_serde<T: Serialize>(
     }
 }
 
-const PAGE_SERVER_VARIANTS: usize = 10;
+const PAGE_SERVER_VARIANTS: usize = 7;
 
 fn page_server_index(message: &PageServerMessage) -> usize {
     match message {
@@ -54,11 +54,8 @@ fn page_server_index(message: &PageServerMessage) -> usize {
         PageServerMessage::PageReplay(_) => 2,
         PageServerMessage::TombstoneBatch(_) => 3,
         PageServerMessage::Synced { .. } => 4,
-        PageServerMessage::LeaseGranted => 5,
-        PageServerMessage::LeaseDenied { .. } => 6,
-        PageServerMessage::PaperChanged { .. } => 7,
-        PageServerMessage::LeaseChanged { .. } => 8,
-        PageServerMessage::Error { .. } => 9,
+        PageServerMessage::PaperChanged { .. } => 5,
+        PageServerMessage::Error { .. } => 6,
     }
 }
 
@@ -68,7 +65,6 @@ fn page_server_message_types_match_serde_tags() {
         PageServerMessage::Welcome {
             session_id: "session_1".to_string(),
             last_seq: 0,
-            lease_holder: None,
             paper: Paper::default(),
         },
         PageServerMessage::StrokeBatch(StrokeBatch {
@@ -88,15 +84,10 @@ fn page_server_message_types_match_serde_tags() {
             stroke_ids: Vec::new(),
         }),
         PageServerMessage::Synced { last_seq: 1 },
-        PageServerMessage::LeaseGranted,
-        PageServerMessage::LeaseDenied {
-            holder: "session_2".to_string(),
-        },
         PageServerMessage::PaperChanged {
             paper: Paper::default(),
             revision: 3,
         },
-        PageServerMessage::LeaseChanged { holder: None },
         PageServerMessage::Error {
             code: "bad_message".to_string(),
             message: "could not parse client message".to_string(),
@@ -111,17 +102,14 @@ fn page_server_message_types_match_serde_tags() {
     );
 }
 
-const PAGE_CLIENT_VARIANTS: usize = 7;
+const PAGE_CLIENT_VARIANTS: usize = 4;
 
 fn page_client_index(message: &PageClientMessage) -> usize {
     match message {
         PageClientMessage::Subscribe { .. } => 0,
-        PageClientMessage::AcquireLease => 1,
-        PageClientMessage::RenewLease => 2,
-        PageClientMessage::ReleaseLease => 3,
-        PageClientMessage::CommitBatch { .. } => 4,
-        PageClientMessage::CommitTombstones { .. } => 5,
-        PageClientMessage::SetPaper { .. } => 6,
+        PageClientMessage::CommitBatch { .. } => 1,
+        PageClientMessage::CommitTombstones { .. } => 2,
+        PageClientMessage::SetPaper { .. } => 3,
     }
 }
 
@@ -129,9 +117,6 @@ fn page_client_index(message: &PageClientMessage) -> usize {
 fn page_client_message_types_match_serde_tags() {
     let samples = [
         PageClientMessage::Subscribe { from_seq: 0 },
-        PageClientMessage::AcquireLease,
-        PageClientMessage::RenewLease,
-        PageClientMessage::ReleaseLease,
         PageClientMessage::CommitBatch {
             client_batch_id: "batch_1".to_string(),
             strokes: Vec::new(),

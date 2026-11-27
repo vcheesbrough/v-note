@@ -348,8 +348,9 @@ where
 
 /// Per-page ink socket. Authenticates like the library socket (Bearer for
 /// Android, realtime ticket for SPA), then enforces owner-only access to the
-/// page before upgrading. Bidirectional: gap-fill/snapshot, edit lease, and
-/// coalesced stroke-batch commits fanned out to the owner's sibling sessions.
+/// page before upgrading. Bidirectional: gap-fill/snapshot, plus coalesced
+/// stroke-batch, tombstone and paper commits from any session, fanned out to
+/// every session on the page (#630: there is no edit lease).
 #[tracing::instrument(skip_all, fields(page_id = %page_id, permessage_deflate))]
 pub async fn page_socket(
     State(state): State<AppState>,
@@ -422,7 +423,7 @@ async fn handle_page_socket(
     let mut receiver = state.realtime.subscribe_page(&page_id);
     let (mut sender, mut inbound) = socket.split();
 
-    if let Err(reason) = send_welcome(&state, &store, &page_id, &session_id, &mut sender).await {
+    if let Err(reason) = send_welcome(&store, &page_id, &session_id, &mut sender).await {
         tracing::info!(page_id = %page_id, session_id = %session_id, reason, "page socket closed");
         return;
     }
@@ -467,13 +468,6 @@ async fn handle_page_socket(
         }
     };
     tracing::info!(page_id = %page_id, session_id = %session_id, reason, "page socket closed");
-
-    // Release the lease on disconnect so a sibling session can take over.
-    if state.realtime.release_lease(&page_id, &session_id) {
-        state
-            .realtime
-            .publish_page(&page_id, PageServerMessage::LeaseChanged { holder: None });
-    }
 }
 
 /// Close code sent to a subscriber that fell behind its broadcast channel:
@@ -495,7 +489,7 @@ const LAGGED_CLOSE_REASON: &str = "lagged";
 /// tombstone, a paper change — and nothing re-delivers them on an open socket:
 /// `subscribe` replays only when asked, and paper is only read into `welcome`.
 /// Closing hands recovery to the path every client already has and every test
-/// already covers: reconnect, fresh `welcome` (current paper and lease holder),
+/// already covers: reconnect, fresh `welcome` (current paper and head `seq`),
 /// then `subscribe` from the client's cursor. That cursor is sound, because a
 /// lag is detected at the first missing message, so everything this socket did
 /// deliver is an unbroken prefix of the channel.
@@ -553,17 +547,15 @@ where
     }
 }
 
-/// The first frame of a page connection: the session, the head `seq`, the lease
-/// holder and the paper. `Err` is the reason the connection closes instead.
+/// The first frame of a page connection: the session, the head `seq` and the
+/// paper. `Err` is the reason the connection closes instead.
 async fn send_welcome(
-    state: &AppState,
     store: &PgPageStore,
     page_id: &str,
     session_id: &str,
     sender: &mut PageSender,
 ) -> Result<(), &'static str> {
     let last_seq = store.max_seq(page_id).await.unwrap_or(0);
-    let lease_holder = state.realtime.current_lease_holder(page_id);
     // Carrying paper here makes the page channel self-sufficient: a reconnecting
     // client gets the authoritative value without a second REST round trip, which
     // is also what self-corrects a stale `PageSummary.paper` in an open library.
@@ -594,7 +586,6 @@ async fn send_welcome(
     let welcome = PageServerMessage::Welcome {
         session_id: session_id.to_string(),
         last_seq,
-        lease_holder,
         paper,
     };
     if !send_page(sender, welcome).await {
@@ -729,10 +720,8 @@ mod tests {
 
     use crate::realtime::hub::{LIBRARY_CHANNEL_CAPACITY, PAGE_CHANNEL_CAPACITY, RealtimeHub};
 
-    fn lease_changed(n: usize) -> PageServerMessage {
-        PageServerMessage::LeaseChanged {
-            holder: Some(format!("session_{n}")),
-        }
+    fn synced(n: usize) -> PageServerMessage {
+        PageServerMessage::Synced { last_seq: n as u64 }
     }
 
     /// A subscriber that falls past the channel's capacity is closed with a
@@ -744,7 +733,7 @@ mod tests {
         let hub = RealtimeHub::default();
         let mut receiver = hub.subscribe_page("page_1");
         for n in 0..PAGE_CHANNEL_CAPACITY + 3 {
-            hub.publish_page("page_1", lease_changed(n));
+            hub.publish_page("page_1", synced(n));
         }
         let lagged_before = crate::observability::metrics().realtime_event_count("page", "lagged");
 
@@ -813,7 +802,7 @@ mod tests {
         let hub = RealtimeHub::default();
         let mut receiver = hub.subscribe_page("page_1");
         for n in 0..PAGE_CHANNEL_CAPACITY {
-            hub.publish_page("page_1", lease_changed(n));
+            hub.publish_page("page_1", synced(n));
         }
 
         let mut sink: Vec<Frame> = Vec::new();
@@ -830,8 +819,7 @@ mod tests {
                 serde_json::from_slice(frame.payload()).expect("a page server message")
             })
             .collect();
-        let expected: Vec<PageServerMessage> =
-            (0..PAGE_CHANNEL_CAPACITY).map(lease_changed).collect();
+        let expected: Vec<PageServerMessage> = (0..PAGE_CHANNEL_CAPACITY).map(synced).collect();
         assert_eq!(sent, expected);
     }
 

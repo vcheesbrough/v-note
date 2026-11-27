@@ -35,9 +35,10 @@ interface ApiClient {
     // state. Null when there is no access token.
     fun openLibrarySocket(listener: LibraryEventListener): WebSocket?
 
-    // Per-page ink channel. Bidirectional: the caller subscribes for gap-fill,
-    // acquires the edit lease, and commits coalesced stroke batches via the
-    // returned [PageSocket]; server events arrive on [listener].
+    // Per-page ink channel. Bidirectional: the caller subscribes for gap-fill
+    // and commits coalesced stroke batches, erasures and paper via the
+    // returned [PageSocket]; server events — this device's echoes and every
+    // other device's edits alike — arrive on [listener].
     fun openPageSocket(
         pageId: String,
         listener: PageEventListener,
