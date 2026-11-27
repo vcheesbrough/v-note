@@ -566,11 +566,10 @@ mod tests {
 
     use std::sync::Mutex;
 
-    use tokio::sync::broadcast;
     use yawc::frame::OpCode;
 
     use super::*;
-    use crate::realtime::hub::Fanout;
+    use crate::realtime::hub::Subscription;
     use crate::realtime::store::{PersistedBatch, PersistedPaper, PersistedTombstones};
 
     const PAGE: &str = "page_1";
@@ -743,7 +742,7 @@ mod tests {
     }
 
     /// Everything broadcast on a channel so far, without waiting.
-    fn drain<T: Clone>(receiver: &mut broadcast::Receiver<Fanout<T>>) -> Vec<T> {
+    fn drain<T: Clone>(receiver: &mut Subscription<T>) -> Vec<T> {
         std::iter::from_fn(|| receiver.try_recv().ok().map(|fanout| fanout.message)).collect()
     }
 

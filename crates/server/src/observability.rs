@@ -17,8 +17,8 @@ use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
-    TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
 };
 use rand::Rng;
 use tracing::Instrument;
@@ -90,6 +90,7 @@ struct ThumbnailMetrics {
 struct RealtimeMetrics {
     events_total: IntCounterVec,
     active_connections: IntGauge,
+    channels: IntGaugeVec,
     message_bytes: HistogramVec,
     replay_bytes: Histogram,
     replay_frames: Histogram,
@@ -210,6 +211,27 @@ impl RealtimeMetrics {
                 )
                 .expect("active realtime gauge should build"),
             ),
+            // `channel` is `page` or `library`, the hub's two channel kinds.
+            channels: {
+                let channels = register(
+                    registry,
+                    IntGaugeVec::new(
+                        Opts::new(
+                            "v_note_realtime_channels",
+                            "Realtime broadcast channels in memory, by channel kind \
+                             (one per open page / per owner with a library socket)",
+                        ),
+                        &["channel"],
+                    )
+                    .expect("realtime channel gauge should build"),
+                );
+                // Exported at 0 from startup rather than appearing with the
+                // first socket, so a query never sees a gap.
+                for channel in ["page", "library"] {
+                    channels.with_label_values(&[channel]).set(0);
+                }
+                channels
+            },
             // Cardinality budget: `channel` × `message_type`, both bounded enums.
             // Never add `page_id`, `session_id`, `owner_id` or `client_batch_id` —
             // those belong in span fields, not labels.
@@ -422,6 +444,18 @@ impl Metrics {
     #[cfg(test)]
     pub(crate) fn thumbnail_queue_depth(&self) -> i64 {
         self.thumbnails.queue_depth.get()
+    }
+
+    /// A page or library broadcast channel was created for its first
+    /// subscriber (#633).
+    pub fn realtime_channel_opened(&self, channel: &'static str) {
+        self.realtime.channels.with_label_values(&[channel]).inc();
+    }
+
+    /// A page or library broadcast channel was removed with its last
+    /// subscriber (#633).
+    pub fn realtime_channel_closed(&self, channel: &'static str) {
+        self.realtime.channels.with_label_values(&[channel]).dec();
     }
 
     pub fn realtime_connection_guard(&self) -> RealtimeConnectionGuard {
