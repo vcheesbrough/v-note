@@ -140,7 +140,7 @@ for metric in \
   v_note_realtime_message_bytes_bucket v_note_realtime_message_bytes_count \
   v_note_realtime_replay_bytes_bucket v_note_realtime_replay_frames_bucket \
   v_note_realtime_replay_duration_seconds_bucket v_note_realtime_message_handling_seconds_bucket \
-  v_note_realtime_active_connections v_note_realtime_events_total \
+  v_note_realtime_active_connections v_note_realtime_channels v_note_realtime_events_total \
   v_note_http_requests_total v_note_http_request_duration_seconds_bucket \
   v_note_thumbnail_artifact_bytes_bucket v_note_thumbnail_generation_duration_seconds_bucket \
   v_note_thumbnail_generation_duration_seconds_count v_note_thumbnail_queue_depth \
