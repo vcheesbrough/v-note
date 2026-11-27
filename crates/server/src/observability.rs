@@ -61,6 +61,12 @@ const REALTIME_HANDLING_BUCKETS: [f64; 12] = [
 
 static METRICS: Lazy<Metrics> = Lazy::new(Metrics::new);
 
+/// Serializes the unit tests that assert exact deltas on process-wide metrics
+/// they share, such as the thumbnail queue-depth gauge (`realtime::dispatch`
+/// and `thumbnails` tests both move it).
+#[cfg(test)]
+pub(crate) static TEST_METRICS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub fn metrics() -> &'static Metrics {
     &METRICS
 }
@@ -444,6 +450,13 @@ impl Metrics {
     #[cfg(test)]
     pub(crate) fn thumbnail_queue_depth(&self) -> i64 {
         self.thumbnails.queue_depth.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page_mutation_count(&self, operation: &str, result: &str) -> u64 {
+        self.page_mutations_total
+            .with_label_values(&[operation, result])
+            .get()
     }
 
     /// A page or library broadcast channel was created for its first

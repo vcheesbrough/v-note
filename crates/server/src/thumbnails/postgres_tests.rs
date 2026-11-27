@@ -237,17 +237,24 @@ async fn cleanup_leaves_jobs_still_generating_and_prunes_finished_artifacts_as_b
 /// permit, a job still inside the window renders, and one a burst has pushed
 /// out of it drops itself as `Superseded` — never `JobGone`, which is left to
 /// permanently deleted pages.
+///
+/// Job 2 is the job-side check's lower edge: exactly 9 newer non-head
+/// revisions (3..=11) plus the head. It must render, as `cleanup` keeps it — a
+/// check that counted the head, or stopped at 9, would drop it.
 #[sqlx::test(migrations = "./migrations")]
 async fn jobs_in_flight_survive_a_newer_jobs_cleanup_and_drop_themselves_only_once_superseded(
     pool: PgPool,
 ) {
     insert_page(&pool, 12).await;
     insert_batch(&pool, 1, 1, &[stroke("s1")]).await;
-    insert_batch(&pool, 2, 11, &[stroke("s11")]).await;
-    insert_batch(&pool, 3, 12, &[stroke("s12")]).await;
+    insert_batch(&pool, 2, 2, &[stroke("s2")]).await;
+    insert_batch(&pool, 3, 11, &[stroke("s11")]).await;
+    insert_batch(&pool, 4, 12, &[stroke("s12")]).await;
     // 1: outside the window of the 10 newest non-head revisions (2..=11).
     insert_job(&pool, 1, Paper::None).await;
-    for source_seq in 2..=10_i64 {
+    // 2: the window's oldest slot.
+    insert_job(&pool, 2, Paper::None).await;
+    for source_seq in 3..=10_i64 {
         insert_artifact(&pool, source_seq, "available").await;
     }
     // 11: inside it.
@@ -266,6 +273,11 @@ async fn jobs_in_flight_survive_a_newer_jobs_cleanup_and_drop_themselves_only_on
         generate(&pool, PAGE, 11).await,
         Ok(Generated::Rendered),
         "a job inside the window renders"
+    );
+    assert_eq!(
+        generate(&pool, PAGE, 2).await,
+        Ok(Generated::Rendered),
+        "9 newer non-head revisions plus the head still leave a job in the window"
     );
     assert_eq!(
         generate(&pool, PAGE, 1).await,
@@ -300,4 +312,52 @@ async fn a_job_past_the_age_limit_is_superseded_unless_it_is_the_head(pool: PgPo
     assert_eq!(generate(&pool, PAGE, 1).await, Ok(Generated::Superseded));
     assert_eq!(generate(&pool, PAGE, 2).await, Ok(Generated::Rendered));
     assert_eq!(kept(&pool).await, [2]);
+}
+
+/// `enqueue`'s arms for a job that ends without rendering (#634): each counts
+/// its own `generate_thumbnail` result and hands back the queue-depth slot
+/// `enqueue` took, so a commit burst of superseded jobs cannot leak gauge depth.
+#[sqlx::test(migrations = "./migrations")]
+async fn enqueue_counts_a_dropped_job_and_releases_its_queue_slot(pool: PgPool) {
+    let _metrics = crate::observability::TEST_METRICS_LOCK.lock().await;
+    let metrics = crate::observability::metrics();
+    let state = AppState {
+        db: pool.clone(),
+        ..AppState::for_tests()
+    };
+    // Revision 1 is superseded: 10 newer non-head revisions, plus the head.
+    insert_page(&pool, 12).await;
+    insert_job(&pool, 1, Paper::None).await;
+    for source_seq in 2..=12_i64 {
+        insert_artifact(&pool, source_seq, "available").await;
+    }
+
+    for (result, source_seq) in [("superseded", 1), ("job_gone", 99)] {
+        let count = metrics.page_mutation_count("generate_thumbnail", result);
+        let depth = metrics.thumbnail_queue_depth();
+
+        enqueue(
+            state.clone(),
+            PAGE.to_string(),
+            "owner".to_string(),
+            source_seq,
+        );
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while metrics.page_mutation_count("generate_thumbnail", result) == count {
+            assert!(Instant::now() < deadline, "the {result} job should finish");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            metrics.page_mutation_count("generate_thumbnail", result),
+            count + 1,
+            "{result} counted once"
+        );
+        assert_eq!(
+            metrics.thumbnail_queue_depth(),
+            depth,
+            "the {result} job released its queue slot"
+        );
+    }
+    assert_eq!(kept(&pool).await, (2..=12).collect::<Vec<i64>>());
 }
