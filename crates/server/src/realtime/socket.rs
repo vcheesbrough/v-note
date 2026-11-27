@@ -759,6 +759,80 @@ mod tests {
         );
     }
 
+    // ---- Library subscription ordering (#631, #636) ------------------------
+
+    /// The library socket is subscribed by the time its upgrade is answered
+    /// (#631): a client may fetch its page list the moment the socket opens, so
+    /// an event published after that 101 must already have a receiver.
+    ///
+    /// The receiver count is read in a response middleware — after
+    /// `realtime_socket` has returned the 101, but before hyper has written it
+    /// and so before the upgrade can complete and the spawned socket task run.
+    /// That makes the check deterministic both ways:
+    /// - **Passes as the code is:** `realtime_socket` subscribes before it
+    ///   answers, and the receiver waits in the spawned task, so the count is 1.
+    /// - **Fails with `subscribe_library` moved back into
+    ///   `handle_library_socket`:** that task cannot start until the upgrade
+    ///   completes, which is after this middleware returns, so the count is
+    ///   always 0 — there is no scheduling for the old ordering to win.
+    ///
+    /// The REST-driven `a_library_socket_hears_an_event_published_the_moment_it_opens`
+    /// in `tests/page_bin.rs` cannot tell the two apart: its publish awaits a
+    /// Postgres `UPDATE` first, by which time either ordering has subscribed.
+    #[tokio::test]
+    async fn the_library_socket_is_subscribed_before_its_upgrade_is_answered() {
+        use std::sync::{Arc, Mutex};
+
+        let state = AppState::for_tests();
+        let hub = Arc::clone(&state.realtime);
+        let at_answer: Arc<Mutex<Option<usize>>> = Arc::default();
+        let app = axum::Router::new()
+            .route("/api/realtime", axum::routing::get(realtime_socket))
+            .with_state(state)
+            .layer(axum::middleware::map_response({
+                let hub = Arc::clone(&hub);
+                let at_answer = Arc::clone(&at_answer);
+                move |response: Response| {
+                    // No `.await` between the handler returning and this read.
+                    let receivers = hub.library_receiver_count("owner_1");
+                    *at_answer.lock().expect("slot mutex") = Some(receivers);
+                    async move { response }
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let address = listener.local_addr().expect("has an address");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        // A ticket rather than a bearer token: it authenticates without JWKS.
+        let ticket = hub
+            .issue_ticket(
+                "owner_1".to_string(),
+                opentelemetry::trace::SpanContext::empty_context(),
+            )
+            .ticket;
+        let stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connects");
+        let socket = yawc::WebSocket::handshake(
+            format!("ws://{address}/api/realtime?ticket={ticket}")
+                .parse()
+                .expect("url"),
+            stream,
+            Options::default(),
+        )
+        .await
+        .expect("upgrades");
+
+        assert_eq!(
+            *at_answer.lock().expect("slot mutex"),
+            Some(1),
+            "the library socket must be subscribed before its 101 is sent"
+        );
+        drop(socket);
+    }
+
     // ---- Lagged subscribers (#279) ----------------------------------------
 
     use crate::realtime::hub::{LIBRARY_CHANNEL_CAPACITY, PAGE_CHANNEL_CAPACITY, RealtimeHub};

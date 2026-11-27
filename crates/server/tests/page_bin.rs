@@ -666,8 +666,9 @@ async fn a_stranger_can_neither_bin_nor_restore_a_page(pool: PgPool) {
 /// race in `bin.spec.ts` (the server subscribing before it answers the
 /// upgrade): the publish here waits on a Postgres `UPDATE` first, so the old
 /// ordering — subscribing in the spawned socket task — would almost always win
-/// too. That ordering is covered by reasoning and the e2e spec; a test that can
-/// observe the hub with no `.await` after the handshake is #636.
+/// too. That ordering is pinned deterministically by
+/// `the_library_socket_is_subscribed_before_its_upgrade_is_answered` in
+/// `src/realtime/socket.rs` (#636), which reads the hub before the 101 is sent.
 #[sqlx::test(migrations = "./migrations")]
 async fn a_library_socket_hears_an_event_published_the_moment_it_opens(pool: PgPool) {
     let server = serve(&pool).await;
