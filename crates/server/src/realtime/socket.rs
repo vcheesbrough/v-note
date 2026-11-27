@@ -21,7 +21,7 @@ use yawc::frame::{Frame, OpCode};
 use yawc::{HttpWebSocket, IncomingUpgrade, Options};
 
 use super::dispatch::{PageContext, dispatch_page_client_message, send_page, send_page_frame};
-use super::hub::{Fanout, fanout_delivery_span, random_hex};
+use super::hub::{Fanout, Subscription, fanout_delivery_span, random_hex};
 use super::store::{PageStore, PgPageStore};
 use crate::AppState;
 use crate::auth::{Claims, extract_bearer, validate_jwt};
@@ -265,7 +265,7 @@ async fn authenticate_realtime(
 /// parent has to be chosen before the span is entered — see `realtime_socket`.
 async fn handle_library_socket(
     owner_id: String,
-    mut receiver: broadcast::Receiver<Fanout<LibraryEvent>>,
+    mut receiver: Subscription<LibraryEvent>,
     socket: HttpWebSocket,
 ) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
