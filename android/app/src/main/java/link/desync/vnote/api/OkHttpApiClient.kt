@@ -7,8 +7,10 @@ import link.desync.vnote.api.codec.decodeLibraryEvent
 import link.desync.vnote.api.codec.decodeMe
 import link.desync.vnote.api.codec.decodePage
 import link.desync.vnote.api.codec.decodePageEvent
+import link.desync.vnote.api.codec.decodePageIds
 import link.desync.vnote.api.codec.decodePageList
 import link.desync.vnote.api.codec.encodeCreatePage
+import link.desync.vnote.api.codec.encodeEmptyBin
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.Paper
@@ -138,11 +140,12 @@ class OkHttpApiClient(
             }.map { }
         }
 
-    override suspend fun emptyBin(): Result<Unit> =
+    override suspend fun emptyBin(pageIds: List<String>): Result<List<String>> =
         reachingServer {
             makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
-                authorizedRequest("$baseUrl/api/bin", token, "/api/bin").delete().build()
-            }.map { }
+                val body = encodeEmptyBin(pageIds).toRequestBody(jsonMediaType)
+                authorizedRequest("$baseUrl/api/bin", token, "/api/bin").delete(body).build()
+            }.mapCatching { body -> decodePageIds(JSONObject(body)) }
         }
 
     override suspend fun fetchThumbnail(url: String): Result<ByteArray> =

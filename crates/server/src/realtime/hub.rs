@@ -185,19 +185,24 @@ impl RealtimeHub {
             .subscribe()
     }
 
+    /// Fans `message` out to every session on the page. A page nobody has
+    /// open has no channel, and publishing to it is a no-op rather than one
+    /// that creates a channel: the REST bin routes (#631) publish to pages
+    /// that are usually closed, and a created channel is never pruned.
     pub fn publish_page(&self, page_id: &str, message: PageServerMessage) {
-        let sender = {
-            let mut channels = self
-                .page_channels
-                .lock()
-                .expect("page channel mutex poisoned");
-            channels
-                .entry(page_id.to_string())
-                .or_insert_with(|| {
-                    let (sender, _) = broadcast::channel(PAGE_CHANNEL_CAPACITY);
-                    sender
-                })
-                .clone()
+        let Some(sender) = self
+            .page_channels
+            .lock()
+            .expect("page channel mutex poisoned")
+            .get(page_id)
+            .cloned()
+        else {
+            tracing::debug!(
+                page_id = %page_id,
+                message_type = message.message_type(),
+                "page message not published: no session has the page open"
+            );
+            return;
         };
         let message_type = message.message_type();
         let receivers = sender.send(Fanout::from_current_span(message)).unwrap_or(0);
@@ -328,6 +333,35 @@ mod tests {
 
     /// Single use, now that a ticket carries a trace as well as an identity: a
     /// replayed ticket must yield neither.
+    /// #631: the REST bin routes publish to pages that are usually closed. That
+    /// must not create a page channel (nothing prunes one), and a later
+    /// subscriber starts from an empty channel rather than an old notice.
+    #[test]
+    fn publishing_to_a_page_nobody_has_open_creates_no_channel() {
+        let hub = RealtimeHub::default();
+        hub.publish_page("page_closed", PageServerMessage::PageRestored);
+        assert!(
+            hub.page_channels
+                .lock()
+                .expect("page channel mutex poisoned")
+                .is_empty()
+        );
+
+        let mut receiver = hub.subscribe_page("page_closed");
+        hub.publish_page("page_closed", PageServerMessage::PageRestored);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("an open page is published to")
+                .message,
+            PageServerMessage::PageRestored
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "nothing from before it opened"
+        );
+    }
+
     #[test]
     fn a_ticket_redeems_exactly_once() {
         let hub = RealtimeHub::default();

@@ -84,10 +84,6 @@ async fn library_connection(
     let parent = telemetry::screen();
     let ticket = api::realtime_ticket(parent, "realtime ticket").await?;
 
-    // Every (re)connect refetches the list, so what the library shows after a
-    // drop is the server's, not what was on screen before it.
-    api::load_pages(parent, pages, pages_loaded).await?;
-
     let ws_url = api::realtime_url(&ticket.ticket)?;
     // Ends as soon as the socket is open rather than spanning the connection:
     // this is the trace of *opening* it, and the connection outlives the trace
@@ -105,6 +101,16 @@ async fn library_connection(
             return Err(ChannelError::Transport(message));
         }
     };
+    // Every (re)connect refetches the list, so what the library shows after a
+    // drop is the server's, not what was on screen before it — and it does so
+    // only once the socket is open. The server subscribes a library socket
+    // before it answers the upgrade, so from here on every event is already
+    // queued on the socket: one published while the list loads arrives after
+    // it and is applied on top. Loading first, as before #631, left a window
+    // between the snapshot and the subscription in which an event (a restore,
+    // a delete from another device) was lost until the next reload.
+    await_open(&socket).await?;
+    api::load_pages(parent, pages, pages_loaded).await?;
     telemetry::info_in(parent, "library realtime connected");
     sync.set(SyncState::Live);
     while let Some(message) = socket.next().await {
@@ -122,6 +128,27 @@ async fn library_connection(
     }
     Ok(())
 }
+
+/// Resolves once `socket` has finished its handshake, or fails if it closed
+/// instead. `gloo-net` opens without a future to await, so this polls the
+/// ready state; the handshake is one round trip, so it takes a few ticks.
+async fn await_open(socket: &WebSocket) -> Result<(), ChannelError> {
+    use gloo_net::websocket::State;
+    loop {
+        match socket.state() {
+            State::Open => return Ok(()),
+            State::Connecting => TimeoutFuture::new(OPEN_POLL_MS).await,
+            State::Closing | State::Closed => {
+                return Err(ChannelError::Transport(
+                    "realtime socket closed before it opened".to_string(),
+                ));
+            }
+        }
+    }
+}
+
+/// How often [`await_open`] looks at a connecting socket.
+const OPEN_POLL_MS: u32 = 10;
 
 /// The page channel's signals, as the viewer owns them.
 #[derive(Clone, Copy)]

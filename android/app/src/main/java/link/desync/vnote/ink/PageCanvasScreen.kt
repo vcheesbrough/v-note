@@ -170,7 +170,7 @@ fun PageCanvasScreen(
             }
         }
         session.binnedAt?.let {
-            BinnedPageNotice(page = page, onRestore = session::restore)
+            BinnedPageNotice(page = page, restoreError = session.restoreError, onRestore = session::restore)
         }
         session.status?.let { status ->
             PageStatusBanner(
@@ -222,6 +222,7 @@ private fun UnsentInkDialog(
 @Composable
 private fun BinnedPageNotice(
     page: PageSummary,
+    restoreError: String?,
     onRestore: () -> Unit,
 ) {
     // An untitled page's label is its age, which reads badly mid-sentence.
@@ -240,12 +241,22 @@ private fun BinnedPageNotice(
             modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                "$which was moved to the bin on another device; your changes are kept there.",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "$which was moved to the bin on another device; your changes are kept there.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                // A failed Restore says so; tapping it again retries.
+                restoreError?.let { error ->
+                    Text(
+                        "Couldn't restore it: $error",
+                        modifier = Modifier.testTag("page-binned-restore-error"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
             TextButton(onClick = onRestore, modifier = Modifier.testTag("page-binned-restore")) { Text("Restore") }
         }
     }

@@ -60,6 +60,12 @@ class PageBinInstrumentedTest {
     // Every page-channel message this device sent.
     private val pageMessages: MutableList<String> = Collections.synchronizedList(mutableListOf())
     private val librarySocket = AtomicReference<WebSocket>()
+
+    // The body of the last `DELETE /api/bin`, and whether the next restore fails.
+    private val emptyBinBody = AtomicReference<String>()
+    private val failNextRestore =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
     private val pageSocket = AtomicReference<WebSocket>()
 
     private val environmentRule =
@@ -156,8 +162,15 @@ class PageBinInstrumentedTest {
 
         composeRule.onNodeWithTag("empty-bin").performClick()
         composeRule.onNodeWithText("Empty the bin?").assertIsDisplayed()
+        composeRule.onNodeWithText("2 pages and all their ink will be deleted. This can't be undone.").assertIsDisplayed()
+        // Binned on another device while the dialog is up, its event not yet
+        // here: the user never saw it, so it must not be in what is deleted.
+        moveToBin("page_alpha", "2026-11-27T22:00:00Z")
         composeRule.onNodeWithTag("confirm-purge").performClick()
         awaitMutation("DELETE /api/bin")
+        val named = JSONObject(emptyBinBody.get()).getJSONArray("page_ids")
+        assertEquals(setOf("page_old", "page_older"), List(named.length()) { named.getString(it) }.toSet())
+        assertTrue("the unseen page survives", "page_alpha" in binned)
         awaitGone("bin-row-page_old")
         awaitGone("bin-row-page_older")
         composeRule.onNodeWithText("The bin is empty").assertIsDisplayed()
@@ -200,6 +213,24 @@ class PageBinInstrumentedTest {
         composeRule.onNodeWithTag("page-binned-restore", useUnmergedTree = true).performClick()
         awaitMutation("POST /api/pages/page_alpha/restore")
         awaitGone("page-binned-notice")
+    }
+
+    /** A failed Restore from the notice says so, and tapping it again retries. */
+    @Test
+    fun aFailedRestoreFromTheNoticeSaysSoAndCanBeRetried() {
+        awaitTag("page-tile-page_beta")
+        moveToBin("page_beta", "2026-11-27T21:00:00Z")
+        composeRule.onNodeWithTag("page-tile-page_beta", useUnmergedTree = true).performClick()
+        awaitTag("page-binned-notice")
+
+        failNextRestore.set(true)
+        composeRule.onNodeWithTag("page-binned-restore", useUnmergedTree = true).performClick()
+        awaitTag("page-binned-restore-error")
+        composeRule.onNodeWithTag("page-binned-notice").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("page-binned-restore", useUnmergedTree = true).performClick()
+        awaitGone("page-binned-notice")
+        assertEquals("tried twice", 2, mutations.count { it == "POST /api/pages/page_beta/restore" })
     }
 
     /** A device that opens (or reconnects to) a binned page is told at once. */
@@ -346,8 +377,11 @@ class PageBinInstrumentedTest {
                             ),
                         )
                     path == "/api/bin" && method == "DELETE" -> {
-                        binned.clear()
-                        MockResponse(code = 204)
+                        val body = request.body?.utf8() ?: "{}"
+                        emptyBinBody.set(body)
+                        val named = JSONObject(body).getJSONArray("page_ids")
+                        val deleted = List(named.length()) { named.getString(it) }.filter { binned.remove(it) != null }
+                        json("""{"page_ids":[${deleted.joinToString(",") { "\"$it\"" }}]}""")
                     }
                     path.startsWith("/api/bin/") && method == "DELETE" -> {
                         binned.remove(path.removePrefix("/api/bin/"))
@@ -373,6 +407,7 @@ class PageBinInstrumentedTest {
         }
 
     private fun restore(id: String): MockResponse {
+        if (failNextRestore.getAndSet(false)) return MockResponse(code = 500)
         val title = binned.remove(id)?.first ?: live[id] ?: return MockResponse(code = 403)
         live[id] = title
         librarySocket.get()?.send("""{"type":"page-restored","page":${pageJson(id, title)}}""")

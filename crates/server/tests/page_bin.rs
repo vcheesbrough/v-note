@@ -17,8 +17,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    CreatePageRequest, ListPagesResponse, PAGE_DELETED_ERROR, PageResponse, PageServerMessage,
-    Paper,
+    CreatePageRequest, ListPagesResponse, PAGE_DELETED_ERROR, PageIds, PageResponse,
+    PageServerMessage, Paper,
 };
 use server::build_router;
 use sqlx::PgPool;
@@ -545,10 +545,43 @@ async fn emptying_the_bin_deletes_only_the_callers_binned_pages(pool: PgPool) {
         "the bin lists only the caller's binned pages"
     );
 
-    let (status, _) = call(&server, OWNER, Method::DELETE, "/api/bin", None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Binned on another device after the user was shown the bin: not named in
+    // the request, so it must survive to be restored. The live page and the
+    // stranger's binned page are named too, and must survive as well.
+    let late = create_page(&server, "late").await;
+    call(
+        &server,
+        OWNER,
+        Method::DELETE,
+        &format!("/api/pages/{late}"),
+        None,
+    )
+    .await;
+    let confirmed = serde_json::to_string(&PageIds {
+        page_ids: vec![
+            first.clone(),
+            second.clone(),
+            live.clone(),
+            foreign.page.id.clone(),
+        ],
+    })
+    .expect("serializes");
+    let (status, body) = call(&server, OWNER, Method::DELETE, "/api/bin", Some(confirmed)).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut deleted = serde_json::from_slice::<PageIds>(&body)
+        .expect("the deleted ids")
+        .page_ids;
+    deleted.sort();
+    assert_eq!(
+        deleted, expected,
+        "only the confirmed binned pages, and it says which"
+    );
 
-    assert!(ids(&listed(&server, "/api/bin").await).is_empty());
+    assert_eq!(
+        ids(&listed(&server, "/api/bin").await),
+        [late.as_str()],
+        "a page binned after the confirmation is not destroyed unseen"
+    );
     assert_eq!(ids(&listed(&server, "/api/pages").await), [live.as_str()]);
     for page in [&first, &second] {
         let (status, _) = call(
@@ -606,4 +639,45 @@ async fn a_stranger_can_neither_bin_nor_restore_a_page(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(ids(&listed(&server, "/api/bin").await), [page_id.as_str()]);
+}
+
+/// The library socket is subscribed before its upgrade is answered (#631, the
+/// CI race behind `bin.spec.ts`): a client that loads the page list as soon as
+/// its socket is open must hear every event published from then on, so an
+/// event sent the instant the handshake completes is still delivered.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_library_socket_hears_an_event_published_the_moment_it_opens(pool: PgPool) {
+    let server = serve(&pool).await;
+    let page_id = create_page(&server, "instant").await;
+    let address = server.address;
+    let stream = TcpStream::connect(address).await.expect("connects");
+    let mut library = WebSocket::handshake_with_request(
+        format!("ws://{address}/api/realtime").parse().expect("url"),
+        stream,
+        Options::default(),
+        HttpRequest::builder().header("Authorization", format!("Bearer {}", token(OWNER))),
+    )
+    .await
+    .expect("upgrades");
+
+    let (status, _) = call(
+        &server,
+        OWNER,
+        Method::DELETE,
+        &format!("/api/pages/{page_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let frame = tokio::time::timeout(Duration::from_secs(10), library.next())
+        .await
+        .expect("the event arrives")
+        .expect("the socket stays open");
+    let event: protocol::LibraryEvent =
+        serde_json::from_slice(frame.payload()).expect("a library event");
+    assert!(
+        matches!(event, protocol::LibraryEvent::PageBinned { ref page } if page.id == page_id),
+        "{event:?}"
+    );
 }

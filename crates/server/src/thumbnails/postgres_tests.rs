@@ -119,7 +119,7 @@ async fn generate_drops_a_job_whose_page_was_permanently_deleted(pool: PgPool) {
 
     assert_eq!(
         generate(&pool, PAGE, 1).await,
-        Ok(Generated::PageGone),
+        Ok(Generated::JobGone),
         "a gone page's job is dropped, not failed"
     );
 }

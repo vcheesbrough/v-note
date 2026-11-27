@@ -102,18 +102,25 @@ test.describe('page recycle bin', () => {
     expect(await upgradeRefused(page, request, pageId)).toBe(true);
   });
 
-  test('empty bin permanently deletes every binned page and leaves the library alone', async ({ request }) => {
+  test('empty bin permanently deletes the binned pages it was shown and leaves the rest alone', async ({ request }) => {
     const live = await createPage(request, uniqueTitle('bin-live'));
     const first = await createPage(request, uniqueTitle('bin-empty-1'));
     const second = await createPage(request, uniqueTitle('bin-empty-2'));
     for (const id of [first, second]) {
       expect((await request.delete(`/api/pages/${id}`)).status()).toBe(204);
     }
-    expect(await listedIds(request, '/api/bin')).toEqual(expect.arrayContaining([first, second]));
+    const shown = await listedIds(request, '/api/bin');
+    expect(shown).toEqual(expect.arrayContaining([first, second]));
 
-    expect((await request.delete('/api/bin')).status()).toBe(204);
+    // Binned elsewhere after the bin was shown: not confirmed, so it survives.
+    const late = await createPage(request, uniqueTitle('bin-empty-late'));
+    expect((await request.delete(`/api/pages/${late}`)).status()).toBe(204);
 
-    expect(await listedIds(request, '/api/bin')).toEqual([]);
+    const emptied = await request.delete('/api/bin', { data: { page_ids: shown } });
+    expect(emptied.status()).toBe(200);
+    expect((await emptied.json()).page_ids.sort()).toEqual([...shown].sort());
+
+    expect(await listedIds(request, '/api/bin')).toEqual([late]);
     expect(await listedIds(request, '/api/pages')).toContain(live);
     for (const id of [first, second]) {
       expect((await request.get(`/api/pages/${id}`)).status()).toBe(410);

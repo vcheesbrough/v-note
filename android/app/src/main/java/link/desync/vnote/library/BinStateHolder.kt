@@ -65,11 +65,14 @@ internal class BinStateHolder(
         }
     }
 
-    fun empty() {
+    // [confirmed] is exactly what the confirmation counted: a page binned
+    // elsewhere since is not named, so it is not destroyed unseen.
+    fun empty(confirmed: List<PageSummary>) {
         CoroutineScope(Dispatchers.Main).launch {
-            val emptied = pages
-            api.emptyBin().fold(
-                onSuccess = { emptied.forEach { applyEvent(LibraryEvent.PageDeleted(it.id)) } },
+            api.emptyBin(confirmed.map { it.id }).fold(
+                // Only what the server says it deleted: a confirmed page that
+                // was restored meanwhile survived, and must stay listed.
+                onSuccess = { deleted -> deleted.forEach { applyEvent(LibraryEvent.PageDeleted(it)) } },
                 onFailure = { failure -> reportError(failure.message ?: "Emptying the bin failed") },
             )
         }

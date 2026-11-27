@@ -113,7 +113,7 @@ class PageTileThreadInstrumentedTest {
 
         override suspend fun deletePagePermanently(pageId: String): Result<Unit> = unused()
 
-        override suspend fun emptyBin(): Result<Unit> = unused()
+        override suspend fun emptyBin(pageIds: List<String>): Result<List<String>> = unused()
 
         override fun openLibrarySocket(listener: LibraryEventListener): WebSocket? = unused()
 

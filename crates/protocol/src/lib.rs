@@ -111,6 +111,15 @@ pub struct CreatePageRequest {
     pub paper: Paper,
 }
 
+/// `DELETE /api/bin` (#631), both ways. The request names the binned pages to
+/// delete permanently — the ones the user was shown when they confirmed, so a
+/// page binned after that is not destroyed unseen. The response names the ones
+/// that were: a named page restored meanwhile is not among them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PageIds {
+    pub page_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RealtimeTicketResponse {
     pub ticket: String,

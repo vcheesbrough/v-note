@@ -6,7 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use protocol::{
-    CreatePageRequest, LibraryEvent, ListPagesResponse, PageResponse, PageServerMessage,
+    CreatePageRequest, LibraryEvent, ListPagesResponse, PageIds, PageResponse, PageServerMessage,
     PageSummary, Paper, ThumbnailMetadata,
 };
 use tracing::Instrument as _;
@@ -314,6 +314,24 @@ async fn missing_page(state: &AppState, page_id: &str, owner_id: &str, what: &st
     }
 }
 
+/// [`missing_page`], counted: `page_gone` for the owner's own permanently
+/// deleted page, as the page channel counts it, `not_found` otherwise.
+async fn missing_page_metered(
+    state: &AppState,
+    page_id: &str,
+    owner_id: &str,
+    operation: &'static str,
+) -> ApiError {
+    let missing = missing_page(state, page_id, owner_id, operation).await;
+    let result = if missing == ApiError::PAGE_PURGED {
+        "page_gone"
+    } else {
+        "not_found"
+    };
+    crate::observability::metrics().record_page_mutation(operation, result);
+    missing
+}
+
 /// Reads one of the caller's pages, live or binned.
 async fn owned_page(
     state: &AppState,
@@ -373,10 +391,7 @@ pub async fn delete_page(
                 metrics.record_page_mutation("bin_page", "noop");
                 Ok(StatusCode::NO_CONTENT)
             }
-            None => {
-                metrics.record_page_mutation("bin_page", "not_found");
-                Err(missing_page(&state, &page_id, &claims.sub, "page bin").await)
-            }
+            None => Err(missing_page_metered(&state, &page_id, &claims.sub, "bin_page").await),
         };
     };
 
@@ -431,10 +446,7 @@ pub async fn restore_page(
                 metrics.record_page_mutation("restore_page", "noop");
                 Ok(Json(PageResponse { page }))
             }
-            None => {
-                metrics.record_page_mutation("restore_page", "not_found");
-                Err(missing_page(&state, &page_id, &claims.sub, "page restore").await)
-            }
+            None => Err(missing_page_metered(&state, &page_id, &claims.sub, "restore_page").await),
         };
     };
 
@@ -475,15 +487,16 @@ pub async fn list_bin(
     }))
 }
 
-/// Permanently deletes binned pages: `Some(id)` for one, `None` for the whole
-/// bin. One transaction removes the rows — their ink, tombstones and
+/// Permanently deletes the caller's binned pages among `page_ids` — never a
+/// page that is live, another owner's, or not named. One transaction removes
+/// the rows — their ink, tombstones and
 /// thumbnails go by cascade, and a thumbnail job still in flight finds its row
 /// gone and drops itself — and records each id in `purged_pages`, so a later
 /// write for it gets the definitive `page_deleted` answer. Returns the ids.
 async fn purge_binned(
     state: &AppState,
     owner_id: &str,
-    page_id: Option<&str>,
+    page_ids: &[String],
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = state
         .db
@@ -492,11 +505,11 @@ async fn purge_binned(
         .await?;
     let purged: Vec<String> = sqlx::query_scalar(
         "DELETE FROM pages
-         WHERE owner_id = $1 AND binned_at IS NOT NULL AND ($2::text IS NULL OR id = $2)
+         WHERE owner_id = $1 AND binned_at IS NOT NULL AND id = ANY($2)
          RETURNING id",
     )
     .bind(owner_id)
-    .bind(page_id)
+    .bind(page_ids)
     .fetch_all(metered(&mut *tx))
     .instrument(db_query_span!("DELETE", "purge_pages"))
     .await?;
@@ -537,7 +550,7 @@ pub async fn purge_page(
     Path(page_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let metrics = crate::observability::metrics();
-    let purged = purge_binned(&state, &claims.sub, Some(&page_id))
+    let purged = purge_binned(&state, &claims.sub, std::slice::from_ref(&page_id))
         .await
         .map_err(|error| {
             metrics.record_page_mutation("purge_page", "error");
@@ -563,14 +576,19 @@ pub async fn purge_page(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /api/bin` — permanently deletes every page in the caller's bin.
-#[tracing::instrument(skip_all, fields(owner_id = %claims.sub, purged))]
+/// `DELETE /api/bin` — empties the bin: permanently deletes the binned pages
+/// the body names, which are the ones the user was shown and confirmed, and
+/// answers with the ids it deleted. A page binned elsewhere after that is not
+/// in the list, so it survives to be restored; a named page restored meanwhile
+/// is live, so it survives too and is not in the answer.
+#[tracing::instrument(skip_all, fields(owner_id = %claims.sub, requested = request.page_ids.len(), purged))]
 pub async fn empty_bin(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
-) -> Result<StatusCode, ApiError> {
+    Json(request): Json<PageIds>,
+) -> Result<Json<PageIds>, ApiError> {
     let metrics = crate::observability::metrics();
-    let purged = purge_binned(&state, &claims.sub, None)
+    let purged = purge_binned(&state, &claims.sub, &request.page_ids)
         .await
         .map_err(|error| {
             metrics.record_page_mutation("empty_bin", "error");
@@ -578,11 +596,11 @@ pub async fn empty_bin(
         })?;
     tracing::Span::current().record("purged", purged.len());
     tracing::info!(purged = purged.len(), "bin emptied");
-    for page_id in purged {
-        announce_purged(&state, &claims.sub, page_id);
+    for page_id in &purged {
+        announce_purged(&state, &claims.sub, page_id.clone());
     }
     metrics.record_page_mutation("empty_bin", "success");
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(PageIds { page_ids: purged }))
 }
 
 fn server_error(error: sqlx::Error) -> ApiError {

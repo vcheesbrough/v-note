@@ -91,7 +91,11 @@ async fn every_page_route_returns_a_generic_500_when_the_database_is_unreachable
         ),
         (Method::POST, "/api/pages/page_abc/restore", Body::empty()),
         (Method::GET, "/api/bin", Body::empty()),
-        (Method::DELETE, "/api/bin", Body::empty()),
+        (
+            Method::DELETE,
+            "/api/bin",
+            Body::from(r#"{"page_ids":["page_abc"]}"#),
+        ),
         (Method::DELETE, "/api/bin/page_abc", Body::empty()),
     ];
 

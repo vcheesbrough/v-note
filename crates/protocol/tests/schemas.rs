@@ -24,8 +24,9 @@ use std::path::{Path, PathBuf};
 use jsonschema::{Registry, Validator};
 use protocol::{
     CreatePageRequest, HealthResponse, LibraryEvent, ListPagesResponse, MeResponse, MetaResponse,
-    PageClientMessage, PageReplay, PageServerMessage, PageSummary, Paper, RealtimeTicketResponse,
-    Stroke, StrokeBatch, TelemetryConfigResponse, ThumbnailMetadata, TombstoneBatch,
+    PageClientMessage, PageIds, PageReplay, PageServerMessage, PageSummary, Paper,
+    RealtimeTicketResponse, Stroke, StrokeBatch, TelemetryConfigResponse, ThumbnailMetadata,
+    TombstoneBatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -109,6 +110,7 @@ fn errors(validator: &Validator, instance: &Value) -> Vec<String> {
 fn schema_for_fixture(fixture: &str) -> Option<&'static str> {
     Some(match fixture {
         "create-page.json" => "create-page.schema.json",
+        "page-ids.json" => "page-ids.schema.json",
         "health.json" => "health.schema.json",
         "me.json" => "me.schema.json",
         "meta.json" => "meta.schema.json",
@@ -214,6 +216,7 @@ fn rest_dtos_serialise_to_their_schemas() {
     assert_roundtrip::<ListPagesResponse>(&registry, "pages.json", "pages.schema.json");
     assert_roundtrip::<ListPagesResponse>(&registry, "bin.json", "pages.schema.json");
     assert_roundtrip::<CreatePageRequest>(&registry, "create-page.json", "create-page.schema.json");
+    assert_roundtrip::<PageIds>(&registry, "page-ids.json", "page-ids.schema.json");
     assert_roundtrip::<RealtimeTicketResponse>(
         &registry,
         "realtime-ticket.json",

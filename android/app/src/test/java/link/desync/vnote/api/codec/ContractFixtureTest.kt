@@ -143,6 +143,15 @@ class ContractFixtureTest {
         assertNull(decodePage(fixture("page.json")).binnedAt)
     }
 
+    // #631: empty bin names the pages it confirmed, and is answered with the
+    // ones it deleted — the same shape both ways.
+    @Test
+    fun pageIdsEncodeAndDecodeToTheFixture() {
+        val ids = listOf("page_01j00000000000000000000000", "page_01j00000000000000000000001")
+        assertJsonEquals(fixture("page-ids.json"), encodeEmptyBin(ids))
+        assertEquals(ids, decodePageIds(fixture("page-ids.json")))
+    }
+
     // #631: the page channel's bin notices, and the definitive class for a
     // permanently deleted page.
     @Test
@@ -460,6 +469,7 @@ class ContractFixtureTest {
                 "page-server-paper-changed.json",
                 "page-server-stroke-batch.json",
                 "page-server-welcome.json",
+                "page-ids.json",
                 "page.json",
                 "pages.json",
                 "realtime-ticket.json",

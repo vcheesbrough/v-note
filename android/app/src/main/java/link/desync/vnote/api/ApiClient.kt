@@ -19,8 +19,10 @@ interface PageBinApi {
     // Permanently deletes one binned page — the only destructive step.
     suspend fun deletePagePermanently(pageId: String): Result<Unit>
 
-    // Permanently deletes every binned page.
-    suspend fun emptyBin(): Result<Unit>
+    // Empties the bin: permanently deletes the binned pages named — the ones
+    // the user was shown — so a page binned elsewhere since survives. Returns
+    // the ids actually deleted.
+    suspend fun emptyBin(pageIds: List<String>): Result<List<String>>
 }
 
 // The v-note server as the app sees it: the REST calls plus the two realtime

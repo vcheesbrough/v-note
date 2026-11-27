@@ -203,7 +203,7 @@ class LibraryStateHolderTest {
 
         override suspend fun deletePagePermanently(pageId: String): Result<Unit> = error("unused")
 
-        override suspend fun emptyBin(): Result<Unit> = error("unused")
+        override suspend fun emptyBin(pageIds: List<String>): Result<List<String>> = error("unused")
 
         override suspend fun fetchThumbnail(url: String): Result<ByteArray> = error("unused")
 

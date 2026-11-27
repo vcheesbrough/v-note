@@ -132,13 +132,18 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
         let started = Instant::now();
         let result = generate(pool, &page_id, source_seq).await;
         let thumbnail = match result {
-            Ok(Generated::PageGone) => {
-                // Permanently deleted while queued or rendering (#631): the job
-                // row went with the page. Acked and dropped — nothing failed,
-                // and there is no library tile left to tell.
-                tracing::info!(page_id = %page_id, source_seq, "thumbnail job dropped: the page was permanently deleted");
+            Ok(Generated::JobGone) => {
+                // The job's row went while it was queued or rendering: its page
+                // was permanently deleted (#631), or retention `cleanup` pruned
+                // that older revision. Acked and dropped — nothing failed, and
+                // a newer revision (if the page lives) carries the preview.
+                tracing::info!(
+                    page_id = %page_id,
+                    source_seq,
+                    "thumbnail job dropped: its row is gone (page permanently deleted or revision pruned)"
+                );
                 crate::observability::metrics()
-                    .record_page_mutation("generate_thumbnail", "page_gone");
+                    .record_page_mutation("generate_thumbnail", "job_gone");
                 crate::observability::metrics().thumbnail_generation_finished();
                 return;
             }
@@ -198,9 +203,10 @@ fn render_permits() -> &'static Semaphore {
 #[derive(Debug, PartialEq, Eq)]
 enum Generated {
     Rendered,
-    /// The job's row is gone, which only a permanent deletion of its page does
-    /// (the row cascades with it, #631) — not a failure to retry or report.
-    PageGone,
+    /// The job's row is gone — its page was permanently deleted (the row
+    /// cascades with it, #631), or retention `cleanup` pruned that older
+    /// revision. Not a failure to retry or report.
+    JobGone,
 }
 
 async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<Generated, String> {
@@ -231,7 +237,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<Gener
     .await
     .map_err(|error| error.to_string())?
     else {
-        return Ok(Generated::PageGone);
+        return Ok(Generated::JobGone);
     };
     let paper =
         Paper::from_wire(&paper).ok_or_else(|| format!("unknown stored paper {paper:?}"))?;
@@ -283,8 +289,8 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<Gener
     .map_err(|error| error.to_string())?
     .rows_affected();
     if stored == 0 {
-        // Permanently deleted mid-render: nothing left to store it on.
-        return Ok(Generated::PageGone);
+        // The row went mid-render (see `Generated::JobGone`).
+        return Ok(Generated::JobGone);
     }
     crate::observability::metrics().observe_thumbnail_artifact_bytes(png_bytes);
     tracing::Span::current().record("png_bytes", png_bytes);

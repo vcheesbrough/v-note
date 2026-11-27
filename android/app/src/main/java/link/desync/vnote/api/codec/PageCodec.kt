@@ -5,6 +5,7 @@ import link.desync.vnote.model.LibraryEvent
 import link.desync.vnote.model.MeProfile
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.model.ThumbnailMetadata
+import org.json.JSONArray
 import org.json.JSONObject
 
 // JSON codecs for the REST resources and the library channel. `internal` rather
@@ -66,6 +67,15 @@ internal fun decodeLibraryEvent(json: JSONObject): LibraryEvent =
             )
         else -> error("Unknown realtime event type: $type")
     }
+
+// `DELETE /api/bin`'s answer: the pages it permanently deleted (#631).
+internal fun decodePageIds(json: JSONObject): List<String> {
+    val ids = json.getJSONArray("page_ids")
+    return List(ids.length()) { index -> ids.getString(index) }
+}
+
+// `DELETE /api/bin`'s body: the pages the user confirmed (#631).
+internal fun encodeEmptyBin(pageIds: List<String>): String = JSONObject().put("page_ids", JSONArray(pageIds)).toString()
 
 // The paper is sent on create rather than as a post-create set-paper: one round
 // trip, no revision bump. A null title is omitted, not sent as `null`.

@@ -53,7 +53,11 @@ private sealed interface PendingPurge {
         val page: PageSummary,
     ) : PendingPurge
 
-    data object All : PendingPurge
+    // The pages shown when Empty bin was tapped — what the dialog counts and
+    // what is deleted, so a page binned elsewhere meanwhile is never included.
+    data class All(
+        val pages: List<PageSummary>,
+    ) : PendingPurge
 }
 
 @Composable
@@ -64,20 +68,19 @@ internal fun BinScreen(
     onBack: () -> Unit,
     onRestore: (PageSummary) -> Unit,
     onDeletePermanently: (PageSummary) -> Unit,
-    onEmptyBin: () -> Unit,
+    onEmptyBin: (List<PageSummary>) -> Unit,
 ) {
     BackHandler(onBack = onBack)
     var pending by remember { mutableStateOf<PendingPurge?>(null) }
     pending?.let { purge ->
         PurgeDialog(
             purge = purge,
-            binnedCount = pages.size,
             onDismiss = { pending = null },
             onConfirm = {
                 pending = null
                 when (purge) {
                     is PendingPurge.One -> onDeletePermanently(purge.page)
-                    PendingPurge.All -> onEmptyBin()
+                    is PendingPurge.All -> onEmptyBin(purge.pages)
                 }
             },
         )
@@ -95,7 +98,7 @@ internal fun BinScreen(
                 maxLines = 1,
             )
             TextButton(
-                onClick = { pending = PendingPurge.All },
+                onClick = { pending = PendingPurge.All(pages) },
                 enabled = pages.isNotEmpty(),
                 modifier = Modifier.testTag("empty-bin"),
             ) {
@@ -205,7 +208,6 @@ private fun BinRow(
 @Composable
 private fun PurgeDialog(
     purge: PendingPurge,
-    binnedCount: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -214,8 +216,8 @@ private fun PurgeDialog(
             is PendingPurge.One ->
                 "Delete permanently?" to
                     "${purge.page.displayTitle()} and all its ink will be deleted. This can't be undone."
-            PendingPurge.All -> {
-                val what = if (binnedCount == 1) "1 page" else "$binnedCount pages"
+            is PendingPurge.All -> {
+                val what = if (purge.pages.size == 1) "1 page" else "${purge.pages.size} pages"
                 "Empty the bin?" to "$what and all their ink will be deleted. This can't be undone."
             }
         }

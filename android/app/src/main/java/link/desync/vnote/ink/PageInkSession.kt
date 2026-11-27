@@ -89,6 +89,12 @@ class PageInkSession(
     var binnedAt by mutableStateOf<String?>(null)
         private set
 
+    // Why the notice's last Restore failed, shown in the notice so a failed
+    // tap does not look like a slow one; null once a restore lands or the
+    // page is restored from elsewhere.
+    var restoreError by mutableStateOf<String?>(null)
+        private set
+
     private var sessionId: String? = null
     private var lastSeq: Long = 0
     private val seenBatchIds = mutableSetOf<String>()
@@ -335,7 +341,7 @@ class PageInkSession(
             is PageEvent.TombstoneBatch -> onTombstoneBatch(event)
             is PageEvent.PaperChanged -> onPaperChanged(event)
             is PageEvent.PageBinned -> binnedAt = event.binnedAt
-            PageEvent.PageRestored -> binnedAt = null
+            PageEvent.PageRestored -> restored()
             is PageEvent.Failure -> onFailure(event)
         }
     }
@@ -346,12 +352,18 @@ class PageInkSession(
     fun restore() {
         scope.launch(Dispatchers.Main) {
             apiClient.restorePage(pageId).fold(
-                onSuccess = { binnedAt = null },
+                onSuccess = { restored() },
                 onFailure = { failure ->
                     AppLog.w(TAG, "restoring the page from the bin failed", failure, context = screen)
+                    restoreError = failure.message ?: RESTORE_FAILED
                 },
             )
         }
+    }
+
+    private fun restored() {
+        binnedAt = null
+        restoreError = null
     }
 
     private fun onWelcome(event: PageEvent.Welcome) {
@@ -362,7 +374,7 @@ class PageInkSession(
         status = null
         // A binned page says so straight after `welcome`, so a page restored
         // while this device was away comes back without the notice.
-        binnedAt = null
+        restored()
         reconnectAttempts = 0
         refreshedAfterUnauthorized = false
         // Authoritative on every (re)connect, which is what
@@ -754,6 +766,7 @@ class PageInkSession(
         private const val TOMBSTONE_FAILED = "tombstone_failed"
         private const val PAPER_FAILED = "paper_failed"
         private const val COMMIT_FAILED = "commit_failed"
+        private const val RESTORE_FAILED = "Restoring the page failed"
         private const val CLOSED_DETAIL = "connection closed"
         private val RETRYABLE =
             setOf(PageStatusKind.Disconnected, PageStatusKind.SessionExpired, PageStatusKind.Rejected)
