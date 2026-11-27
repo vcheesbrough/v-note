@@ -158,8 +158,8 @@ class PagePaperInstrumentedTest {
     }
 
     /**
-     * Until the page has caught up the control is disabled; the connecting
-     * banner explains why. There is no edit lease to wait for (#630).
+     * Until the page has caught up (welcomed and its replay applied) the
+     * control is disabled. There is no edit lease to wait for (#630).
      */
     @Test
     fun thePaperControlIsDisabledUntilThePageCatchesUp() {
