@@ -135,16 +135,23 @@ class ContractFixtureTest {
             PageEvent.Welcome(
                 sessionId = "session_abcdef0123456789",
                 lastSeq = 2,
-                leaseHolder = HOLDER,
                 paper = Paper.SquaredSmall,
             ),
             decodePageEvent(fixture("page-server-welcome.json")),
         )
     }
 
+    // Protocol v8 retired the edit lease (#630): its messages are no longer
+    // part of the contract, so the codec has no event for them.
     @Test
-    fun leaseDeniedDecodes() {
-        assertEquals(PageEvent.LeaseDenied(HOLDER), decodePageEvent(fixture("page-server-lease-denied.json")))
+    fun retiredLeaseMessagesDecodeToNothing() {
+        for (retired in listOf(
+            """{"type":"lease-granted"}""",
+            """{"type":"lease-denied","holder":"session_b"}""",
+            """{"type":"lease-changed","holder":"session_b"}""",
+        )) {
+            assertNull(retired, decodePageEvent(JSONObject(retired)))
+        }
     }
 
     @Test
@@ -319,12 +326,9 @@ class ContractFixtureTest {
         )
     }
 
-    /** No fixtures exist for these; their wire types are pinned by the Rust schema gate. */
+    /** No fixture exists for this; its wire type is pinned by the Rust schema gate. */
     @Test
-    fun leaseAndTombstoneMessagesEncode() {
-        assertJsonEquals(JSONObject("""{"type":"acquire-lease"}"""), encodeAcquireLease())
-        assertJsonEquals(JSONObject("""{"type":"renew-lease"}"""), encodeRenewLease())
-        assertJsonEquals(JSONObject("""{"type":"release-lease"}"""), encodeReleaseLease())
+    fun tombstoneMessageEncodes() {
         assertJsonEquals(
             JSONObject("""{"type":"commit-tombstones","client_mutation_id":"erase_1","stroke_ids":["s1","s2"]}"""),
             encodeCommitTombstones("erase_1", listOf("s1", "s2")),
@@ -383,7 +387,6 @@ class ContractFixtureTest {
     private companion object {
         const val PAGE_ID = "page_01j00000000000000000000000"
         const val CREATED_AT = "2026-06-10T22:00:00Z"
-        const val HOLDER = "session_fedcba9876543210"
         const val BATCH_A = "batch_aaaaaaaaaaaaaaaaaaaaaaaa"
         const val BATCH_B = "batch_bbbbbbbbbbbbbbbbbbbbbbbb"
 
@@ -399,7 +402,6 @@ class ContractFixtureTest {
                 "page-client-set-paper.json",
                 "page-client-subscribe.json",
                 "page-replay.json",
-                "page-server-lease-denied.json",
                 "page-server-page-replay.json",
                 "page-server-paper-changed.json",
                 "page-server-stroke-batch.json",

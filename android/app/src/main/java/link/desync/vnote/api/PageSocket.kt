@@ -1,10 +1,7 @@
 package link.desync.vnote.api
 
-import link.desync.vnote.api.codec.encodeAcquireLease
 import link.desync.vnote.api.codec.encodeCommitBatch
 import link.desync.vnote.api.codec.encodeCommitTombstones
-import link.desync.vnote.api.codec.encodeReleaseLease
-import link.desync.vnote.api.codec.encodeRenewLease
 import link.desync.vnote.api.codec.encodeSetPaper
 import link.desync.vnote.api.codec.encodeSubscribe
 import link.desync.vnote.ink.Paper
@@ -17,18 +14,6 @@ class PageSocket(
 ) {
     fun subscribe(fromSeq: Long) {
         webSocket.send(encodeSubscribe(fromSeq))
-    }
-
-    fun acquireLease() {
-        webSocket.send(encodeAcquireLease())
-    }
-
-    fun renewLease() {
-        webSocket.send(encodeRenewLease())
-    }
-
-    fun releaseLease() {
-        webSocket.send(encodeReleaseLease())
     }
 
     fun commitBatch(

@@ -60,13 +60,15 @@ class PageCanvasInputInstrumentedTest {
     private lateinit var tokenStore: TokenStore
     private lateinit var apiClient: ApiClient
     private val seedDelivered = CountDownLatch(1)
-    private val leaseGranted = CountDownLatch(1)
-    private val leaseRequested = CountDownLatch(1)
+    private val subscribed = CountDownLatch(1)
 
-    // When set, `acquire-lease` is parked rather than answered, so a test can
-    // ink in the window before the grant (#390); [grantDeferredLease] answers it.
-    private val deferLease = AtomicBoolean(false)
-    private val deferredLeaseSocket = AtomicReference<WebSocket>()
+    // When set, `subscribe` is parked rather than answered, so a test can ink
+    // in the window before the replay lands (#390); [releaseDeferredReplay]
+    // answers it.
+    private val deferReplay = AtomicBoolean(false)
+
+    // The open page socket, so a test can fan out another device's edits.
+    private val pageSocket = AtomicReference<WebSocket>()
     private val mutations = LinkedBlockingQueue<JSONObject>()
     private val requestPaths = ConcurrentLinkedQueue<String>()
     private val pageMessages = ConcurrentLinkedQueue<String>()
@@ -378,14 +380,14 @@ class PageCanvasInputInstrumentedTest {
     }
 
     /**
-     * #390: the lease is granted a round trip after the page is drawn. A stroke
+     * #390: the replay lands a round trip after the page is drawn. A stroke
      * made in that window used to be refused at pen-down; it is now drawn,
-     * held, and sent the moment the lease arrives.
+     * held, and sent the moment the page has caught up.
      */
     @Test
-    fun strokeDrawnBeforeTheLeaseIsGrantedIsCommittedOnceGranted() {
-        deferLease.set(true)
-        openEditor(awaitLease = false)
+    fun strokeDrawnBeforeTheReplayLandsIsCommittedOnceCaughtUp() {
+        deferReplay.set(true)
+        openEditor(awaitCaughtUp = false)
 
         val downTime = android.os.SystemClock.uptimeMillis()
         sendStylus(MotionEvent.ACTION_DOWN, 240f, LIVE_STROKE_Y, downTime = downTime)
@@ -394,11 +396,11 @@ class PageCanvasInputInstrumentedTest {
 
         val held = composeRule.awaitInkPixels { hasInkAt(it, 340, LIVE_STROKE_Y.toInt()) }
         assertTrue("held stroke stays on the canvas", hasInkAt(held, 340, LIVE_STROKE_Y.toInt()))
-        assertNull("nothing is sent without the lease", awaitMutation("commit-batch", 500))
+        assertNull("nothing is sent before the replay lands", awaitMutation("commit-batch", 500))
 
-        grantDeferredLease()
+        releaseDeferredReplay()
         val commit = awaitMutation("commit-batch")
-        assertNotNull("held stroke is committed once the lease is granted", commit)
+        assertNotNull("held stroke is committed once caught up", commit)
         val points = commit!!.getJSONArray("strokes").getJSONObject(0).getJSONArray("points")
         assertEquals("the whole stroke, from its first sample", 240.0, points.getJSONObject(0).getDouble("x"), 1.0)
         assertNull("sent once", awaitMutation("commit-batch", 500))
@@ -813,7 +815,7 @@ class PageCanvasInputInstrumentedTest {
         android.os.SystemClock.sleep(16)
     }
 
-    private fun openEditor(awaitLease: Boolean = true) {
+    private fun openEditor(awaitCaughtUp: Boolean = true) {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             runCatching {
                 composeRule.onNodeWithTag("page-tile-page_input").assertIsDisplayed()
@@ -823,26 +825,85 @@ class PageCanvasInputInstrumentedTest {
         composeRule.onNodeWithTag("page-tile-page_input").performClick()
         composeRule.onNodeWithTag("drawing-tool").assertIsSelected()
         assertTrue(
-            "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
-            composeRule.awaitLatch(seedDelivered, 5_000),
+            "replay requested; requests=$requestPaths messages=$pageMessages",
+            composeRule.awaitLatch(subscribed, 5_000),
         )
-        assertTrue(
-            "edit lease requested; requests=$requestPaths messages=$pageMessages",
-            composeRule.awaitLatch(leaseRequested, 5_000),
-        )
-        if (awaitLease) {
+        if (awaitCaughtUp) {
             assertTrue(
-                "edit lease granted; requests=$requestPaths messages=$pageMessages",
-                composeRule.awaitLatch(leaseGranted, 5_000),
+                "seed stroke delivered; requests=$requestPaths messages=$pageMessages",
+                composeRule.awaitLatch(seedDelivered, 5_000),
             )
+            composeRule.awaitInkPixels { hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }
         }
-        composeRule.awaitInkPixels { hasInkAt(it, SEED_ASSERTION_X, FIRST_STROKE_Y.toInt()) }
     }
 
-    private fun grantDeferredLease() {
-        val socket = checkNotNull(deferredLeaseSocket.get()) { "no lease request was parked" }
-        socket.send("""{"type":"lease-granted"}""")
-        leaseGranted.countDown()
+    private fun releaseDeferredReplay() {
+        val socket = checkNotNull(pageSocket.get()) { "no page socket" }
+        sendReplay(socket)
+    }
+
+    private fun sendReplay(webSocket: WebSocket) {
+        webSocket.send(seedStrokeBatch)
+        webSocket.send("""{"type":"synced","last_seq":1}""")
+        seedDelivered.countDown()
+    }
+
+    /**
+     * #630 acceptance 4: another device's stroke arrives while this user is
+     * mid-stroke. It is painted at once, and the stroke under the nib is
+     * neither dropped nor corrupted: it stays on screen through the arrival,
+     * keeps taking samples, and is committed whole — from its first sample to
+     * its last — when the pen lifts.
+     */
+    @Test
+    fun aRemoteStrokeArrivingMidStrokeLeavesTheStrokeInProgressIntact() {
+        openEditor()
+
+        val downTime = android.os.SystemClock.uptimeMillis()
+        sendStylus(MotionEvent.ACTION_DOWN, 240f, LIVE_STROKE_Y, downTime = downTime)
+        for (x in 260..340 step 20) {
+            sendStylus(MotionEvent.ACTION_MOVE, x.toFloat(), LIVE_STROKE_Y, downTime = downTime)
+        }
+
+        pageSocket.get().send(remoteStrokeBatch)
+        val arrived =
+            composeRule.awaitInkPixels {
+                hasInkAt(it, SEED_ASSERTION_X, REMOTE_STROKE_Y.toInt()) && hasInkAt(it, 300, LIVE_STROKE_Y.toInt())
+            }
+        assertTrue("the remote stroke is painted live", hasInkAt(arrived, SEED_ASSERTION_X, REMOTE_STROKE_Y.toInt()))
+        assertTrue("the stroke in progress is still on screen", hasInkAt(arrived, 300, LIVE_STROKE_Y.toInt()))
+        assertNull("the stroke in progress is not committed early", awaitMutation("commit-batch", 300))
+
+        for (x in 360..460 step 20) {
+            sendStylus(MotionEvent.ACTION_MOVE, x.toFloat(), LIVE_STROKE_Y, downTime = downTime)
+        }
+        val continued = composeRule.awaitInkPixels { hasInkAt(it, 440, LIVE_STROKE_Y.toInt()) }
+        assertTrue("the stroke keeps drawing after the arrival", hasInkAt(continued, 440, LIVE_STROKE_Y.toInt()))
+        sendStylus(MotionEvent.ACTION_UP, 460f, LIVE_STROKE_Y, downTime = downTime)
+
+        val commit = awaitMutation("commit-batch")
+        assertNotNull("the stroke is committed on lift", commit)
+        val strokes = commit!!.getJSONArray("strokes")
+        assertEquals("one stroke", 1, strokes.length())
+        val points = strokes.getJSONObject(0).getJSONArray("points")
+        val xs = (0 until points.length()).map { points.getJSONObject(it).getDouble("x") }
+        assertEquals("from its first sample", 240.0, xs.first(), 1.0)
+        assertEquals("to its last", 460.0, xs.last(), 1.0)
+        assertTrue("with the samples on both sides of the arrival: $xs", xs.any { it in 330.0..350.0 } && xs.any { it in 350.0..370.0 })
+        assertTrue("in drawing order: $xs", xs.zipWithNext().all { (a, b) -> b >= a })
+        assertTrue(
+            "every point on the line it was drawn on",
+            (0 until points.length()).all {
+                kotlin.math.abs(points.getJSONObject(it).getDouble("y") - LIVE_STROKE_Y) < 1.0
+            },
+        )
+        assertNull("committed once", awaitMutation("commit-batch", 500))
+
+        val after =
+            composeRule.awaitInkPixels {
+                hasInkAt(it, 400, LIVE_STROKE_Y.toInt()) && hasInkAt(it, SEED_ASSERTION_X, REMOTE_STROKE_Y.toInt())
+            }
+        assertTrue("both strokes stay on the page", hasInkAt(after, 400, LIVE_STROKE_Y.toInt()))
     }
 
     /**
@@ -1048,6 +1109,7 @@ class PageCanvasInputInstrumentedTest {
                         webSocket: WebSocket,
                         response: okhttp3.Response,
                     ) {
+                        pageSocket.set(webSocket)
                         webSocket.send("""{"type":"welcome","session_id":"input-editor","last_seq":1}""")
                     }
 
@@ -1059,22 +1121,11 @@ class PageCanvasInputInstrumentedTest {
                         val message = JSONObject(text)
                         when (message.getString("type")) {
                             "subscribe" -> {
-                                webSocket.send(seedStrokeBatch)
-                                webSocket.send("""{"type":"synced","last_seq":1}""")
-                                seedDelivered.countDown()
-                            }
-                            "acquire-lease" -> {
-                                if (deferLease.get()) {
-                                    deferredLeaseSocket.set(webSocket)
-                                } else {
-                                    webSocket.send("""{"type":"lease-granted"}""")
-                                    leaseGranted.countDown()
-                                }
-                                leaseRequested.countDown()
+                                if (!deferReplay.get()) sendReplay(webSocket)
+                                subscribed.countDown()
                             }
                             "commit-batch" -> mutations.offer(message)
                             "commit-tombstones" -> mutations.offer(message)
-                            "release-lease" -> webSocket.close(1000, "lease released")
                         }
                     }
 
@@ -1094,6 +1145,13 @@ class PageCanvasInputInstrumentedTest {
             FIRST_STROKE_Y,
         )},${strokeJson("seed-second", SECOND_STROKE_Y)}]}"""
 
+    // Another device's stroke, fanned out to this session after the replay.
+    private val remoteStrokeBatch =
+        """{"type":"stroke-batch","seq":2,"client_batch_id":"other-device","strokes":[${strokeJson(
+            "remote-stroke",
+            REMOTE_STROKE_Y,
+        )}]}"""
+
     private fun strokeJson(
         id: String,
         y: Float,
@@ -1103,6 +1161,9 @@ class PageCanvasInputInstrumentedTest {
     companion object {
         private const val FIRST_STROKE_Y = 200f
         private const val SECOND_STROKE_Y = 400f
+
+        // Below both seed strokes, clear of the live stroke.
+        private const val REMOTE_STROKE_Y = 500f
 
         // The clear band between the two seed strokes.
         private const val LIVE_STROKE_Y = 300f

@@ -1,7 +1,8 @@
 import { expect, request, test, type APIRequestContext, type Page } from '../csp-guard';
 
 // Page paper (rule lines) e2e. Covers the create-with-paper round trip through
-// every read path, the lease gate, thumbnail regeneration with old-URL
+// every read path, two sessions setting it at once (last arrival wins, #630),
+// thumbnail regeneration with old-URL
 // immutability preserved, the inkless-page rule (library re-sorts, no revision
 // bump, no paper-only thumbnail), the same-value no-op, and the graded density
 // cull in the SPA renderer.
@@ -51,39 +52,50 @@ test.describe('page paper', () => {
     expect((await legacy.json()).page.paper).toBe('none');
   });
 
-  test('set-paper requires the edit lease', async ({ page, request }) => {
-    const pageId = await createPage(request, uniqueTitle('paper-lease'));
+  // #630: there is no edit lease, so two sessions may set the paper at the
+  // same moment. Neither is refused; both see every change in the same order,
+  // and the page — read back, re-welcomed, and drawn by an open SPA viewer —
+  // ends on the last arrival.
+  test('set-paper from two sessions at once converges on the last arrival everywhere', async ({ page, request }) => {
+    const title = uniqueTitle('paper-concurrent');
+    const pageId = await createPage(request, title);
+    const openPage = page.getByRole('button', { name: `Open ${title}`, exact: true });
+    await openPage.waitFor({ state: 'visible', timeout: 5_000 }).catch(async () => {
+      await page.reload({ waitUntil: 'load' });
+      await expect(openPage).toBeVisible({ timeout: 5_000 });
+    });
+    await openPage.click();
+    await expect(page.getByLabel('Read-only ink canvas')).toBeVisible();
 
-    // `set-paper` acquires-or-renews like the ink commits do, so a lone session
-    // is granted implicitly. Hold the lease from a second session to see the
-    // refusal.
-    const holderTicket = await realtimeTicket(request);
-    const secondTicket = await realtimeTicket(request);
     const result = await driveTwoSockets(page, {
       pageId,
-      holderTicket,
-      secondTicket,
-      holderActions: [{ delayMs: 50, message: { type: 'acquire-lease' } }],
-      secondActions: [
-        {
-          delayMs: 400,
-          message: { type: 'set-paper', client_mutation_id: 'paper-denied', paper: 'squared-large' },
-        },
+      firstTicket: await realtimeTicket(request),
+      secondTicket: await realtimeTicket(request),
+      firstActions: [
+        { delayMs: 300, message: { type: 'set-paper', client_mutation_id: 'paper-first', paper: 'ruled-wide' } },
       ],
-      settleMs: 600,
+      secondActions: [
+        { delayMs: 300, message: { type: 'set-paper', client_mutation_id: 'paper-second', paper: 'squared-large' } },
+      ],
+      settleMs: 800,
     });
+    const changes = (messages: any[]) =>
+      messages.filter((message) => message.type === 'paper-changed').map((m) => `${m.revision}:${m.paper}`);
     expect(
-      result.second.some((message) => message.type === 'lease-denied'),
-      'the non-holder is refused',
-    ).toBeTruthy();
-    expect(
-      result.second.some((message) => message.type === 'paper-changed'),
-      'no paper change is broadcast',
-    ).toBeFalsy();
+      [...result.first, ...result.second].filter((m) => m.type === 'error' || String(m.type).startsWith('lease')),
+      'neither session is refused',
+    ).toEqual([]);
+    expect(changes(result.first), 'both changes reach the first session').toHaveLength(2);
+    expect(changes(result.second), 'both sessions see the same order').toEqual(changes(result.first));
+    const last = result.first.filter((m) => m.type === 'paper-changed').at(-1).paper;
+    expect(['ruled-wide', 'squared-large']).toContain(last);
 
-    // …and the page is unchanged.
+    // The page itself, a fresh welcome and the open viewer all agree.
     const after = await request.get(`/api/pages/${pageId}`);
-    expect((await after.json()).page.paper).toBe('none');
+    expect((await after.json()).page.paper).toBe(last);
+    const snapshot = await driveSocket(page, { pageId, ticket: await realtimeTicket(request), actions: [], settleMs: 300 });
+    expect(snapshot.messages.find((message) => message.type === 'welcome')?.paper).toBe(last);
+    await expect.poll(() => page.evaluate(() => (window as any).__vNoteInkPaper)).toBe(last);
   });
 
   test('a paper change on an inked page mints a new thumbnail and leaves the old URL immutable', async ({
@@ -98,7 +110,6 @@ test.describe('page paper', () => {
       pageId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: {
@@ -123,7 +134,6 @@ test.describe('page paper', () => {
       pageId,
       ticket: paperTicket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: {
@@ -181,7 +191,6 @@ test.describe('page paper', () => {
       pageId: olderId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: {
@@ -219,7 +228,6 @@ test.describe('page paper', () => {
       pageId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: {
@@ -241,7 +249,6 @@ test.describe('page paper', () => {
       pageId,
       ticket: noopTicket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           // Already 'ruled-wide' — value-idempotent.
@@ -281,7 +288,6 @@ test.describe('page paper', () => {
       pageId,
       ticket,
       actions: [
-        { delayMs: 50, message: { type: 'acquire-lease' } },
         {
           delayMs: 100,
           message: {
@@ -468,20 +474,20 @@ async function driveSocket(
   }, params);
 }
 
-/** Two concurrent sessions on one page, so the single-editor lease can be exercised. */
+/** Two concurrent sessions on one page, editing it at the same time (#630). */
 async function driveTwoSockets(
   page: Page,
   params: {
     pageId: string;
-    holderTicket: string;
+    firstTicket: string;
     secondTicket: string;
-    holderActions: SocketAction[];
+    firstActions: SocketAction[];
     secondActions: SocketAction[];
     settleMs: number;
   },
-): Promise<{ holder: any[]; second: any[] }> {
+): Promise<{ first: any[]; second: any[] }> {
   return page.evaluate(
-    async ({ pageId, holderTicket, secondTicket, holderActions, secondActions, settleMs }) => {
+    async ({ pageId, firstTicket, secondTicket, firstActions, secondActions, settleMs }) => {
       const origin = location.origin.replace(/^http/, 'ws');
       const open = (ticket: string) => {
         const ws = new WebSocket(
@@ -515,18 +521,18 @@ async function driveTwoSockets(
         }
       };
 
-      const holder = open(holderTicket);
+      const first = open(firstTicket);
       const second = open(secondTicket);
-      await Promise.all([drive(holder, holderActions), drive(second, secondActions)]);
+      await Promise.all([drive(first, firstActions), drive(second, secondActions)]);
       await new Promise((resolve) => setTimeout(resolve, settleMs));
-      for (const socket of [holder, second]) {
+      for (const socket of [first, second]) {
         try {
           socket.ws.close();
         } catch {
           /* already closed */
         }
       }
-      return { holder: holder.messages, second: second.messages };
+      return { first: first.messages, second: second.messages };
     },
     params,
   );

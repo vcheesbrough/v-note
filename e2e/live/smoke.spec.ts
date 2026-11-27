@@ -69,11 +69,9 @@ test('a real user signs in, inks a page that persists, and signs out', async ({ 
       const ticket = await realtimeTicket(context);
       const result = await driveSocket(page, pageId!, ticket, [
         { type: 'subscribe', from_seq: 0 },
-        { type: 'acquire-lease' },
         { type: 'commit-batch', client_batch_id: 'live-smoke-batch', strokes: stroke(strokeId) },
       ]);
       expect(result.opened, 'the page channel WebSocket opened').toBeTruthy();
-      expect(result.messages.some((m) => m.type === 'lease-granted'), 'edit lease granted').toBeTruthy();
       const echoed = result.messages.find(
         (m) => m.type === 'stroke-batch' && m.client_batch_id === 'live-smoke-batch',
       );

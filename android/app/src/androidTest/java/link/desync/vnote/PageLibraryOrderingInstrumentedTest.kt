@@ -51,7 +51,7 @@ class PageLibraryOrderingInstrumentedTest {
     private val pageListRequests = AtomicInteger(0)
     private val librarySocket = AtomicReference<WebSocket>()
     private val realtimeUpgrades = AtomicInteger(0)
-    private val leaseGranted = CountDownLatch(1)
+    private val editorCaughtUp = CountDownLatch(1)
 
     // Every path the fake server was asked for, in arrival order.
     private val requestPaths: MutableList<String> = Collections.synchronizedList(mutableListOf())
@@ -202,7 +202,7 @@ class PageLibraryOrderingInstrumentedTest {
 
         composeRule.onNodeWithTag("drawing-tool").assertIsDisplayed().assertIsSelected()
         composeRule.onNodeWithTag("eraser-tool").assertIsDisplayed().assertIsNotSelected()
-        assertTrue("editor lease granted", composeRule.awaitLatch(leaseGranted, 5_000))
+        assertTrue("editor caught up", composeRule.awaitLatch(editorCaughtUp, 5_000))
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("tool-palette").assertDoesNotExist()
         assertEquals(48.dp, composeRule.onNodeWithTag("drawing-tool").getUnclippedBoundsInRoot().width())
@@ -458,14 +458,10 @@ class PageLibraryOrderingInstrumentedTest {
                         text: String,
                     ) {
                         when {
-                            text.contains("\"type\":\"subscribe\"") ->
+                            text.contains("\"type\":\"subscribe\"") -> {
                                 webSocket.send("""{"type":"synced","last_seq":0}""")
-                            text.contains("\"type\":\"acquire-lease\"") -> {
-                                webSocket.send("""{"type":"lease-granted"}""")
-                                leaseGranted.countDown()
+                                editorCaughtUp.countDown()
                             }
-                            text.contains("\"type\":\"release-lease\"") ->
-                                webSocket.close(1000, "lease released")
                         }
                     }
 

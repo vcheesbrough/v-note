@@ -15,7 +15,6 @@ internal fun decodePageEvent(json: JSONObject): PageEvent? =
             PageEvent.Welcome(
                 sessionId = json.getString("session_id"),
                 lastSeq = json.getLong("last_seq"),
-                leaseHolder = json.optString("lease_holder").ifBlank { null },
                 paper = Paper.fromWire(json.optString("paper").ifBlank { null }) ?: Paper.None,
             )
         "stroke-batch" -> decodeStrokeBatch(json)
@@ -26,9 +25,6 @@ internal fun decodePageEvent(json: JSONObject): PageEvent? =
             Paper.fromWire(json.getString("paper"))?.let { paper ->
                 PageEvent.PaperChanged(paper = paper, revision = json.getLong("revision"))
             }
-        "lease-granted" -> PageEvent.LeaseGranted
-        "lease-denied" -> PageEvent.LeaseDenied(json.getString("holder"))
-        "lease-changed" -> PageEvent.LeaseChanged(json.optString("holder").ifBlank { null })
         "error" ->
             PageEvent.Failure(
                 code = json.optString("code"),
@@ -40,12 +36,6 @@ internal fun decodePageEvent(json: JSONObject): PageEvent? =
     }
 
 internal fun encodeSubscribe(fromSeq: Long): String = JSONObject().put("type", "subscribe").put("from_seq", fromSeq).toString()
-
-internal fun encodeAcquireLease(): String = JSONObject().put("type", "acquire-lease").toString()
-
-internal fun encodeRenewLease(): String = JSONObject().put("type", "renew-lease").toString()
-
-internal fun encodeReleaseLease(): String = JSONObject().put("type", "release-lease").toString()
 
 internal fun encodeCommitBatch(
     clientBatchId: String,

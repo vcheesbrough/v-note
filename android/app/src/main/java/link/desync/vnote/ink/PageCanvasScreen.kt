@@ -76,8 +76,8 @@ fun PageCanvasScreen(
         session.connect()
         onDispose { session.disconnect() }
     }
-    // Leaving drops ink the server has not acknowledged — held while the lease
-    // or the connection was missing (#390), or sent and not yet echoed — so
+    // Leaving drops ink the server has not acknowledged — held while the
+    // connection was missing or catching up (#390), or sent and not yet echoed — so
     // ask first. With nothing unsent, back leaves at once, as it always did.
     // Signing in again (#150) leaves the page too, so it asks the same way.
     var unsentOnLeave by remember(page.id) { mutableStateOf<Pair<Int, () -> Unit>?>(null) }

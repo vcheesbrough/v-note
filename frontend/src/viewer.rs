@@ -375,12 +375,8 @@ pub(crate) fn apply_page_event(
                 "server error {code}: {message}"
             )));
         }
-        // Paper is handled by `next_viewer_paper` above; the SPA is a read-only
-        // viewer, so leases never affect what it renders.
-        PageServerMessage::PaperChanged { .. }
-        | PageServerMessage::LeaseGranted
-        | PageServerMessage::LeaseDenied { .. }
-        | PageServerMessage::LeaseChanged { .. } => {}
+        // Paper is handled by `next_viewer_paper` above.
+        PageServerMessage::PaperChanged { .. } => {}
     }
     Ok(())
 }
@@ -572,7 +568,6 @@ mod tests {
         let welcome = PageServerMessage::Welcome {
             session_id: "session_1".to_string(),
             last_seq: 0,
-            lease_holder: None,
             paper: Paper::SquaredLarge,
         };
         assert_eq!(
@@ -600,11 +595,6 @@ mod tests {
         // Every other event leaves paper untouched.
         for event in [
             PageServerMessage::Synced { last_seq: 3 },
-            PageServerMessage::LeaseGranted,
-            PageServerMessage::LeaseDenied {
-                holder: "other".to_string(),
-            },
-            PageServerMessage::LeaseChanged { holder: None },
             PageServerMessage::Error {
                 code: "paper_failed".to_string(),
                 message: "nope".to_string(),

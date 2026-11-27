@@ -29,11 +29,15 @@ import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 // touch handling in CanvasInput.kt (stylus capture and erasing, finger
 // pan/zoom with momentum).
 //
-// Ink is captured whether or not the edit lease is held yet (#390): the
-// session decides what happens to a finished stroke, so the canvas never
-// drops a pen-down because a lease grant is still a round trip away. Only
-// [inkBlocked] stops it: the session knows it cannot edit (another editor
-// holds the lease, or the channel failed).
+// Ink is captured whether or not the page channel has caught up yet (#390):
+// the session decides what happens to a finished stroke, so the canvas never
+// drops a pen-down because the replay is still a round trip away. Only
+// [inkBlocked] stops it: the session knows its ink cannot be stored (the
+// channel failed, or the session expired).
+//
+// Other devices' ink arrives as a new [strokes] list at any moment (#630).
+// It only reaches the committed layer: the stroke under the nib lives in the
+// input controller and the live layer, and survives the recomposition.
 
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)

@@ -217,8 +217,6 @@ async function seedDensePage(page: Page, pageId: string, ticket: string): Promis
       const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
       ws.send(JSON.stringify({ type: 'subscribe', from_seq: 0 }));
       await pause(50);
-      ws.send(JSON.stringify({ type: 'acquire-lease' }));
-      await pause(100);
       for (const batch of batches) {
         ws.send(JSON.stringify(batch));
         await pause(20);

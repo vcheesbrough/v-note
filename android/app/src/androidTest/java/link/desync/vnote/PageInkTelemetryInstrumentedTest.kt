@@ -130,7 +130,6 @@ class PageInkTelemetryInstrumentedTest {
                             val message = JSONObject(text)
                             when (message.getString("type")) {
                                 "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
-                                "acquire-lease" -> webSocket.send("""{"type":"lease-granted"}""")
                                 "commit-batch" ->
                                     webSocket.send(
                                         JSONObject()
@@ -170,7 +169,7 @@ class PageInkTelemetryInstrumentedTest {
 
         val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
         session.connect()
-        assertTrue("lease granted", awaitUntil { session.canEdit })
+        assertTrue("page channel caught up", awaitUntil { session.canEdit })
         session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0), StrokePoint(3.0, 4.0, 120))))
         assertTrue("stroke confirmed", awaitUntil { session.strokes.size == 1 && session.pendingBatchCount == 0 })
         val upgrade = server.takeRequest(5, TimeUnit.SECONDS)!!

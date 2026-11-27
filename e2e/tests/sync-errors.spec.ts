@@ -271,10 +271,9 @@ async function commitStroke(publisher: Page, request: APIRequestContext, pageId:
       const batchId = `${label}-${crypto.randomUUID()}`;
       const result = await new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => resolve(false), 5_000);
-        ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'acquire-lease' })));
         ws.addEventListener('message', (event) => {
           const message = JSON.parse(event.data);
-          if (message.type === 'lease-granted') {
+          if (message.type === 'welcome') {
             ws.send(
               JSON.stringify({
                 type: 'commit-batch',
@@ -302,7 +301,6 @@ async function commitStroke(publisher: Page, request: APIRequestContext, pageId:
           }
         });
       });
-      ws.send(JSON.stringify({ type: 'release-lease' }));
       ws.close();
       return result;
     },

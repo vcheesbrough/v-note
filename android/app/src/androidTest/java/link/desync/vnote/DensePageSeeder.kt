@@ -90,7 +90,6 @@ class DensePageSeeder {
         Log.i(TAG, "seeding page ${page.id} with $strokeCount strokes")
 
         val welcomed = CountDownLatch(1)
-        val leased = CountDownLatch(1)
         val acked = CountDownLatch(strokeCount)
         val failure = AtomicReference<String?>(null)
 
@@ -101,7 +100,6 @@ class DensePageSeeder {
                     override fun onEvent(event: PageEvent) {
                         when (event) {
                             is PageEvent.Welcome -> welcomed.countDown()
-                            PageEvent.LeaseGranted -> leased.countDown()
                             is PageEvent.StrokeBatch -> acked.countDown()
                             is PageEvent.Failure -> failure.set("${event.code}: ${event.message}")
                             else -> Unit
@@ -117,8 +115,6 @@ class DensePageSeeder {
             ) ?: error("could not open page socket")
 
         assertTrue("no welcome", welcomed.await(30, TimeUnit.SECONDS))
-        socket.acquireLease()
-        assertTrue("no lease", leased.await(30, TimeUnit.SECONDS))
 
         val random = Random(SEED)
         repeat(strokeCount) { index ->
@@ -134,7 +130,6 @@ class DensePageSeeder {
         }
 
         val done = acked.await(20, TimeUnit.MINUTES)
-        socket.releaseLease()
         socket.close()
         failure.get()?.let { error("server rejected a batch: $it") }
         assertTrue("only ${strokeCount - acked.count} of $strokeCount batches acked", done)

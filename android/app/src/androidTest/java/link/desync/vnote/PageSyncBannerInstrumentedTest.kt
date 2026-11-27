@@ -52,6 +52,9 @@ class PageSyncBannerInstrumentedTest {
     private val serverUp = AtomicBoolean(true)
     private val pageUpgrades = AtomicInteger(0)
 
+    // Set once the shared page has sent another device's batch.
+    private val remoteInkSent = AtomicBoolean(false)
+
     private val environmentRule =
         object : ExternalResource() {
             override fun before() {
@@ -108,7 +111,7 @@ class PageSyncBannerInstrumentedTest {
      */
     @Test
     fun anUnreachableServerShowsDisconnectedUntilRetryReconnects() {
-        pageMode = PageMode.DropOnLease
+        pageMode = PageMode.DropAfterSubscribe
         openPage()
 
         awaitTag("page-status-disconnected")
@@ -131,16 +134,21 @@ class PageSyncBannerInstrumentedTest {
         assertNoBanner()
     }
 
+    /**
+     * #630: there is no edit lease, so another device inking the same page is
+     * not trouble. Its ink arrives on the open page and no banner appears.
+     */
     @Test
-    fun anotherEditorShowsTheLeaseBannerAndNothingElse() {
-        pageMode = PageMode.LeaseHeldElsewhere
+    fun anotherDeviceInkingThePageShowsNoBanner() {
+        pageMode = PageMode.SharedWithAnotherDevice
         openPage()
 
-        awaitTag("page-status-lease-held")
-        composeRule.onNodeWithText(PageInkSession.LEASE_BLOCKED).assertIsDisplayed()
-        // Waiting for the other editor is not something Retry fixes.
-        composeRule.onAllNodesWithTag("page-status-retry").assertCountEquals(0)
-        composeRule.onAllNodesWithTag("page-status-disconnected").assertCountEquals(0)
+        awaitTagGone("page-status-connecting")
+        composeRule.waitUntil(timeoutMillis = 5_000) { remoteInkSent.get() }
+        // Long enough for the remote batch to be applied and any banner drawn.
+        Thread.sleep(500)
+        composeRule.waitForIdle()
+        assertNoBanner()
     }
 
     @Test
@@ -184,7 +192,7 @@ class PageSyncBannerInstrumentedTest {
         }
     }
 
-    private enum class PageMode { Healthy, DropOnLease, LeaseHeldElsewhere, Unauthorized }
+    private enum class PageMode { Healthy, DropAfterSubscribe, SharedWithAnotherDevice, Unauthorized }
 
     private fun dispatcher(): Dispatcher =
         object : Dispatcher() {
@@ -218,8 +226,7 @@ class PageSyncBannerInstrumentedTest {
                 webSocket: WebSocket,
                 response: okhttp3.Response,
             ) {
-                val holder = if (mode == PageMode.LeaseHeldElsewhere) ""","lease_holder":"other-device"""" else ""
-                webSocket.send("""{"type":"welcome","session_id":"banner-editor","last_seq":0$holder}""")
+                webSocket.send("""{"type":"welcome","session_id":"banner-editor","last_seq":0}""")
             }
 
             override fun onMessage(
@@ -227,16 +234,18 @@ class PageSyncBannerInstrumentedTest {
                 text: String,
             ) {
                 when (JSONObject(text).getString("type")) {
-                    "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
-                    "acquire-lease" ->
-                        if (mode == PageMode.DropOnLease) {
+                    "subscribe" ->
+                        if (mode == PageMode.DropAfterSubscribe) {
                             // Down from here on: every reconnect is refused.
                             serverUp.set(false)
                             webSocket.close(1013, "lagged")
                         } else {
-                            webSocket.send("""{"type":"lease-granted"}""")
+                            webSocket.send("""{"type":"synced","last_seq":0}""")
+                            if (mode == PageMode.SharedWithAnotherDevice) {
+                                webSocket.send(REMOTE_BATCH)
+                                remoteInkSent.set(true)
+                            }
                         }
-                    "release-lease" -> webSocket.close(1000, "lease released")
                 }
             }
 
@@ -272,5 +281,11 @@ class PageSyncBannerInstrumentedTest {
 
     private companion object {
         const val PAGE_ID = "page_banner"
+
+        // Another device's stroke, fanned out to this session.
+        const val REMOTE_BATCH =
+            """{"type":"stroke-batch","seq":1,"client_batch_id":"other-device-batch","strokes":[{"id":"other-stroke",""" +
+                """"style":{"tool_kind":"solid_round","style_version":2,"parameters":{"color":"#1565C0",""" +
+                """"width":4.0,"cap_style":"round","join_style":"round"}},"points":[{"x":40.0,"y":40.0,"t":0}]}]}"""
     }
 }

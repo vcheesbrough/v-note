@@ -7,7 +7,6 @@ sealed interface PageEvent {
     data class Welcome(
         val sessionId: String,
         val lastSeq: Long,
-        val leaseHolder: String?,
         val paper: Paper = Paper.None,
     ) : PageEvent
 
@@ -40,16 +39,6 @@ sealed interface PageEvent {
         val revision: Long,
         val clientMutationId: String,
         val strokeIds: List<String>,
-    ) : PageEvent
-
-    data object LeaseGranted : PageEvent
-
-    data class LeaseDenied(
-        val holder: String,
-    ) : PageEvent
-
-    data class LeaseChanged(
-        val holder: String?,
     ) : PageEvent
 
     data class Failure(

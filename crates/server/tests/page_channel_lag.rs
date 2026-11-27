@@ -218,7 +218,7 @@ async fn a_stalled_subscriber_is_closed_on_lag_and_converges_by_resubscribing(po
         other => panic!("expected the empty replay, got {other:?}"),
     }
 
-    // The publisher holds the lease and commits; a reader task keeps it drained
+    // The publisher commits; a reader task keeps it drained
     // and reports the seq of every echo, so it never lags itself.
     let publisher = open(address, &page_id, None).await;
     let (mut publisher_tx, mut publisher_rx) = publisher.split();
@@ -236,8 +236,6 @@ async fn a_stalled_subscriber_is_closed_on_lag_and_converges_by_resubscribing(po
             }
         }
     });
-    let lease = serde_json::json!({ "type": "acquire-lease" }).to_string();
-    publisher_tx.send(Frame::text(lease)).await.expect("sends");
 
     let total = LARGE_BATCHES + SMALL_BATCHES;
     let mut expected_strokes = BTreeSet::new();
@@ -273,7 +271,6 @@ async fn a_stalled_subscriber_is_closed_on_lag_and_converges_by_resubscribing(po
     let close = loop {
         match next_message(&mut subscriber).await {
             Ok(PageServerMessage::StrokeBatch(batch)) => delivered.push(batch.seq),
-            // The publisher taking the lease is fanned out too.
             Ok(_) => {}
             Err(closed) => break closed,
         }
