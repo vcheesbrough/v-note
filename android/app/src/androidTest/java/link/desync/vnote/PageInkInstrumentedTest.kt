@@ -60,6 +60,20 @@ private val seedStrokeMessage =
     }
     """.trimIndent()
 
+// A page socket that answers the app's close. The app closes its page socket
+// when the session disconnects, and MockWebServer's shutdown waits on a
+// half-closed connection until it gives up. The edit lease used to hide this:
+// every fake closed its side on `release-lease` (#630).
+private open class AnsweringCloses : WebSocketListener() {
+    override fun onClosing(
+        webSocket: WebSocket,
+        code: Int,
+        reason: String,
+    ) {
+        webSocket.close(code, reason)
+    }
+}
+
 @RunWith(AndroidJUnit4::class)
 class PageInkInstrumentedTest {
     private lateinit var server: MockWebServer
@@ -100,7 +114,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -187,7 +201,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -255,7 +269,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -333,7 +347,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -388,7 +402,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -452,7 +466,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -528,7 +542,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -830,7 +844,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -1146,7 +1160,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
@@ -1216,7 +1230,7 @@ class PageInkInstrumentedTest {
             MockResponse
                 .Builder()
                 .webSocketUpgrade(
-                    object : WebSocketListener() {
+                    object : AnsweringCloses() {
                         override fun onOpen(
                             webSocket: WebSocket,
                             response: okhttp3.Response,
