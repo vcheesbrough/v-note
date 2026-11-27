@@ -104,15 +104,40 @@ async fn generate_leaves_out_ink_erased_by_its_revision_and_ink_added_after_it(p
     );
 }
 
+/// A job whose row is gone — its page was permanently deleted (#631), and the
+/// row cascaded with it — acks and drops instead of failing.
 #[sqlx::test(migrations = "./migrations")]
-async fn generate_fails_when_the_job_row_is_missing(pool: PgPool) {
+async fn generate_drops_a_job_whose_page_was_permanently_deleted(pool: PgPool) {
     insert_page(&pool, 1).await;
-
-    let error = generate(&pool, PAGE, 1)
+    insert_batch(&pool, 1, 1, &[stroke("s1")]).await;
+    insert_job(&pool, 1, Paper::None).await;
+    sqlx::query("DELETE FROM pages WHERE id = $1")
+        .bind(PAGE)
+        .execute(&pool)
         .await
-        .expect_err("there is no job row");
+        .expect("page should delete");
 
-    assert!(error.contains("missing"), "{error}");
+    assert_eq!(
+        generate(&pool, PAGE, 1).await,
+        Ok(Generated::PageGone),
+        "a gone page's job is dropped, not failed"
+    );
+}
+
+/// A binned page keeps rendering: its ink is kept, so its preview is too.
+#[sqlx::test(migrations = "./migrations")]
+async fn generate_renders_a_binned_pages_job(pool: PgPool) {
+    insert_page(&pool, 1).await;
+    sqlx::query("UPDATE pages SET binned_at = now() WHERE id = $1")
+        .bind(PAGE)
+        .execute(&pool)
+        .await
+        .expect("page should bin");
+    insert_batch(&pool, 1, 1, &[stroke("s1")]).await;
+    insert_job(&pool, 1, Paper::None).await;
+
+    assert_eq!(generate(&pool, PAGE, 1).await, Ok(Generated::Rendered));
+    assert_eq!(stored(&pool, 1).await.0, "available");
 }
 
 #[sqlx::test(migrations = "./migrations")]

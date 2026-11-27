@@ -45,6 +45,25 @@ class LibraryStateHolderTest {
         assertTrue(holder.pages.isEmpty())
     }
 
+    // #631: a page binned while it is open stays open — its ink is kept and the
+    // page channel's notice offers Restore — while it moves to the bin.
+    @Test
+    fun binningTheOpenPageKeepsItOpenAndFilesItInTheBin() {
+        holder.applyLibraryEvent(LibraryEvent.PageCreated(page("a")))
+        holder.openPage(page("a"))
+
+        val binned = page("a").copy(binnedAt = "2026-11-27T21:00:00Z")
+        holder.applyLibraryEvent(LibraryEvent.PageBinned(binned))
+
+        assertEquals("a", holder.selectedPage?.id)
+        assertTrue(holder.pages.isEmpty())
+        assertEquals(listOf(binned), holder.bin.pages)
+
+        holder.applyLibraryEvent(LibraryEvent.PageRestored(page("a")))
+        assertEquals(listOf("a"), holder.pages.map { it.id })
+        assertTrue(holder.bin.pages.isEmpty())
+    }
+
     @Test
     fun deletingAnotherPageLeavesTheOpenPageOpen() {
         holder.applyLibraryEvent(LibraryEvent.PageCreated(page("a")))
@@ -177,6 +196,14 @@ class LibraryStateHolderTest {
         ): Result<PageSummary> = error("unused")
 
         override suspend fun deletePage(pageId: String): Result<Unit> = error("unused")
+
+        override suspend fun listBin(): Result<List<PageSummary>> = error("unused")
+
+        override suspend fun restorePage(pageId: String): Result<PageSummary> = error("unused")
+
+        override suspend fun deletePagePermanently(pageId: String): Result<Unit> = error("unused")
+
+        override suspend fun emptyBin(): Result<Unit> = error("unused")
 
         override suspend fun fetchThumbnail(url: String): Result<ByteArray> = error("unused")
 

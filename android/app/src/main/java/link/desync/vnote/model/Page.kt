@@ -18,6 +18,9 @@ data class PageSummary(
     val updatedAt: String,
     val thumbnail: ThumbnailMetadata = ThumbnailMetadata.Empty,
     val paper: Paper = Paper.None,
+    // When the page was moved to the bin (RFC 3339), or null for a live page
+    // (#631). Only the bin listing and `page-binned` carry it.
+    val binnedAt: String? = null,
 )
 
 sealed interface ThumbnailMetadata {
@@ -42,8 +45,20 @@ sealed interface LibraryEvent {
         val page: PageSummary,
     ) : LibraryEvent
 
+    // Permanently deleted, from the bin: the page and its ink are gone (#631).
     data class PageDeleted(
         val pageId: String,
+    ) : LibraryEvent
+
+    // Moved to the bin: leaves the library, joins the bin. [page] carries
+    // `binnedAt`.
+    data class PageBinned(
+        val page: PageSummary,
+    ) : LibraryEvent
+
+    // Back from the bin with all its ink: leaves the bin, rejoins the library.
+    data class PageRestored(
+        val page: PageSummary,
     ) : LibraryEvent
 
     data class PageThumbnailUpdated(

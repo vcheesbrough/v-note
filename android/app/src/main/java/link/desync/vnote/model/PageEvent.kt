@@ -41,6 +41,15 @@ sealed interface PageEvent {
         val strokeIds: List<String>,
     ) : PageEvent
 
+    // The page is in the bin (#631): sent after `welcome` on a binned page and
+    // when it is binned while open. Commits are still kept.
+    data class PageBinned(
+        val binnedAt: String,
+    ) : PageEvent
+
+    // The page came back out of the bin.
+    data object PageRestored : PageEvent
+
     data class Failure(
         val code: String,
         val message: String,

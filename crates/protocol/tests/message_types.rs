@@ -45,7 +45,7 @@ fn assert_labels_match_serde<T: Serialize>(
     }
 }
 
-const PAGE_SERVER_VARIANTS: usize = 7;
+const PAGE_SERVER_VARIANTS: usize = 9;
 
 fn page_server_index(message: &PageServerMessage) -> usize {
     match message {
@@ -56,6 +56,8 @@ fn page_server_index(message: &PageServerMessage) -> usize {
         PageServerMessage::Synced { .. } => 4,
         PageServerMessage::PaperChanged { .. } => 5,
         PageServerMessage::Error { .. } => 6,
+        PageServerMessage::PageBinned { .. } => 7,
+        PageServerMessage::PageRestored => 8,
     }
 }
 
@@ -93,6 +95,10 @@ fn page_server_message_types_match_serde_tags() {
             message: "could not parse client message".to_string(),
             client_mutation_id: None,
         },
+        PageServerMessage::PageBinned {
+            binned_at: "2026-11-27T21:00:00Z".to_string(),
+        },
+        PageServerMessage::PageRestored,
     ];
     assert_labels_match_serde(
         &samples,
@@ -138,7 +144,7 @@ fn page_client_message_types_match_serde_tags() {
     );
 }
 
-const LIBRARY_EVENT_VARIANTS: usize = 4;
+const LIBRARY_EVENT_VARIANTS: usize = 6;
 
 fn library_event_index(event: &LibraryEvent) -> usize {
     match event {
@@ -146,6 +152,20 @@ fn library_event_index(event: &LibraryEvent) -> usize {
         LibraryEvent::PageDeleted { .. } => 1,
         LibraryEvent::PageThumbnailUpdated { .. } => 2,
         LibraryEvent::PageUpdated { .. } => 3,
+        LibraryEvent::PageBinned { .. } => 4,
+        LibraryEvent::PageRestored { .. } => 5,
+    }
+}
+
+fn sample_page(binned_at: Option<&str>) -> PageSummary {
+    PageSummary {
+        id: "page_1".to_string(),
+        title: String::new(),
+        created_at: "2026-09-14T00:00:00Z".to_string(),
+        updated_at: "2026-09-14T00:00:00Z".to_string(),
+        thumbnail: ThumbnailMetadata::Empty,
+        paper: Paper::default(),
+        binned_at: binned_at.map(str::to_string),
     }
 }
 
@@ -153,14 +173,7 @@ fn library_event_index(event: &LibraryEvent) -> usize {
 fn library_event_types_match_serde_tags() {
     let samples = [
         LibraryEvent::PageCreated {
-            page: PageSummary {
-                id: "page_1".to_string(),
-                title: String::new(),
-                created_at: "2026-09-14T00:00:00Z".to_string(),
-                updated_at: "2026-09-14T00:00:00Z".to_string(),
-                thumbnail: ThumbnailMetadata::Empty,
-                paper: Paper::default(),
-            },
+            page: sample_page(None),
         },
         LibraryEvent::PageDeleted {
             page_id: "page_1".to_string(),
@@ -172,6 +185,12 @@ fn library_event_types_match_serde_tags() {
         LibraryEvent::PageUpdated {
             page_id: "page_1".to_string(),
             updated_at: "2026-09-14T00:00:00Z".to_string(),
+        },
+        LibraryEvent::PageBinned {
+            page: sample_page(Some("2026-11-27T21:00:00Z")),
+        },
+        LibraryEvent::PageRestored {
+            page: sample_page(None),
         },
     ];
     assert_labels_match_serde(

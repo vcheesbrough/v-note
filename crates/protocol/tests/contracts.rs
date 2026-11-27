@@ -711,3 +711,63 @@ fn deserializes_realtime_fixtures() {
     let reserialized = serde_json::to_value(&updated).expect("page-updated should serialize");
     assert_eq!(reserialized["type"], "page-updated");
 }
+
+/// Protocol v9 (#631): the bin's fixtures — the listing, the two new library
+/// events, the two new page-channel messages, and the permanently-deleted
+/// error class — parse to the variants and values clients branch on.
+#[test]
+fn deserializes_bin_fixtures() {
+    let bin: ListPagesResponse =
+        serde_json::from_str(&fixture("bin.json")).expect("bin fixture should parse");
+    assert_eq!(
+        bin.pages[0].binned_at.as_deref(),
+        Some("2026-11-27T21:00:00Z")
+    );
+
+    let pages: ListPagesResponse =
+        serde_json::from_str(&fixture("pages.json")).expect("pages fixture should parse");
+    assert!(
+        pages.pages.iter().all(|page| page.binned_at.is_none()),
+        "a live page carries no binned_at"
+    );
+
+    match serde_json::from_str(&fixture("library-event-page-binned.json"))
+        .expect("page-binned event should parse")
+    {
+        LibraryEvent::PageBinned { page } => assert!(page.binned_at.is_some()),
+        other => panic!("expected page-binned, got {other:?}"),
+    }
+    match serde_json::from_str(&fixture("library-event-page-restored.json"))
+        .expect("page-restored event should parse")
+    {
+        LibraryEvent::PageRestored { page } => assert!(page.binned_at.is_none()),
+        other => panic!("expected page-restored, got {other:?}"),
+    }
+
+    let binned: PageServerMessage = serde_json::from_str(&fixture("page-server-page-binned.json"))
+        .expect("page-binned message should parse");
+    assert_eq!(
+        binned,
+        PageServerMessage::PageBinned {
+            binned_at: "2026-11-27T21:00:00Z".to_string()
+        }
+    );
+    let restored: PageServerMessage =
+        serde_json::from_str(&fixture("page-server-page-restored.json"))
+            .expect("page-restored message should parse");
+    assert_eq!(restored, PageServerMessage::PageRestored);
+
+    match serde_json::from_str(&fixture("page-server-error-page-deleted.json"))
+        .expect("page_deleted error should parse")
+    {
+        PageServerMessage::Error {
+            code,
+            client_mutation_id,
+            ..
+        } => {
+            assert_eq!(code, protocol::PAGE_DELETED_ERROR);
+            assert!(client_mutation_id.is_some());
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+}

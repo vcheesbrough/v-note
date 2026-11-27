@@ -7,10 +7,26 @@ import link.desync.vnote.model.PageEvent
 import link.desync.vnote.model.PageSummary
 import okhttp3.WebSocket
 
+// The recycle bin's REST calls (#631). Split from [ApiClient], which extends
+// it, so each interface stays one concern.
+interface PageBinApi {
+    // The binned pages, most recently binned first.
+    suspend fun listBin(): Result<List<PageSummary>>
+
+    // Brings a page back from the bin with all its ink.
+    suspend fun restorePage(pageId: String): Result<PageSummary>
+
+    // Permanently deletes one binned page — the only destructive step.
+    suspend fun deletePagePermanently(pageId: String): Result<Unit>
+
+    // Permanently deletes every binned page.
+    suspend fun emptyBin(): Result<Unit>
+}
+
 // The v-note server as the app sees it: the REST calls plus the two realtime
 // channels. [OkHttpApiClient] is the production implementation; screens and the
 // ink session depend on this interface so they can run against a fake.
-interface ApiClient {
+interface ApiClient : PageBinApi {
     // The server this client talks to, as the menu names it.
     val baseUrl: String
 
@@ -27,12 +43,14 @@ interface ApiClient {
         paper: Paper = Paper.None,
     ): Result<PageSummary>
 
+    // Moves the page to the bin (#631) — nothing is destroyed. The bin's own
+    // calls are [PageBinApi]'s.
     suspend fun deletePage(pageId: String): Result<Unit>
 
     suspend fun fetchThumbnail(url: String): Result<ByteArray>
 
-    // Owner-wide library channel: page created/deleted/updated and thumbnail
-    // state. Null when there is no access token.
+    // Owner-wide library channel: page created/binned/restored/deleted/updated
+    // and thumbnail state. Null when there is no access token.
     fun openLibrarySocket(listener: LibraryEventListener): WebSocket?
 
     // Per-page ink channel. Bidirectional: the caller subscribes for gap-fill

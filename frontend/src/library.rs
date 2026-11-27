@@ -55,10 +55,14 @@ pub(crate) fn apply_event(
     selected_page: RwSignal<Option<PageSummary>>,
     event: LibraryEvent,
 ) {
-    // Closing a deleted page is the only cross-signal effect; the list mutation
-    // itself is a pure reducer so it can be unit-tested.
-    if let LibraryEvent::PageDeleted { page_id } = &event {
-        close_if_open(selected_page, page_id);
+    // Closing a page that left the library — moved to the bin or permanently
+    // deleted — is the only cross-signal effect; the list mutation itself is a
+    // pure reducer so it can be unit-tested. The SPA has no bin view (#631),
+    // so a binned page is simply gone from it until it is restored.
+    match &event {
+        LibraryEvent::PageDeleted { page_id } => close_if_open(selected_page, page_id),
+        LibraryEvent::PageBinned { page } => close_if_open(selected_page, &page.id),
+        _ => {}
     }
     pages.update(|items| apply_library_event_to_pages(items, event));
 }
@@ -83,12 +87,15 @@ fn close_if_open(selected_page: RwSignal<Option<PageSummary>>, page_id: &str) {
 /// without a reactive runtime.
 fn apply_library_event_to_pages(items: &mut Vec<PageSummary>, event: LibraryEvent) {
     match event {
-        LibraryEvent::PageCreated { page } => {
+        // A restored page rejoins the library at its old `updated_at`, exactly
+        // as a new one joins it.
+        LibraryEvent::PageCreated { page } | LibraryEvent::PageRestored { page } => {
             items.retain(|existing| existing.id != page.id);
             items.push(page);
             sort_pages_recent_first(items);
         }
         LibraryEvent::PageDeleted { page_id } => items.retain(|page| page.id != page_id),
+        LibraryEvent::PageBinned { page } => items.retain(|existing| existing.id != page.id),
         LibraryEvent::PageThumbnailUpdated { page_id, thumbnail } => {
             if let Some(page) = items.iter_mut().find(|page| page.id == page_id)
                 && thumbnail_seq(&thumbnail) >= thumbnail_seq(&page.thumbnail)
@@ -158,6 +165,7 @@ mod tests {
             updated_at: updated_at.to_string(),
             thumbnail: ThumbnailMetadata::Empty,
             paper: Paper::None,
+            binned_at: None,
         }
     }
 
@@ -249,5 +257,37 @@ mod tests {
             .find(|page| page.id == "b")
             .expect("created page");
         assert_eq!(page.paper, Paper::RuledMarginWide);
+    }
+
+    /// #631: binning takes a page out of the library; restoring puts it back
+    /// at its old place by `updated_at`, and a permanent delete of a page the
+    /// library no longer holds changes nothing.
+    #[test]
+    fn binned_pages_leave_the_library_and_restored_ones_return_in_order() {
+        let mut items = vec![
+            summary("newest", "2026-07-22T12:00:00+00:00"),
+            summary("middle", "2026-07-22T11:00:00+00:00"),
+            summary("oldest", "2026-07-22T10:00:00+00:00"),
+        ];
+        let mut binned = summary("middle", "2026-07-22T11:00:00+00:00");
+        binned.binned_at = Some("2026-11-27T21:00:00+00:00".to_string());
+        apply_library_event_to_pages(&mut items, LibraryEvent::PageBinned { page: binned });
+        assert_eq!(ids(&items), vec!["newest", "oldest"]);
+
+        apply_library_event_to_pages(
+            &mut items,
+            LibraryEvent::PageRestored {
+                page: summary("middle", "2026-07-22T11:00:00+00:00"),
+            },
+        );
+        assert_eq!(ids(&items), vec!["newest", "middle", "oldest"]);
+
+        apply_library_event_to_pages(
+            &mut items,
+            LibraryEvent::PageDeleted {
+                page_id: "gone-already".to_string(),
+            },
+        );
+        assert_eq!(ids(&items), vec!["newest", "middle", "oldest"]);
     }
 }

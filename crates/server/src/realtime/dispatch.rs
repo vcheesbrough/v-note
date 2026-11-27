@@ -14,7 +14,7 @@ use protocol::{
 
 use yawc::frame::Frame;
 
-use super::store::PageStore;
+use super::store::{PageStore, StoreError};
 use crate::AppState;
 
 /// The connection a page-channel message arrived on: the shared state and the
@@ -104,7 +104,10 @@ where
         .await
     {
         Ok(persisted) => persisted,
-        Err(error) => {
+        Err(StoreError::PageGone) => {
+            return reject_purged_page(ctx, sender, "commit_batch", client_batch_id).await;
+        }
+        Err(StoreError::Db(error)) => {
             tracing::error!(error = %error, "stroke commit failed");
             crate::observability::metrics().record_page_mutation("commit_batch", "error");
             return send_page(
@@ -172,7 +175,10 @@ where
         .await
     {
         Ok(persisted) => persisted,
-        Err(error) => {
+        Err(StoreError::PageGone) => {
+            return reject_purged_page(ctx, sender, "commit_tombstones", client_mutation_id).await;
+        }
+        Err(StoreError::Db(error)) => {
             tracing::error!(error = %error, "tombstone commit failed");
             crate::observability::metrics().record_page_mutation("commit_tombstones", "error");
             return send_page(
@@ -229,7 +235,10 @@ where
     // change is broadcast to every session, the sender included.
     let persisted = match ctx.store.persist_paper(ctx.page_id, paper).await {
         Ok(persisted) => persisted,
-        Err(error) => {
+        Err(StoreError::PageGone) => {
+            return reject_purged_page(ctx, sender, "set_paper", client_mutation_id).await;
+        }
+        Err(StoreError::Db(error)) => {
             tracing::error!(error = %error, "paper change failed");
             crate::observability::metrics().record_page_mutation("set_paper", "error");
             return send_page(
@@ -281,6 +290,39 @@ where
     }
     crate::observability::metrics().record_page_mutation("set_paper", "success");
     true
+}
+
+/// Answers a mutation on a page that was permanently deleted while this socket
+/// was open (#631) with the definitive `page_deleted` class: not stored, never
+/// to be stored, and not `commit_failed` — which a client would retry forever.
+async fn reject_purged_page<S, Tx>(
+    ctx: &PageContext<'_, S>,
+    sender: &mut Tx,
+    operation: &'static str,
+    client_mutation_id: String,
+) -> bool
+where
+    Tx: Sink<Frame> + Unpin,
+{
+    tracing::warn!(
+        page_id = ctx.page_id,
+        session_id = ctx.session_id,
+        client_mutation_id = %client_mutation_id,
+        operation,
+        "page-channel mutation rejected: the page was permanently deleted"
+    );
+    crate::observability::metrics().record_page_mutation(operation, "page_gone");
+    send_page(sender, page_deleted_error(Some(client_mutation_id))).await
+}
+
+/// The `page_deleted` error envelope: the reply to a mutation on a permanently
+/// deleted page, and the notice broadcast to its open sessions when it goes.
+pub(crate) fn page_deleted_error(client_mutation_id: Option<String>) -> PageServerMessage {
+    PageServerMessage::Error {
+        code: protocol::PAGE_DELETED_ERROR.to_string(),
+        message: "this page was permanently deleted".to_string(),
+        client_mutation_id,
+    }
 }
 
 /// Tells the owner's library the page was just edited, so it re-sorts.
@@ -562,9 +604,9 @@ mod tests {
     /// log of every call dispatch made.
     #[derive(Default)]
     struct FakeStore {
-        batch: Mutex<Option<Result<PersistedBatch, sqlx::Error>>>,
-        tombstones: Mutex<Option<Result<PersistedTombstones, sqlx::Error>>>,
-        paper: Mutex<Option<Result<PersistedPaper, sqlx::Error>>>,
+        batch: Mutex<Option<Result<PersistedBatch, StoreError>>>,
+        tombstones: Mutex<Option<Result<PersistedTombstones, StoreError>>>,
+        paper: Mutex<Option<Result<PersistedPaper, StoreError>>>,
         replay: (Vec<StrokeBatch>, Vec<TombstoneBatch>),
         head_seq: u64,
         calls: Mutex<Vec<String>>,
@@ -580,9 +622,9 @@ mod tests {
         }
 
         fn take<T>(
-            slot: &Mutex<Option<Result<T, sqlx::Error>>>,
+            slot: &Mutex<Option<Result<T, StoreError>>>,
             call: &str,
-        ) -> Result<T, sqlx::Error> {
+        ) -> Result<T, StoreError> {
             slot.lock()
                 .expect("slot lock")
                 .take()
@@ -603,8 +645,20 @@ mod tests {
             unreachable!("ownership is checked at upgrade, never by dispatch")
         }
 
+        async fn page_was_purged(
+            &self,
+            _page_id: &str,
+            _owner_id: &str,
+        ) -> Result<bool, sqlx::Error> {
+            unreachable!("a purge is checked at upgrade, never by dispatch")
+        }
+
         async fn current_paper(&self, _page_id: &str) -> Result<Paper, sqlx::Error> {
             unreachable!("paper is read for the welcome, never by dispatch")
+        }
+
+        async fn binned_at(&self, _page_id: &str) -> Result<Option<String>, sqlx::Error> {
+            unreachable!("the bin state is read for the welcome, never by dispatch")
         }
 
         async fn max_seq(&self, page_id: &str) -> Result<u64, sqlx::Error> {
@@ -626,7 +680,7 @@ mod tests {
             page_id: &str,
             client_batch_id: &str,
             strokes: &[Stroke],
-        ) -> Result<PersistedBatch, sqlx::Error> {
+        ) -> Result<PersistedBatch, StoreError> {
             let ids = joined(strokes.iter().map(|stroke| stroke.id.as_str()));
             self.record(format!("persist_batch {page_id} {client_batch_id} {ids}"));
             Self::take(&self.batch, "persist_batch")
@@ -637,7 +691,7 @@ mod tests {
             page_id: &str,
             client_mutation_id: &str,
             stroke_ids: &[String],
-        ) -> Result<PersistedTombstones, sqlx::Error> {
+        ) -> Result<PersistedTombstones, StoreError> {
             let ids = joined(stroke_ids.iter().map(String::as_str));
             self.record(format!(
                 "persist_tombstones {page_id} {client_mutation_id} {ids}"
@@ -649,7 +703,7 @@ mod tests {
             &self,
             page_id: &str,
             paper: Paper,
-        ) -> Result<PersistedPaper, sqlx::Error> {
+        ) -> Result<PersistedPaper, StoreError> {
             self.record(format!("persist_paper {page_id} {}", paper.wire_value()));
             Self::take(&self.paper, "persist_paper")
         }
@@ -868,7 +922,7 @@ mod tests {
         let state = AppState::for_tests();
         let mut page = state.realtime.subscribe_page(PAGE);
         let store = FakeStore {
-            batch: Mutex::new(Some(Err(sqlx::Error::RowNotFound))),
+            batch: Mutex::new(Some(Err(sqlx::Error::RowNotFound.into()))),
             ..FakeStore::default()
         };
 
@@ -884,6 +938,52 @@ mod tests {
             }]
         );
         assert!(drain(&mut page).is_empty());
+    }
+
+    /// A page permanently deleted while a session had it open (#631): every
+    /// mutation is answered with the definitive `page_deleted` class — never
+    /// `commit_failed`, which a client would retry forever — names what it
+    /// rejected, and broadcasts nothing.
+    #[tokio::test]
+    async fn every_mutation_on_a_permanently_deleted_page_is_rejected_as_page_deleted() {
+        let state = AppState::for_tests();
+        for (name, message) in every_mutation() {
+            let mut page = state.realtime.subscribe_page(PAGE);
+            let mut library = state.realtime.subscribe_library(OWNER);
+            let store = FakeStore {
+                batch: Mutex::new(Some(Err(StoreError::PageGone))),
+                tombstones: Mutex::new(Some(Err(StoreError::PageGone))),
+                paper: Mutex::new(Some(Err(StoreError::PageGone))),
+                ..FakeStore::default()
+            };
+            let mutation_id = match &message {
+                PageClientMessage::CommitBatch {
+                    client_batch_id, ..
+                } => client_batch_id.clone(),
+                PageClientMessage::CommitTombstones {
+                    client_mutation_id, ..
+                }
+                | PageClientMessage::SetPaper {
+                    client_mutation_id, ..
+                } => client_mutation_id.clone(),
+                PageClientMessage::Subscribe { .. } => unreachable!("not a mutation"),
+            };
+
+            let (keep_open, replies) = handle(&state, &store, message).await;
+
+            assert!(keep_open, "{name}");
+            assert_eq!(
+                replies,
+                [PageServerMessage::Error {
+                    code: protocol::PAGE_DELETED_ERROR.to_string(),
+                    message: "this page was permanently deleted".to_string(),
+                    client_mutation_id: Some(mutation_id),
+                }],
+                "{name}"
+            );
+            assert!(drain(&mut page).is_empty(), "{name}");
+            assert!(drain(&mut library).is_empty(), "{name}");
+        }
     }
 
     #[tokio::test]
@@ -1061,7 +1161,7 @@ mod tests {
     async fn commit_tombstones_failure_echoes_the_client_mutation_id() {
         let state = AppState::for_tests();
         let store = FakeStore {
-            tombstones: Mutex::new(Some(Err(sqlx::Error::RowNotFound))),
+            tombstones: Mutex::new(Some(Err(sqlx::Error::RowNotFound.into()))),
             ..FakeStore::default()
         };
         let message = PageClientMessage::CommitTombstones {

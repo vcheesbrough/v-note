@@ -1019,7 +1019,7 @@ real browser through the real flow:
 | Create a page | `POST /api/pages`; the page is in the library after a reload |
 | Draw a stroke | A stroke batch committed over the page channel (ticket → WSS → commit), echoed with a `seq` |
 | Persistence | After a reload the page opens at `seq 1`, the stroke is on the canvas, and a fresh `subscribe` replays it from Postgres |
-| Clean up | The page is deleted (`204`) and gone from the list |
+| Clean up | The page is moved to the bin and then permanently deleted (`204` each, #631), and gone from both the library and the bin |
 | Sign out | `/auth/logout` clears the cookie; `/api/me` from the same browser is `401` |
 
 **It fails the deployment** that broke signing in or inking. Since #462 it no

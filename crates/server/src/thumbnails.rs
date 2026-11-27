@@ -132,7 +132,17 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
         let started = Instant::now();
         let result = generate(pool, &page_id, source_seq).await;
         let thumbnail = match result {
-            Ok(()) => {
+            Ok(Generated::PageGone) => {
+                // Permanently deleted while queued or rendering (#631): the job
+                // row went with the page. Acked and dropped — nothing failed,
+                // and there is no library tile left to tell.
+                tracing::info!(page_id = %page_id, source_seq, "thumbnail job dropped: the page was permanently deleted");
+                crate::observability::metrics()
+                    .record_page_mutation("generate_thumbnail", "page_gone");
+                crate::observability::metrics().thumbnail_generation_finished();
+                return;
+            }
+            Ok(Generated::Rendered) => {
                 // Size and duration are this span's `png_bytes` and the
                 // thumbnail histograms; the line is the outcome.
                 tracing::info!(page_id = %page_id, source_seq, "thumbnail rendered");
@@ -184,7 +194,16 @@ fn render_permits() -> &'static Semaphore {
     })
 }
 
-async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), String> {
+/// What became of one thumbnail job.
+#[derive(Debug, PartialEq, Eq)]
+enum Generated {
+    Rendered,
+    /// The job's row is gone, which only a permanent deletion of its page does
+    /// (the row cascades with it, #631) — not a failure to retry or report.
+    PageGone,
+}
+
+async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<Generated, String> {
     // Taken before the queries below, not just around the render: the page's
     // whole stroke vector is the larger and more variable allocation, so a
     // permit held only over rasterization would leave every queued job holding
@@ -202,7 +221,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     // place paper is read for rendering, so no caller can pass a stale value
     // (notably `recover_pending`, which re-queues jobs after a restart with no
     // in-memory context at all).
-    let paper: String = sqlx::query_scalar(
+    let Some(paper) = sqlx::query_scalar::<_, String>(
         "SELECT paper FROM page_thumbnails WHERE page_id = $1 AND source_seq = $2",
     )
     .bind(page_id)
@@ -211,7 +230,9 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .instrument(db_query_span!("SELECT", "thumbnail_job_paper"))
     .await
     .map_err(|error| error.to_string())?
-    .ok_or("thumbnail job row is missing")?;
+    else {
+        return Ok(Generated::PageGone);
+    };
     let paper =
         Paper::from_wire(&paper).ok_or_else(|| format!("unknown stored paper {paper:?}"))?;
 
@@ -250,7 +271,7 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
         .map_err(|error| error.to_string())??;
     drop(permit);
     let png_bytes = png.len();
-    sqlx::query(
+    let stored = sqlx::query(
         "UPDATE page_thumbnails SET status = 'available', png = $3 WHERE page_id = $1 AND source_seq = $2",
     )
     .bind(page_id)
@@ -259,11 +280,16 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<(), S
     .execute(metered(pool))
     .instrument(db_query_span!("UPDATE", "thumbnail_store_png"))
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())?
+    .rows_affected();
+    if stored == 0 {
+        // Permanently deleted mid-render: nothing left to store it on.
+        return Ok(Generated::PageGone);
+    }
     crate::observability::metrics().observe_thumbnail_artifact_bytes(png_bytes);
     tracing::Span::current().record("png_bytes", png_bytes);
     cleanup_best_effort(pool, page_id).await;
-    Ok(())
+    Ok(Generated::Rendered)
 }
 
 fn render(paper: Paper, strokes: &[Stroke]) -> Result<Vec<u8>, String> {

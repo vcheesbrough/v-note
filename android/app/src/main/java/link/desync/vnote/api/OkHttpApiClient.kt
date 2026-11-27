@@ -13,6 +13,7 @@ import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.MeProfile
+import link.desync.vnote.model.PageEvent
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.net.HttpClients
 import link.desync.vnote.telemetry.AppLog
@@ -36,6 +37,12 @@ private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
 private const val LOG_TAG = "VNoteApi"
 private const val NORMAL_CLOSURE = 1000
 private const val HTTP_UNAUTHORIZED = 401
+private const val HTTP_GONE = 410
+
+// The page channel's error class for a permanently deleted page (#631), and
+// the words the banner shows for it when the upgrade itself says so.
+internal const val PAGE_DELETED = "page_deleted"
+private const val PAGE_DELETED_MESSAGE = "This page was permanently deleted"
 
 // Thumbnail URLs come from the server whole, so this is the route they match
 // rather than something derived from the URL.
@@ -105,6 +112,36 @@ class OkHttpApiClient(
                 authorizedRequest("$baseUrl/api/pages/$pageId", token, "/api/pages/{page_id}")
                     .delete()
                     .build()
+            }.map { }
+        }
+
+    override suspend fun listBin(): Result<List<PageSummary>> =
+        reachingServer {
+            makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
+                authorizedRequest("$baseUrl/api/bin", token, "/api/bin").get().build()
+            }.mapCatching { body -> decodePageList(JSONObject(body)) }
+        }
+
+    override suspend fun restorePage(pageId: String): Result<PageSummary> =
+        reachingServer {
+            makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
+                authorizedRequest("$baseUrl/api/pages/$pageId/restore", token, "/api/pages/{page_id}/restore")
+                    .post(ByteArray(0).toRequestBody(null))
+                    .build()
+            }.mapCatching { body -> decodePage(JSONObject(body).getJSONObject("page")) }
+        }
+
+    override suspend fun deletePagePermanently(pageId: String): Result<Unit> =
+        reachingServer {
+            makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
+                authorizedRequest("$baseUrl/api/bin/$pageId", token, "/api/bin/{page_id}").delete().build()
+            }.map { }
+        }
+
+    override suspend fun emptyBin(): Result<Unit> =
+        reachingServer {
+            makeAuthorizedApiRequest(retryOnUnauthorized = true) { token ->
+                authorizedRequest("$baseUrl/api/bin", token, "/api/bin").delete().build()
             }.map { }
         }
 
@@ -194,10 +231,21 @@ class OkHttpApiClient(
                     ) {
                         logWebSocketFailure("page realtime", response, t)
                         val message = socketFailureMessage(t, response, "Page connection failed")
-                        if (response?.code == HTTP_UNAUTHORIZED) {
-                            listener.onUnauthorized(message)
-                        } else {
-                            listener.onError(message)
+                        when (response?.code) {
+                            HTTP_UNAUTHORIZED -> listener.onUnauthorized(message)
+                            // Permanently deleted (#631): the same definitive
+                            // class a commit on an open socket gets, so it is
+                            // shown as such rather than retried as a dropped
+                            // connection forever.
+                            HTTP_GONE ->
+                                listener.onEvent(
+                                    PageEvent.Failure(
+                                        code = PAGE_DELETED,
+                                        message = PAGE_DELETED_MESSAGE,
+                                        clientMutationId = null,
+                                    ),
+                                )
+                            else -> listener.onError(message)
                         }
                     }
 

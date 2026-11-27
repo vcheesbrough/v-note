@@ -114,6 +114,54 @@ class ContractFixtureTest {
         )
     }
 
+    // #631: the bin's listing and its two library events carry `binnedAt`
+    // exactly when the page is in the bin.
+    @Test
+    fun binListAndBinEventsDecode() {
+        val binned =
+            PageSummary(
+                id = PAGE_ID,
+                title = "Meeting notes",
+                createdAt = CREATED_AT,
+                updatedAt = "2026-06-10T22:05:00Z",
+                thumbnail = ThumbnailMetadata.Available(3, "/api/pages/$PAGE_ID/thumbnails/3"),
+                paper = Paper.RuledNarrow,
+                binnedAt = "2026-11-27T21:00:00Z",
+            )
+        assertEquals(
+            listOf(binned.copy(paper = Paper.None)),
+            decodePageList(fixture("bin.json")),
+        )
+        assertEquals(
+            LibraryEvent.PageBinned(binned),
+            decodeLibraryEvent(fixture("library-event-page-binned.json")),
+        )
+        assertEquals(
+            LibraryEvent.PageRestored(binned.copy(binnedAt = null)),
+            decodeLibraryEvent(fixture("library-event-page-restored.json")),
+        )
+        assertNull(decodePage(fixture("page.json")).binnedAt)
+    }
+
+    // #631: the page channel's bin notices, and the definitive class for a
+    // permanently deleted page.
+    @Test
+    fun binPageMessagesDecode() {
+        assertEquals(
+            PageEvent.PageBinned("2026-11-27T21:00:00Z"),
+            decodePageEvent(fixture("page-server-page-binned.json")),
+        )
+        assertEquals(PageEvent.PageRestored, decodePageEvent(fixture("page-server-page-restored.json")))
+        assertEquals(
+            PageEvent.Failure(
+                code = "page_deleted",
+                message = "this page was permanently deleted",
+                clientMutationId = "batch_01j00000000000000000000000",
+            ),
+            decodePageEvent(fixture("page-server-error-page-deleted.json")),
+        )
+    }
+
     @Test
     fun everyThumbnailStatusDecodes() {
         assertEquals(ThumbnailMetadata.Empty, decodeThumbnail(JSONObject("""{"status":"empty"}""")))
@@ -392,9 +440,12 @@ class ContractFixtureTest {
 
         val ASSERTED_HERE =
             setOf(
+                "bin.json",
                 "create-page.json",
+                "library-event-page-binned.json",
                 "library-event-page-created.json",
                 "library-event-page-deleted.json",
+                "library-event-page-restored.json",
                 "library-event-page-thumbnail-updated.json",
                 "library-event-page-updated.json",
                 "me.json",
@@ -402,7 +453,10 @@ class ContractFixtureTest {
                 "page-client-set-paper.json",
                 "page-client-subscribe.json",
                 "page-replay.json",
+                "page-server-error-page-deleted.json",
+                "page-server-page-binned.json",
                 "page-server-page-replay.json",
+                "page-server-page-restored.json",
                 "page-server-paper-changed.json",
                 "page-server-stroke-batch.json",
                 "page-server-welcome.json",

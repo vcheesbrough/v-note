@@ -26,6 +26,8 @@ internal fun decodePage(json: JSONObject): PageSummary =
         thumbnail = json.optJSONObject("thumbnail")?.let(::decodeThumbnail) ?: ThumbnailMetadata.Empty,
         // Absent on pre-v5 payloads, which render as blank pages.
         paper = Paper.fromWire(json.optString("paper").ifBlank { null }) ?: Paper.None,
+        // Absent on a live page; the bin listing and `page-binned` carry it.
+        binnedAt = if (json.isNull("binned_at")) null else json.getString("binned_at"),
     )
 
 internal fun decodePageList(json: JSONObject): List<PageSummary> {
@@ -50,6 +52,8 @@ internal fun decodeLibraryEvent(json: JSONObject): LibraryEvent =
     when (val type = json.getString("type")) {
         "page-created" -> LibraryEvent.PageCreated(decodePage(json.getJSONObject("page")))
         "page-deleted" -> LibraryEvent.PageDeleted(json.getString("page_id"))
+        "page-binned" -> LibraryEvent.PageBinned(decodePage(json.getJSONObject("page")))
+        "page-restored" -> LibraryEvent.PageRestored(decodePage(json.getJSONObject("page")))
         "page-thumbnail-updated" ->
             LibraryEvent.PageThumbnailUpdated(
                 json.getString("page_id"),

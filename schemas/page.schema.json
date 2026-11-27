@@ -31,6 +31,11 @@
     "paper": {
       "enum": ["none", "ruled-margin-narrow", "ruled-margin-wide", "ruled-narrow", "ruled-wide", "squared-small", "squared-large"],
       "default": "none"
+    },
+    "binned_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the page was moved to the bin (protocol 9, #631). Absent on a live page."
     }
   }
 }

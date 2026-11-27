@@ -185,7 +185,7 @@ impl RealtimeHub {
             .subscribe()
     }
 
-    pub(super) fn publish_page(&self, page_id: &str, message: PageServerMessage) {
+    pub fn publish_page(&self, page_id: &str, message: PageServerMessage) {
         let sender = {
             let mut channels = self
                 .page_channels

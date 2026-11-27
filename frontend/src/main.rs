@@ -218,7 +218,7 @@ fn PageTile(
                 <button class="page-delete" aria-label=delete_label on:click=move |_| {
                     let page_id = delete_page_id.clone();
                     if web_sys::window()
-                        .and_then(|window| window.confirm_with_message("Delete this page permanently?").ok())
+                        .and_then(|window| window.confirm_with_message("Move this page to the bin? It can be restored from the bin in the Android app.").ok())
                         .unwrap_or(false)
                     {
                         wasm_bindgen_futures::spawn_local(async move {

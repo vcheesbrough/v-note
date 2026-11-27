@@ -113,7 +113,7 @@ fn schema_for_fixture(fixture: &str) -> Option<&'static str> {
         "me.json" => "me.schema.json",
         "meta.json" => "meta.schema.json",
         "page.json" => "page.schema.json",
-        "pages.json" => "pages.schema.json",
+        "pages.json" | "bin.json" => "pages.schema.json",
         "page-replay.json" => "page-replay.schema.json",
         // Note: `page-server-page-replay.json` is matched by the
         // `page-server-` prefix rule below, as the wire *message*.
@@ -212,6 +212,7 @@ fn rest_dtos_serialise_to_their_schemas() {
     assert_roundtrip::<MeResponse>(&registry, "me.json", "me.schema.json");
     assert_roundtrip::<PageSummary>(&registry, "page.json", "page.schema.json");
     assert_roundtrip::<ListPagesResponse>(&registry, "pages.json", "pages.schema.json");
+    assert_roundtrip::<ListPagesResponse>(&registry, "bin.json", "pages.schema.json");
     assert_roundtrip::<CreatePageRequest>(&registry, "create-page.json", "create-page.schema.json");
     assert_roundtrip::<RealtimeTicketResponse>(
         &registry,
@@ -274,6 +275,14 @@ fn sample_page(thumbnail: ThumbnailMetadata) -> PageSummary {
         updated_at: "2026-09-15T00:00:00Z".to_string(),
         thumbnail,
         paper: Paper::RuledMarginNarrow,
+        binned_at: None,
+    }
+}
+
+fn sample_binned_page() -> PageSummary {
+    PageSummary {
+        binned_at: Some("2026-11-27T21:00:00Z".to_string()),
+        ..sample_page(ThumbnailMetadata::Empty)
     }
 }
 
@@ -325,6 +334,15 @@ fn server_samples() -> Vec<PageServerMessage> {
             message: "boom".to_string(),
             client_mutation_id: None,
         },
+        PageServerMessage::Error {
+            code: protocol::PAGE_DELETED_ERROR.to_string(),
+            message: "this page was permanently deleted".to_string(),
+            client_mutation_id: Some("batch_sample".to_string()),
+        },
+        PageServerMessage::PageBinned {
+            binned_at: "2026-11-27T21:00:00Z".to_string(),
+        },
+        PageServerMessage::PageRestored,
     ];
     // Adding a variant to the enum fails to compile here until a sample for
     // it is added above.
@@ -336,6 +354,8 @@ fn server_samples() -> Vec<PageServerMessage> {
             | PageServerMessage::TombstoneBatch(_)
             | PageServerMessage::Synced { .. }
             | PageServerMessage::PaperChanged { .. }
+            | PageServerMessage::PageBinned { .. }
+            | PageServerMessage::PageRestored
             | PageServerMessage::Error { .. } => {}
         }
     }
@@ -382,6 +402,12 @@ fn library_samples() -> Vec<LibraryEvent> {
             page_id: page_id.clone(),
             updated_at: "2026-09-15T00:00:00Z".to_string(),
         },
+        LibraryEvent::PageBinned {
+            page: sample_binned_page(),
+        },
+        LibraryEvent::PageRestored {
+            page: sample_page(ThumbnailMetadata::Empty),
+        },
     ];
     samples.extend(thumbnail_states().into_iter().map(|thumbnail| {
         LibraryEvent::PageThumbnailUpdated {
@@ -394,7 +420,9 @@ fn library_samples() -> Vec<LibraryEvent> {
             LibraryEvent::PageCreated { .. }
             | LibraryEvent::PageDeleted { .. }
             | LibraryEvent::PageThumbnailUpdated { .. }
-            | LibraryEvent::PageUpdated { .. } => {}
+            | LibraryEvent::PageUpdated { .. }
+            | LibraryEvent::PageBinned { .. }
+            | LibraryEvent::PageRestored { .. } => {}
         }
     }
     samples
@@ -522,4 +550,25 @@ fn the_retired_edit_lease_messages_are_rejected() {
             "{retired} must not parse as a server message"
         );
     }
+}
+
+/// Protocol v9 (#631): `page-binned` must carry the binned page's
+/// `binned_at`, and `page-restored` must not — a client files the page by it.
+#[test]
+fn bin_library_events_require_the_matching_bin_state() {
+    let schemas = schemas();
+    let registry = registry(&schemas);
+    let library = validator(&registry, "library-event.schema.json");
+    let live = serde_json::to_value(sample_page(ThumbnailMetadata::Empty)).expect("page");
+    let binned = serde_json::to_value(sample_binned_page()).expect("page");
+    assert!(errors(&library, &json!({ "type": "page-binned", "page": binned })).is_empty());
+    assert!(!errors(&library, &json!({ "type": "page-binned", "page": live })).is_empty());
+    assert!(errors(&library, &json!({ "type": "page-restored", "page": live })).is_empty());
+    assert!(
+        !errors(
+            &library,
+            &json!({ "type": "page-restored", "page": binned })
+        )
+        .is_empty()
+    );
 }

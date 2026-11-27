@@ -38,6 +38,9 @@ internal class LibraryStateHolder(
     var selectedPage by mutableStateOf<PageSummary?>(null)
         private set
 
+    // The bin screen (#631), kept live by this holder's library channel.
+    val bin = BinStateHolder(apiClient, applyEvent = { applyLibraryEvent(it) }, reportError = { error = it })
+
     var error by mutableStateOf<String?>(null)
         private set
 
@@ -87,14 +90,17 @@ internal class LibraryStateHolder(
         }
     }
 
+    // Moves the page to the bin (#631). The page leaves the library at once;
+    // the channel's `page-binned` files it in the bin with its time.
     fun deletePage(page: PageSummary) {
         CoroutineScope(Dispatchers.Main).launch {
             apiClient.deletePage(page.id).fold(
-                // Exactly what the channel's own page-deleted event does: drop
-                // it, close it if open, clear the error.
-                onSuccess = { applyLibraryEvent(LibraryEvent.PageDeleted(page.id)) },
+                onSuccess = {
+                    pages = pages.without(page.id)
+                    error = null
+                },
                 onFailure = { failure ->
-                    error = failure.message ?: "Deleting page failed"
+                    error = failure.message ?: "Moving the page to the bin failed"
                 },
             )
         }
@@ -107,6 +113,7 @@ internal class LibraryStateHolder(
         connectionGeneration += 1
         pages = emptyList()
         selectedPage = null
+        bin.clear()
     }
 
     // Activity teardown.
@@ -114,10 +121,13 @@ internal class LibraryStateHolder(
         librarySocket?.close(1000, "activity destroyed")
     }
 
-    // One library-channel event, on the UI thread: the list follows the event, a
-    // deleted open page is closed, and a live event clears the error banner.
+    // One library-channel event, on the UI thread: both lists follow the event,
+    // a permanently deleted open page is closed, and a live event clears the
+    // error banner. A *binned* open page stays open (#631): its ink is kept and
+    // the page channel's notice offers to restore it.
     internal fun applyLibraryEvent(event: LibraryEvent) {
         pages = pages.applying(event)
+        bin.apply(event)
         if (event is LibraryEvent.PageDeleted && selectedPage?.id == event.pageId) {
             selectedPage = null
             Telemetry.startScreen(LIBRARY_SCREEN)
@@ -200,7 +210,7 @@ internal class LibraryStateHolder(
     }
 }
 
-private const val LIBRARY_SCREEN = "screen.library"
+internal const val LIBRARY_SCREEN = "screen.library"
 
 // Whether a library channel opened as [generation] may still reconnect: it must
 // be the newest channel ([currentGeneration]), and the session must still be

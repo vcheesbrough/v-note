@@ -105,10 +105,18 @@ async fn a_page_is_created_listed_read_and_deleted_only_by_its_owner(pool: PgPoo
         assert_eq!(body, b"page not found", "{label}");
     }
 
+    // Delete moves the page to the bin (#631): out of the library, still
+    // readable by its owner with `binned_at` set. `tests/page_bin.rs` covers
+    // the rest of the lifecycle.
     let (status, _, _) = send(&pool, OWNER, Method::DELETE, &page_uri, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _, _) = send(&pool, OWNER, Method::GET, &page_uri, None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "a deleted page is gone");
+    let (_, _, body) = send(&pool, OWNER, Method::GET, "/api/pages", None).await;
+    let listed: ListPagesResponse = serde_json::from_slice(&body).expect("a page list");
+    assert!(listed.pages.is_empty(), "a binned page leaves the library");
+    let (status, _, body) = send(&pool, OWNER, Method::GET, &page_uri, None).await;
+    assert_eq!(status, StatusCode::OK, "a binned page is still its owner's");
+    let read: PageResponse = serde_json::from_slice(&body).expect("a page response");
+    assert!(read.page.binned_at.is_some());
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -226,8 +234,40 @@ async fn page_mutations_log_at_info_with_their_page_id(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
+    let (status, _, _) = send(
+        &pool,
+        OWNER,
+        Method::POST,
+        &format!("/api/pages/{id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    send(
+        &pool,
+        OWNER,
+        Method::DELETE,
+        &format!("/api/pages/{id}"),
+        None,
+    )
+    .await;
+    let (status, _, _) = send(
+        &pool,
+        OWNER,
+        Method::DELETE,
+        &format!("/api/bin/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
     let events = events.lock().expect("capture lock").clone();
-    for message in ["page created", "page deleted"] {
+    for message in [
+        "page created",
+        "page moved to the bin",
+        "page restored from the bin",
+        "page permanently deleted",
+    ] {
         let line = events.iter().find(|fields| {
             fields.get("message").map(String::as_str) == Some(message)
                 && fields.get("page_id") == Some(&id)

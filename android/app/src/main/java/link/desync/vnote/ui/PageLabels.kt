@@ -18,6 +18,9 @@ fun PageSummary.displayTitle(): String =
 
 fun PageSummary.displayUpdatedAge(): String = updatedAt.approximateRelativeTimestamp()
 
+// When a binned page went to the bin (#631), as the bin lists it.
+fun PageSummary.displayBinnedAge(): String = binnedAt?.let { "Moved to the bin ${it.approximateRelativeTimestamp()}" } ?: "In the bin"
+
 private fun String.compactTimestamp(): String =
     trim()
         .removeSuffix("Z")

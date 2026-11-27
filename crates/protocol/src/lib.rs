@@ -14,7 +14,7 @@ pub use paper::{
     paper_marks, paper_texture_alpha, paper_texture_tile, preview_viewport, visit_paper_marks,
 };
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The request-correlation header. Clients send one per HTTP call and WSS
 /// handshake; the server echoes it on the response and stamps it on every log
@@ -74,6 +74,11 @@ pub struct PageSummary {
     /// so pre-v5 payloads still parse as blank pages.
     #[serde(default)]
     pub paper: Paper,
+    /// When the page was moved to the bin (RFC 3339), or absent for a live
+    /// page (#631, protocol 9). Only the bin listing and `page-binned` carry
+    /// it: the library listing never holds a binned page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binned_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,14 +117,30 @@ pub struct RealtimeTicketResponse {
     pub expires_at: String,
 }
 
+/// The owner's library channel. Since protocol 9 (#631) a page has three
+/// states — live, in the bin, permanently deleted — and each transition has
+/// its own event: `page-binned` (live → bin), `page-restored` (bin → live)
+/// and `page-deleted` (bin → gone, the only destructive one).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum LibraryEvent {
     PageCreated {
         page: PageSummary,
     },
+    /// The page was permanently deleted: it, its ink and everything derived
+    /// from it are gone. Before protocol 9 this was the only delete.
     PageDeleted {
         page_id: String,
+    },
+    /// The page moved to the bin. `page.binned_at` is set; the page leaves
+    /// the library and joins the bin.
+    PageBinned {
+        page: PageSummary,
+    },
+    /// The page came back from the bin with all its ink. `page.binned_at` is
+    /// absent; the page leaves the bin and rejoins the library.
+    PageRestored {
+        page: PageSummary,
     },
     PageThumbnailUpdated {
         page_id: String,
@@ -142,6 +163,8 @@ impl LibraryEvent {
         match self {
             Self::PageCreated { .. } => "page-created",
             Self::PageDeleted { .. } => "page-deleted",
+            Self::PageBinned { .. } => "page-binned",
+            Self::PageRestored { .. } => "page-restored",
             Self::PageThumbnailUpdated { .. } => "page-thumbnail-updated",
             Self::PageUpdated { .. } => "page-updated",
         }
@@ -397,6 +420,13 @@ impl PageClientMessage {
     }
 }
 
+/// The page-channel error code for a mutation on a page that has been
+/// permanently deleted (#631). Its own class, not `commit_failed` (which a
+/// client retries) nor a generic rejection: the server will never accept
+/// anything for this page again, and the client holds the only copy of the
+/// ink it sent. Over REST the same state is `410 Gone`.
+pub const PAGE_DELETED_ERROR: &str = "page_deleted";
+
 /// Server → client messages on the page channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -432,6 +462,15 @@ pub enum PageServerMessage {
         paper: Paper,
         revision: u64,
     },
+    /// The page is in the bin (#631, protocol 9): sent right after `welcome`
+    /// when a session opens a binned page, and broadcast to every open session
+    /// when the page is binned. Commits are still accepted and kept — the page
+    /// simply stays binned — so a client tells its user where the ink went.
+    PageBinned {
+        binned_at: String,
+    },
+    /// The page came back out of the bin; broadcast to every open session.
+    PageRestored,
     /// Recoverable error envelope (e.g. rejected commit).
     ///
     /// `client_mutation_id` names the mutation that failed: the
@@ -440,6 +479,9 @@ pub enum PageServerMessage {
     /// paper change. `commit_failed` is transient (the store could not write;
     /// the batch was not persisted, and re-sending it is idempotent), so a
     /// client retries it; `invalid_stroke_style` is definitive.
+    /// [`PAGE_DELETED_ERROR`] (protocol 9) is definitive too, and distinct: the
+    /// page was permanently deleted, so the client still holds the only copy
+    /// of whatever it was sending.
     Error {
         code: String,
         message: String,
@@ -459,6 +501,8 @@ impl PageServerMessage {
             Self::TombstoneBatch(_) => "tombstone-batch",
             Self::Synced { .. } => "synced",
             Self::PaperChanged { .. } => "paper-changed",
+            Self::PageBinned { .. } => "page-binned",
+            Self::PageRestored => "page-restored",
             Self::Error { .. } => "error",
         }
     }

@@ -377,6 +377,10 @@ pub(crate) fn apply_page_event(
         }
         // Paper is handled by `next_viewer_paper` above.
         PageServerMessage::PaperChanged { .. } => {}
+        // The SPA has no bin (#631): the library channel's `page-binned` closes
+        // the viewer, so the page channel's own notice has nothing to add, and
+        // `page-restored` only ever reaches a viewer that is already open.
+        PageServerMessage::PageBinned { .. } | PageServerMessage::PageRestored => {}
     }
     Ok(())
 }
@@ -595,6 +599,10 @@ mod tests {
         // Every other event leaves paper untouched.
         for event in [
             PageServerMessage::Synced { last_seq: 3 },
+            PageServerMessage::PageBinned {
+                binned_at: "2026-11-27T21:00:00+00:00".to_string(),
+            },
+            PageServerMessage::PageRestored,
             PageServerMessage::Error {
                 code: "paper_failed".to_string(),
                 message: "nope".to_string(),

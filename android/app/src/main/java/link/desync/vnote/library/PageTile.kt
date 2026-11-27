@@ -142,8 +142,9 @@ private fun PageTileFooter(
     }
 }
 
+// The page's thumbnail on ruled card stock; shared with the bin's rows.
 @Composable
-private fun PagePreview(
+internal fun PagePreview(
     apiClient: ApiClient,
     thumbnail: ThumbnailMetadata,
     unavailable: Boolean,

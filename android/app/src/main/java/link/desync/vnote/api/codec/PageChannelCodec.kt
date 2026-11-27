@@ -25,6 +25,8 @@ internal fun decodePageEvent(json: JSONObject): PageEvent? =
             Paper.fromWire(json.getString("paper"))?.let { paper ->
                 PageEvent.PaperChanged(paper = paper, revision = json.getLong("revision"))
             }
+        "page-binned" -> PageEvent.PageBinned(json.getString("binned_at"))
+        "page-restored" -> PageEvent.PageRestored
         "error" ->
             PageEvent.Failure(
                 code = json.optString("code"),

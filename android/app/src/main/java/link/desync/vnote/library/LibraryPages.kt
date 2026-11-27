@@ -22,6 +22,10 @@ internal fun List<PageSummary>.applying(event: LibraryEvent): List<PageSummary> 
     when (event) {
         is LibraryEvent.PageCreated -> upsert(event.page)
         is LibraryEvent.PageDeleted -> without(event.pageId)
+        // The bin (#631): a binned page leaves the library; a restored one
+        // rejoins it at its old place, by its unchanged `updatedAt`.
+        is LibraryEvent.PageBinned -> without(event.page.id)
+        is LibraryEvent.PageRestored -> upsert(event.page)
         is LibraryEvent.PageThumbnailUpdated ->
             map { page ->
                 // A late update for an older revision never replaces a newer thumbnail.
@@ -41,6 +45,26 @@ internal fun List<PageSummary>.applying(event: LibraryEvent): List<PageSummary> 
                 this
             }
         }
+    }
+
+// The bin's list rules (#631): most recently binned first; a binned page joins,
+// a restored or permanently deleted one leaves, and its thumbnail keeps
+// updating like the library's. Every other event concerns live pages only.
+internal fun List<PageSummary>.binApplying(event: LibraryEvent): List<PageSummary> =
+    when (event) {
+        is LibraryEvent.PageBinned ->
+            (filterNot { it.id == event.page.id } + event.page).sortedByDescending { it.binnedAt }
+        is LibraryEvent.PageRestored -> without(event.page.id)
+        is LibraryEvent.PageDeleted -> without(event.pageId)
+        is LibraryEvent.PageThumbnailUpdated ->
+            map { page ->
+                if (page.id == event.pageId && event.thumbnail.sourceSeq() >= page.thumbnail.sourceSeq()) {
+                    page.copy(thumbnail = event.thumbnail)
+                } else {
+                    page
+                }
+            }
+        is LibraryEvent.PageCreated, is LibraryEvent.PageUpdated -> this
     }
 
 internal fun ThumbnailMetadata.sourceSeq(): Long =
