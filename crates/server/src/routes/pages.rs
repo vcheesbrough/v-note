@@ -314,19 +314,24 @@ async fn missing_page(state: &AppState, page_id: &str, owner_id: &str, what: &st
     }
 }
 
-/// [`missing_page`], counted: `page_gone` for the owner's own permanently
-/// deleted page, as the page channel counts it, `not_found` otherwise.
+/// [`missing_page`] (`what` names it in the log line), counted under
+/// `operation`: `page_gone` for the owner's own permanently deleted page, as
+/// the page channel counts it, `not_found` for a missing or foreign one, and
+/// `error` when the lookup itself failed.
 async fn missing_page_metered(
     state: &AppState,
     page_id: &str,
     owner_id: &str,
     operation: &'static str,
+    what: &str,
 ) -> ApiError {
-    let missing = missing_page(state, page_id, owner_id, operation).await;
+    let missing = missing_page(state, page_id, owner_id, what).await;
     let result = if missing == ApiError::PAGE_PURGED {
         "page_gone"
-    } else {
+    } else if missing == ApiError::PAGE_NOT_FOUND {
         "not_found"
+    } else {
+        "error"
     };
     crate::observability::metrics().record_page_mutation(operation, result);
     missing
@@ -391,7 +396,12 @@ pub async fn delete_page(
                 metrics.record_page_mutation("bin_page", "noop");
                 Ok(StatusCode::NO_CONTENT)
             }
-            None => Err(missing_page_metered(&state, &page_id, &claims.sub, "bin_page").await),
+            None => {
+                Err(
+                    missing_page_metered(&state, &page_id, &claims.sub, "bin_page", "page bin")
+                        .await,
+                )
+            }
         };
     };
 
@@ -446,7 +456,14 @@ pub async fn restore_page(
                 metrics.record_page_mutation("restore_page", "noop");
                 Ok(Json(PageResponse { page }))
             }
-            None => Err(missing_page_metered(&state, &page_id, &claims.sub, "restore_page").await),
+            None => Err(missing_page_metered(
+                &state,
+                &page_id,
+                &claims.sub,
+                "restore_page",
+                "page restore",
+            )
+            .await),
         };
     };
 

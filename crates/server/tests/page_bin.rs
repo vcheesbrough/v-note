@@ -484,6 +484,25 @@ async fn permanently_deleting_removes_everything_and_rejects_later_writes_distin
         assert_eq!(body, b"page permanently deleted", "{method} {uri}");
     }
     assert_eq!(upgrade_status(address, &page_id, OWNER).await, 410);
+    // …and a bin or restore of it is counted as `page_gone`, as the page
+    // channel counts it, not as a stranger's `not_found`. Presence is proof:
+    // no other test in this binary bins or restores a purged page.
+    let response = server::observability::metrics_handler().await;
+    let metrics = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body")
+            .to_vec(),
+    )
+    .expect("utf-8");
+    for operation in ["bin_page", "restore_page"] {
+        assert!(
+            metrics.contains(&format!(
+                "v_note_page_mutations_total{{operation=\"{operation}\",result=\"page_gone\"}}"
+            )),
+            "{operation} on a purged page counts page_gone"
+        );
+    }
     // …idempotent for a repeated permanent delete…
     let (status, _) = call(&server, OWNER, Method::DELETE, &purge, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -641,10 +660,14 @@ async fn a_stranger_can_neither_bin_nor_restore_a_page(pool: PgPool) {
     assert_eq!(ids(&listed(&server, "/api/bin").await), [page_id.as_str()]);
 }
 
-/// The library socket is subscribed before its upgrade is answered (#631, the
-/// CI race behind `bin.spec.ts`): a client that loads the page list as soon as
-/// its socket is open must hear every event published from then on, so an
-/// event sent the instant the handshake completes is still delivered.
+/// An event published right after a library socket opens is delivered (#631).
+///
+/// This does **not** deterministically guard the ordering fix behind the CI
+/// race in `bin.spec.ts` (the server subscribing before it answers the
+/// upgrade): the publish here waits on a Postgres `UPDATE` first, so the old
+/// ordering — subscribing in the spawned socket task — would almost always win
+/// too. That ordering is covered by reasoning and the e2e spec; a test that can
+/// observe the hub with no `.await` after the handshake is #636.
 #[sqlx::test(migrations = "./migrations")]
 async fn a_library_socket_hears_an_event_published_the_moment_it_opens(pool: PgPool) {
     let server = serve(&pool).await;
