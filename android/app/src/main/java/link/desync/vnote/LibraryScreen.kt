@@ -64,6 +64,7 @@ internal fun AppScreen(
     onCreatePage: () -> Unit,
     onOpenPage: (PageSummary) -> Unit,
     onDeletePage: (PageSummary) -> Unit,
+    onOpenBin: () -> Unit = {},
 ) {
     var pendingDelete by remember { mutableStateOf<PageSummary?>(null) }
 
@@ -89,6 +90,7 @@ internal fun AppScreen(
             onSignIn = onSignIn,
             onSignOut = onSignOut,
             onCreatePage = onCreatePage,
+            onOpenBin = onOpenBin,
         )
         LibraryBody(
             apiClient = apiClient,
@@ -111,6 +113,7 @@ private fun LibraryTopBar(
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onCreatePage: () -> Unit,
+    onOpenBin: () -> Unit,
 ) {
     VNoteTopBar {
         LibraryMenu(
@@ -118,6 +121,7 @@ private fun LibraryTopBar(
             health = health,
             onMenuOpened = onMenuOpened,
             onSignOut = onSignOut,
+            onOpenBin = onOpenBin,
         )
         Text(
             "v-note",
@@ -151,6 +155,7 @@ private fun LibraryMenu(
     health: String,
     onMenuOpened: () -> Unit,
     onSignOut: () -> Unit,
+    onOpenBin: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -172,6 +177,14 @@ private fun LibraryMenu(
             }
             MenuNote(health, Modifier.testTag("server-health"))
             if (sessionState is SessionState.SignedIn) {
+                DropdownMenuItem(
+                    text = { Text("Bin") },
+                    modifier = Modifier.testTag("open-bin"),
+                    onClick = {
+                        expanded = false
+                        onOpenBin()
+                    },
+                )
                 DropdownMenuItem(
                     text = { Text("Sign out") },
                     onClick = {
@@ -292,9 +305,11 @@ private fun DeletePageDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Delete page?") },
-        text = { Text("This permanently removes ${page.displayTitle()}.") },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("Delete") } },
+        title = { Text("Move to the bin?") },
+        text = { Text("${page.displayTitle()} moves to the bin. You can restore it from there.") },
+        confirmButton = {
+            TextButton(onClick = onConfirm, modifier = Modifier.testTag("confirm-move-to-bin")) { Text("Move to bin") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

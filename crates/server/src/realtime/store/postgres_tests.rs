@@ -328,3 +328,89 @@ async fn pg_page_store_goes_through_the_same_queries(pool: PgPool) {
             .expect("owner check")
     );
 }
+
+/// #631: a binned page is written exactly like a live one — ink, erasures and
+/// paper all land — and stays binned; the store reports its bin state.
+#[sqlx::test(migrations = "./migrations")]
+async fn every_mutation_on_a_binned_page_is_stored_and_the_page_stays_binned(pool: PgPool) {
+    insert_page(&pool, Paper::None).await;
+    sqlx::query("UPDATE pages SET binned_at = now() WHERE id = $1")
+        .bind(PAGE)
+        .execute(&pool)
+        .await
+        .expect("page should bin");
+
+    let batch = persist_batch(&pool, PAGE, "batch_1", &[stroke("s1"), stroke("s2")])
+        .await
+        .expect("a binned page accepts ink");
+    assert_eq!(batch.seq, 1);
+    let erased = persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s1"]))
+        .await
+        .expect("a binned page accepts erasures");
+    assert_eq!(erased.stroke_ids, ["s1"]);
+    assert!(
+        persist_paper(&pool, PAGE, Paper::RuledWide)
+            .await
+            .expect("a binned page accepts paper")
+            .changed
+    );
+
+    assert!(
+        binned_at(&pool, PAGE).await.expect("bin state").is_some(),
+        "still binned"
+    );
+    let (batches, _) = load_page_replay(&pool, PAGE, 0).await.expect("replay");
+    assert_eq!(batches.len(), 1);
+}
+
+/// #631: once the page row is gone (permanently deleted), every mutation is
+/// `PageGone` — the definitive class — and never a database error.
+#[sqlx::test(migrations = "./migrations")]
+async fn every_mutation_on_a_permanently_deleted_page_is_page_gone(pool: PgPool) {
+    insert_page(&pool, Paper::None).await;
+    persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+        .await
+        .expect("first batch");
+    sqlx::query("DELETE FROM pages WHERE id = $1")
+        .bind(PAGE)
+        .execute(&pool)
+        .await
+        .expect("page should delete");
+
+    assert!(matches!(
+        persist_batch(&pool, PAGE, "batch_2", &[stroke("s2")]).await,
+        Err(StoreError::PageGone)
+    ));
+    assert!(matches!(
+        persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s1"])).await,
+        Err(StoreError::PageGone)
+    ));
+    assert!(matches!(
+        persist_paper(&pool, PAGE, Paper::RuledWide).await,
+        Err(StoreError::PageGone)
+    ));
+    assert_eq!(binned_at(&pool, PAGE).await.expect("bin state"), None);
+}
+
+/// #631: `page_was_purged` names only the owner's permanently deleted pages.
+#[sqlx::test(migrations = "./migrations")]
+async fn page_was_purged_is_true_only_for_the_owners_purged_page(pool: PgPool) {
+    sqlx::query("INSERT INTO purged_pages (id, owner_id) VALUES ($1, $2)")
+        .bind(PAGE)
+        .bind(OWNER)
+        .execute(&pool)
+        .await
+        .expect("purged row should insert");
+
+    assert!(page_was_purged(&pool, PAGE, OWNER).await.expect("query"));
+    assert!(
+        !page_was_purged(&pool, PAGE, "someone_else")
+            .await
+            .expect("query")
+    );
+    assert!(
+        !page_was_purged(&pool, "page_never", OWNER)
+            .await
+            .expect("query")
+    );
+}

@@ -2,9 +2,12 @@ package link.desync.vnote.ink
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.DeleteSweep
@@ -13,6 +16,7 @@ import androidx.compose.material3.FilledTonalIconToggleButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -22,10 +26,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,6 +41,7 @@ import link.desync.vnote.api.ApiClient
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.ui.VNoteTopBar
 import link.desync.vnote.ui.displayTitle
+import link.desync.vnote.ui.hasDisplayTitle
 
 // The open-page screen: top bar (back, title, paper, pen and eraser controls), the
 // status banner, and the ink canvas, wired to one PageInkSession.
@@ -161,6 +169,9 @@ fun PageCanvasScreen(
                 Icon(Icons.Outlined.DeleteSweep, contentDescription = "Eraser")
             }
         }
+        session.binnedAt?.let {
+            BinnedPageNotice(page = page, restoreError = session.restoreError, onRestore = session::restore)
+        }
         session.status?.let { status ->
             PageStatusBanner(
                 status = status,
@@ -203,4 +214,50 @@ private fun UnsentInkDialog(
             TextButton(onClick = onLeave, modifier = Modifier.testTag("unsent-ink-leave")) { Text("Leave anyway") }
         },
     )
+}
+
+// Shown while the open page is in the bin (#631) — binned on another device,
+// or opened after it was. Not an error and not a block: ink drawn here is
+// still saved, it just stays in the bin with the page.
+@Composable
+private fun BinnedPageNotice(
+    page: PageSummary,
+    restoreError: String?,
+    onRestore: () -> Unit,
+) {
+    // An untitled page's label is its age, which reads badly mid-sentence.
+    val which = if (page.hasDisplayTitle()) "Page \u201c${page.title}\u201d" else "This page"
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        shape = RoundedCornerShape(7.dp),
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+                .testTag("page-binned-notice")
+                .semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "$which was moved to the bin on another device; your changes are kept there.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                // A failed Restore says so; tapping it again retries.
+                restoreError?.let { error ->
+                    Text(
+                        "Couldn't restore it: $error",
+                        modifier = Modifier.testTag("page-binned-restore-error"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+            TextButton(onClick = onRestore, modifier = Modifier.testTag("page-binned-restore")) { Text("Restore") }
+        }
+    }
 }

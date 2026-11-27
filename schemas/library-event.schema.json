@@ -22,11 +22,36 @@
       "required": ["type", "page_id"],
       "properties": {
         "type": {
-          "const": "page-deleted"
+          "const": "page-deleted",
+          "description": "Since protocol 9: the page was permanently deleted (from the bin)."
         },
         "page_id": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "page"],
+      "description": "The page moved to the bin; page.binned_at is set (protocol 9).",
+      "properties": {
+        "type": { "const": "page-binned" },
+        "page": {
+          "allOf": [{ "$ref": "page.schema.json" }, { "required": ["binned_at"] }]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "page"],
+      "description": "The page came back from the bin with all its ink; page.binned_at is absent (protocol 9).",
+      "properties": {
+        "type": { "const": "page-restored" },
+        "page": {
+          "allOf": [{ "$ref": "page.schema.json" }, { "not": { "required": ["binned_at"] } }]
         }
       }
     },

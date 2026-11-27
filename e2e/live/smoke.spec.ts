@@ -7,7 +7,8 @@ import { isAbandonedSmokePage, smokeTitle } from './leftovers';
 //
 // One test, in order, because each step needs the session the previous one
 // built and the point is the whole journey a user makes: sign in → /api/me →
-// create a page → commit a stroke → both survive a reload → delete → sign out.
+// create a page → commit a stroke → both survive a reload → delete (to the bin,
+// then permanently, #631) → sign out.
 //
 // The account is the blueprint's dedicated smoke user (authentik/blueprint-dev.yaml):
 // its pages are disposable. The page this creates is deleted before sign-out,
@@ -44,10 +45,11 @@ test('a real user signs in, inks a page that persists, and signs out', async ({ 
 
     await test.step('sweep pages abandoned by a killed run', async () => {
       const now = Date.now();
-      for (const leftover of await listPages(context)) {
+      // Live pages and binned ones alike: a run killed between the two steps
+      // of `deletePage` leaves its page in the bin.
+      for (const leftover of [...(await listPages(context)), ...(await listPages(context, '/api/bin'))]) {
         if (isAbandonedSmokePage(leftover.title, now)) {
-          const res = await context.request.delete(`/api/pages/${leftover.id}`);
-          expect([204, 404]).toContain(res.status());
+          await deletePage(context, leftover.id);
         }
       }
     });
@@ -94,11 +96,11 @@ test('a real user signs in, inks a page that persists, and signs out', async ({ 
       expect(replayedStrokeIds(replay.messages)).toContain(strokeId);
     });
 
-    await test.step('delete the page', async () => {
-      const res = await context.request.delete(`/api/pages/${pageId}`);
-      expect(res.status()).toBe(204);
+    await test.step('delete the page: to the bin, then permanently', async () => {
+      await deletePage(context, pageId!);
       deleted = true;
       expect((await listPages(context)).some((p) => p.id === pageId)).toBe(false);
+      expect((await listPages(context, '/api/bin')).some((p) => p.id === pageId)).toBe(false);
     });
 
     await test.step('sign out ends the session', async () => {
@@ -120,7 +122,7 @@ test('a real user signs in, inks a page that persists, and signs out', async ({ 
     // Cleanup on failure. Best effort: the assertion that failed is the one to
     // report, not a cleanup error on top of it.
     if (pageId && !deleted) {
-      await context.request.delete(`/api/pages/${pageId}`).catch(() => undefined);
+      await deletePage(context, pageId).catch(() => undefined);
     }
   }
 });
@@ -192,8 +194,21 @@ async function currentFlowStages(page: Page): Promise<string[]> {
   });
 }
 
-async function listPages(context: BrowserContext): Promise<Array<{ id: string; title: string }>> {
-  const res = await context.request.get('/api/pages');
+/// Deletes a page for good (#631): `DELETE /api/pages/{id}` only moves it to
+/// the bin, and the smoke user's bin is never emptied otherwise. Both steps are
+/// idempotent, so a page already binned or already gone passes.
+async function deletePage(context: BrowserContext, pageId: string) {
+  const binned = await context.request.delete(`/api/pages/${pageId}`);
+  expect([204, 410]).toContain(binned.status());
+  const purged = await context.request.delete(`/api/bin/${pageId}`);
+  expect(purged.status()).toBe(204);
+}
+
+async function listPages(
+  context: BrowserContext,
+  uri = '/api/pages',
+): Promise<Array<{ id: string; title: string }>> {
+  const res = await context.request.get(uri);
   expect(res.status()).toBe(200);
   return (await res.json()).pages;
 }

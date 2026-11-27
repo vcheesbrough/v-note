@@ -1,0 +1,17 @@
+{
+  "pages": [
+    {
+      "id": "page_01j00000000000000000000000",
+      "title": "Meeting notes",
+      "created_at": "2026-06-10T22:00:00Z",
+      "updated_at": "2026-06-10T22:05:00Z",
+      "thumbnail": {
+        "status": "available",
+        "source_seq": 3,
+        "url": "/api/pages/page_01j00000000000000000000000/thumbnails/3"
+      },
+      "paper": "none",
+      "binned_at": "2026-11-27T21:00:00Z"
+    }
+  ]
+}

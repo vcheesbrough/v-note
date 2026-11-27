@@ -99,6 +99,41 @@ class LibraryPagesTest {
         assertEquals(7L, ThumbnailMetadata.Available(7, "/t/7").sourceSeq())
     }
 
+    // #631: a binned page leaves the library and joins the bin, most recently
+    // binned first; restoring reverses both, back at its old library place.
+    @Test
+    fun binningMovesAPageFromTheLibraryToTheBinAndRestoringMovesItBack() {
+        val library = listOf(page("new", "2026-07-22T12:00:00Z"), page("mid", "2026-07-22T11:00:00Z"), page("old", "2026-07-22T10:00:00Z"))
+        val earlier = page("old", "2026-07-22T10:00:00Z").copy(binnedAt = "2026-11-27T20:00:00Z")
+        val later = page("mid", "2026-07-22T11:00:00Z").copy(binnedAt = "2026-11-27T21:00:00Z")
+
+        var pages = library.applying(LibraryEvent.PageBinned(earlier)).applying(LibraryEvent.PageBinned(later))
+        var bin = emptyList<PageSummary>().binApplying(LibraryEvent.PageBinned(earlier)).binApplying(LibraryEvent.PageBinned(later))
+        assertEquals(listOf("new"), pages.ids())
+        assertEquals(listOf("mid", "old"), bin.ids())
+
+        val restored = later.copy(binnedAt = null)
+        pages = pages.applying(LibraryEvent.PageRestored(restored))
+        bin = bin.binApplying(LibraryEvent.PageRestored(restored))
+        assertEquals(listOf("new", "mid"), pages.ids())
+        assertEquals(listOf("old"), bin.ids())
+
+        bin = bin.binApplying(LibraryEvent.PageDeleted("old"))
+        assertEquals(emptyList<String>(), bin.ids())
+    }
+
+    // A binned page's preview keeps updating, and live-page events leave the bin alone.
+    @Test
+    fun theBinFollowsThumbnailsAndIgnoresLivePageEvents() {
+        val binned = page("b", "2026-07-22T10:00:00Z").copy(binnedAt = "2026-11-27T21:00:00Z")
+        val bin = listOf(binned)
+
+        val thumbnail = ThumbnailMetadata.Available(2, "/api/pages/b/thumbnails/2")
+        assertEquals(thumbnail, bin.binApplying(LibraryEvent.PageThumbnailUpdated("b", thumbnail)).single().thumbnail)
+        assertSame(bin, bin.binApplying(LibraryEvent.PageCreated(page("c", "2026-07-22T12:00:00Z"))))
+        assertSame(bin, bin.binApplying(LibraryEvent.PageUpdated("b", "2026-07-22T13:00:00Z")))
+    }
+
     private fun page(
         id: String,
         updatedAt: String,

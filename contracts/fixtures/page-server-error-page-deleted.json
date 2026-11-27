@@ -1,0 +1,6 @@
+{
+  "type": "error",
+  "code": "page_deleted",
+  "message": "this page was permanently deleted",
+  "client_mutation_id": "batch_01j00000000000000000000000"
+}

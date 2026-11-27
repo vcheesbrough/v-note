@@ -11,5 +11,7 @@ mod hub;
 mod socket;
 mod store;
 
+pub(crate) use dispatch::page_deleted_error;
 pub use hub::RealtimeHub;
 pub use socket::{page_socket, realtime_socket, realtime_ticket};
+pub(crate) use store::page_was_purged;

@@ -208,11 +208,16 @@ pub async fn realtime_socket(
             }
         };
 
+    // Subscribed before the upgrade is answered, not once the socket task
+    // runs: a client may load the page list as soon as its socket is open, and
+    // an event published between that list and a later subscription would be
+    // lost (#631 — a restore made while the library reconnected never showed).
+    let receiver = state.realtime.subscribe_library(&owner_id);
     let options = realtime_ws_options(&state);
     spawn_upgraded(ws, options, "library", move |socket| {
         let span = tracing::info_span!("handle_library_socket");
         crate::observability::set_remote_parent(&span, &origin);
-        handle_library_socket(state, owner_id, socket).instrument(span)
+        handle_library_socket(owner_id, receiver, socket).instrument(span)
     })
 }
 
@@ -258,11 +263,14 @@ async fn authenticate_realtime(
 
 /// Its span is built by the caller, not by `#[tracing::instrument]`, because the
 /// parent has to be chosen before the span is entered — see `realtime_socket`.
-async fn handle_library_socket(state: AppState, owner_id: String, socket: HttpWebSocket) {
+async fn handle_library_socket(
+    owner_id: String,
+    mut receiver: broadcast::Receiver<Fanout<LibraryEvent>>,
+    socket: HttpWebSocket,
+) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
     crate::observability::metrics().record_realtime_event("library", "connected");
     tracing::info!(owner_id = %owner_id, "library socket connected");
-    let mut receiver = state.realtime.subscribe_library(&owner_id);
     let (mut sender, mut inbound) = socket.split();
 
     let reason = loop {
@@ -378,6 +386,24 @@ pub async fn page_socket(
     match store.page_belongs_to_owner(&page_id, &owner_id).await {
         Ok(true) => {}
         Ok(false) => {
+            // Permanently deleted (#631) is its own answer: the client holds
+            // the only copy of anything it meant to send here, and must not
+            // read it as the not-found-or-not-yours 403.
+            match store.page_was_purged(&page_id, &owner_id).await {
+                Ok(true) => {
+                    tracing::warn!(
+                        page_id = %page_id,
+                        "page socket rejected: the page was permanently deleted"
+                    );
+                    return (StatusCode::GONE, "page permanently deleted").into_response();
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "page purge check failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "ownership check failed")
+                        .into_response();
+                }
+            }
             tracing::warn!(
                 page_id = %page_id,
                 "page socket rejected: page not found or not owned by the caller"
@@ -591,6 +617,23 @@ async fn send_welcome(
     if !send_page(sender, welcome).await {
         crate::observability::metrics().record_realtime_event("page", "send_error");
         return Err("welcome send failed");
+    }
+    // A binned page (#631) opens like any other — its ink is kept and commits
+    // are accepted — but the session is told at once, so a device that opens
+    // or reconnects to it can say where its ink is going. Best effort: the
+    // bin state is a notice, not data, so a failed read leaves it unsaid
+    // rather than closing a page that is otherwise fine.
+    match store.binned_at(page_id).await {
+        Ok(Some(binned_at)) => {
+            if !send_page(sender, PageServerMessage::PageBinned { binned_at }).await {
+                crate::observability::metrics().record_realtime_event("page", "send_error");
+                return Err("page-binned send failed");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, %page_id, "could not read the page's bin state");
+        }
     }
     Ok(())
 }

@@ -82,6 +82,19 @@ class PageInkSession(
     // The banner's line, for callers that only need the copy.
     val statusBanner: String? get() = status?.message
 
+    // When the page was moved to the bin (#631), or null while it is live. Ink
+    // committed to a binned page is still stored — the page just stays in the
+    // bin — so this is a notice, not a block: the canvas keeps working and the
+    // screen says where the ink is going, with a way to restore the page.
+    var binnedAt by mutableStateOf<String?>(null)
+        private set
+
+    // Why the notice's last Restore failed, shown in the notice so a failed
+    // tap does not look like a slow one; null once a restore lands or the
+    // page is restored from elsewhere.
+    var restoreError by mutableStateOf<String?>(null)
+        private set
+
     private var sessionId: String? = null
     private var lastSeq: Long = 0
     private val seenBatchIds = mutableSetOf<String>()
@@ -327,8 +340,30 @@ class PageInkSession(
             is PageEvent.Synced -> onSynced(event)
             is PageEvent.TombstoneBatch -> onTombstoneBatch(event)
             is PageEvent.PaperChanged -> onPaperChanged(event)
+            is PageEvent.PageBinned -> binnedAt = event.binnedAt
+            PageEvent.PageRestored -> restored()
             is PageEvent.Failure -> onFailure(event)
         }
+    }
+
+    // The notice's Restore: bring the page back from the bin. The page
+    // channel's `page-restored` clears the notice on every device; this one
+    // clears it as soon as the server agrees.
+    fun restore() {
+        scope.launch(Dispatchers.Main) {
+            apiClient.restorePage(pageId).fold(
+                onSuccess = { restored() },
+                onFailure = { failure ->
+                    AppLog.w(TAG, "restoring the page from the bin failed", failure, context = screen)
+                    restoreError = failure.message ?: RESTORE_FAILED
+                },
+            )
+        }
+    }
+
+    private fun restored() {
+        binnedAt = null
+        restoreError = null
     }
 
     private fun onWelcome(event: PageEvent.Welcome) {
@@ -337,6 +372,9 @@ class PageInkSession(
         AppLog.i(TAG, "page channel connected", context = screen)
         sessionId = event.sessionId
         status = null
+        // A binned page says so straight after `welcome`, so a page restored
+        // while this device was away comes back without the notice.
+        restored()
         reconnectAttempts = 0
         refreshedAfterUnauthorized = false
         // Authoritative on every (re)connect, which is what
@@ -728,6 +766,7 @@ class PageInkSession(
         private const val TOMBSTONE_FAILED = "tombstone_failed"
         private const val PAPER_FAILED = "paper_failed"
         private const val COMMIT_FAILED = "commit_failed"
+        private const val RESTORE_FAILED = "Restoring the page failed"
         private const val CLOSED_DETAIL = "connection closed"
         private val RETRYABLE =
             setOf(PageStatusKind.Disconnected, PageStatusKind.SessionExpired, PageStatusKind.Rejected)

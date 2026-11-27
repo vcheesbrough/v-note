@@ -107,6 +107,14 @@ class PageTileThreadInstrumentedTest {
 
         override suspend fun deletePage(pageId: String): Result<Unit> = unused()
 
+        override suspend fun listBin(): Result<List<PageSummary>> = unused()
+
+        override suspend fun restorePage(pageId: String): Result<PageSummary> = unused()
+
+        override suspend fun deletePagePermanently(pageId: String): Result<Unit> = unused()
+
+        override suspend fun emptyBin(pageIds: List<String>): Result<List<String>> = unused()
+
         override fun openLibrarySocket(listener: LibraryEventListener): WebSocket? = unused()
 
         override fun openPageSocket(

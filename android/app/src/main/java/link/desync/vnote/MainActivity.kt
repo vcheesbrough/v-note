@@ -106,43 +106,59 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    AppRoot {
-                        val session = sessionState.value
-                        val selectedPage = library.selectedPage
-                        if (session is SessionState.SignedIn && selectedPage != null) {
-                            // An open page takes over the whole surface — the infinite ink canvas.
-                            PageCanvasScreen(
-                                apiClient = apiClient,
-                                page = selectedPage,
-                                userId = session.profile.sub,
-                                onBack = { library.closePage() },
-                                onSignIn = {
-                                    library.closePage()
-                                    signIn()
-                                },
-                            )
-                        } else {
-                            AppScreen(
-                                apiClient = apiClient,
-                                healthProbe = healthProbe,
-                                sessionState = session,
-                                onSignIn = { signIn() },
-                                onSignOut = { signOut() },
-                                onReload = { reloadSession() },
-                                pages = library.pages,
-                                libraryError = library.error,
-                                onCreatePage = { createPage() },
-                                onOpenPage = { library.openPage(it) },
-                                onDeletePage = { library.deletePage(it) },
-                            )
-                        }
-                    }
+                    AppRoot { CurrentScreen() }
                 }
             }
         }
 
         if (!handleAuthorizationIntent(intent)) {
             reloadSession()
+        }
+    }
+
+    // Which screen fills the surface: an open page, the bin (#631), or the
+    // library (which is also the signed-out screen).
+    @Composable
+    private fun CurrentScreen() {
+        val session = sessionState.value
+        val selectedPage = library.selectedPage
+        if (session is SessionState.SignedIn && selectedPage != null) {
+            // An open page takes over the whole surface — the infinite ink canvas.
+            PageCanvasScreen(
+                apiClient = apiClient,
+                page = selectedPage,
+                userId = session.profile.sub,
+                onBack = { library.closePage() },
+                onSignIn = {
+                    library.closePage()
+                    signIn()
+                },
+            )
+        } else if (session is SessionState.SignedIn && library.bin.showing) {
+            BinScreen(
+                apiClient = apiClient,
+                pages = library.bin.pages,
+                error = library.error,
+                onBack = library.bin::close,
+                onRestore = library.bin::restore,
+                onDeletePermanently = library.bin::deletePermanently,
+                onEmptyBin = library.bin::empty,
+            )
+        } else {
+            AppScreen(
+                apiClient = apiClient,
+                healthProbe = healthProbe,
+                sessionState = session,
+                onSignIn = { signIn() },
+                onSignOut = { signOut() },
+                onReload = { reloadSession() },
+                pages = library.pages,
+                libraryError = library.error,
+                onCreatePage = { createPage() },
+                onOpenPage = { library.openPage(it) },
+                onDeletePage = { library.deletePage(it) },
+                onOpenBin = library.bin::open,
+            )
         }
     }
 
