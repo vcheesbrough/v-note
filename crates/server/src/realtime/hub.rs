@@ -125,11 +125,21 @@ impl<T: Clone> Channels<T> {
             senders.remove(key);
             drop(senders);
             crate::observability::metrics().realtime_channel_closed(self.kind);
-            tracing::debug!(
-                channel = self.kind,
-                key,
-                "realtime channel pruned: no subscribers left"
-            );
+            // Named like every other realtime line's id, so a Loki search on
+            // `page_id` / `owner_id` finds the prune too. Field names must be
+            // static, hence one arm per kind.
+            match self.kind {
+                "page" => tracing::debug!(
+                    channel = self.kind,
+                    page_id = key,
+                    "realtime channel pruned: no subscribers left"
+                ),
+                _ => tracing::debug!(
+                    channel = self.kind,
+                    owner_id = key,
+                    "realtime channel pruned: no subscribers left"
+                ),
+            }
         }
     }
 
