@@ -32,6 +32,9 @@ internal class LibraryStateHolder(
     private val isSignedIn: () -> Boolean,
     // Channel callbacks arrive on OkHttp threads; state is written on the UI thread.
     private val runOnUiThread: (() -> Unit) -> Unit,
+    // Between a channel ending and the next one opening. Unit tests pass 0 so
+    // a reconnect runs inline and can be asserted.
+    private val reconnectDelayMillis: Long = RECONNECT_DELAY_MILLIS,
 ) {
     var pages by mutableStateOf<List<PageSummary>>(emptyList())
         private set
@@ -213,7 +216,7 @@ internal class LibraryStateHolder(
                     // a 401, which an upgrade cannot do for itself.
                     val superseded = !opened.get() && !loadSnapshot(generation, clearsError = false)
                     if (!superseded) {
-                        delay(1_000)
+                        delay(reconnectDelayMillis)
                         if (channelMayReconnect(generation, connectionGeneration, isSignedIn())) connect()
                     }
                 }
@@ -257,6 +260,8 @@ internal class LibraryStateHolder(
 }
 
 internal const val LIBRARY_SCREEN = "screen.library"
+
+private const val RECONNECT_DELAY_MILLIS = 1_000L
 
 // Whether a library channel opened as [generation] may still reconnect: it must
 // be the newest channel ([currentGeneration]), and the session must still be

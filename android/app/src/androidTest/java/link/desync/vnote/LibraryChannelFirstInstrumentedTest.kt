@@ -94,11 +94,6 @@ class LibraryChannelFirstInstrumentedTest {
     fun anEventPublishedBeforeTheSnapshotIsAnsweredIsInTheList() {
         // The event alone puts the page on screen: the snapshot is still held.
         awaitTile(LIVE_PAGE) { "requests so far: $requestPaths" }
-        val requests = requestPaths.toList()
-        assertTrue(
-            "the library socket opens before the list is requested: $requests",
-            requests.indexOf("/api/realtime") in 0 until requests.indexOf("/api/pages"),
-        )
 
         releaseSnapshot.countDown()
 
@@ -106,6 +101,13 @@ class LibraryChannelFirstInstrumentedTest {
         // which it does not list, must still be there with it.
         awaitTile(SNAPSHOT_PAGE) { "requests so far: $requestPaths" }
         composeRule.onNodeWithTag("page-tile-$LIVE_PAGE", useUnmergedTree = true).assertIsDisplayed()
+        // Checked only now: the server records `/api/pages` on its own thread,
+        // so before the snapshot has landed the request may not be logged yet.
+        val requests = requestPaths.toList()
+        assertTrue(
+            "the library socket opens before the list is requested: $requests",
+            requests.indexOf("/api/realtime") in 0 until requests.indexOf("/api/pages"),
+        )
     }
 
     private fun awaitTile(

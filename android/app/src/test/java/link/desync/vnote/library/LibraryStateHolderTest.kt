@@ -207,6 +207,66 @@ class LibraryStateHolderTest {
 
         assertEquals(listOf("a"), holder.pages.map { it.id })
         assertEquals("Realtime connection failed: HTTP 503", holder.error)
+        assertEquals("then it reconnects", 2, api.socketsOpened)
+    }
+
+    /**
+     * A channel that had opened already took its snapshot; its reconnect
+     * goes straight to a new channel, whose own open fetches the next one.
+     */
+    @Test
+    fun anOpenedChannelReconnectsWithoutASnapshotOfItsOwn() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+        api.openChannel()
+        api.completeListPages(Result.success(listOf(page("a"))))
+
+        api.failChannel("Realtime disconnected")
+
+        assertEquals("no snapshot between the close and the reconnect", 1, api.listPagesCalls)
+        assertEquals(2, api.socketsOpened)
+        assertEquals("Realtime disconnected", holder.error)
+
+        api.openChannel()
+        assertEquals("the new channel's open fetches", 2, api.listPagesCalls)
+        api.completeListPages(Result.success(listOf(page("b"), page("a"))))
+        assertEquals(listOf("b", "a"), holder.pages.map { it.id })
+        assertNull("a live channel with a fresh list clears the banner", holder.error)
+    }
+
+    /**
+     * A refused channel's snapshot that lands after sign-out is dropped, and
+     * the channel it was taken for does not reconnect: no stray socket.
+     */
+    @Test
+    fun aRefusedChannelWhoseSnapshotIsSupersededDoesNotReconnect() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+
+        api.failChannel("Realtime connection failed: HTTP 503")
+        holder.clear()
+        api.completeListPages(Result.success(listOf(page("a"))))
+
+        assertTrue("a superseded snapshot must not repopulate the library", holder.pages.isEmpty())
+        assertEquals("a superseded channel must not reconnect", 1, api.socketsOpened)
+    }
+
+    /**
+     * With no access token there is no channel to wait for, so the list is
+     * loaded at once; nothing else would ever load it.
+     */
+    @Test
+    fun withNoChannelTheListStillLoads() {
+        val api = ChannelControlledApiClient(hasAccessToken = false)
+        val holder = holderWith(api)
+
+        holder.start()
+
+        assertEquals(1, api.listPagesCalls)
+        api.completeListPages(Result.success(listOf(page("a"))))
+        assertEquals(listOf("a"), holder.pages.map { it.id })
     }
 
     /**
@@ -231,8 +291,9 @@ class LibraryStateHolderTest {
 
     // Unconfined runs each coroutine inline on this thread up to its first
     // suspension and resumes it inline on the thread that completes it, so the
-    // tests above step the fetch by hand with no sleeps or idling. Cancelled
-    // after each test, so a reconnect's delay never fires into the next one.
+    // tests above step the fetch by hand with no sleeps or idling. A zero
+    // reconnect delay runs each reconnect inline too. Cancelled after each
+    // test, so nothing still suspended carries into the next one.
     private val scopeJob = Job()
 
     @After
@@ -246,6 +307,7 @@ class LibraryStateHolderTest {
             reconnectScope = CoroutineScope(Dispatchers.Unconfined + scopeJob),
             isSignedIn = { true },
             runOnUiThread = { block -> block() },
+            reconnectDelayMillis = 0,
         )
 
     private fun page(
@@ -255,8 +317,11 @@ class LibraryStateHolderTest {
 
     // Holds each `listPages` open until the test releases it, and drives the
     // newest channel's listener by hand, so the order of channel, snapshot and
-    // events is observable.
-    private class ChannelControlledApiClient : ApiClient by UnusedApiClient {
+    // events is observable. Without an access token it opens no channel, as
+    // the real client does.
+    private class ChannelControlledApiClient(
+        private val hasAccessToken: Boolean = true,
+    ) : ApiClient by UnusedApiClient {
         private val pending = ArrayDeque<CompletableDeferred<Result<List<PageSummary>>>>()
         private var listener: LibraryEventListener? = null
 
@@ -284,7 +349,8 @@ class LibraryStateHolderTest {
         }
 
         // A real socket is not needed: the holder only closes it.
-        override fun openLibrarySocket(listener: LibraryEventListener): WebSocket {
+        override fun openLibrarySocket(listener: LibraryEventListener): WebSocket? {
+            if (!hasAccessToken) return null
             socketsOpened += 1
             this.listener = listener
             return ClosableSocket
