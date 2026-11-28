@@ -45,11 +45,15 @@ class SyncEngine(
     private val retry = RetryTimer(scope)
 
     // Pages whose last background attempt failed, oldest failure first. They
-    // are tried again only on a retry, a few at a time ([probes]), so a
-    // server that is down is asked a few times per backoff step however many
-    // pages are waiting. One of them succeeding means it is back: all go.
+    // are tried again only on a retry, a few at a time and each at most once
+    // ([probing]), so a server that is down is asked a few times per backoff
+    // step however many pages are waiting. One of them succeeding means it
+    // is back: all go.
     private val failed = linkedSetOf<String>()
-    private var probes = 0
+
+    // The failed pages this retry may still try. A page leaves it when its
+    // attempt starts, so a later pass in the same step cannot try it again.
+    private val probing = linkedSetOf<String>()
     private var createsFailing = false
 
     // Signed in (from the device or freshly): sync may run.
@@ -69,6 +73,7 @@ class SyncEngine(
         background.values.forEach { it.disconnect() }
         background.clear()
         failed.clear()
+        probing.clear()
     }
 
     // Look for work now. Cheap and idempotent: a kick during a pass runs one
@@ -139,12 +144,12 @@ class SyncEngine(
             .forEach { wanted[it.id] = it.updatedAt }
         // A failed page with nothing left to do has nothing to retry.
         failed.retainAll(wanted.keys)
+        probing.retainAll(failed)
         for ((pageId, markSynced) in wanted) {
             if (pageId !in failed) startSession(pageId, markSynced)
         }
-        for (pageId in failed.toList()) {
-            if (probes == 0) break
-            if (startSession(pageId, wanted[pageId])) probes -= 1
+        for (pageId in probing.toList()) {
+            if (startSession(pageId, wanted[pageId])) probing.remove(pageId)
         }
     }
 
@@ -200,6 +205,7 @@ class SyncEngine(
     // everything waiting is tried now, and the backoff starts over.
     private fun recovered() {
         failed.clear()
+        probing.clear()
         createsFailing = false
         retry.startOver()
     }
@@ -208,7 +214,8 @@ class SyncEngine(
     // failed pages are tried again, and the creates with them.
     private fun scheduleRetry() =
         retry.schedule {
-            probes = MAX_BACKGROUND
+            probing.clear()
+            probing.addAll(failed.take(MAX_BACKGROUND))
             kick()
         }
 

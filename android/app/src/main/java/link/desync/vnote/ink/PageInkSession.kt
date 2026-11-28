@@ -176,7 +176,10 @@ class PageInkSession(
     // Reconnect now instead of waiting out the backoff — the network may be
     // back — and start over once the user has signed in again.
     fun retryNow() {
-        if (closing || status?.kind !in RETRYABLE) {
+        // A page still waiting for its create has no channel to reopen:
+        // the server does not hold it yet, so the upgrade could only be
+        // refused. [createAcknowledged] opens it once the create lands.
+        if (closing || status?.kind !in RETRYABLE || sync.createPending()) {
             return
         }
         AppLog.i(TAG, "page channel retry requested", context = screen)
@@ -192,6 +195,9 @@ class PageInkSession(
     // Opens a page socket. Everything the session holds is kept, so the
     // `subscribe(lastSeq)` asks only for what it has not seen.
     private fun open() {
+        // Whatever socket the session still held is closed first, so no path
+        // here can leave a second channel connected behind the new one.
+        retireSocket()
         val generation = ++socketGeneration
         connectSpan = Telemetry.span("realtime.connect", screen).attr("vnote.channel", "page")
         val opened =

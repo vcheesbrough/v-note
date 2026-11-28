@@ -6,15 +6,21 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.HttpStatusException
 import link.desync.vnote.api.OkHttpApiClient
+import link.desync.vnote.api.ServerUnreachableException
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
+import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
 import link.desync.vnote.store.Edit
 import link.desync.vnote.store.LocalStore
+import link.desync.vnote.sync.PageCreates
 import link.desync.vnote.sync.SyncEngine
 import link.desync.vnote.sync.SyncStatus
 import mockwebserver3.Dispatcher
@@ -117,6 +123,97 @@ class SyncEngineInstrumentedTest {
         )
         assertEquals("and each is offered as a new page", gone.toSet(), onMain { status.gonePages.map { it.pageId }.toSet() })
         assertTrue("nothing was stored for them", gone.all { stored[it].isNullOrEmpty() })
+    }
+
+    /**
+     * A page that fails is asked once per backoff step, not once for every
+     * pass the engine makes within the step: a server that is down, or a
+     * page that can never succeed, is not hammered. Attempts fall at 0, 1
+     * and 3 s, and the next is due at 7 s.
+     */
+    @Test
+    fun aFailedPageIsTriedOncePerBackoffStep() {
+        purged += GONE
+        onMain {
+            store.library.write(listOf(page(GONE)))
+            owe(GONE)
+            engine.start()
+        }
+
+        assertTrue("retried on the backoff", awaitUntil(10_000) { (upgrades[GONE]?.get() ?: 0) >= 3 })
+        Thread.sleep(SETTLE_MILLIS)
+
+        assertEquals("three steps, three attempts", 3, upgrades.getValue(GONE).get())
+    }
+
+    /**
+     * With the server or the network away, the first create that cannot be
+     * sent ends the pass: the others would only fail the same way, one
+     * timeout after another, ahead of the replays behind them.
+     */
+    @Test
+    fun aCreateThatCannotReachTheServerEndsThePass() {
+        val creates = CountingCreates { Result.failure(ServerUnreachableException(java.io.IOException("no route"))) }
+        onMain { LOCAL_PAGES.forEach { store.outbox.createPage(page(it)) } }
+
+        val allLanded = onMain { runBlocking { PageCreates(creates, store, status).push {} } }
+
+        assertEquals(false, allLanded)
+        assertEquals("only the first was tried", LOCAL_PAGES.take(1), creates.asked)
+        assertEquals(
+            "all three are still owed",
+            3,
+            onMain {
+                store.outbox.read
+                    .pendingCreates()
+                    .size
+            },
+        )
+    }
+
+    /**
+     * A create the server answers with an error is that create's failure:
+     * it stays owed, and the ones behind it are still sent.
+     */
+    @Test
+    fun aCreateTheServerAnswersWithAnErrorDoesNotHoldTheOthersBack() {
+        val creates =
+            CountingCreates { id ->
+                if (id == LOCAL_PAGES.first()) Result.failure(HttpStatusException(400, "Bad Request", null)) else Result.success(page(id))
+            }
+        onMain { LOCAL_PAGES.forEach { store.outbox.createPage(page(it)) } }
+        val landed = mutableListOf<String>()
+
+        val allLanded = onMain { runBlocking { PageCreates(creates, store, status).push { landed += it.id } } }
+
+        assertEquals("one is still owed", false, allLanded)
+        assertEquals("every create was tried", LOCAL_PAGES, creates.asked)
+        assertEquals("the others landed", LOCAL_PAGES.drop(1), landed)
+        assertEquals(
+            "the refused one stays owed",
+            LOCAL_PAGES.take(1),
+            onMain {
+                store.outbox.read
+                    .pendingCreates()
+                    .map { it.pageId }
+            },
+        )
+    }
+
+    // The real client, but for creates: answered by [answer], and counted.
+    private inner class CountingCreates(
+        private val answer: (String) -> Result<PageSummary>,
+    ) : ApiClient by client {
+        val asked = CopyOnWriteArrayList<String>()
+
+        override suspend fun createPage(
+            title: String?,
+            paper: Paper,
+            id: String?,
+        ): Result<PageSummary> {
+            asked += checkNotNull(id)
+            return answer(id)
+        }
     }
 
     /**
@@ -228,6 +325,11 @@ class SyncEngineInstrumentedTest {
 
     private companion object {
         const val HEALTHY = "page_healthy"
+        const val GONE = "page_gone"
+        val LOCAL_PAGES = listOf("page_local_1", "page_local_2", "page_local_3")
+
+        // Well inside the 4 s between the third attempt and the fourth.
+        const val SETTLE_MILLIS = 1_500L
         const val STAMP = "2026-11-28T00:00:00Z"
 
         // Far inside the 16 s step the retry cuts short.

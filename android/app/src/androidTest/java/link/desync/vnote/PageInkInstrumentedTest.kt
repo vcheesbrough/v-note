@@ -4,7 +4,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.HttpStatusException
 import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
@@ -36,6 +38,7 @@ import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 // Enough batches that a per-batch publish would be unmistakable, while keeping
@@ -1303,6 +1306,59 @@ class PageInkInstrumentedTest {
             assertTrue("$code: no longer offered", onMain { status.gonePages.isEmpty() })
             session.disconnect()
         }
+    }
+
+    /**
+     * #651 review: a page made on this device and still waiting for its
+     * create has no channel yet. A returning network must not open one — the
+     * server does not hold the page, so the upgrade could only be refused,
+     * reported as a failure and retried behind the create. Nothing is asked
+     * of the server until the create lands, and then exactly one channel opens.
+     */
+    @Test
+    fun aReturningNetworkDoesNotOpenAPageStillWaitingForItsCreate() {
+        val createPending = AtomicBoolean(true)
+        val store = LocalStore.shared(context())
+        val status = SyncStatus(store)
+        val commits = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = null, commits = commits)
+        val session =
+            PageInkSession(
+                apiClient,
+                "page_1",
+                CoroutineScope(Dispatchers.Main),
+                sync = SessionSync(store, status, createPending = { createPending.get() }),
+            )
+        onMain { session.connect() }
+        assertEquals(PageInkSession.WAITING_FOR_CREATE, onMain { session.statusBanner })
+
+        onMain { session.retryNow() }
+        // Long enough for an upgrade to have been sent, had one been coming.
+        Thread.sleep(1_500)
+
+        assertEquals("nothing asked of the server", 0, server.requestCount)
+        assertEquals("and no failure reported", null, onMain { status.problem })
+
+        createPending.set(false)
+        onMain { session.createAcknowledged() }
+        assertTrue("live once the create landed", awaitUntil { session.canEdit })
+        // Longer than the first backoff step: no second channel follows.
+        Thread.sleep(1_500)
+        assertEquals("one channel, and only one", 1, server.requestCount)
+        session.disconnect()
+    }
+
+    /**
+     * #651 review: a thumbnail the server answers with an error fails with
+     * its status, like every other REST call, not as a bare message.
+     */
+    @Test
+    fun aFailedThumbnailRequestCarriesItsStatus() {
+        server.enqueue(MockResponse.Builder().code(503).build())
+
+        val failure = runBlocking { apiClient.fetchThumbnail("/api/pages/page_1/thumbnails/1") }.exceptionOrNull()
+
+        assertEquals(503, (failure as? HttpStatusException)?.code)
     }
 
     /**

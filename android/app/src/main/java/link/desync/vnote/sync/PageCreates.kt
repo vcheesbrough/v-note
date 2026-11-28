@@ -16,22 +16,29 @@ internal class PageCreates(
     private val store: LocalStore,
     private val status: SyncStatus,
 ) {
-    // Sends every create still owed, oldest first. True once none is left;
-    // false when any must be tried again. Every one is tried on every pass,
-    // so a create that keeps failing never holds the others back.
+    // Sends the creates still owed, oldest first. True once none is left;
+    // false when any must be tried again. A create the server answered for
+    // with an error does not hold the ones behind it back; a failure that
+    // says nothing about the create itself — the server or the network is
+    // away — ends the pass, since the rest would only fail the same way,
+    // one timeout after another, ahead of the replays waiting behind them.
     suspend fun push(onCreated: (PageSummary) -> Unit): Boolean {
         var allLanded = true
         for (op in store.outbox.read.pendingCreates()) {
-            if (!pushOne(op, onCreated)) allLanded = false
+            when (pushOne(op, onCreated)) {
+                Outcome.Landed -> Unit
+                Outcome.Answered -> allLanded = false
+                Outcome.Unreachable -> return false
+            }
         }
         return allLanded
     }
 
-    // One create. True when it landed. Any failure leaves it owed (#651).
+    // One create. Any failure leaves it owed, to be retried (#651).
     private suspend fun pushOne(
         op: OutboxOp,
         onCreated: (PageSummary) -> Unit,
-    ): Boolean {
+    ): Outcome {
         val result = apiClient.createPage(title = op.title.ifBlank { null }, paper = op.paper, id = op.pageId)
         val created = result.getOrNull() ?: return failed(op.pageId, result.exceptionOrNull())
         if (created.id != op.pageId) {
@@ -42,7 +49,7 @@ internal class PageCreates(
             // page per retry; no environment runs one.)
             AppLog.w(TAG, "page create answered with a different id")
             status.reportFailure(hostOf(apiClient.baseUrl), ErrorClass.ID_MISMATCH, null)
-            return false
+            return Outcome.Answered
         }
         store.transaction {
             store.library.markCreated(created)
@@ -54,17 +61,32 @@ internal class PageCreates(
         status.markSynced()
         status.refresh()
         onCreated(created)
-        return true
+        return Outcome.Landed
     }
 
     private fun failed(
         pageId: String,
         failure: Throwable?,
-    ): Boolean {
+    ): Outcome {
         AppLog.w(TAG, "page create failed; it stays owed: ${failure?.javaClass?.simpleName}")
         status.reportFailure(failure, hostOf(apiClient.baseUrl), apiClient.signInHost)
-        if (failure is HttpStatusException && ErrorClass.isGone(ErrorClass.http(failure.code))) status.reportGone(pageId)
-        return false
+        if (failure !is HttpStatusException) return Outcome.Unreachable
+        if (ErrorClass.isGone(ErrorClass.http(failure.code))) status.reportGone(pageId)
+        return Outcome.Answered
+    }
+
+    // How one create went. Every outcome but [Landed] leaves it owed; they
+    // differ only in whether the pass goes on to the next create.
+    private enum class Outcome {
+        Landed,
+
+        // An HTTP status, or a page under another id: an answer for this
+        // create, which says nothing about the next one.
+        Answered,
+
+        // No answer for this create at all: no network, no server, no
+        // token, or a body that is not v-note's.
+        Unreachable,
     }
 
     private companion object {
