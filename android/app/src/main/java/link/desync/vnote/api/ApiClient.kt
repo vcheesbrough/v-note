@@ -89,6 +89,11 @@ class ServerUnreachableException(
     )
 
 interface LibraryEventListener {
+    // The upgrade succeeded. The server subscribes a library socket before it
+    // answers the upgrade (#631), so every event published from here on is
+    // queued on it: a snapshot fetched after this misses nothing (#635).
+    fun onOpen() = Unit
+
     fun onEvent(event: LibraryEvent)
 
     fun onError(message: String)
