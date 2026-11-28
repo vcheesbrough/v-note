@@ -19,6 +19,7 @@ import link.desync.vnote.model.PageEvent
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.store.Edit
 import link.desync.vnote.store.OpKind
+import link.desync.vnote.sync.Backoff
 import link.desync.vnote.sync.ErrorClass
 import link.desync.vnote.telemetry.AppLog
 import link.desync.vnote.telemetry.Attribute
@@ -39,6 +40,12 @@ import java.util.UUID
 // again in the order it was made — the server is idempotent on every id, so a
 // repeat is only re-echoed — until the server's echo acknowledges it. The
 // channel reconnects on its own after any close it did not ask for (#279).
+//
+// Every failure is the same failure (#651): a refused upgrade whatever its
+// status, a dropped socket, any error code on the open channel. Everything
+// owed is kept and the channel tries again on the [Backoff] schedule until it
+// works; nothing is ever refused for good. The one thing retrying cannot fix
+// is having no token, which waits for a sign-in.
 class PageInkSession(
     private val apiClient: ApiClient,
     private val pageId: String,
@@ -82,13 +89,12 @@ class PageInkSession(
         private set
 
     // Non-null when there is something to say about this page's sync (#150):
-    // connecting, disconnected, retrying, session expired, or a rejection.
-    // Only a rejection is shown on the page (#159); the rest is the top bar's
-    // status icon.
+    // connecting, disconnected, retrying, or no token to sync with. None of
+    // it is shown on the page (#651): that is the top bar's status icon.
     var status by mutableStateOf<PageStatus?>(null)
         private set
 
-    // The banner's line, for callers that only need the copy.
+    // The status in words, for callers that only need the copy.
     val statusBanner: String? get() = status?.message
 
     // When the page was moved to the bin (#631), or null while it is live. Ink
@@ -128,15 +134,16 @@ class PageInkSession(
     private var socketGeneration = 0
 
     private var reconnectJob: Job? = null
-    private var reconnectAttempts = 0
+    private val reconnectBackoff = Backoff()
 
-    // A `*_failed` from a server that is up but could not store an edit (#150):
-    // everything owed is sent again with the reconnect backoff.
+    // An error code on the open channel (#150, #651): everything owed is sent
+    // again on the same schedule as a reconnect.
     private var resendJob: Job? = null
-    private var resendAttempts = 0
+    private val resendBackoff = Backoff()
 
-    // Set once a 401 on the upgrade has been answered with a refresh; a second
-    // 401 before the next `Welcome` means the session is gone.
+    // Set once a 401 on the upgrade has been answered with a refresh. A 401
+    // with the fresh token is a connection failure like any other, so the
+    // next attempt, after its backoff, starts with a refresh again.
     private var refreshedAfterUnauthorized = false
 
     fun connect() {
@@ -149,11 +156,6 @@ class PageInkSession(
         ledger.load()
         paperState = ledger.requestedPaper ?: ledger.confirmedPaper ?: paperState
         publishRenderableStrokes()
-        ledger.rejection?.let { (code, message) ->
-            showRejection(code, message)
-            sync.onIdle()
-            return
-        }
         if (sync.createPending()) {
             // Made on this device and not yet on the server: drawing works,
             // and the channel opens once the sync engine's create lands.
@@ -166,13 +168,13 @@ class PageInkSession(
 
     // The sync engine's create for this page landed: open its channel.
     fun createAcknowledged() {
-        if (closing || socket != null || ledger.rejection != null) return
+        if (closing || socket != null) return
         status = PageStatus(PageStatusKind.Connecting, CONNECTING)
         open()
     }
 
-    // Reconnect now instead of waiting out the backoff, and start an expired
-    // session over once the user has signed in again.
+    // Reconnect now instead of waiting out the backoff — the network may be
+    // back — and start over once the user has signed in again.
     fun retryNow() {
         if (closing || status?.kind !in RETRYABLE) {
             return
@@ -182,7 +184,7 @@ class PageInkSession(
         reconnectJob = null
         stopResend()
         refreshedAfterUnauthorized = false
-        reconnectAttempts = 0
+        reconnectBackoff.reset()
         retireSocket()
         open()
     }
@@ -339,6 +341,7 @@ class PageInkSession(
         connectSpan = null
         AppLog.i(TAG, "page channel connected", context = screen)
         sync.status?.reportReachable()
+        sync.status?.reportPresent(pageId)
         status = null
         // A binned page says so straight after `welcome`.
         restored()
@@ -410,7 +413,7 @@ class PageInkSession(
         canEdit = true
         // Reset here, not on `welcome`: a socket that is welcomed and then
         // fails its replay every time must still back off.
-        reconnectAttempts = 0
+        reconnectBackoff.reset()
         resendPending()
         idleIfDone()
     }
@@ -434,14 +437,17 @@ class PageInkSession(
         }
     }
 
-    // An edit of ours reached the server.
+    // An edit of ours reached the server — which is the server answering, so
+    // whatever was last reported as failing is not failing now (#651): an
+    // error code on a commit is cleared by the commit that lands.
     private fun acknowledged() {
+        sync.status?.reportReachable()
         sync.status?.markSynced()
         refreshSyncCounts()
         // Keyed on the status, not the job: the job clears itself before the
         // resend it makes is answered.
         if (status?.kind == PageStatusKind.Retrying && !ledger.hasWork) {
-            AppLog.i(TAG, "failed edits recovered after attempts=$resendAttempts", context = screen)
+            AppLog.i(TAG, "failed edits recovered", context = screen)
             stopResend()
             status = null
         }
@@ -452,36 +458,28 @@ class PageInkSession(
         if (sync.headless && canEdit && !ledger.hasWork) sync.onIdle()
     }
 
+    // An error code on the open channel. Whatever it says, nothing is
+    // discarded and nothing is refused (#651): the edit was not stored (the
+    // server says so instead of echoing), and everything owed is sent again
+    // on the backoff until the server takes it.
     private fun onFailure(event: PageEvent.Failure) {
-        // The code only: the message is the server's, shown to the user as is.
+        // The code only: the message is the server's.
         AppLog.w(TAG, "page channel error", context = screen, attributes = listOf(Attribute("vnote.error_code", event.code)))
-        if (event.code in TRANSIENT_FAILURES) {
-            // A replay that ends in an error still shows what arrived.
-            endReplay(failure = event.code)
-            scheduleResend(event)
+        // A replay that ends in an error still shows what arrived.
+        endReplay(failure = event.code)
+        sync.status?.reportFailure(hostOf(apiClient.baseUrl), event.code, null)
+        if (ErrorClass.isGone(event.code)) sync.status?.reportGone(pageId)
+        if (sync.headless) {
+            standDown()
             return
         }
-        endReplay(failure = event.code)
-        canEdit = false
-        stopResend()
-        failStrokeSpans("rejected")
-        ledger.reject(event.code, event.message)
-        showRejection(event.code, event.message)
-        publishRenderableStrokes()
-        refreshSyncCounts()
-        // Definitive: nothing sent on this page can land, so stop trying.
-        retireSocket()
-        sync.onIdle()
+        scheduleResend(event)
     }
 
-    // The server is up but could not store an edit. Nothing is discarded: it
-    // was not stored (the server says so instead of echoing), and everything
-    // owed is sent again with the reconnect backoff until the server takes it.
     private fun scheduleResend(event: PageEvent.Failure) {
         status = PageStatus(PageStatusKind.Retrying, SYNC_RETRYING, detail = "${event.code}: ${event.message}")
-        sync.status?.reportFailure(hostOf(apiClient.baseUrl), ErrorClass.SERVER_ERROR, null)
         if (resendJob?.isActive == true) return
-        val delayMs = reconnectDelayMs(resendAttempts++)
+        val delayMs = resendBackoff.next()
         AppLog.i(TAG, "retrying failed edits: delayMs=$delayMs", context = screen)
         resendJob =
             scope.launch {
@@ -494,8 +492,7 @@ class PageInkSession(
                     // `welcome_failed`): the socket stays open but will never
                     // reach `synced`, so start over on a new one, which
                     // re-subscribes from the cursor.
-                    else ->
-                        handleDisconnected(ConnectionFailure(event.code, hostOf(apiClient.baseUrl), ErrorClass.SERVER_ERROR, null))
+                    else -> handleDisconnected(ConnectionFailure(event.code, hostOf(apiClient.baseUrl), event.code, null))
                 }
             }
     }
@@ -503,14 +500,15 @@ class PageInkSession(
     private fun stopResend() {
         resendJob?.cancel()
         resendJob = null
-        resendAttempts = 0
+        resendBackoff.reset()
     }
 
-    private fun showRejection(
-        code: String,
-        message: String,
-    ) {
-        status = PageStatus(PageStatusKind.Rejected, message, detail = code)
+    // A headless session that failed does not retry by itself: it hands its
+    // slot back, and the sync engine tries the page again on its backoff.
+    private fun standDown() {
+        canEdit = false
+        retireSocket()
+        sync.onIdle()
     }
 
     private fun beginReplay() {
@@ -564,14 +562,20 @@ class PageInkSession(
         stopResend()
         if (closing) return
         sync.status?.reportFailure(failure.host, failure.errorClass, failure.correlationId)
+        if (ErrorClass.isGone(failure.errorClass)) sync.status?.reportGone(pageId)
         status = PageStatus(PageStatusKind.Disconnected, DISCONNECTED, detail = failure.message)
+        if (sync.headless) {
+            standDown()
+            return
+        }
         scheduleReconnect()
     }
 
     // The upgrade was refused with 401. One forced refresh, then straight back
-    // in. A refused refresh, or a second 401 after one, is an expired session:
-    // sync pauses for a sign-in while editing carries on. An identity provider
-    // out of reach is only a wait (#159).
+    // in. A 401 that is still a 401 with the fresh token is not the session's
+    // fault — something in between is answering — and neither is an identity
+    // provider out of reach: both are connection failures, retried (#651).
+    // Only a refused refresh leaves no token, and waits for a sign-in.
     private fun handleUnauthorized(message: String) {
         AppLog.w(TAG, "page channel refused the session: $message", context = screen)
         connectSpan?.fail(message)
@@ -582,7 +586,7 @@ class PageInkSession(
         retireSocket()
         if (closing) return
         if (refreshedAfterUnauthorized) {
-            sessionExpired(SESSION_EXPIRED, detail = message)
+            handleDisconnected(ConnectionFailure(message, hostOf(apiClient.baseUrl), ErrorClass.http(HTTP_UNAUTHORIZED), null))
             return
         }
         refreshedAfterUnauthorized = true
@@ -596,24 +600,23 @@ class PageInkSession(
                         open()
                     }
                     RefreshOutcome.Unavailable -> {
-                        refreshedAfterUnauthorized = false
-                        sync.status?.reportFailure(apiClient.signInHost, ErrorClass.OFFLINE, null)
-                        status = PageStatus(PageStatusKind.Disconnected, DISCONNECTED, detail = message)
+                        // This coroutine is the reconnect job: cleared so
+                        // the reconnect it asks for can be scheduled.
                         reconnectJob = null
-                        scheduleReconnect()
+                        handleDisconnected(ConnectionFailure(message, apiClient.signInHost, ErrorClass.OFFLINE, null))
                     }
                     RefreshOutcome.Refused -> sessionExpired(SESSION_EXPIRED, detail = message)
                 }
             }
     }
 
-    // Only signing in again fixes this. Editing carries on, and everything
-    // owed stays in the outbox for when it is back.
+    // There is no token to connect with: only signing in again fixes this.
+    // Editing carries on, and everything owed stays in the outbox for then.
     private fun sessionExpired(
         message: String,
         detail: String?,
     ) {
-        AppLog.w(TAG, "page channel paused: session expired", context = screen)
+        AppLog.w(TAG, "page channel paused: no token to sync with", context = screen)
         sync.status?.requireSignIn()
         status = PageStatus(PageStatusKind.SessionExpired, message, detail = detail)
         sync.onIdle()
@@ -630,12 +633,13 @@ class PageInkSession(
             return
         }
         retireSocket()
-        val delayMs = reconnectDelayMs(reconnectAttempts++)
+        val delayMs = reconnectBackoff.next()
         reconnectJob =
             scope.launch {
                 delay(delayMs)
                 if (!closing) {
                     AppLog.i(TAG, "page channel reconnecting", context = screen)
+                    refreshedAfterUnauthorized = false
                     open()
                 }
             }
@@ -647,26 +651,13 @@ class PageInkSession(
     }
 
     companion object {
-        // First retry after 1 s — the SPA's page loop and the library channel
-        // wait the same — doubling to a 30 s ceiling while the server stays
-        // unreachable. Reset by the next `Welcome`.
-        internal fun reconnectDelayMs(attempt: Int): Long =
-            (RECONNECT_BASE_MS shl attempt.coerceIn(0, RECONNECT_MAX_DOUBLINGS)).coerceAtMost(RECONNECT_MAX_MS)
-
         private fun newId(): String = UUID.randomUUID().toString().replace("-", "")
 
-        private const val RECONNECT_BASE_MS = 1_000L
-        private const val RECONNECT_MAX_MS = 30_000L
-        private const val RECONNECT_MAX_DOUBLINGS = 5
+        private const val HTTP_UNAUTHORIZED = 401
         private const val TAG = "PageInkSession"
         private const val RESTORE_FAILED = "Restoring the page failed"
         private const val CLOSED_DETAIL = "connection closed"
         private val RETRYABLE = setOf(PageStatusKind.Disconnected, PageStatusKind.SessionExpired)
-
-        // The server is up but failed to store or serve something: retried.
-        // Every other error code is a definitive refusal (#159).
-        private val TRANSIENT_FAILURES =
-            setOf("commit_failed", "tombstone_failed", "paper_failed", "replay_failed", "welcome_failed")
 
         const val CONNECTING = "Connecting…"
         const val DISCONNECTED = "Offline — your changes are kept and sync when you're back"

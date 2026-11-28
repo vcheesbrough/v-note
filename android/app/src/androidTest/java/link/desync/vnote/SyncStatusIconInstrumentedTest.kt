@@ -2,8 +2,12 @@ package link.desync.vnote
 
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -15,6 +19,11 @@ import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
 import link.desync.vnote.ink.PageInkSession
 import link.desync.vnote.ink.PageStatusKind
+import link.desync.vnote.model.Stroke
+import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.store.Edit
+import link.desync.vnote.store.LocalStore
+import link.desync.vnote.store.OpState
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -22,6 +31,7 @@ import mockwebserver3.RecordedRequest
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
@@ -33,11 +43,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * #159 on screen: the top bar's sync status icon — on every screen — names
- * the kind of trouble (offline, sign-in needed) and says nothing while sync
- * is nominal. The open page shows no banner for any of it: only a refusal is
- * the page's to show. The session-level behaviour behind each state is in
- * [PageInkInstrumentedTest].
+ * #159, #651 on screen: the top bar's sync status icon — on every screen —
+ * is the one sign of trouble. It shows when the last attempt failed or there
+ * is no token, and never while online, not even with edits on their way. Its
+ * place in the bar is kept either way, so nothing moves when it comes and
+ * goes. The open page shows no banner for any of it. The session-level
+ * behaviour behind each state is in [PageInkInstrumentedTest].
  */
 @RunWith(AndroidJUnit4::class)
 class SyncStatusIconInstrumentedTest {
@@ -121,11 +132,19 @@ class SyncStatusIconInstrumentedTest {
 
         awaitTag("sync-status-offline")
         assertNoBanner()
+        val controlsWithTheIcon = topBarControls()
         composeRule.onNodeWithTag("sync-status-offline").performClick()
         composeRule.onNodeWithTag("sync-status-details").assertIsDisplayed()
-        composeRule.onNodeWithTag("sync-status-host").assertIsDisplayed()
-        composeRule.onNodeWithTag("sync-status-error-class").assertIsDisplayed()
+        composeRule.onNodeWithTag("sync-status-host").assertTextEquals("Can't reach ${server.url("/").host}")
+        // The drop itself is reported first; the refused reconnect follows.
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText("Error: HTTP 503").fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithTag("sync-status-last-sync").assertIsDisplayed()
+        // Nothing here needs the user: no sign-in, and nothing to discard.
+        composeRule.onAllNodesWithTag("sync-status-sign-in").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Sign in").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Discard").assertCountEquals(0)
         composeRule.onNodeWithText("Close").performClick()
 
         pageMode = PageMode.Healthy
@@ -134,6 +153,37 @@ class SyncStatusIconInstrumentedTest {
             composeRule.onAllNodesWithTag("sync-status-offline").fetchSemanticsNodes().isEmpty()
         }
         assertNoBanner()
+        // #651: the icon's place is kept, so the bar's controls did not move.
+        composeRule.onNodeWithTag("sync-status-slot").assertExists()
+        assertEquals("the controls stay put when the icon goes", controlsWithTheIcon, topBarControls())
+    }
+
+    /**
+     * #651: while online, edits on their way show nothing. The server here
+     * takes a commit and never echoes it, so the edit stays pending for as
+     * long as the test looks: no icon appears, and its slot is still there.
+     */
+    @Test
+    fun editsOnTheirWayWhileOnlineShowNoIcon() {
+        val store = LocalStore.shared(InstrumentationRegistry.getInstrumentation().targetContext)
+        awaitTag("page-tile-$PAGE_ID")
+        composeRule.runOnUiThread {
+            store.outbox.enqueue(PAGE_ID, Edit.Batch("batch_on_its_way", listOf(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0))))))
+        }
+        openPage()
+
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            store.outbox.read
+                .forPage(PAGE_ID)
+                .singleOrNull()
+                ?.state == OpState.Sent
+        }
+        // Long enough for an icon to have appeared, had one been coming.
+        Thread.sleep(1_000)
+        composeRule.waitForIdle()
+        assertEquals("still pending", 1, store.outbox.read.unsyncedCount())
+        awaitNoIcon()
+        composeRule.onNodeWithTag("sync-status-slot").assertExists()
     }
 
     /**
@@ -154,9 +204,10 @@ class SyncStatusIconInstrumentedTest {
     }
 
     /**
-     * #159: a refused session pauses sync — the icon asks for a sign-in, with
-     * a Sign in button in its details — while the page stays open for
-     * editing, with no banner.
+     * #159, #651: with no token left — the identity provider refused the
+     * refresh — sync waits for a sign-in. The same icon shows, in the same
+     * place, and its details offer Sign in; the page stays open for editing,
+     * with no banner.
      */
     @Test
     fun aRefusedSessionAsksForSignInFromTheIcon() {
@@ -168,6 +219,7 @@ class SyncStatusIconInstrumentedTest {
         composeRule.onNodeWithTag("sync-status-sign-in").performClick()
         composeRule.onNodeWithTag("sync-status-details").assertIsDisplayed()
         composeRule.onNodeWithText(PageInkSession.SESSION_EXPIRED).assertIsDisplayed()
+        composeRule.onNodeWithText("Sign in").assertIsDisplayed()
         // Not clicked here: Sign in starts OIDC discovery against the real
         // identity provider, which the test network guard refuses by crashing
         // the run.
@@ -176,7 +228,7 @@ class SyncStatusIconInstrumentedTest {
 
     private fun awaitNoIcon() {
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            listOf("offline", "sign-in", "rejected").all { state ->
+            listOf("offline", "sign-in").all { state ->
                 composeRule.onAllNodesWithTag("sync-status-$state").fetchSemanticsNodes().isEmpty()
             }
         }
@@ -193,11 +245,22 @@ class SyncStatusIconInstrumentedTest {
         }
     }
 
+    // No banner of any kind, and none of the controls a refusal used to
+    // put on the page (#651).
     private fun assertNoBanner() {
-        for (kind in PageStatusKind.entries) {
-            composeRule.onAllNodesWithTag("page-status-${kind.tag}").assertCountEquals(0)
+        for (kind in PageStatusKind.entries.map { it.tag } + "rejected") {
+            composeRule.onAllNodesWithTag("page-status-$kind").assertCountEquals(0)
         }
+        composeRule.onAllNodesWithText("Keep as a new page").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Discard").assertCountEquals(0)
     }
+
+    // Where the open page's top-bar controls are.
+    private fun topBarControls() =
+        listOf(
+            composeRule.onNodeWithTag("eraser-tool").getUnclippedBoundsInRoot(),
+            composeRule.onNodeWithContentDescription("Back to library").getUnclippedBoundsInRoot(),
+        )
 
     private enum class PageMode { Healthy, DropAfterSubscribe, SharedWithAnotherDevice, Unauthorized }
 

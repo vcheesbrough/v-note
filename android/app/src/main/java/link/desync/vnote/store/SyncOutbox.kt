@@ -28,15 +28,14 @@ enum class OpKind(
 // Where an entry is on its way to the server (#159). `Pending` was never
 // sent; `Sent` went out on a socket that may have dropped before the answer.
 // Both are replayed until `Acknowledged`, which the server's own echo sets.
-// `Rejected` is a definitive refusal: kept, shown, never retried and never
-// counted as synced.
+// There is no other way out (#651): no failure, whatever it is, ends an
+// entry — it stays owed and is retried until the server takes it.
 enum class OpState(
     internal val wire: String,
 ) {
     Pending("pending"),
     Sent("sent"),
     Acknowledged("acknowledged"),
-    Rejected("rejected"),
     ;
 
     internal companion object {
@@ -51,8 +50,6 @@ data class OutboxOp(
     val kind: OpKind,
     val state: OpState,
     internal val payload: JSONObject,
-    val detailCode: String? = null,
-    val detailMessage: String? = null,
 ) {
     val strokes: List<Stroke>
         get() = payload.optJSONArray("strokes").toStrokes()
@@ -66,14 +63,6 @@ data class OutboxOp(
     val title: String
         get() = payload.optString("title")
 }
-
-// A page whose edits the server definitively refused, with why.
-data class Rejection(
-    val pageId: String,
-    val code: String,
-    val message: String,
-    val strokeCount: Int,
-)
 
 // The durable outbox (#159): every edit is written here, in one transaction,
 // before the canvas reports it accepted, and stays until the server
@@ -108,26 +97,8 @@ class SyncOutbox internal constructor(
     // the transaction that stores the confirmed ink, so the two never part.
     fun acknowledge(opId: String) = setState(opId, OpState.Acknowledged)
 
-    // A definitive refusal for the page: every entry still on its way is
-    // rejected with it, since none of them can land either.
-    fun reject(
-        pageId: String,
-        code: String,
-        message: String,
-    ) {
-        store.transaction { db ->
-            val values =
-                ContentValues().apply {
-                    put("state", OpState.Rejected.wire)
-                    put("detail_code", code)
-                    put("detail_message", message)
-                }
-            db.update(OUTBOX, values, "page_id = ? AND state IN (?, ?)", arrayOf(pageId, OpState.Pending.wire, OpState.Sent.wire))
-        }
-    }
-
-    // The user chose what to do with a refused page's edits (kept them as a
-    // new page, or let them go): every entry still owed by the page goes.
+    // The user kept a permanently deleted page's edits as a new page: the
+    // entries the deleted page still owed, which can never land, go.
     fun discardPage(pageId: String) {
         store.transaction { db -> db.delete(OUTBOX, "page_id = ? AND state <> ?", arrayOf(pageId, OpState.Acknowledged.wire)) }
     }
@@ -162,8 +133,8 @@ class SyncOutbox internal constructor(
         state: OpState,
     ) {
         store.transaction { db ->
-            // Never moves an entry out of a final state: a late echo for a
-            // rejected entry, or a resend of an acknowledged one, is ignored.
+            // Never moves an entry out of its final state: a resend of an
+            // acknowledged one is ignored.
             db.update(
                 OUTBOX,
                 ContentValues().apply { put("state", state.wire) },
@@ -195,12 +166,11 @@ sealed interface Edit {
     ) : Edit
 }
 
-// What the outbox holds: per page, overall, and what was refused.
+// What the outbox holds: per page, and overall.
 class OutboxQueries internal constructor(
     private val store: LocalStore,
 ) {
-    // Unacknowledged entries for one page — pending, sent and rejected — in
-    // the order they were made.
+    // Unacknowledged entries for one page, in the order they were made.
     fun forPage(pageId: String): List<OutboxOp> = query("page_id = ? AND state <> ?", arrayOf(pageId, OpState.Acknowledged.wire))
 
     fun pendingCreates(): List<OutboxOp> =
@@ -223,44 +193,13 @@ class OutboxQueries internal constructor(
                 arrayOf(OpState.Acknowledged.wire),
             ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
 
-    // Edits still on their way: pending or sent, not refused.
-    fun awaitingCount(): Int =
-        store.db
-            .rawQuery(
-                "SELECT COUNT(*) FROM $OUTBOX WHERE state IN (?, ?)",
-                arrayOf(OpState.Pending.wire, OpState.Sent.wire),
-            ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
-
-    fun rejections(): List<Rejection> =
-        store.db
-            .rawQuery(
-                "SELECT page_id, detail_code, detail_message, kind, payload FROM $OUTBOX WHERE state = ? ORDER BY position",
-                arrayOf(OpState.Rejected.wire),
-            ).use { cursor ->
-                val byPage = linkedMapOf<String, Rejection>()
-                while (cursor.moveToNext()) {
-                    val pageId = cursor.getString(0)
-                    val strokes =
-                        if (cursor.getString(3) == OpKind.CommitBatch.wire) {
-                            JSONObject(cursor.getString(4)).optJSONArray("strokes")?.length() ?: 0
-                        } else {
-                            0
-                        }
-                    val previous = byPage[pageId]
-                    byPage[pageId] =
-                        previous?.copy(strokeCount = previous.strokeCount + strokes)
-                            ?: Rejection(pageId, cursor.getString(1).orEmpty(), cursor.getString(2).orEmpty(), strokes)
-                }
-                byPage.values.toList()
-            }
-
     private fun query(
         where: String,
         args: Array<String>,
     ): List<OutboxOp> =
         store.db
             .rawQuery(
-                "SELECT position, op_id, page_id, kind, state, payload, detail_code, detail_message FROM $OUTBOX " +
+                "SELECT position, op_id, page_id, kind, state, payload FROM $OUTBOX " +
                     "WHERE $where ORDER BY position",
                 args,
             ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.toOp()) } }
@@ -273,8 +212,6 @@ class OutboxQueries internal constructor(
             kind = OpKind.of(getString(3)),
             state = OpState.of(getString(4)),
             payload = JSONObject(getString(5)),
-            detailCode = if (isNull(6)) null else getString(6),
-            detailMessage = if (isNull(7)) null else getString(7),
         )
 }
 

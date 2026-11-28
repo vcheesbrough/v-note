@@ -424,7 +424,7 @@ Canvas input tests (`PageCanvasInputInstrumentedTest`) send `MotionEvent`s strai
 - **A test that swaps telemetry** (`Telemetry.install(recording)`) no longer leaves the replaced runtime's export loop running: `install` stops the runtime it replaces, and swapping back restarts it.
 - There is no test-only network security config: changing the build type would ripple through the CI lanes and lane keys, and the guard already covers AppAuth's `HttpURLConnection` through its `ConnectionBuilder`.
 
-### Offline, captive portal and session expiry (#159)
+### Offline, captive portal and session expiry (#159, #651)
 
 The app is local-first: the library, every page's ink and an outbox of unsynced edits live in
 `vnote-local.db` (plain SQLite, `android/app/.../store/`). To exercise the cases that matter
@@ -438,6 +438,34 @@ against the dev stack:
   back on (`… airplane-mode disable`): the outbox replays on its own and the icon goes. Kill the
   process while offline (`adb shell am force-stop link.desync.vnote.dev`) to check nothing
   accepted is lost.
+- **Every failure is the same failure (#651).** Whatever stands between the app and the server,
+  the app must do exactly what it does offline: no banner on the page, drawing and creating pages
+  work, the top bar shows the cloud-with-a-line icon, its details name the host and the failure,
+  and everything syncs by itself within one backoff step (≤ 30 s) of the server answering again —
+  at once when the network itself returned. Nothing but a refused refresh may show *Sign in*, and
+  there is no Discard anywhere. The cases, against the dev stack with the `dev` APK:
+  - **Server down behind the proxy (Traefik 404).** On the dev host, `docker stop` the v-note
+    container. Traefik has no router for the host and answers every request with its own plain-text
+    404; the details show `HTTP 404`. `docker start` it and watch the pending count drain. This is
+    the case the bug was reported from — the app used to read that 404 as the page being refused.
+  - **Outside the LAN/VPN (Traefik 403).** Put the device on mobile data with Tailscale off: the
+    `lan-vpn-only` `ipAllowList` answers 403 (`HTTP 403`). Turn Tailscale back on.
+  - **Captive portal (3xx, or a 200 with its own page).** Join a Wi-Fi network whose portal you
+    have not accepted. The API client follows no redirect, so a redirecting portal shows as
+    `HTTP 302`/`307`; one that serves its page with 200 shows as `HTTP 200` or `JSONException`.
+    Accept the portal: the network turns validated and the app retries at once.
+  - **Server-side failure.** Make the server itself fail — for example by stopping its database
+    container — and start it again; the details show the status it answers with (a 5xx) or the
+    page channel's own error code (`commit_failed`, `replay_failed`).
+  - **Restart in the middle** of any of them (`adb shell am force-stop link.desync.vnote.dev`,
+    then launch): every edit is still pending, and sync resumes by itself.
+  - **A page permanently deleted elsewhere (410).** Draw on a page offline, delete it permanently
+    from another device's bin, come back online: the edits stay pending and retried (`HTTP 410`),
+    and the details offer *Keep as a new page* for them — optional, and the only way they can land.
+  - **An install stuck by the old bug** (outbox rows in state `rejected`, from 0.85) is unstuck by
+    the store's upgrade on first launch of 0.86: the rows are `pending` again and replay.
+  All of these are automated on loopback in `OfflineReplayInstrumentedTest` (one case per kind),
+  `SyncEngineInstrumentedTest` and `PageInkInstrumentedTest`.
 - **Only one host reachable.** The backend and Authentik (`auth.desync.link`) are separate hosts.
   With `devLocal`, `adb reverse` reaches the laptop server while Authentik may be out of reach:
   sync keeps working while the access token is valid, and an expired token waits (offline icon,
@@ -448,8 +476,9 @@ against the dev stack:
   (`AuthRepositoryInstrumentedTest.noAnswerButInvalidGrantEndsTheSession` covers 502/503/HTML).
 - **Session expiry.** Revoke the refresh token in Authentik (the user's *Tokens* tab), then make
   the access token expire (wait an hour, or clear it: `adb shell run-as link.desync.vnote.dev rm
-  -r shared_prefs/vnote_auth_tokens.xml` clears both). Sync pauses with the *sign-in needed* icon
-  while editing carries on; signing in as the same user resumes replay. Signing in as a different
+  -r shared_prefs/vnote_auth_tokens.xml` clears both). With no token left, sync waits for a sign-in —
+  the same offline icon, whose details now offer *Sign in* — while editing carries on; signing in
+  as the same user resumes replay. Signing in as a different
   user warns first when unsynced changes exist (*N unsynced changes from another account will be
   deleted*).
 - **Inspect the store.** `adb shell run-as link.desync.vnote.dev sqlite3 databases/vnote-local.db

@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import link.desync.vnote.api.ApiClient
@@ -13,6 +14,7 @@ import link.desync.vnote.api.LibraryEventListener
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.LibraryEvent
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.sync.Backoff
 import link.desync.vnote.telemetry.Telemetry
 import okhttp3.WebSocket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -36,9 +38,11 @@ internal class LibraryStateHolder(
     private val isSignedIn: () -> Boolean,
     // Channel callbacks arrive on OkHttp threads; state is written on the UI thread.
     private val runOnUiThread: (() -> Unit) -> Unit,
-    // Between a channel ending and the next one opening. Unit tests pass 0 so
-    // a reconnect runs inline and can be asserted.
-    private val reconnectDelayMillis: Long = RECONNECT_DELAY_MILLIS,
+    // How long between a channel ending and the next one opening: 1 s, then
+    // doubling to 30 s for as long as the server stays away (#651), not a
+    // flat 1 s — polling every second for hours offline is battery for
+    // nothing. Unit tests pass a schedule of 0 so a reconnect runs inline.
+    private val reconnectBackoff: Backoff = Backoff(),
 ) {
     private var pageState by mutableStateOf<List<PageSummary>>(emptyList())
 
@@ -61,6 +65,11 @@ internal class LibraryStateHolder(
         private set
 
     private var librarySocket: WebSocket? = null
+
+    // The wait before the next reconnect, while there is one: what
+    // [retryNow] cuts short. Set on OkHttp's thread, read on the UI thread.
+    @Volatile
+    private var reconnectJob: Job? = null
 
     // One per snapshot fetch in flight: the events applied while it is out,
     // replayed on top of the list it brings back (see [loadSnapshot]). Only
@@ -154,21 +163,29 @@ internal class LibraryStateHolder(
         }
     }
 
-    // Sign-out: close the channel for good, and forget the list and the open
-    // page — in memory only. The device's copy is kept (#159): signing in
-    // again as the same identity carries on where it left off.
+    // The network may be back (#651): a channel waiting out its backoff
+    // reconnects now, and the backoff starts over. A channel that is open or
+    // connecting is left alone.
+    fun retryNow() {
+        val waiting = reconnectJob ?: return
+        if (!waiting.isActive) return
+        waiting.cancel()
+        reconnectJob = null
+        reconnectBackoff.reset()
+        if (isSignedIn()) connect()
+    }
+
+    // Sign-out, or the activity going away: close the channel for good, and
+    // forget the list and the open page — in memory only. The device's copy
+    // is kept (#159): signing in again as the same identity carries on where
+    // it left off.
     fun clear() {
-        librarySocket?.close(1000, "signed out")
+        librarySocket?.close(1000, "closed")
         librarySocket = null
         connectionGeneration += 1
         pageState = emptyList()
         selectedPage = null
         bin.clear()
-    }
-
-    // Activity teardown.
-    fun close() {
-        librarySocket?.close(1000, "activity destroyed")
     }
 
     // One library-channel event, on the UI thread: both lists follow the event,
@@ -181,7 +198,8 @@ internal class LibraryStateHolder(
         bin.apply(event)
         if (event is LibraryEvent.PageDeleted) {
             // Gone for good: so is its confirmed ink. Edits still owed to it
-            // stay, to be refused and offered as a new page (#159).
+            // stay owed, and the status details offer them as a new page
+            // (#651).
             local.store?.ink?.forget(event.pageId)
             if (selectedPage?.id == event.pageId) {
                 selectedPage = null
@@ -278,17 +296,18 @@ internal class LibraryStateHolder(
                         status.reportFailure(failure.host, failure.errorClass, failure.correlationId)
                     }
                 }
-                reconnectScope.launch {
-                    // A channel that never opened took no snapshot. Take one
-                    // anyway: the list still loads when only realtime is
-                    // refused, and its REST call refreshes an expired token on
-                    // a 401, which an upgrade cannot do for itself.
-                    val superseded = !opened.get() && !loadSnapshot(generation, clearsError = false)
-                    if (!superseded) {
-                        delay(reconnectDelayMillis)
-                        if (channelMayReconnect(generation, connectionGeneration, isSignedIn())) connect()
+                reconnectJob =
+                    reconnectScope.launch {
+                        // A channel that never opened took no snapshot. Take one
+                        // anyway: the list still loads when only realtime is
+                        // refused, and its REST call refreshes an expired token on
+                        // a 401, which an upgrade cannot do for itself.
+                        val superseded = !opened.get() && !loadSnapshot(generation, clearsError = false)
+                        if (!superseded) {
+                            delay(reconnectBackoff.next())
+                            if (channelMayReconnect(generation, connectionGeneration, isSignedIn())) connect()
+                        }
                     }
-                }
             }
         }
         librarySocket?.close(1000, "reconnecting")
@@ -298,6 +317,8 @@ internal class LibraryStateHolder(
                     override fun onOpen() {
                         opened.set(true)
                         reconnectScope.launch {
+                            // Any success starts the backoff over.
+                            reconnectBackoff.reset()
                             loadSnapshot(generation)
                             // Reachable again: whatever the device owes goes now.
                             local.onOnline()
@@ -337,8 +358,6 @@ internal class LibraryStateHolder(
 }
 
 internal const val LIBRARY_SCREEN = "screen.library"
-
-private const val RECONNECT_DELAY_MILLIS = 1_000L
 
 // Whether a library channel opened as [generation] may still reconnect: it must
 // be the newest channel ([currentGeneration]), and the session must still be

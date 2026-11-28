@@ -1,12 +1,12 @@
 package link.desync.vnote.ink
 
-// What the open page's banner says, and why (#150). Each kind is a different
-// thing for the user to do — wait, wait while ink is retried, sign in again,
-// or retry — so the kinds are kept apart rather than flattened
-// into one error string. No status at all means sync is nominal.
+// Where an open page's sync stands, and why (#150). No status at all means
+// sync is nominal. Nothing here is shown on the page (#651) — the top bar's
+// status icon speaks for every screen — and no kind is final: all but
+// [SessionExpired] are retried without the user, and that one resumes on a
+// sign-in.
 enum class PageStatusKind(
-    // Stable value for the banner's test tag, so a UI test can tell the kinds
-    // apart without matching copy.
+    // Stable name for logs and tests.
     val tag: String,
 ) {
     // The first connection to this page is being made. Loading, not trouble.
@@ -17,17 +17,13 @@ enum class PageStatusKind(
     // caught up again (#390).
     Disconnected("disconnected"),
 
-    // Connected, but the server failed to store ink (`commit_failed`). Ink is
-    // blocked while the held batches are re-sent with backoff.
+    // Connected, but the server answered an edit with an error code — any
+    // code. Everything owed is re-sent with backoff.
     Retrying("retrying"),
 
-    // The server refused this device's session and a token refresh could not
-    // fix it. Only signing in again can.
+    // There is no token to sync with: the identity provider refused the
+    // refresh, or none is stored. Only signing in again can fix it.
     SessionExpired("session-expired"),
-
-    // The server definitively refused something this session sent. Not
-    // retried; leaving and reopening the page starts afresh.
-    Rejected("rejected"),
 }
 
 data class PageStatus(
@@ -37,6 +33,4 @@ data class PageStatus(
     // Technical detail (HTTP status, close code, server error code) for the
     // power user and for support; never page content.
     val detail: String? = null,
-) {
-    val isError: Boolean get() = kind != PageStatusKind.Connecting
-}
+)

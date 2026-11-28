@@ -6,7 +6,6 @@ import link.desync.vnote.store.ConfirmedBatch
 import link.desync.vnote.store.Edit
 import link.desync.vnote.store.LocalStore
 import link.desync.vnote.store.OpKind
-import link.desync.vnote.store.OpState
 import link.desync.vnote.store.OutboxOp
 
 // One page's ink as the device holds it (#159): what the server confirmed,
@@ -29,18 +28,10 @@ internal class PageLedger(
     val pendingErasures = linkedMapOf<String, Set<String>>()
     private val pendingPaper = linkedMapOf<String, Paper>()
 
-    // Edits the server definitively refused: kept and drawn until the user
-    // recovers or discards them, never counted as synced.
-    private val rejectedBatches = linkedMapOf<String, List<Stroke>>()
-
     var lastSeq = 0L
         private set
 
     var confirmedPaper: Paper? = null
-        private set
-
-    // Why the server refused this page's edits, or null.
-    var rejection: Pair<String, String>? = null
         private set
 
     // The newest paper this device asked for and the server has not confirmed.
@@ -64,11 +55,6 @@ internal class PageLedger(
         lastSeq = cached.lastSeq
         confirmedPaper = cached.paper
         for (op in store.outbox.read.forPage(pageId)) {
-            if (op.state == OpState.Rejected) {
-                rejection = op.detailCode.orEmpty() to op.detailMessage.orEmpty()
-                if (op.kind == OpKind.CommitBatch) rejectedBatches[op.opId] = op.strokes
-                continue
-            }
             when (op.kind) {
                 OpKind.CommitBatch -> pendingBatches[op.opId] = op.strokes
                 OpKind.Erase -> pendingErasures[op.opId] = op.strokeIds.toSet()
@@ -80,13 +66,6 @@ internal class PageLedger(
 
     fun record(edit: Edit) {
         store.outbox.enqueue(pageId, edit)
-        rejection?.let { (code, message) ->
-            // The page is refused: a new edit cannot land either, so it joins
-            // the refusal and goes wherever the user sends the rest.
-            store.outbox.reject(pageId, code, message)
-            if (edit is Edit.Batch) rejectedBatches[edit.clientBatchId] = edit.strokes
-            return
-        }
         when (edit) {
             is Edit.Batch -> pendingBatches[edit.clientBatchId] = edit.strokes
             is Edit.Erase -> pendingErasures[edit.clientMutationId] = edit.strokeIds.toSet()
@@ -97,10 +76,9 @@ internal class PageLedger(
     // Everything still to send, in the order it was made — the per-page
     // replay order. Read from the store, which is the record of what is owed.
     fun replayable(): List<OutboxOp> =
-        store.outbox.read.forPage(pageId).filter {
-            it.state != OpState.Rejected &&
-                it.kind != OpKind.CreatePage
-        }
+        store.outbox.read
+            .forPage(pageId)
+            .filter { it.kind != OpKind.CreatePage }
 
     // A batch the server holds. True when it is new to this page. Ours or not,
     // it is stored first, acknowledging our entry in the same transaction.
@@ -147,25 +125,11 @@ internal class PageLedger(
         store.ink.advance(pageId, seq)
     }
 
-    // The server refused this page for good: everything still owed is
-    // rejected with it, kept, and drawn until the user decides.
-    fun reject(
-        code: String,
-        message: String,
-    ) {
-        store.outbox.reject(pageId, code, message)
-        rejectedBatches.putAll(pendingBatches)
-        pendingBatches.clear()
-        pendingErasures.clear()
-        pendingPaper.clear()
-        rejection = code to message
-    }
-
-    // What to draw: confirmed ink, then this device's unconfirmed and refused
-    // ink on top, less anything erased here and not yet confirmed.
+    // What to draw: confirmed ink, then this device's unconfirmed ink on top,
+    // less anything erased here and not yet confirmed.
     fun renderable(): List<Stroke> {
         val erasing = pendingErasures.values.flatten().toSet()
-        val local = (pendingBatches.values + rejectedBatches.values).flatten().filterNot { it.id in tombstones }
+        val local = pendingBatches.values.flatten().filterNot { it.id in tombstones }
         val all = confirmed + local
         return if (erasing.isEmpty()) all else all.filterNot { it.id in erasing }
     }

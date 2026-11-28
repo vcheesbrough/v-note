@@ -54,8 +54,8 @@ class LibraryCache internal constructor(
         }
     }
 
-    // A page made here whose create the server refused, once the user has
-    // kept its ink as a new page or let it go.
+    // A page made here that the server says was permanently deleted, once
+    // the user has kept its ink as a new page (#651).
     internal fun removeLocal(pageId: String) {
         store.db.delete(PAGES, "id = ? AND local_only = 1", arrayOf(pageId))
     }

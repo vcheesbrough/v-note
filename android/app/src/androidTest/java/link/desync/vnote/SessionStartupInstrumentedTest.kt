@@ -19,7 +19,6 @@ import mockwebserver3.RecordedRequest
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
@@ -29,9 +28,12 @@ import org.junit.runner.RunWith
 import java.net.InetAddress
 
 /**
- * #150: the startup session check signs the user out only when the server
- * refuses the session. A server answering with an error keeps the stored
- * tokens, so Retry signs straight back in once it recovers.
+ * #150, #651: the startup session check never signs the user out, whatever
+ * `/me` answers — a 401 could as well be a captive portal's. The stored
+ * tokens are kept, so Retry signs straight back in once the server answers.
+ * Only the identity provider refusing the refresh (`invalid_grant`) clears
+ * them, and that is [AuthRepository]'s own doing
+ * ([AuthRepositoryInstrumentedTest]).
  */
 @RunWith(AndroidJUnit4::class)
 class SessionStartupInstrumentedTest {
@@ -59,10 +61,9 @@ class SessionStartupInstrumentedTest {
                     accessTokenExpiryEpochSeconds = System.currentTimeMillis() / 1000 + 3600,
                 )
                 MainActivity.apiClientFactory = { store, _ ->
-                    // The API client's 401 refresh fails, as it does for a
-                    // revoked refresh token. It deliberately does not clear
-                    // the tokens itself: whether they survive is up to the
-                    // activity, which is what this test is about.
+                    // The API client's 401 refresh fails. It deliberately
+                    // does not clear the tokens itself: whether they survive
+                    // is up to the activity, which is what this test is about.
                     val refusingRefresh =
                         object : AuthRepository(context, AuthConfig.fromBuildConfig(), store) {
                             override suspend fun refreshAccessTokenIfNeeded(force: Boolean): Boolean = !force
@@ -99,7 +100,7 @@ class SessionStartupInstrumentedTest {
     }
 
     @Test
-    fun aRefusedSessionSignsOut() {
+    fun a401OnTheSessionCheckKeepsTheTokensToo() {
         // The rule launched the activity against a 503; recreating it makes
         // the 401 the check that decides what is shown.
         awaitText("HTTP 503", substring = true)
@@ -107,7 +108,13 @@ class SessionStartupInstrumentedTest {
         composeRule.activityRule.scenario.recreate()
 
         awaitText("Session expired")
-        assertNull("signed out locally", tokenStore.accessToken())
+        assertNotNull("never signed out locally by a failed /me", tokenStore.accessToken())
+
+        meStatus = 200
+        composeRule.onNodeWithText("Retry").performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTag("create-page-button").fetchSemanticsNodes().isNotEmpty()
+        }
     }
 
     private fun awaitText(

@@ -16,7 +16,6 @@ import link.desync.vnote.auth.RefreshOutcome
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.MeProfile
-import link.desync.vnote.model.PageEvent
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.net.HttpClients
 import link.desync.vnote.sync.ErrorClass
@@ -26,6 +25,7 @@ import link.desync.vnote.telemetry.TracingInterceptor
 import link.desync.vnote.telemetry.parseTraceparent
 import link.desync.vnote.telemetry.traced
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -41,21 +41,21 @@ private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
 private const val LOG_TAG = "VNoteApi"
 private const val NORMAL_CLOSURE = 1000
 private const val HTTP_UNAUTHORIZED = 401
-private const val HTTP_FORBIDDEN = 403
-private const val HTTP_NOT_FOUND = 404
-private const val HTTP_GONE = 410
-
-// The page channel's error class for a permanently deleted page (#631), and
-// the words the banner shows for it when the upgrade itself says so.
-internal const val PAGE_DELETED = "page_deleted"
-
-// The upgrade's 403/404: the page is not found or not this user's (#159).
-internal const val PAGE_FORBIDDEN = "forbidden"
-private const val PAGE_DELETED_MESSAGE = "This page was permanently deleted"
 
 // Thumbnail URLs come from the server whole, so this is the route they match
 // rather than something derived from the URL.
 private const val THUMBNAIL_ROUTE = "/api/pages/{page_id}/thumbnails/{source_seq}"
+
+// The API's HTTP client. It follows no redirect (#651): v-note's API never
+// redirects, so a 3xx is always something in between — a captive portal, a
+// proxy — and is a failed request like any other status, not an invitation to
+// send the request, and its bearer token, to that something's host.
+internal fun apiHttpClient(): OkHttpClient =
+    HttpClients.build {
+        followRedirects(false)
+        followSslRedirects(false)
+        addInterceptor(TracingInterceptor())
+    }
 
 // [ApiClient] over OkHttp: bearer-authenticated REST with one refresh-and-retry
 // on 401, and the two realtime WebSockets. Wire formats live in `api.codec`.
@@ -65,7 +65,7 @@ class OkHttpApiClient(
     private val tokenStore: TokenStore,
     private val authRepository: AuthRepository,
 ) : ApiClient {
-    private val http = HttpClients.build { addInterceptor(TracingInterceptor()) }
+    private val http = apiHttpClient()
     private val healthCheck =
         HealthCheck(
             http = http,
@@ -250,33 +250,14 @@ class OkHttpApiClient(
                     ) {
                         logWebSocketFailure("page realtime", response, t)
                         val failure = connectionFailure(webSocket, t, response, "Page connection failed")
-                        when (response?.code) {
-                            HTTP_UNAUTHORIZED -> listener.onUnauthorized(failure.message)
-                            // Permanently deleted (#631): the same definitive
-                            // class a commit on an open socket gets, so it is
-                            // shown as such rather than retried as a dropped
-                            // connection forever.
-                            HTTP_GONE ->
-                                listener.onEvent(
-                                    PageEvent.Failure(
-                                        code = PAGE_DELETED,
-                                        message = PAGE_DELETED_MESSAGE,
-                                        clientMutationId = null,
-                                    ),
-                                )
-                            // Not found or not this user's (#159's "other
-                            // 403/404"): definitive, so a replay stops and
-                            // says so instead of retrying a page it can
-                            // never write.
-                            HTTP_FORBIDDEN, HTTP_NOT_FOUND ->
-                                listener.onEvent(
-                                    PageEvent.Failure(
-                                        code = PAGE_FORBIDDEN,
-                                        message = "${failure.message} (HTTP ${response.code})",
-                                        clientMutationId = null,
-                                    ),
-                                )
-                            else -> listener.onConnectionFailure(failure)
+                        // Every refused upgrade is the same connection
+                        // failure (#651), whatever its status: the answer may
+                        // be a proxy's, not v-note's. A 401 is named only so
+                        // the token is refreshed before the reconnect.
+                        if (response?.code == HTTP_UNAUTHORIZED) {
+                            listener.onUnauthorized(failure.message)
+                        } else {
+                            listener.onConnectionFailure(failure)
                         }
                     }
 
@@ -367,7 +348,7 @@ class OkHttpApiClient(
     private suspend fun requestMe(retryOnUnauthorized: Boolean): Result<MeProfile> {
         val accessToken =
             tokenStore.accessToken()
-                ?: return Result.failure(IllegalStateException("Not signed in"))
+                ?: return noToken()
 
         val request =
             authorizedRequest("$baseUrl/api/me", accessToken, "/api/me")
@@ -375,18 +356,17 @@ class OkHttpApiClient(
                 .build()
 
         http.newCall(request).execute().use { response ->
-            if (response.code == HTTP_UNAUTHORIZED) {
-                if (retryOnUnauthorized && refreshAfterUnauthorized()) {
-                    return requestMe(retryOnUnauthorized = false)
-                }
-                return Result.failure(SessionExpiredException())
+            if (response.code == HTTP_UNAUTHORIZED && retryOnUnauthorized) {
+                return if (refreshAfterUnauthorized()) requestMe(retryOnUnauthorized = false) else noToken()
             }
             if (!response.isSuccessful) {
                 logHttpFailure("GET /api/me", response)
                 return Result.failure(httpFailure("GET /api/me failed", response))
             }
             val body = response.body.string()
-            return Result.success(decodeMe(JSONObject(body)))
+            // A 2xx that is not v-note's JSON (a captive portal's page) is a
+            // failed call, not an exception on the caller's coroutine (#651).
+            return runCatching { decodeMe(JSONObject(body)) }
         }
     }
 
@@ -396,14 +376,11 @@ class OkHttpApiClient(
     ): Result<String> {
         val accessToken =
             tokenStore.accessToken()
-                ?: return Result.failure(IllegalStateException("Not signed in"))
+                ?: return noToken()
 
         http.newCall(buildRequest(accessToken)).execute().use { response ->
-            if (response.code == HTTP_UNAUTHORIZED) {
-                if (retryOnUnauthorized && refreshAfterUnauthorized()) {
-                    return makeAuthorizedApiRequest(retryOnUnauthorized = false, buildRequest)
-                }
-                return Result.failure(SessionExpiredException())
+            if (response.code == HTTP_UNAUTHORIZED && retryOnUnauthorized) {
+                return if (refreshAfterUnauthorized()) makeAuthorizedApiRequest(retryOnUnauthorized = false, buildRequest) else noToken()
             }
             if (!response.isSuccessful) {
                 logHttpFailure("API request", response)
@@ -419,13 +396,10 @@ class OkHttpApiClient(
     ): Result<ByteArray> {
         val accessToken =
             tokenStore.accessToken()
-                ?: return Result.failure(IllegalStateException("Not signed in"))
+                ?: return noToken()
         http.newCall(buildRequest(accessToken)).execute().use { response ->
-            if (response.code == HTTP_UNAUTHORIZED) {
-                if (retryOnUnauthorized && refreshAfterUnauthorized()) {
-                    return makeAuthorizedApiRequestForBytes(false, buildRequest)
-                }
-                return Result.failure(SessionExpiredException())
+            if (response.code == HTTP_UNAUTHORIZED && retryOnUnauthorized) {
+                return if (refreshAfterUnauthorized()) makeAuthorizedApiRequestForBytes(false, buildRequest) else noToken()
             }
             if (!response.isSuccessful) {
                 logHttpFailure("thumbnail request", response)
@@ -435,11 +409,15 @@ class OkHttpApiClient(
         }
     }
 
+    // No token is stored, or the provider refused to refresh it: the one case
+    // only a sign-in fixes (#651).
+    private fun <T> noToken(): Result<T> = Result.failure(SessionExpiredException())
+
     // The server refused the token: refresh it. True when a fresh one is
-    // stored. A provider out of reach is not a refused session (#159): it
-    // fails the call as unreachable, so sync waits rather than pausing for a
-    // sign-in. A 401 *after* a refresh is the session expired, as is a
-    // refused refresh.
+    // stored; false when the provider refused the refresh, which leaves no
+    // token. A provider out of reach fails the call as unreachable (#159). A
+    // 401 that is still a 401 with the fresh token is not handled here at
+    // all: it is an HTTP failure like any other status, retried (#651).
     private suspend fun refreshAfterUnauthorized(): Boolean {
         if (authRepository.refreshAccessTokenIfNeeded(force = true)) return true
         if (authRepository.lastRefreshOutcome == RefreshOutcome.Unavailable) {

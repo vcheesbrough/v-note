@@ -19,6 +19,8 @@ import link.desync.vnote.model.StrokePoint
 import link.desync.vnote.model.StrokeStyle
 import link.desync.vnote.store.Edit
 import link.desync.vnote.store.LocalStore
+import link.desync.vnote.store.OpState
+import link.desync.vnote.sync.SyncStatus
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.WebSocket
@@ -340,7 +342,7 @@ class PageInkInstrumentedTest {
             LocalStore
                 .shared(context())
                 .outbox.read
-                .awaitingCount(),
+                .unsyncedCount(),
         )
         assertEquals("re-sent under the same id", 1, commits.toSet().size)
         assertEquals("sent twice", 2, commits.size)
@@ -349,69 +351,90 @@ class PageInkInstrumentedTest {
     }
 
     /**
-     * #159: a definitive rejection is not retried and never counts as synced.
-     * The ink is kept — drawn, and in the outbox as rejected — and the page
-     * says why, offering recovery.
+     * #651: no error code on an open page channel is a refusal. Whatever the
+     * server answers a commit with — codes that used to end the page for
+     * good among them — the ink stays drawn and owed, the page takes more of
+     * it, and the commit is sent again until the server stores it.
      */
     @Test
-    fun aRejectedCommitIsKeptShownAndNeverSynced() {
-        val commitReceived = CountDownLatch(1)
-        server.enqueue(
-            MockResponse
-                .Builder()
-                .webSocketUpgrade(
-                    object : AnsweringCloses() {
-                        override fun onOpen(
-                            webSocket: WebSocket,
-                            response: okhttp3.Response,
-                        ) {
-                            webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
-                        }
+    fun anyErrorCodeOnTheChannelIsRetriedUntilTheServerTakesTheEdit() {
+        val codes = listOf("forbidden", "page_deleted", "bad_message", "invalid_stroke_style", "commit_failed", "never_heard_of_it")
+        for (code in codes) {
+            val pageId = "page_$code"
+            val commits = CopyOnWriteArrayList<String>()
+            server.enqueue(
+                MockResponse
+                    .Builder()
+                    .webSocketUpgrade(
+                        object : AnsweringCloses() {
+                            override fun onOpen(
+                                webSocket: WebSocket,
+                                response: okhttp3.Response,
+                            ) {
+                                webSocket.send("""{"type":"welcome","session_id":"me","last_seq":0}""")
+                            }
 
-                        override fun onMessage(
-                            webSocket: WebSocket,
-                            text: String,
-                        ) {
-                            when (JSONObject(text).getString("type")) {
-                                "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
-                                "commit-batch" -> {
-                                    commitReceived.countDown()
-                                    webSocket.send(
-                                        """{"type":"error","code":"invalid_stroke_style","message":"Commit rejected"}""",
-                                    )
+                            override fun onMessage(
+                                webSocket: WebSocket,
+                                text: String,
+                            ) {
+                                val message = JSONObject(text)
+                                when (message.getString("type")) {
+                                    "subscribe" -> webSocket.send("""{"type":"synced","last_seq":0}""")
+                                    "commit-batch" -> {
+                                        commits += message.getString("client_batch_id")
+                                        if (commits.size == 1) {
+                                            webSocket.send("""{"type":"error","code":"$code","message":"Commit rejected"}""")
+                                        } else {
+                                            webSocket.send(
+                                                JSONObject()
+                                                    .put("type", "stroke-batch")
+                                                    .put("seq", 1)
+                                                    .put("client_batch_id", message.getString("client_batch_id"))
+                                                    .put("strokes", message.getJSONArray("strokes"))
+                                                    .toString(),
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    },
-                ).build(),
-        )
+                        },
+                    ).build(),
+            )
+            val session = PageInkSession(apiClient, pageId, CoroutineScope(Dispatchers.Main), sync = localSync())
+            session.connect()
+            assertTrue("$code: page channel caught up", awaitUntil { session.canEdit })
 
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
-        session.connect()
-        assertTrue("page channel caught up", awaitUntil { session.canEdit })
+            session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0))))
 
-        session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0))))
-        assertTrue("commit sent", commitReceived.await(5, TimeUnit.SECONDS))
-        assertTrue("no longer pending", awaitUntil { session.pendingBatchCount == 0 })
-        assertEquals("the refused ink is still drawn", 1, session.strokes.size)
-        // Await rather than read: `handle` publishes strokes before it sets the
-        // banner, so polling on one and immediately reading the other races the
-        // remainder of that handler.
-        assertTrue(
-            "commit rejection shown",
-            awaitUntil { session.statusBanner == "Commit rejected" },
-        )
-        assertEquals(PageStatusKind.Rejected, session.status?.kind)
-        assertEquals("not live once refused", false, session.canEdit)
-        val rejections =
-            LocalStore
-                .shared(context())
-                .outbox.read
-                .rejections()
-        assertEquals("recorded as refused, with its stroke", listOf(1), rejections.map { it.strokeCount })
-        assertEquals("invalid_stroke_style", rejections.single().code)
-
-        session.disconnect()
+            assertTrue("$code: retrying", awaitUntil { session.status?.kind == PageStatusKind.Retrying })
+            assertEquals("$code: the ink is kept, owed", 1, session.pendingBatchCount)
+            assertEquals("$code: and still drawn", 1, session.strokes.size)
+            assertEquals(
+                "$code: owed in the outbox, as pending or sent",
+                listOf(true),
+                LocalStore
+                    .shared(context())
+                    .outbox.read
+                    .forPage(pageId)
+                    .map { it.state == OpState.Pending || it.state == OpState.Sent },
+            )
+            assertTrue(
+                "$code: stored once the server takes it",
+                awaitUntil(timeoutMs = 10_000) { session.pendingBatchCount == 0 && session.status == null },
+            )
+            assertEquals("$code: re-sent under the same id", 1, commits.toSet().size)
+            assertEquals(
+                "$code: nothing owed",
+                0,
+                LocalStore
+                    .shared(context())
+                    .outbox.read
+                    .forPage(pageId)
+                    .size,
+            )
+            session.disconnect()
+        }
     }
 
     @Test
@@ -566,7 +589,7 @@ class PageInkInstrumentedTest {
             LocalStore
                 .shared(context())
                 .outbox.read
-                .awaitingCount(),
+                .unsyncedCount(),
         )
 
         session.disconnect()
@@ -1051,30 +1074,37 @@ class PageInkInstrumentedTest {
     }
 
     /**
-     * #150, #159: when the refreshed token is refused too, the session is
-     * gone. Sync pauses for a sign-in and the page stops reconnecting — every
-     * further attempt would be refused the same way — while editing carries
-     * on, and a 401 is never recorded as a rejection.
+     * #651: a 401 that is still a 401 with a freshly refreshed token is not
+     * the session's fault — a captive portal or a proxy answers like that —
+     * so it is a connection failure like any other: nothing asks for a
+     * sign-in, the page keeps taking ink, and the channel tries again on the
+     * backoff (refreshing first) until the server lets it in.
      */
     @Test
-    fun aSessionTheRefreshCannotRenewStopsAndAsksForSignIn() {
-        server.enqueue(MockResponse.Builder().code(401).build())
-        server.enqueue(MockResponse.Builder().code(401).build())
+    fun aRefusalThatOutlastsARefreshIsRetriedAndNeverAsksForSignIn() {
+        // Refused, refreshed, refused again; then, a backoff later, the same.
+        repeat(4) { server.enqueue(MockResponse.Builder().code(401).build()) }
+        val commits = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = null, commits = commits)
+        val status = SyncStatus(LocalStore.shared(context()))
+        val session =
+            PageInkSession(
+                apiClient,
+                "page_1",
+                CoroutineScope(Dispatchers.Main),
+                sync = SessionSync(LocalStore.shared(context()), status),
+            )
+        onMain { session.connect() }
 
-        val session = openSession()
-
-        assertTrue(
-            "session expired shown",
-            awaitUntil { session.status?.kind == PageStatusKind.SessionExpired },
-        )
-        assertEquals(PageInkSession.SESSION_EXPIRED, session.statusBanner)
-        session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0))))
+        assertTrue("offline, as for any failure", awaitUntil { session.status?.kind == PageStatusKind.Disconnected })
+        assertEquals("HTTP 401", onMain { status.problem?.errorClass })
+        onMain { session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)))) }
         assertEquals("editing carries on", 1, session.strokes.size)
-        val outbox = LocalStore.shared(context()).outbox.read
-        assertEquals("the stroke is owed, not refused", 1, outbox.awaitingCount())
-        assertTrue("a 401 is never a rejection", outbox.rejections().isEmpty())
-        Thread.sleep(2_500)
-        assertEquals("stopped after the refreshed token was refused", 2, server.requestCount)
+
+        assertTrue("in once the server lets it", awaitUntil(timeoutMs = 15_000) { session.canEdit && session.pendingBatchCount == 0 })
+        assertEquals("the stroke drawn meanwhile was stored", 1, commits.size)
+        assertEquals("never a sign-in", false, onMain { status.signInNeeded })
+        assertEquals("four refusals, then the page", 5, server.requestCount)
         session.disconnect()
     }
 
@@ -1163,7 +1193,7 @@ class PageInkInstrumentedTest {
             LocalStore
                 .shared(context())
                 .outbox.read
-                .awaitingCount(),
+                .unsyncedCount(),
         )
 
         val commits = CopyOnWriteArrayList<JSONObject>()
@@ -1178,7 +1208,7 @@ class PageInkInstrumentedTest {
             LocalStore
                 .shared(context())
                 .outbox.read
-                .awaitingCount(),
+                .unsyncedCount(),
         )
         second.disconnect()
 
@@ -1216,31 +1246,92 @@ class PageInkInstrumentedTest {
     }
 
     /**
-     * #159, acceptance 10: an upgrade answered 403 (not found, or not this
-     * user's) is a definitive refusal. What the page owes is recorded as
-     * refused — kept, drawn, and never retried or counted as synced.
+     * #651: an upgrade refused with any status is a connection failure, never
+     * a verdict on the page — with the server down a proxy answers 404, and
+     * off the VPN it answers 403. What the page owes stays owed and drawn,
+     * the channel reconnects, and the edit lands once the server answers.
+     * The statuses that used to end the page for good are all here.
      */
     @Test
-    fun aForbiddenUpgradeIsRecordedAsARejection() {
-        val stroke = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)))
-        LocalStore.shared(context()).outbox.enqueue("page_1", Edit.Batch("batch_owed", listOf(stroke)))
-        server.enqueue(MockResponse(code = 403))
+    fun anUpgradeRefusedWithAnyStatusIsRetriedUntilTheEditLands() {
+        for (code in listOf(302, 400, 403, 404, 409, 410, 500, 503)) {
+            val pageId = "page_http_$code"
+            val store = LocalStore.shared(context())
+            val stroke = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)))
+            store.outbox.enqueue(pageId, Edit.Batch("batch_owed_$code", listOf(stroke)))
+            server.enqueue(
+                MockResponse
+                    .Builder()
+                    .code(code)
+                    .addHeader("Location", "http://127.0.0.1:9/portal")
+                    .build(),
+            )
+            val commits = CopyOnWriteArrayList<JSONObject>()
+            enqueueEchoingPage(stored = null, commits = commits)
+            val status = SyncStatus(store)
+            val session = PageInkSession(apiClient, pageId, CoroutineScope(Dispatchers.Main), sync = SessionSync(store, status))
+            onMain { session.connect() }
 
-        val session = openSession()
+            assertTrue("$code: offline", awaitUntil { session.status?.kind == PageStatusKind.Disconnected })
+            assertEquals("$code: named for the diagnostics", "HTTP $code", onMain { status.problem?.errorClass })
+            assertEquals("$code: kept and drawn", listOf(stroke.id), session.strokes.map { it.id })
+            assertEquals(
+                "$code: still owed",
+                listOf(OpState.Pending),
+                store.outbox.read
+                    .forPage(pageId)
+                    .map { it.state },
+            )
+            assertEquals(
+                "$code: only a 410 is offered as a new page",
+                code == 410,
+                onMain {
+                    status.gonePages.map { it.pageId } ==
+                        listOf(pageId)
+                },
+            )
 
-        assertTrue("refused", awaitUntil { session.status?.kind == PageStatusKind.Rejected })
-        assertEquals("kept and drawn", listOf(stroke.id), session.strokes.map { it.id })
-        val rejection =
-            LocalStore
-                .shared(context())
-                .outbox.read
-                .rejections()
-                .single()
-        assertEquals("page_1", rejection.pageId)
-        assertEquals(1, rejection.strokeCount)
-        Thread.sleep(2_500)
-        assertEquals("not retried", 1, server.requestCount)
-        session.disconnect()
+            assertTrue(
+                "$code: lands once the server answers",
+                awaitUntil(timeoutMs = 10_000) {
+                    session.canEdit &&
+                        session.pendingBatchCount == 0
+                },
+            )
+            assertEquals("$code: sent once", listOf("batch_owed_$code"), commits.map { it.getString("client_batch_id") })
+            assertEquals("$code: reachable again", null, onMain { status.problem })
+            assertTrue("$code: no longer offered", onMain { status.gonePages.isEmpty() })
+            session.disconnect()
+        }
+    }
+
+    /**
+     * #651, acceptance 5: an install the bug left with `rejected` outbox
+     * entries comes up, after the store's upgrade, with them pending — and
+     * they replay by themselves, exactly once, with nothing lost.
+     */
+    @Test
+    fun entriesAnOlderVersionParkedAsRejectedReplayAfterTheUpgrade() {
+        val name = "vnote-rejected-v1.db"
+        context().deleteDatabase(name)
+        val stroke = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)), id = "stuck-stroke")
+        seedVersionOneOutbox(context(), name, "page_1", "batch_stuck", stroke)
+        val commits = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = null, commits = commits)
+        try {
+            val upgraded = LocalStore(context(), name)
+            val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = SessionSync(upgraded))
+            onMain { session.connect() }
+
+            assertEquals("drawn from the start", listOf("stuck-stroke"), onMain { session.strokes.map { it.id } })
+            assertTrue("replayed with no user action", awaitUntil(timeoutMs = 10_000) { session.canEdit && session.pendingBatchCount == 0 })
+            assertEquals("sent once, under its own id", listOf("batch_stuck"), commits.map { it.getString("client_batch_id") })
+            assertEquals("nothing owed", 0, upgraded.outbox.read.unsyncedCount())
+            assertEquals("the stroke is the page's confirmed ink", listOf("stuck-stroke"), onMain { session.strokes.map { it.id } })
+            session.disconnect()
+        } finally {
+            context().deleteDatabase(name)
+        }
     }
 
     /**
@@ -1272,7 +1363,7 @@ class PageInkInstrumentedTest {
             LocalStore
                 .shared(context())
                 .outbox.read
-                .awaitingCount(),
+                .unsyncedCount(),
         )
         session.disconnect()
     }

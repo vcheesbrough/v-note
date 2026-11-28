@@ -17,17 +17,19 @@ import link.desync.vnote.sync.IdentityDecision
 import link.desync.vnote.sync.PageRecovery
 import link.desync.vnote.sync.decideIdentity
 import link.desync.vnote.sync.resetInstallFor
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
  * The device's own copy (#159): what survives a restart, how an
- * acknowledgement and a refusal land, recovery, and one identity per install.
+ * acknowledgement lands, what an upgrade does to entries an older version
+ * parked as rejected (#651), recovery, and one identity per install.
  * The shared store is emptied before every test by [FreshLocalStore].
  */
 @RunWith(AndroidJUnit4::class)
@@ -74,7 +76,7 @@ class LocalStoreInstrumentedTest {
         val cached = store.ink.load(PAGE)
         assertEquals(listOf("batch_1"), cached.batches.map { it.clientBatchId })
         assertEquals(7L, cached.lastSeq)
-        assertEquals("nothing owed", 0, store.outbox.read.awaitingCount())
+        assertEquals("nothing owed", 0, store.outbox.read.unsyncedCount())
         assertTrue(
             "not listed as owed",
             store.outbox.read
@@ -99,45 +101,81 @@ class LocalStoreInstrumentedTest {
     }
 
     /**
-     * Acceptance 4, 10: a refusal is kept and never counted as synced; a late
-     * echo for a refused entry does not revive it.
+     * #651, acceptance 5: an install the bug left with `rejected` outbox
+     * entries comes up with them pending, their refusal's reason cleared.
+     * Every entry is still there, once, in the order it was made, with the
+     * ink it carried; what was acknowledged or already pending is untouched.
      */
     @Test
-    fun aRefusalIsKeptAndNeverCountsAsSynced() {
-        store.outbox.enqueue(PAGE, Edit.Batch("batch_1", listOf(stroke("s1"), stroke("s2"))))
+    fun upgradingAnInstallPutsRejectedEntriesBackToPending() {
+        val name = "vnote-upgrade-test.db"
+        context.deleteDatabase(name)
+        seedVersionOneStore(
+            context,
+            name,
+            listOf(
+                VersionOneOp("batch_done", PAGE, "commit_batch", batchPayload(stroke("done")), "acknowledged"),
+                VersionOneOp(
+                    "batch_stuck",
+                    PAGE,
+                    "commit_batch",
+                    batchPayload(stroke("s1"), stroke("s2")),
+                    "rejected",
+                    "forbidden",
+                    "HTTP 404",
+                ),
+                VersionOneOp(
+                    "erase_stuck",
+                    PAGE,
+                    "erase",
+                    JSONObject().put("stroke_ids", JSONArray(listOf("s0"))),
+                    "rejected",
+                    "forbidden",
+                    "HTTP 404",
+                ),
+                VersionOneOp("batch_other", "page_other", "commit_batch", batchPayload(stroke("s3")), "rejected", "page_deleted", "gone"),
+                VersionOneOp("batch_sent", PAGE, "commit_batch", batchPayload(stroke("s4")), "sent"),
+            ),
+        )
+        try {
+            val upgraded = LocalStore(context, name)
 
-        store.outbox.reject(PAGE, "page_deleted", "this page was permanently deleted")
-        store.outbox.acknowledge("batch_1")
-
-        val rejection =
-            store.outbox.read
-                .rejections()
-                .single()
-        assertEquals("page_deleted", rejection.code)
-        assertEquals(2, rejection.strokeCount)
-        assertEquals("not owed any more", 0, store.outbox.read.awaitingCount())
-        assertEquals("but not synced either", 1, store.outbox.read.unsyncedCount())
+            val owed = upgraded.outbox.read.forPage(PAGE)
+            assertEquals("in the order they were made", listOf("batch_stuck", "erase_stuck", "batch_sent"), owed.map { it.opId })
+            assertEquals(listOf(OpState.Pending, OpState.Pending, OpState.Sent), owed.map { it.state })
+            assertEquals("with their ink", listOf("s1", "s2"), owed[0].strokes.map { it.id })
+            assertEquals(listOf("s0"), owed[1].strokeIds)
+            assertEquals("every page's", listOf(PAGE, "page_other"), upgraded.outbox.read.pagesWithWork())
+            assertEquals("all owed again", 4, upgraded.outbox.read.unsyncedCount())
+            upgraded.db.rawQuery("SELECT COUNT(*), COUNT(detail_code), COUNT(detail_message) FROM outbox", null).use { rows ->
+                rows.moveToFirst()
+                assertEquals("nothing lost, nothing duplicated", 5, rows.getInt(0))
+                assertEquals("no refusal reason left", 0, rows.getInt(1) + rows.getInt(2))
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
     }
 
     /**
-     * Acceptance 6: a refused page's strokes become a new page made on this
-     * device, under fresh ids, owed to the server; the refusal is gone.
+     * #651: the strokes owed to a permanently deleted page become a new page
+     * made on this device, under fresh ids, owed to the server; the deleted
+     * page owes nothing any more.
      */
     @Test
-    fun keepingRefusedStrokesMakesANewPageUnderFreshIds() {
+    fun keepingOwedStrokesMakesANewPageUnderFreshIds() {
         store.outbox.enqueue(PAGE, Edit.Batch("batch_1", listOf(stroke("kept"))))
         store.outbox.enqueue(PAGE, Edit.Batch("batch_2", listOf(stroke("erased"))))
         store.outbox.enqueue(PAGE, Edit.Erase("erase_1", listOf("erased")))
-        store.outbox.reject(PAGE, "page_deleted", "gone")
 
         val page = PageRecovery(store).keepAsNewPage(PAGE)
 
         assertNotEquals(PAGE, page.id)
         assertTrue("made here, not on the server yet", store.library.isLocalOnly(page.id))
         assertTrue(
-            "the refusal is settled",
+            "the deleted page owes nothing",
             store.outbox.read
-                .rejections()
+                .forPage(PAGE)
                 .isEmpty(),
         )
         val owed = store.outbox.read.forPage(page.id)
@@ -146,16 +184,6 @@ class LocalStoreInstrumentedTest {
         assertEquals("the erased stroke stays erased", 1, strokes.size)
         assertNotEquals("a fresh stroke id", "kept", strokes.single().id)
         assertEquals(stroke("kept").points, strokes.single().points)
-    }
-
-    @Test
-    fun discardingARefusalLetsItsEditsGo() {
-        store.outbox.enqueue(PAGE, Edit.Batch("batch_1", listOf(stroke("s1"))))
-        store.outbox.reject(PAGE, "forbidden", "not yours")
-
-        PageRecovery(store).discard(PAGE)
-
-        assertEquals(0, store.outbox.read.unsyncedCount())
     }
 
     /** The library cache keeps a page made here when the server's list does not have it yet. */
@@ -209,7 +237,7 @@ class LocalStoreInstrumentedTest {
         assertEquals(IdentityDecision.Continue, decideIdentity(store, ME.copy(email = "new@example.com")))
 
         assertEquals(1, store.library.pages().size)
-        assertEquals(1, store.outbox.read.awaitingCount())
+        assertEquals(1, store.outbox.read.unsyncedCount())
     }
 
     /** Acceptance 9: a different identity with nothing owed resets without asking. */
@@ -246,7 +274,7 @@ class LocalStoreInstrumentedTest {
         assertEquals("mine", tokenStore.accessToken())
         assertEquals("my-refresh", tokenStore.refreshToken())
         assertEquals(ME.sub, store.identity.current()?.sub)
-        assertEquals(2, store.outbox.read.awaitingCount())
+        assertEquals(2, store.outbox.read.unsyncedCount())
 
         // Delete and continue.
         resetInstallFor(store, OTHER)
@@ -264,14 +292,9 @@ class LocalStoreInstrumentedTest {
 
         assertTrue(store.identity.signedOut())
         assertEquals(ME.sub, store.identity.current()?.sub)
-        assertEquals(1, store.outbox.read.awaitingCount())
+        assertEquals(1, store.outbox.read.unsyncedCount())
         store.identity.save(ME)
         assertEquals("signing in again clears the sign-out", false, store.identity.signedOut())
-        assertNull(
-            store.outbox.read
-                .rejections()
-                .firstOrNull(),
-        )
     }
 
     private fun stroke(id: String) = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0), StrokePoint(3.0, 4.0, 16)), id = id)
