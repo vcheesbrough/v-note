@@ -9,6 +9,7 @@ import link.desync.vnote.model.PageSummary
 import link.desync.vnote.model.Stroke
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
 
 // What an outbox entry asks the server to do.
 enum class OpKind(
@@ -70,16 +71,30 @@ data class OutboxOp(
 class SyncOutbox internal constructor(
     private val store: LocalStore,
 ) {
-    // One edit, made on [pageId] under its immutable id.
+    // One edit, made on [pageId] under its immutable id, and the page's
+    // last-updated time moved to now with it (#657).
     fun enqueue(
         pageId: String,
         edit: Edit,
     ): OutboxOp =
-        when (edit) {
-            is Edit.Batch -> insert(pageId, OpKind.CommitBatch, edit.clientBatchId, JSONObject().put("strokes", edit.strokes.toJson()))
-            is Edit.Erase ->
-                insert(pageId, OpKind.Erase, edit.clientMutationId, JSONObject().put("stroke_ids", JSONArray(edit.strokeIds.toList())))
-            is Edit.SetPaper -> insert(pageId, OpKind.SetPaper, edit.clientMutationId, JSONObject().put("paper", edit.paper.wireValue))
+        store.transaction {
+            val op =
+                when (edit) {
+                    is Edit.Batch -> {
+                        val payload = JSONObject().put("strokes", edit.strokes.toJson())
+                        insert(pageId, OpKind.CommitBatch, edit.clientBatchId, payload)
+                    }
+                    is Edit.Erase -> {
+                        val payload = JSONObject().put("stroke_ids", JSONArray(edit.strokeIds.toList()))
+                        insert(pageId, OpKind.Erase, edit.clientMutationId, payload)
+                    }
+                    is Edit.SetPaper -> {
+                        val payload = JSONObject().put("paper", edit.paper.wireValue)
+                        insert(pageId, OpKind.SetPaper, edit.clientMutationId, payload)
+                    }
+                }
+            touchPage(pageId, Instant.now().toString())
+            op
         }
 
     // A page made on this device: the page row and its create, together. The
@@ -127,6 +142,28 @@ class SyncOutbox internal constructor(
             val position = db.insertOrThrow(OUTBOX, null, values)
             OutboxOp(position, opId, pageId, kind, OpState.Pending, payload)
         }
+
+    // The page was updated [at] now, by an edit made here (#657), so its
+    // last-updated time in the device's copy says so offline too. It never
+    // moves back, whatever this device's clock says. The server's own time
+    // replaces it the next time the library is written from the server
+    // ([LibraryCache.write] takes the server's row as it is): the server's wins.
+    //
+    // `ink_synced_at` moves with it when the page's ink was current: this
+    // device's own edit is not a change made elsewhere, and must not make the
+    // page look stale ([LibraryCache.staleInk]). A page already stale stays
+    // stale. Once the server's time arrives the two differ again, and the
+    // page's ink is caught up once, as after any edit the server stamps.
+    private fun touchPage(
+        pageId: String,
+        at: String,
+    ) {
+        store.db.execSQL(
+            "UPDATE $PAGES SET ink_synced_at = CASE WHEN ink_synced_at = updated_at THEN ? ELSE ink_synced_at END, " +
+                "updated_at = ? WHERE id = ? AND updated_at < ?",
+            arrayOf<Any>(at, at, pageId, at),
+        )
+    }
 
     private fun setState(
         opId: String,

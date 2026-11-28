@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import link.desync.vnote.sync.ConnectionProblem
 import kotlin.coroutines.CoroutineContext
 
 // The server's `/health` as the library menu reports it (#186).
@@ -29,6 +30,15 @@ sealed interface ServerHealth {
                 is Healthy -> "Server healthy at $baseUrl"
                 is Unhealthy -> "Health check failed: $reason"
             }
+
+    // The line the menu shows, given what the sync status knows (#657): never
+    // "healthy" while the app's last attempt to reach a host failed. The
+    // monitor keeps a healthy verdict up through a re-probe (about 15 s), and
+    // that verdict may predate going offline, so on its own it would contradict
+    // the offline icon. A failed check and a check under way are said as they
+    // are: neither claims anything that is not so.
+    fun lineGiven(offline: ConnectionProblem?): String =
+        if (this is Healthy && offline != null) "Offline — can't reach ${offline.host}" else label
 }
 
 // Probes `/health`, retrying before it reports a failure.

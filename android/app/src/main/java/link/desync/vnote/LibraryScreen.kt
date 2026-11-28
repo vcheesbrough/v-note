@@ -42,6 +42,7 @@ import link.desync.vnote.library.ServerHealthMonitor
 import link.desync.vnote.library.ServerHealthProbe
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.telemetry.AppLog
+import link.desync.vnote.ui.LocalSyncUi
 import link.desync.vnote.ui.StatePanel
 import link.desync.vnote.ui.StatusBanner
 import link.desync.vnote.ui.VNoteTopBar
@@ -81,11 +82,13 @@ internal fun AppScreen(
 
     val health = rememberServerHealth(healthProbe)
     val healthState by health.state.collectAsState()
+    // What the offline icon knows, so the menu never contradicts it (#657).
+    val offline = LocalSyncUi.current?.status?.problem
 
     Column(modifier = Modifier.fillMaxSize()) {
         LibraryTopBar(
             sessionState = sessionState,
-            health = healthState.label,
+            health = healthState.lineGiven(offline),
             onMenuOpened = health::check,
             onSignIn = onSignIn,
             onSignOut = onSignOut,

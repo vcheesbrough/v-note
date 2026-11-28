@@ -8,8 +8,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -54,7 +52,9 @@ val LocalSyncUi = compositionLocalOf<SyncUi?> { null }
 // it flash. Everything that is not online wears the one icon, the cloud with
 // a line through it: the last attempt failed, whatever the failure, or there
 // is no token to sync with. Tapping it says what is wrong and what is
-// waiting. The top bar reserves its place ([SyncStatusSlot]), so nothing
+// waiting. It carries no count (#657): how much is waiting is the details'
+// to say, not a number ticking up on the bar with every stroke drawn
+// offline. The top bar reserves its place ([SyncStatusSlot]), so nothing
 // moves when it appears or goes.
 @Composable
 fun SyncStatusIcon() {
@@ -63,7 +63,7 @@ fun SyncStatusIcon() {
     val indicator = status.indicator
     if (indicator == SyncIndicator.Synced) return
     var open by remember { mutableStateOf(false) }
-    val label = if (indicator == SyncIndicator.SignInNeeded) "Sign in to sync" else "Offline — ${status.pendingCount} changes waiting"
+    val label = if (indicator == SyncIndicator.SignInNeeded) "Sign in to sync" else "Offline"
     IconButton(
         modifier =
             Modifier
@@ -71,9 +71,7 @@ fun SyncStatusIcon() {
                 .semantics { contentDescription = label },
         onClick = { open = true },
     ) {
-        BadgedBox(badge = { if (status.pendingCount > 0) Badge { Text("${status.pendingCount}") } }) {
-            Icon(Icons.Outlined.CloudOff, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
-        }
+        Icon(Icons.Outlined.CloudOff, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
     }
     if (open) {
         SyncDetailsDialog(ui, onDismiss = { open = false })
