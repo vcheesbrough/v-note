@@ -562,7 +562,8 @@ mod tests {
     //! process-wide frame count for `welcome`, which only the socket sends,
     //! outside every unit test, so no other test in this binary moves it.
     //! Tests asserting exact deltas on the thumbnail queue-depth gauge hold
-    //! [`METRICS_LOCK`], as does every other test that moves it.
+    //! [`METRICS_LOCK`], as does every other test that moves it, in this module
+    //! or another (`thumbnails` Postgres tests).
 
     use std::sync::Mutex;
 
@@ -577,8 +578,8 @@ mod tests {
     const OWNER: &str = "owner_1";
     const EDITED_AT: &str = "2026-09-15T00:00:00+00:00";
 
-    /// Serializes the tests that move process-wide metrics they assert on.
-    static METRICS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // Serializes the tests that move process-wide metrics they assert on.
+    use crate::observability::TEST_METRICS_LOCK as METRICS_LOCK;
 
     fn fixture_stroke(id: &str) -> Stroke {
         let mut stroke: Stroke =
