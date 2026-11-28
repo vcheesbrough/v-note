@@ -6,9 +6,11 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
+import link.desync.vnote.auth.RefreshOutcome
 import link.desync.vnote.auth.TokenStore
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.SocketEffect
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationResponse
 import net.openid.appauth.AuthorizationServiceConfiguration
@@ -161,6 +163,104 @@ class AuthRepositoryInstrumentedTest {
     }
 
     /**
+     * #159: only an OAuth `invalid_grant` ends the session. Everything else a
+     * token endpoint can answer while the network or the provider is in
+     * trouble — Traefik's 502/503 while Authentik restarts, a captive portal's
+     * HTML (with an error status or a 200) — keeps the tokens, and the
+     * refresh reports the provider unavailable rather than refused.
+     */
+    @Test
+    fun noAnswerButInvalidGrantEndsTheSession() {
+        val answers =
+            mapOf(
+                "502" to
+                    MockResponse
+                        .Builder()
+                        .code(502)
+                        .body("Bad Gateway")
+                        .build(),
+                "503" to
+                    MockResponse
+                        .Builder()
+                        .code(503)
+                        .body("Service Unavailable")
+                        .build(),
+                "captive portal, error status" to html(511),
+                "captive portal, 200" to html(200),
+                "another OAuth error" to
+                    MockResponse
+                        .Builder()
+                        .code(400)
+                        .body("""{"error":"temporarily_unavailable"}""")
+                        .addHeader("Content-Type", "application/json")
+                        .build(),
+            )
+        for ((what, answer) in answers) {
+            tokenStore.saveTokens(accessToken = "stale-access", refreshToken = "kept", accessTokenExpiryEpochSeconds = 1L)
+            server.enqueue(answer)
+
+            val outcome = runBlocking { authRepository.refresh() }
+
+            assertEquals("$what: the provider is unavailable, not refusing", RefreshOutcome.Unavailable, outcome)
+            assertEquals("$what: refresh token kept", "kept", tokenStore.refreshToken())
+            assertEquals("$what: access token kept", "stale-access", tokenStore.accessToken())
+        }
+    }
+
+    /**
+     * #159: a refresh response lost on the way back (the connection drops
+     * after the provider took the request) is retried once with the same
+     * refresh token, which the provider only replaces in its last week.
+     */
+    @Test
+    fun aLostRefreshResponseIsRetriedOnceWithTheSameToken() {
+        tokenStore.saveTokens(accessToken = "stale-access", refreshToken = "same-refresh", accessTokenExpiryEpochSeconds = 1L)
+        server.enqueue(MockResponse.Builder().onResponseStart(SocketEffect.ShutdownConnection).build())
+        server.enqueue(
+            jsonResponse(
+                """{"access_token":"fresh-access","token_type":"Bearer","expires_in":3600}""",
+            ),
+        )
+
+        val outcome = runBlocking { authRepository.refresh() }
+
+        assertEquals(RefreshOutcome.Refreshed, outcome)
+        assertEquals("fresh-access", tokenStore.accessToken())
+        assertEquals("the refresh token is kept when not replaced", "same-refresh", tokenStore.refreshToken())
+        val first =
+            server
+                .takeRequest()
+                .body
+                ?.utf8()
+                .orEmpty()
+        val second =
+            server
+                .takeRequest()
+                .body
+                ?.utf8()
+                .orEmpty()
+        assertTrue("first try", first.contains("refresh_token=same-refresh"))
+        assertTrue("retried with the same token", second.contains("refresh_token=same-refresh"))
+    }
+
+    /** The refused outcome is the one that clears the tokens. */
+    @Test
+    fun invalidGrantIsTheRefusedOutcome() {
+        tokenStore.saveTokens(accessToken = "stale-access", refreshToken = "revoked", accessTokenExpiryEpochSeconds = 1L)
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(400)
+                .body("""{"error":"invalid_grant","error_description":"Token is not valid"}""")
+                .addHeader("Content-Type", "application/json")
+                .build(),
+        )
+
+        assertEquals(RefreshOutcome.Refused, runBlocking { authRepository.refresh() })
+        assertNull(tokenStore.accessToken())
+    }
+
+    /**
      * #150: offline (airplane mode) the token endpoint cannot be reached. That
      * is not a refusal — the session must survive until the network is back.
      */
@@ -242,6 +342,14 @@ class AuthRepositoryInstrumentedTest {
             .build()
             .toIntent()
     }
+
+    private fun html(code: Int): MockResponse =
+        MockResponse
+            .Builder()
+            .code(code)
+            .body("<html><body>Sign in to the hotel Wi-Fi</body></html>")
+            .addHeader("Content-Type", "text/html")
+            .build()
 
     private fun jsonResponse(body: String): MockResponse =
         MockResponse

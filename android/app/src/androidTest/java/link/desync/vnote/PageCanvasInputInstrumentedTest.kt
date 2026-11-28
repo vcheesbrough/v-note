@@ -15,7 +15,6 @@ import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
@@ -30,6 +29,7 @@ import link.desync.vnote.ink.DrawingToolPreferences
 import link.desync.vnote.model.SOLID_ROUND_PRESSURE_STYLE_VERSION
 import link.desync.vnote.model.SolidRoundParameters
 import link.desync.vnote.model.StrokeStyle
+import link.desync.vnote.store.LocalStore
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -531,39 +531,23 @@ class PageCanvasInputInstrumentedTest {
     }
 
     /**
-     * PR #72 review: ink the server has not acknowledged lives only in memory,
-     * so leaving with it asks first. This server never echoes, so a stroke
-     * stays unacknowledged. System back asks too, and Stay keeps the page.
+     * #159: ink the server has not acknowledged is in the device's outbox, so
+     * leaving loses nothing and asks nothing. This server never echoes, so the
+     * stroke stays owed — and is still drawn when the page is opened again.
      */
     @Test
-    fun systemBackWithUnsentInkAsksAndStayKeepsThePage() {
+    fun leavingWithUnsentInkLeavesAtOnceAndKeepsIt() {
         openEditor()
         drawUnacknowledgedStroke()
 
         Espresso.pressBack()
 
-        composeRule.onNodeWithTag("unsent-ink-dialog").assertIsDisplayed()
-        composeRule.onNodeWithText("1 stroke hasn't reached the server and will be lost if you leave.").assertIsDisplayed()
-        composeRule.onNodeWithTag("unsent-ink-stay").performClick()
-        composeRule.onNodeWithTag("unsent-ink-dialog").assertDoesNotExist()
-        composeRule.onNodeWithTag("ink-canvas").assertIsDisplayed()
-    }
-
-    /** PR #72 review: Leave anyway, from the back arrow, leaves the page. */
-    @Test
-    fun backArrowWithUnsentInkLeavesOnlyWhenConfirmed() {
-        openEditor()
-        drawUnacknowledgedStroke()
-
-        composeRule.onNodeWithContentDescription("Back to library").performClick()
-        composeRule.onNodeWithTag("unsent-ink-dialog").assertIsDisplayed()
-        composeRule.onNodeWithTag("ink-canvas").assertIsDisplayed()
-        composeRule.onNodeWithTag("unsent-ink-leave").performClick()
-
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onAllNodesWithTag("page-tile-page_input").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithTag("unsent-ink-dialog").assertDoesNotExist()
+        val outbox = LocalStore.shared(InstrumentationRegistry.getInstrumentation().targetContext).outbox.read
+        assertEquals("the stroke is kept, owed to the server", 1, outbox.awaitingCount())
     }
 
     /** PR #72 review: with nothing unsent, back leaves at once — no dialog. */

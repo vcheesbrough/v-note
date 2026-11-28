@@ -19,3 +19,13 @@ internal sealed interface SessionState {
         val message: String,
     ) : SessionState
 }
+
+// A sign-in as [profile] waiting on the user: [unsynced] changes from the
+// identity the device holds would be deleted by switching (#159).
+internal data class IdentitySwitch(
+    val profile: MeProfile,
+    val unsynced: Int,
+    // The tokens from before the sign-in, restored if the user cancels; null
+    // when there were none to restore.
+    val previousTokens: link.desync.vnote.auth.TokenStore.Snapshot?,
+)

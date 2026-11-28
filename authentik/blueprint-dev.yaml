@@ -93,6 +93,17 @@ entries:
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       sub_mode: hashed_user_id
+      # #159: Android works offline and must not lose its session to a gap in
+      # connectivity. An hour-long access token, refreshed in the background;
+      # a 30-day refresh token, so a user re-signs in only after a month with
+      # no refresh at all (each refresh rolls the window on). The 7-day
+      # threshold replaces the refresh token only in its last week: a refresh
+      # whose response is lost keeps the old one valid on every other day, so
+      # a dropped reply almost never forces a sign-in. (Dev is the only
+      # blueprint since #392; prod's, #388, needs the same three lines.)
+      access_token_validity: hours=1
+      refresh_token_validity: days=30
+      refresh_token_threshold: days=7
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, email]]

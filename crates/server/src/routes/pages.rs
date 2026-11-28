@@ -98,6 +98,12 @@ impl ApiError {
         status: StatusCode::FORBIDDEN,
         message: "page not found",
     };
+    /// A client-minted page id (#159) that is not `page_` and 32 lowercase
+    /// hex digits.
+    const INVALID_PAGE_ID: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        message: "invalid page id",
+    };
     const THUMBNAIL_GONE: Self = Self {
         status: StatusCode::GONE,
         message: "thumbnail revision no longer available",
@@ -150,21 +156,115 @@ pub async fn list_pages(
     }))
 }
 
-#[tracing::instrument(skip_all, fields(owner_id = %claims.sub, page_id))]
+/// `POST /api/pages`. The server picks the id unless the client minted one
+/// (#159: Android creates pages offline and replays the create, perhaps more
+/// than once, when it reconnects):
+///
+/// - a new id is a `201` and a `page-created`, as a server-picked one is;
+/// - the caller's own existing page is a `200` with the page as it stands
+///   (binned or not, whatever the replayed title and paper say) and no event:
+///   the replay of a create whose response was lost;
+/// - another owner's id is the not-found `403` every page route gives a
+///   stranger, so it never reveals the page exists;
+/// - the caller's permanently deleted page is the `410` the other routes give,
+///   and a malformed id is a `400`.
+#[tracing::instrument(skip_all, fields(owner_id = %claims.sub, page_id, client_minted))]
 pub async fn create_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreatePageRequest>,
 ) -> Result<(StatusCode, Json<PageResponse>), ApiError> {
+    let metrics = crate::observability::metrics();
     let title = payload
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("");
-    let page_id = format!("page_{}", Uuid::new_v4().simple());
-    tracing::Span::current().record("page_id", page_id.as_str());
+    let client_minted = payload.id.is_some();
+    let page_id = match payload.id {
+        Some(id) if protocol::is_page_id(&id) => id,
+        Some(_) => {
+            // The id itself is not logged: it failed validation, so it is
+            // arbitrary client input.
+            tracing::warn!("page create rejected: the client-minted id is malformed");
+            metrics.record_page_mutation("create_page", "invalid_id");
+            return Err(ApiError::INVALID_PAGE_ID);
+        }
+        None => format!("page_{}", Uuid::new_v4().simple()),
+    };
+    let span = tracing::Span::current();
+    span.record("page_id", page_id.as_str());
+    span.record("client_minted", client_minted);
 
+    let inserted = insert_page(&state, &page_id, &claims.sub, title, payload.paper)
+        .await
+        .map_err(|error| {
+            metrics.record_page_mutation("create_page", "error");
+            server_error(error)
+        })?;
+
+    let Some(row) = inserted else {
+        // The id is taken, or was permanently deleted. Only the caller's own
+        // page is answered as such; anything else is the stranger's answer.
+        return match owned_page(&state, &page_id, &claims.sub).await? {
+            Some(page) => {
+                tracing::info!(
+                    page_id = %page_id,
+                    binned = page.binned_at.is_some(),
+                    "page create replayed: the page already exists"
+                );
+                metrics.record_page_mutation("create_page", "replayed");
+                Ok((StatusCode::OK, Json(PageResponse { page })))
+            }
+            None => Err(missing_page_metered(
+                &state,
+                &page_id,
+                &claims.sub,
+                "create_page",
+                "page create",
+            )
+            .await),
+        };
+    };
+
+    let page = PageSummary::from(row);
+    tracing::info!(
+        page_id = %page.id,
+        paper = page.paper.wire_value(),
+        titled = !page.title.is_empty(),
+        client_minted,
+        "page created",
+    );
+    state.realtime.publish_library_event(
+        &claims.sub,
+        LibraryEvent::PageCreated { page: page.clone() },
+    );
+    metrics.record_page_mutation("create_page", "success");
+    Ok((StatusCode::CREATED, Json(PageResponse { page })))
+}
+
+/// Inserts a new page, or returns `None` when `page_id` is taken by a page
+/// (anyone's) or was permanently deleted (by anyone, #631) — a purged id is
+/// never reused, or a replayed create would resurrect a page its owner
+/// destroyed.
+///
+/// One transaction, so a purge racing the insert cannot slip between them:
+/// `ON CONFLICT DO NOTHING` waits out a concurrent purge's lock on the row it
+/// deletes, and the `purged_pages` check runs after that, in its own statement
+/// snapshot, so it sees what the purge recorded.
+async fn insert_page(
+    state: &AppState,
+    page_id: &str,
+    owner_id: &str,
+    title: &str,
+    paper: Paper,
+) -> Result<Option<PageRow>, sqlx::Error> {
+    let mut tx = state
+        .db
+        .begin()
+        .instrument(db_query_span!("BEGIN", "create_page"))
+        .await?;
     // A page is born with its paper — one round trip, no revision bump, and no
     // thumbnail job (a page with no ink has nothing to preview yet). Serde has
     // already rejected any value outside the wire vocabulary.
@@ -172,34 +272,34 @@ pub async fn create_page(
         r#"
         INSERT INTO pages (id, owner_id, title, paper)
         VALUES ($1, $2, $3, $4)
+        ON CONFLICT (id) DO NOTHING
         RETURNING id, title, created_at, updated_at, paper, binned_at, NULL::text AS thumbnail_status, NULL::bigint AS thumbnail_seq
         "#,
     )
     .bind(page_id)
-    .bind(claims.sub.clone())
+    .bind(owner_id)
     .bind(title)
-    .bind(payload.paper.wire_value())
-    .fetch_one(metered(&state.db))
+    .bind(paper.wire_value())
+    .fetch_optional(metered(&mut *tx))
     .instrument(db_query_span!("INSERT", "create_page"))
-    .await
-    .map_err(|error| {
-        crate::observability::metrics().record_page_mutation("create_page", "error");
-        server_error(error)
-    })?;
-
-    let page = PageSummary::from(row);
-    tracing::info!(
-        page_id = %page.id,
-        paper = page.paper.wire_value(),
-        titled = !page.title.is_empty(),
-        "page created",
-    );
-    state.realtime.publish_library_event(
-        &claims.sub,
-        LibraryEvent::PageCreated { page: page.clone() },
-    );
-    crate::observability::metrics().record_page_mutation("create_page", "success");
-    Ok((StatusCode::CREATED, Json(PageResponse { page })))
+    .await?;
+    if row.is_none() {
+        return Ok(None);
+    }
+    let purged: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM purged_pages WHERE id = $1)")
+            .bind(page_id)
+            .fetch_one(metered(&mut *tx))
+            .instrument(db_query_span!("SELECT", "create_page_purged"))
+            .await?;
+    if purged {
+        // Dropping the transaction rolls the insert back.
+        return Ok(None);
+    }
+    tx.commit()
+        .instrument(db_query_span!("COMMIT", "create_page"))
+        .await?;
+    Ok(row)
 }
 
 #[tracing::instrument(skip_all, fields(page_id = %page_id, owner_id = %claims.sub))]
@@ -626,6 +726,85 @@ fn server_error(error: sqlx::Error) -> ApiError {
 }
 
 #[cfg(test)]
+fn test_claims(sub: &str) -> Claims {
+    Claims {
+        sub: sub.to_string(),
+        email: None,
+        preferred_username: None,
+        scope: None,
+        iss: "test".to_string(),
+        exp: u64::MAX,
+    }
+}
+
+#[cfg(test)]
+fn client_minted_create(id: &str) -> Json<CreatePageRequest> {
+    Json(CreatePageRequest {
+        id: Some(id.to_string()),
+        title: None,
+        paper: Paper::default(),
+    })
+}
+
+/// `create_page`'s outcomes on the page-mutation metric (#159): the signals
+/// that show replayed offline creates and misbehaving clients in production.
+/// The metrics are process-wide and tests run in parallel, so each asserts
+/// its own count rose rather than an absolute value.
+#[cfg(test)]
+mod create_page_metrics {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_malformed_client_minted_id_counts_invalid_id() {
+        let metrics = crate::observability::metrics();
+        let before = metrics.page_mutation_count("create_page", "invalid_id");
+
+        let result = create_page(
+            State(AppState::for_tests()),
+            Extension(test_claims("metrics-owner")),
+            client_minted_create("not-a-page-id"),
+        )
+        .await;
+
+        assert!(matches!(result, Err(error) if error.status == StatusCode::BAD_REQUEST));
+        assert!(metrics.page_mutation_count("create_page", "invalid_id") > before);
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_replayed_create_counts_replayed(pool: sqlx::PgPool) {
+        let metrics = crate::observability::metrics();
+        let state = AppState {
+            db: pool,
+            ..AppState::for_tests()
+        };
+        let id = "page_0123456789abcdef0123456789abcdef";
+        let created_before = metrics.page_mutation_count("create_page", "success");
+        let replayed_before = metrics.page_mutation_count("create_page", "replayed");
+
+        let first = create_page(
+            State(state.clone()),
+            Extension(test_claims("metrics-owner")),
+            client_minted_create(id),
+        )
+        .await
+        .map(|(status, _)| status);
+        let replay = create_page(
+            State(state),
+            Extension(test_claims("metrics-owner")),
+            client_minted_create(id),
+        )
+        .await
+        .map(|(status, _)| status);
+
+        assert!(matches!(first, Ok(StatusCode::CREATED)));
+        assert!(matches!(replay, Ok(StatusCode::OK)));
+        assert!(metrics.page_mutation_count("create_page", "success") > created_before);
+        assert!(metrics.page_mutation_count("create_page", "replayed") > replayed_before);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;
@@ -679,6 +858,11 @@ mod tests {
                 ApiError::NOT_IN_BIN,
                 StatusCode::CONFLICT,
                 "page is not in the bin",
+            ),
+            (
+                ApiError::INVALID_PAGE_ID,
+                StatusCode::BAD_REQUEST,
+                "invalid page id",
             ),
         ] {
             let (status, content_type, body) = rendered(error).await;

@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import link.desync.vnote.api.ApiClient
+import link.desync.vnote.api.ConnectionFailure
 import link.desync.vnote.api.LibraryEventListener
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.LibraryEvent
@@ -22,6 +23,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 // rules themselves are the pure functions in LibraryPages.kt.
 internal class LibraryStateHolder(
     private val apiClient: ApiClient,
+    // The device's copy (#159): the list opens from it and every change is
+    // written back, so the library is there with no network at all.
+    private val local: LibraryLocal,
     // Runs the reconnect delay and the snapshot fetch that follows each
     // channel's open; the activity's lifecycle scope, which dispatches to the main
     // thread. Compose state is written on this scope, so a production scope has
@@ -36,8 +40,16 @@ internal class LibraryStateHolder(
     // a reconnect runs inline and can be asserted.
     private val reconnectDelayMillis: Long = RECONNECT_DELAY_MILLIS,
 ) {
-    var pages by mutableStateOf<List<PageSummary>>(emptyList())
-        private set
+    private var pageState by mutableStateOf<List<PageSummary>>(emptyList())
+
+    // Every assignment is mirrored to the device's copy.
+    var pages: List<PageSummary>
+        get() = pageState
+        private set(value) {
+            val previous = pageState
+            pageState = value
+            local.store?.library?.write(value, previous)
+        }
 
     var selectedPage by mutableStateOf<PageSummary?>(null)
         private set
@@ -65,6 +77,9 @@ internal class LibraryStateHolder(
         // A new trace for the library (#406): one per visit, as the SPA does per
         // route, so a library left open all day does not grow one endless trace.
         Telemetry.startScreen(LIBRARY_SCREEN)
+        // The device's copy first, so the library is there before — or
+        // without — any answer from the server.
+        local.store?.let { store -> pageState = store.library.pages() }
         connect()
     }
 
@@ -85,19 +100,42 @@ internal class LibraryStateHolder(
         CoroutineScope(Dispatchers.Main).launch { loadSnapshot(generation) }
     }
 
+    // A new page, made on the device with an id minted here (#159), so it
+    // opens at once, online or not. The sync engine creates it on the server,
+    // under the same id, whenever the server is reachable.
     fun createPage(paper: Paper) {
-        CoroutineScope(Dispatchers.Main).launch {
-            apiClient.createPage(paper = paper).fold(
-                onSuccess = { page ->
-                    pages = pages.upsert(page)
-                    selectedPage = page
-                    error = null
-                },
-                onFailure = { failure ->
-                    error = failure.message ?: "Creating page failed"
-                },
-            )
+        val store = local.store
+        if (store == null) {
+            // No device copy (unit tests): the server picks the id, as before.
+            CoroutineScope(Dispatchers.Main).launch {
+                apiClient.createPage(paper = paper).fold(
+                    onSuccess = { page ->
+                        pages = pages.upsert(page)
+                        selectedPage = page
+                        error = null
+                    },
+                    onFailure = { failure -> error = failure.message ?: "Creating page failed" },
+                )
+            }
+            return
         }
+        val now =
+            java.time.Instant
+                .now()
+                .toString()
+        val page =
+            PageSummary(
+                id = "page_${java.util.UUID.randomUUID().toString().replace("-", "")}",
+                title = "",
+                createdAt = now,
+                updatedAt = now,
+                paper = paper,
+            )
+        store.outbox.createPage(page)
+        pages = pages.upsert(page)
+        selectedPage = page
+        error = null
+        local.onLocalEdit()
     }
 
     // Moves the page to the bin (#631). The page leaves the library at once;
@@ -116,12 +154,14 @@ internal class LibraryStateHolder(
         }
     }
 
-    // Sign-out: close the channel for good, and forget the list and the open page.
+    // Sign-out: close the channel for good, and forget the list and the open
+    // page — in memory only. The device's copy is kept (#159): signing in
+    // again as the same identity carries on where it left off.
     fun clear() {
         librarySocket?.close(1000, "signed out")
         librarySocket = null
         connectionGeneration += 1
-        pages = emptyList()
+        pageState = emptyList()
         selectedPage = null
         bin.clear()
     }
@@ -139,9 +179,14 @@ internal class LibraryStateHolder(
         snapshotRecorders.forEach { it.events += event }
         pages = pages.applying(event)
         bin.apply(event)
-        if (event is LibraryEvent.PageDeleted && selectedPage?.id == event.pageId) {
-            selectedPage = null
-            Telemetry.startScreen(LIBRARY_SCREEN)
+        if (event is LibraryEvent.PageDeleted) {
+            // Gone for good: so is its confirmed ink. Edits still owed to it
+            // stay, to be refused and offered as a new page (#159).
+            local.store?.ink?.forget(event.pageId)
+            if (selectedPage?.id == event.pageId) {
+                selectedPage = null
+                Telemetry.startScreen(LIBRARY_SCREEN)
+            }
         }
         error = null
     }
@@ -187,11 +232,26 @@ internal class LibraryStateHolder(
         if (!channelMayReconnect(generation, connectionGeneration, isSignedIn())) return false
         snapshot.fold(
             onSuccess = { loaded ->
-                pages = recorder.events.fold(loaded) { list, event -> list.applying(event) }
-                if (clearsError) error = null
+                val current = recorder.events.fold(loaded) { list, event -> list.applying(event) }
+                // Pages made here and not on the server yet are not in its
+                // list; they stay (#159).
+                val localOnly =
+                    local.store
+                        ?.library
+                        ?.localOnlyIds()
+                        .orEmpty()
+                pages = current + pages.filter { it.id in localOnly && current.none { listed -> listed.id == it.id } }
+                if (local.status == null) {
+                    if (clearsError) error = null
+                } else {
+                    local.onSnapshot()
+                }
             },
+            // The library is the device's copy whatever the server says; why
+            // it could not be refreshed is the sync status's to show (#159).
             onFailure = { failure ->
-                error = failure.message ?: "Loading pages failed"
+                val status = local.status
+                if (status == null) error = failure.message ?: "Loading pages failed" else local.onFailure(status, failure)
             },
         )
         return true
@@ -206,9 +266,18 @@ internal class LibraryStateHolder(
         // as a close does, and OkHttp reports only one of the two. Both
         // reconnect (#150): reconnecting only on a clean close left the
         // library stale for good after airplane mode.
-        val reconnectAfter = { message: String ->
+        val reconnectAfter = { failure: ConnectionFailure ->
             if (channelMayReconnect(generation, connectionGeneration, isSignedIn())) {
-                runOnUiThread { error = message }
+                runOnUiThread {
+                    val status = local.status
+                    if (status ==
+                        null
+                    ) {
+                        error = failure.message
+                    } else {
+                        status.reportFailure(failure.host, failure.errorClass, failure.correlationId)
+                    }
+                }
                 reconnectScope.launch {
                     // A channel that never opened took no snapshot. Take one
                     // anyway: the list still loads when only realtime is
@@ -228,7 +297,11 @@ internal class LibraryStateHolder(
                 object : LibraryEventListener {
                     override fun onOpen() {
                         opened.set(true)
-                        reconnectScope.launch { loadSnapshot(generation) }
+                        reconnectScope.launch {
+                            loadSnapshot(generation)
+                            // Reachable again: whatever the device owes goes now.
+                            local.onOnline()
+                        }
                     }
 
                     // A superseded or signed-out channel's late event is
@@ -240,11 +313,15 @@ internal class LibraryStateHolder(
                     }
 
                     override fun onError(message: String) {
-                        reconnectAfter(message)
+                        reconnectAfter(local.failure(message))
+                    }
+
+                    override fun onConnectionFailure(failure: ConnectionFailure) {
+                        reconnectAfter(failure)
                     }
 
                     override fun onClosed() {
-                        reconnectAfter("Realtime disconnected")
+                        reconnectAfter(local.failure("Realtime disconnected"))
                     }
                 },
             )

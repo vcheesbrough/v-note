@@ -20,7 +20,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
-// The one top bar both screens wear (#317). The library fills it with the menu,
+// The one top bar every screen wears (#317), ending in the sync status icon
+// (#159). The library fills it with the menu,
 // the brand and the create/sign-in control; an open page fills it with the back
 // arrow, the page name and the paper/pen/eraser controls. Same height, ground
 // and rule either way — the Compose counterpart of the SPA's `.top-bar`.
@@ -56,8 +57,11 @@ internal fun VNoteTopBar(
                     .padding(horizontal = 6.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            content = content,
-        )
+        ) {
+            content()
+            // Every screen wears the sync status (#159), at the bar's end.
+            SyncStatusIcon()
+        }
         HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
     }
 }

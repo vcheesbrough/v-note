@@ -29,6 +29,8 @@ internal fun PageStatusBanner(
     onRetry: () -> Unit,
     onSignIn: () -> Unit,
     modifier: Modifier = Modifier,
+    onKeepAsNewPage: () -> Unit = {},
+    onDiscard: () -> Unit = {},
 ) {
     val container = if (status.isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant
     val content = if (status.isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
@@ -48,13 +50,13 @@ internal fun PageStatusBanner(
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(status.message, style = MaterialTheme.typography.bodyMedium, color = content)
-                // Held ink is not saved ink: say how much is waiting, so a
+                // Kept ink is not synced ink: say how much is waiting, so a
                 // banner over a page full of fresh strokes cannot read as
                 // "all synced except the connection".
                 if (unsentStrokes > 0) {
                     val what = if (unsentStrokes == 1) "1 stroke" else "$unsentStrokes strokes"
                     Text(
-                        "$what not yet saved",
+                        "$what not yet synced",
                         modifier = Modifier.testTag("page-status-unsent"),
                         style = MaterialTheme.typography.bodySmall,
                         color = content,
@@ -72,8 +74,18 @@ internal fun PageStatusBanner(
             when (status.kind) {
                 PageStatusKind.SessionExpired ->
                     TextButton(onClick = onSignIn, modifier = Modifier.testTag("page-status-sign-in")) { Text("Sign in") }
-                PageStatusKind.Disconnected, PageStatusKind.Rejected ->
+                PageStatusKind.Disconnected ->
                     TextButton(onClick = onRetry, modifier = Modifier.testTag("page-status-retry")) { Text("Retry") }
+                // Refused for good (#159): nothing to retry. Keep the strokes
+                // as a new page — the device may hold the only copy — or let
+                // them go; never dropped without one of the two.
+                PageStatusKind.Rejected ->
+                    Column {
+                        TextButton(onClick = onKeepAsNewPage, modifier = Modifier.testTag("page-status-keep")) {
+                            Text("Keep as a new page")
+                        }
+                        TextButton(onClick = onDiscard, modifier = Modifier.testTag("page-status-discard")) { Text("Discard") }
+                    }
                 // Retrying already retries; connecting has nothing for the
                 // user to do but wait.
                 PageStatusKind.Connecting, PageStatusKind.Retrying -> Unit

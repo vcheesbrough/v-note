@@ -18,6 +18,11 @@ pub(super) enum StoreError {
     /// after this socket was authorised. Definitive — answered with
     /// `page_deleted`, never retried.
     PageGone,
+    /// The page is not the session owner's (#159). Ownership is checked at the
+    /// upgrade and again under the row lock of every mutation, so a replayed
+    /// outbox can only ever write to its own owner's pages. Definitive —
+    /// answered with `forbidden`, nothing stored.
+    NotOwner,
     /// The database failed. Transient as far as the client is concerned.
     Db(sqlx::Error),
 }
@@ -32,6 +37,7 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PageGone => f.write_str("the page was permanently deleted"),
+            Self::NotOwner => f.write_str("the page belongs to another owner"),
             Self::Db(error) => error.fmt(f),
         }
     }
@@ -40,19 +46,26 @@ impl std::fmt::Display for StoreError {
 /// Takes the page's row lock for a mutation and reads what it needs under it.
 /// No row means the page was permanently deleted (a socket is only opened on a
 /// page its owner holds), so that is [`StoreError::PageGone`], not a
-/// `RowNotFound` that would read as a failed write. A macro because each
-/// caller's query span needs its own `'static` name.
+/// `RowNotFound` that would read as a failed write. A row whose owner is not
+/// `$owner_id`, the session's authenticated subject, is
+/// [`StoreError::NotOwner`] (#159): the early return drops the transaction, so
+/// nothing is written. A macro because each caller's query span needs its own
+/// `'static` name.
 macro_rules! lock_page {
-    ($tx:expr, $page_id:expr, $operation:literal) => {
-        sqlx::query_as::<_, (String, i64, String)>(
+    ($tx:expr, $page_id:expr, $owner_id:expr, $operation:literal) => {{
+        let locked = sqlx::query_as::<_, (String, i64, String)>(
             "SELECT owner_id, ink_revision, paper FROM pages WHERE id = $1 FOR UPDATE",
         )
         .bind($page_id)
         .fetch_optional(metered(&mut *$tx))
         .instrument(db_query_span!("SELECT", $operation))
         .await?
-        .ok_or(StoreError::PageGone)?
-    };
+        .ok_or(StoreError::PageGone)?;
+        if locked.0 != $owner_id {
+            return Err(StoreError::NotOwner);
+        }
+        locked
+    }};
 }
 
 /// Whether `page_id` was permanently deleted by `owner_id` (#631): the one
@@ -225,6 +238,7 @@ pub(super) struct PersistedBatch {
 async fn persist_batch(
     pool: &PgPool,
     page_id: &str,
+    session_owner: &str,
     client_batch_id: &str,
     strokes: &[Stroke],
 ) -> Result<PersistedBatch, StoreError> {
@@ -237,7 +251,8 @@ async fn persist_batch(
     // is read under the same lock so the thumbnail job records the paper in force
     // at the revision it will rasterize. A binned page (#631) is locked and
     // written exactly like a live one: its ink is kept and it stays binned.
-    let (owner_id, current_revision, paper) = lock_page!(tx, page_id, "persist_batch_lock_page");
+    let (owner_id, current_revision, paper) =
+        lock_page!(tx, page_id, session_owner, "persist_batch_lock_page");
 
     // Delete-wins: a permanent tombstone for a stroke id suppresses every later
     // add of that id. Filtering before insert stops an add-after-delete (or a
@@ -425,6 +440,7 @@ pub(super) struct PersistedTombstones {
 async fn persist_tombstones(
     pool: &PgPool,
     page_id: &str,
+    session_owner: &str,
     client_mutation_id: &str,
     requested_ids: &[String],
 ) -> Result<PersistedTombstones, StoreError> {
@@ -433,7 +449,7 @@ async fn persist_tombstones(
         .instrument(db_query_span!("BEGIN", "persist_tombstones"))
         .await?;
     let (owner_id, current_revision, paper) =
-        lock_page!(tx, page_id, "persist_tombstones_lock_page");
+        lock_page!(tx, page_id, session_owner, "persist_tombstones_lock_page");
     if let Some((revision, ids)) = sqlx::query_as::<_, (i64, sqlx::types::Json<Vec<String>>)>(
         "SELECT revision, stroke_ids FROM tombstone_batches WHERE page_id = $1 AND client_mutation_id = $2",
     )
@@ -534,6 +550,7 @@ pub(super) struct PersistedPaper {
 async fn persist_paper(
     pool: &PgPool,
     page_id: &str,
+    session_owner: &str,
     paper: Paper,
 ) -> Result<PersistedPaper, StoreError> {
     let mut tx = pool
@@ -541,7 +558,7 @@ async fn persist_paper(
         .instrument(db_query_span!("BEGIN", "persist_paper"))
         .await?;
     let (owner_id, current_revision, current_paper) =
-        lock_page!(tx, page_id, "persist_paper_lock_page");
+        lock_page!(tx, page_id, session_owner, "persist_paper_lock_page");
 
     if current_paper == paper.wire_value() {
         tracing::debug!("page already has this paper; nothing to change");
@@ -656,21 +673,26 @@ pub(super) trait PageStore: Send + Sync {
         page_id: &str,
         from_seq: u64,
     ) -> Result<(Vec<StrokeBatch>, Vec<TombstoneBatch>), sqlx::Error>;
+    // Each mutation takes `owner_id`, the session's authenticated subject, and
+    // answers `StoreError::NotOwner` unless the locked page is theirs (#159).
     async fn persist_batch(
         &self,
         page_id: &str,
+        owner_id: &str,
         client_batch_id: &str,
         strokes: &[Stroke],
     ) -> Result<PersistedBatch, StoreError>;
     async fn persist_tombstones(
         &self,
         page_id: &str,
+        owner_id: &str,
         client_mutation_id: &str,
         stroke_ids: &[String],
     ) -> Result<PersistedTombstones, StoreError>;
     async fn persist_paper(
         &self,
         page_id: &str,
+        owner_id: &str,
         paper: Paper,
     ) -> Result<PersistedPaper, StoreError>;
 }
@@ -724,27 +746,37 @@ impl PageStore for PgPageStore {
     async fn persist_batch(
         &self,
         page_id: &str,
+        owner_id: &str,
         client_batch_id: &str,
         strokes: &[Stroke],
     ) -> Result<PersistedBatch, StoreError> {
-        persist_batch(&self.pool, page_id, client_batch_id, strokes).await
+        persist_batch(&self.pool, page_id, owner_id, client_batch_id, strokes).await
     }
 
     async fn persist_tombstones(
         &self,
         page_id: &str,
+        owner_id: &str,
         client_mutation_id: &str,
         stroke_ids: &[String],
     ) -> Result<PersistedTombstones, StoreError> {
-        persist_tombstones(&self.pool, page_id, client_mutation_id, stroke_ids).await
+        persist_tombstones(
+            &self.pool,
+            page_id,
+            owner_id,
+            client_mutation_id,
+            stroke_ids,
+        )
+        .await
     }
 
     async fn persist_paper(
         &self,
         page_id: &str,
+        owner_id: &str,
         paper: Paper,
     ) -> Result<PersistedPaper, StoreError> {
-        persist_paper(&self.pool, page_id, paper).await
+        persist_paper(&self.pool, page_id, owner_id, paper).await
     }
 }
 

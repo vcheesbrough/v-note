@@ -11,7 +11,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.DeleteSweep
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalIconToggleButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,6 +38,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.store.LocalStore
+import link.desync.vnote.ui.LocalSyncUi
 import link.desync.vnote.ui.VNoteTopBar
 import link.desync.vnote.ui.displayTitle
 import link.desync.vnote.ui.hasDisplayTitle
@@ -68,11 +69,17 @@ fun PageCanvasScreen(
     // The sticky new-page default is written only when the server confirms a
     // change this session asked for — never on dispatch, and never for the
     // paper `Welcome` reports for a page the user merely opened.
+    val host = LocalPageSync.current
     val session =
         remember(page.id) {
-            PageInkSession(apiClient, page.id, scope, page.paper) { confirmed ->
-                paperPreferences.save(confirmed)
-            }
+            PageInkSession(
+                apiClient,
+                page.id,
+                scope,
+                page.paper,
+                onPaperConfirmed = { confirmed -> paperPreferences.save(confirmed) },
+                sync = host?.sessionSync(page.id) ?: SessionSync(LocalStore.shared(context)),
+            )
         }
     var selectedTool by remember(page.id) { mutableStateOf(CanvasTool.Drawing) }
     var paletteOpen by remember(page.id) { mutableStateOf(false) }
@@ -81,31 +88,19 @@ fun PageCanvasScreen(
     var paperPaletteOpen by remember(page.id) { mutableStateOf(false) }
     var drawingStyle by remember(userId) { mutableStateOf(toolPreferences.load()) }
     DisposableEffect(page.id) {
+        // An open page syncs itself: the engine stands its background session
+        // for this page down first.
+        host?.engine?.focus(page.id, session)
         session.connect()
-        onDispose { session.disconnect() }
+        onDispose {
+            session.disconnect()
+            host?.engine?.focus(null, null)
+        }
     }
-    // Leaving drops ink the server has not acknowledged — held while the
-    // connection was missing or catching up (#390), or sent and not yet echoed — so
-    // ask first. With nothing unsent, back leaves at once, as it always did.
-    // Signing in again (#150) leaves the page too, so it asks the same way.
-    var unsentOnLeave by remember(page.id) { mutableStateOf<Pair<Int, () -> Unit>?>(null) }
-    val leaveThen = { leave: () -> Unit ->
-        val unsent = session.unsentStrokeCount
-        if (unsent > 0) unsentOnLeave = unsent to leave else leave()
-    }
-    val requestLeave = { leaveThen(onBack) }
-    val requestSignIn = { leaveThen(onSignIn) }
+    // Leaving loses nothing (#159): ink the server has not acknowledged is in
+    // the outbox, and the sync engine sends it on.
+    val requestLeave = onBack
     BackHandler(onBack = requestLeave)
-    unsentOnLeave?.let { (unsent, leave) ->
-        UnsentInkDialog(
-            strokes = unsent,
-            onStay = { unsentOnLeave = null },
-            onLeave = {
-                unsentOnLeave = null
-                leave()
-            },
-        )
-    }
 
     Column(modifier = modifier.fillMaxSize()) {
         VNoteTopBar {
@@ -122,7 +117,8 @@ fun PageCanvasScreen(
             PaperControl(
                 paper = session.paper,
                 paletteOpen = paperPaletteOpen,
-                enabled = session.canEdit,
+                // Paper is editable offline too (#159).
+                enabled = true,
                 onClick = {
                     paperPaletteOpen = !paperPaletteOpen
                     // Opening either palette closes the other.
@@ -172,18 +168,22 @@ fun PageCanvasScreen(
         session.binnedAt?.let {
             BinnedPageNotice(page = page, restoreError = session.restoreError, onRestore = session::restore)
         }
-        session.status?.let { status ->
+        // Only a refusal is the page's to show (#159): offline, syncing and
+        // sign-in are the top bar's status icon, on every screen alike.
+        session.status?.takeIf { it.kind == PageStatusKind.Rejected }?.let { status ->
+            val actions = LocalSyncUi.current?.actions
             PageStatusBanner(
                 status = status,
                 unsentStrokes = session.unsentStrokeCount,
                 onRetry = session::retryNow,
-                onSignIn = requestSignIn,
+                onSignIn = onSignIn,
+                onKeepAsNewPage = { actions?.onKeepAsNewPage(page.id) },
+                onDiscard = { actions?.onDiscard(page.id) },
             )
         }
         InkCanvas(
             strokes = session.strokes,
             paper = session.paper,
-            inkBlocked = session.inkBlocked,
             selectedTool = selectedTool,
             drawingStyle = drawingStyle,
             onStrokeFinished = session::commitStroke,
@@ -191,29 +191,6 @@ fun PageCanvasScreen(
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
     }
-}
-
-@Composable
-private fun UnsentInkDialog(
-    strokes: Int,
-    onStay: () -> Unit,
-    onLeave: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onStay,
-        modifier = Modifier.testTag("unsent-ink-dialog"),
-        title = { Text("Unsent ink") },
-        text = {
-            val what = if (strokes == 1) "1 stroke hasn't" else "$strokes strokes haven't"
-            Text("$what reached the server and will be lost if you leave.")
-        },
-        confirmButton = {
-            TextButton(onClick = onStay, modifier = Modifier.testTag("unsent-ink-stay")) { Text("Stay") }
-        },
-        dismissButton = {
-            TextButton(onClick = onLeave, modifier = Modifier.testTag("unsent-ink-leave")) { Text("Leave anyway") }
-        },
-    )
 }
 
 // Shown while the open page is in the bin (#631) — binned on another device,

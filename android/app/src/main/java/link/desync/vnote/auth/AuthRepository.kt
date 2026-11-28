@@ -42,6 +42,12 @@ open class AuthRepository(
         } ?: AuthorizationService(context)
     private val http = HttpClients.build()
 
+    // The identity provider's host, which a network may fail to reach while
+    // the backend answers (#159): named in the sync diagnostics.
+    val providerHost: String get() =
+        link.desync.vnote.api
+            .hostOf(config.issuerUrl)
+
     suspend fun discoverConfiguration(): AuthorizationServiceConfiguration =
         serviceConfigurationOverride
             ?: fetchConfiguration()
@@ -105,25 +111,47 @@ open class AuthRepository(
     private suspend fun exchangeAuthorizationCode(response: AuthorizationResponse): Result<Unit> =
         performTokenRequest(response.createTokenExchangeRequest(), "auth.sign_in")
 
+    // True when a usable access token is now stored. Refreshes only when the
+    // token has expired (or is about to) or [force] says the server refused
+    // it — lazily, when a sync request needs one, never ahead of time (#159).
     open suspend fun refreshAccessTokenIfNeeded(force: Boolean = false): Boolean {
-        val refreshToken = tokenStore.refreshToken() ?: return false
+        if (tokenStore.refreshToken() == null) {
+            lastRefreshOutcome = RefreshOutcome.Refused
+            return false
+        }
         val expiry = tokenStore.accessTokenExpiryEpochSeconds()
         val now = System.currentTimeMillis() / 1000
         if (!force && expiry != null && expiry > now + 60) {
             return true
         }
-        return refreshAccessToken(refreshToken)
+        return refresh() == RefreshOutcome.Refreshed
     }
 
-    suspend fun refreshAccessToken(refreshToken: String = tokenStore.refreshToken().orEmpty()): Boolean {
+    suspend fun refreshAccessToken(refreshToken: String = tokenStore.refreshToken().orEmpty()): Boolean =
+        refresh(refreshToken) == RefreshOutcome.Refreshed
+
+    // What the last refresh came to, for a caller that got `false` from
+    // [refreshAccessTokenIfNeeded] and must tell a refused session from an
+    // unreachable provider. A subclass that fakes the Boolean leaves it
+    // [RefreshOutcome.Refused], which is what `false` meant before #159.
+    @Volatile
+    var lastRefreshOutcome: RefreshOutcome = RefreshOutcome.Refused
+        private set
+
+    // One refresh, and what came of it (#159). Network failures never end the
+    // session: the backend and the identity provider are separate hosts, and
+    // a network that reaches neither, or a provider restarting behind a 502,
+    // or a captive portal answering HTML, is not a refused session. Only an
+    // OAuth `invalid_grant` from the provider clears the tokens.
+    suspend fun refresh(refreshToken: String = tokenStore.refreshToken().orEmpty()): RefreshOutcome =
+        refreshOnce(refreshToken).also { lastRefreshOutcome = it }
+
+    private suspend fun refreshOnce(refreshToken: String): RefreshOutcome {
         if (refreshToken.isBlank()) {
-            return false
+            return RefreshOutcome.Refused
         }
-        // Offline (airplane mode) the identity provider cannot be reached at
-        // all, and discovery fails by throwing — out of `reloadSession`'s bare
-        // coroutine, which crashed the app (#150). Not reaching the provider
-        // is not a refused session: report the refresh as not done and keep
-        // the tokens, so the session survives until the network is back.
+        // Discovery fails by throwing when the provider cannot be reached at
+        // all (#150): that is the provider being unavailable, nothing more.
         val serviceConfig =
             try {
                 discoverConfiguration()
@@ -133,7 +161,7 @@ open class AuthRepository(
                 @Suppress("TooGenericExceptionCaught") unreachable: Exception,
             ) {
                 AppLog.w(TAG, "token refresh skipped: identity provider unreachable", unreachable)
-                return false
+                return RefreshOutcome.Unavailable
             }
         val request =
             TokenRequest
@@ -141,15 +169,25 @@ open class AuthRepository(
                 .setGrantType("refresh_token")
                 .setRefreshToken(refreshToken)
                 .build()
-        return performTokenRequest(request, "auth.token_refresh").fold(
-            onSuccess = { true },
+        var result = performTokenRequest(request, "auth.token_refresh")
+        // A response lost on the way back (a dropped connection, a timeout)
+        // may still have been acted on. Retry once with the same refresh
+        // token: the provider only replaces it in its last week (#159's
+        // `refresh_token_threshold`), so the old one almost always still works.
+        if (result.exceptionOrNull() is IOException) {
+            AppLog.i(TAG, "token refresh response lost; retrying once with the same refresh token")
+            result = performTokenRequest(request, "auth.token_refresh")
+        }
+        return result.fold(
+            onSuccess = { RefreshOutcome.Refreshed },
             onFailure = { failure ->
-                // Only an answer from the provider refusing the refresh token
-                // ends the session; a request that never reached it does not.
-                if (failure !is IOException) {
+                if (failure is TokenRefusedException) {
+                    AppLog.w(TAG, "refresh token refused; the session has ended")
                     tokenStore.clear()
+                    RefreshOutcome.Refused
+                } else {
+                    RefreshOutcome.Unavailable
                 }
-                false
             },
         )
     }
@@ -178,14 +216,19 @@ open class AuthRepository(
                         .build()
                 http.newCall(request).execute().use { response ->
                     val body = response.body.string()
-                    val json = if (body.isBlank()) JSONObject() else JSONObject(body)
+                    // A captive portal answers with HTML, often with 200:
+                    // anything that is not the provider's JSON is no answer.
+                    val json = runCatching { JSONObject(body) }.getOrNull()
                     if (!response.isSuccessful) {
-                        val error =
-                            json
-                                .optString("error_description")
-                                .ifBlank { json.optString("error") }
-                                .ifBlank { "HTTP ${response.code}" }
-                        throw IllegalStateException("Token request failed: $error")
+                        val error = json?.optString("error").orEmpty()
+                        val description =
+                            json?.optString("error_description")?.ifBlank { null }
+                                ?: error.ifBlank { "HTTP ${response.code}" }
+                        if (error == INVALID_GRANT) throw TokenRefusedException(description)
+                        throw TokenEndpointException("Token request failed: $description")
+                    }
+                    if (json == null || json.optString("access_token").isBlank()) {
+                        throw TokenEndpointException("Token request failed: HTTP ${response.code} without a token")
                     }
                     persistTokenResponse(json)
                 }
@@ -231,5 +274,28 @@ open class AuthRepository(
 
     private companion object {
         const val TAG = "VNoteAuth"
+        const val INVALID_GRANT = "invalid_grant"
     }
 }
+
+// What a refresh came to (#159). Only [Refused] means "sign in again".
+enum class RefreshOutcome {
+    Refreshed,
+
+    // The provider answered `invalid_grant`, or there is no refresh token.
+    Refused,
+
+    // The provider could not be reached or gave no usable answer. The
+    // session stands; try again later.
+    Unavailable,
+}
+
+// The provider refused the grant: the one failure that ends a session.
+class TokenRefusedException(
+    message: String,
+) : IllegalStateException(message)
+
+// The provider was reached but gave no usable answer (5xx, HTML, no token).
+class TokenEndpointException(
+    message: String,
+) : IllegalStateException(message)

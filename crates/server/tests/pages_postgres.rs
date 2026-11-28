@@ -63,6 +63,7 @@ async fn send(
 
 async fn create_page(pool: &PgPool, title: Option<&str>, paper: Paper) -> PageResponse {
     let request = serde_json::to_string(&CreatePageRequest {
+        id: None,
         title: title.map(str::to_string),
         paper,
     })

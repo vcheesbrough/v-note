@@ -39,6 +39,7 @@ fn router_with_unreachable_db() -> (axum::Router, String) {
 /// contract and turn a 500 assertion into an accidental 422.
 fn create_page_body() -> String {
     serde_json::to_string(&CreatePageRequest {
+        id: None,
         title: Some("note".to_string()),
         paper: Paper::RuledWide,
     })

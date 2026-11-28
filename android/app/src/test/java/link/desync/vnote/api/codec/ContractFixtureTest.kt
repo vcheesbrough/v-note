@@ -76,6 +76,15 @@ class ContractFixtureTest {
         assertJsonEquals(fixture("create-page.json"), encodeCreatePage("Meeting notes", Paper.RuledWide))
     }
 
+    /** An offline create carries the page id minted on the device (#159). */
+    @Test
+    fun createPageWithADeviceMintedIdMatchesTheContract() {
+        assertJsonEquals(
+            fixture("create-page-with-id.json"),
+            encodeCreatePage("", Paper.None, id = "page_0123456789abcdef0123456789abcdef"),
+        )
+    }
+
     @Test
     fun createPageWithoutATitleOmitsTheKey() {
         assertJsonEquals(JSONObject("""{"paper":"none"}"""), encodeCreatePage(null, Paper.None))
@@ -451,6 +460,7 @@ class ContractFixtureTest {
             setOf(
                 "bin.json",
                 "create-page.json",
+                "create-page-with-id.json",
                 "library-event-page-binned.json",
                 "library-event-page-created.json",
                 "library-event-page-deleted.json",

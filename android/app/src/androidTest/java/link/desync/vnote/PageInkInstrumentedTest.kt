@@ -12,10 +12,13 @@ import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
 import link.desync.vnote.ink.PageStatusKind
 import link.desync.vnote.ink.Paper
+import link.desync.vnote.ink.SessionSync
 import link.desync.vnote.model.SolidRoundParameters
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
 import link.desync.vnote.model.StrokeStyle
+import link.desync.vnote.store.Edit
+import link.desync.vnote.store.LocalStore
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.WebSocket
@@ -150,7 +153,7 @@ class PageInkInstrumentedTest {
                 ).build(),
         )
 
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
         session.connect()
 
         // Snapshot replayed; the page is open for editing.
@@ -236,7 +239,7 @@ class PageInkInstrumentedTest {
                 ).build(),
         )
 
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
         val stroke = Stroke(points = listOf(StrokePoint(10.0, 20.0, 0), StrokePoint(30.0, 25.0, 16)))
         session.connect()
         assertTrue("page channel caught up", awaitUntil { session.canEdit })
@@ -257,13 +260,13 @@ class PageInkInstrumentedTest {
     }
 
     /**
-     * #150: a `commit_failed` while connected (the server is up but could not
-     * store the batch) blocks ink and says it is retrying, keeps the stroke on
-     * the canvas, re-sends it under the same `client_batch_id`, and unblocks
-     * once the server stores and echoes it.
+     * #150, #159: a `commit_failed` while connected (the server is up but could
+     * not store the batch) says it is retrying, keeps the stroke on the canvas
+     * and in the outbox, re-sends it under the same `client_batch_id`, and
+     * clears once the server stores and echoes it. Ink is never refused.
      */
     @Test
-    fun aFailedCommitBlocksInkRetriesAndUnblocksOnSuccess() {
+    fun aFailedCommitIsKeptAndRetriedUntilStored() {
         val commits = CopyOnWriteArrayList<String>()
         server.enqueue(
             MockResponse
@@ -321,7 +324,6 @@ class PageInkInstrumentedTest {
             awaitUntil { session.status?.kind == PageStatusKind.Retrying },
         )
         assertEquals(PageInkSession.SYNC_RETRYING, session.statusBanner)
-        assertTrue("ink blocked while retrying", session.inkBlocked)
         assertEquals("the failed batch is kept, not discarded", 1, session.pendingBatchCount)
         assertEquals("and still drawn", 1, session.strokes.size)
         // Retrying is not a disconnect: the socket stays live.
@@ -331,17 +333,28 @@ class PageInkInstrumentedTest {
             "recovered once the retry is stored",
             awaitUntil(timeoutMs = 10_000) { session.pendingBatchCount == 0 && session.status == null },
         )
-        assertEquals("ink unblocked", false, session.inkBlocked)
         assertEquals("confirmed stroke rendered once", 1, session.strokes.size)
+        assertEquals(
+            "nothing owed once stored",
+            0,
+            LocalStore
+                .shared(context())
+                .outbox.read
+                .awaitingCount(),
+        )
         assertEquals("re-sent under the same id", 1, commits.toSet().size)
         assertEquals("sent twice", 2, commits.size)
 
         session.disconnect()
     }
 
-    /** A definitive rejection is not retried: the batch is dropped and the banner says why. */
+    /**
+     * #159: a definitive rejection is not retried and never counts as synced.
+     * The ink is kept — drawn, and in the outbox as rejected — and the page
+     * says why, offering recovery.
+     */
     @Test
-    fun clearsPendingInkWhenServerRejectsCommit() {
+    fun aRejectedCommitIsKeptShownAndNeverSynced() {
         val commitReceived = CountDownLatch(1)
         server.enqueue(
             MockResponse
@@ -373,14 +386,14 @@ class PageInkInstrumentedTest {
                 ).build(),
         )
 
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
         session.connect()
         assertTrue("page channel caught up", awaitUntil { session.canEdit })
 
         session.commitStroke(Stroke(points = listOf(StrokePoint(10.0, 20.0, 0))))
         assertTrue("commit sent", commitReceived.await(5, TimeUnit.SECONDS))
-        assertTrue("rejection clears pending ink", awaitUntil { session.pendingBatchCount == 0 })
-        assertEquals("uncommitted ink is not rendered", emptyList<Stroke>(), session.strokes)
+        assertTrue("no longer pending", awaitUntil { session.pendingBatchCount == 0 })
+        assertEquals("the refused ink is still drawn", 1, session.strokes.size)
         // Await rather than read: `handle` publishes strokes before it sets the
         // banner, so polling on one and immediately reading the other races the
         // remainder of that handler.
@@ -389,7 +402,14 @@ class PageInkInstrumentedTest {
             awaitUntil { session.statusBanner == "Commit rejected" },
         )
         assertEquals(PageStatusKind.Rejected, session.status?.kind)
-        assertEquals("input blocked", false, session.canEdit)
+        assertEquals("not live once refused", false, session.canEdit)
+        val rejections =
+            LocalStore
+                .shared(context())
+                .outbox.read
+                .rejections()
+        assertEquals("recorded as refused, with its stroke", listOf(1), rejections.map { it.strokeCount })
+        assertEquals("invalid_stroke_style", rejections.single().code)
 
         session.disconnect()
     }
@@ -440,7 +460,7 @@ class PageInkInstrumentedTest {
                 ).build(),
         )
 
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
         session.connect()
         assertTrue("stroke loaded", awaitUntil { session.strokes.singleOrNull()?.id == "seed-stroke" })
         assertTrue("page channel caught up", awaitUntil { session.canEdit })
@@ -457,11 +477,19 @@ class PageInkInstrumentedTest {
         session.disconnect()
     }
 
+    /**
+     * #159: `tombstone_failed` is the server failing to store an erase, not a
+     * refusal. The stroke stays erased here, the erase stays owed, and it is
+     * sent again with the backoff until the server takes it.
+     */
     @Test
-    fun failedEraseRestoresOptimisticallyHiddenStroke() {
+    fun aFailedEraseStaysErasedAndIsRetried() {
         val tombstoneReceived = CountDownLatch(1)
         val allowFailure = CountDownLatch(1)
         val mutationId = AtomicReference<String>()
+        val erases =
+            java.util.concurrent.atomic
+                .AtomicInteger()
         server.enqueue(
             MockResponse
                 .Builder()
@@ -486,16 +514,27 @@ class PageInkInstrumentedTest {
                                 "commit-tombstones" -> {
                                     val message = JSONObject(text)
                                     mutationId.set(message.getString("client_mutation_id"))
-                                    tombstoneReceived.countDown()
-                                    allowFailure.await(5, TimeUnit.SECONDS)
-                                    webSocket.send(
-                                        JSONObject()
-                                            .put("type", "error")
-                                            .put("code", "tombstone_failed")
-                                            .put("message", "Could not erase stroke")
-                                            .put("client_mutation_id", mutationId.get())
-                                            .toString(),
-                                    )
+                                    if (erases.incrementAndGet() == 1) {
+                                        tombstoneReceived.countDown()
+                                        allowFailure.await(5, TimeUnit.SECONDS)
+                                        webSocket.send(
+                                            JSONObject()
+                                                .put("type", "error")
+                                                .put("code", "tombstone_failed")
+                                                .put("message", "Could not erase stroke")
+                                                .put("client_mutation_id", mutationId.get())
+                                                .toString(),
+                                        )
+                                    } else {
+                                        webSocket.send(
+                                            JSONObject()
+                                                .put("type", "tombstone-batch")
+                                                .put("revision", 2)
+                                                .put("client_mutation_id", mutationId.get())
+                                                .put("stroke_ids", message.getJSONArray("stroke_ids"))
+                                                .toString(),
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -503,7 +542,7 @@ class PageInkInstrumentedTest {
                 ).build(),
         )
 
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
         session.connect()
         assertTrue("stroke loaded", awaitUntil { session.strokes.singleOrNull()?.id == "seed-stroke" })
         assertTrue("page channel caught up", awaitUntil { session.canEdit })
@@ -516,15 +555,19 @@ class PageInkInstrumentedTest {
             allowFailure.countDown()
         }
 
-        assertTrue(
-            "failed erase restores the original stroke",
-            awaitUntil { session.strokes.singleOrNull()?.id == "seed-stroke" },
+        assertTrue("retrying shown", awaitUntil { session.status?.kind == PageStatusKind.Retrying })
+        assertEquals("the stroke stays erased", emptyList<Stroke>(), session.strokes)
+        assertTrue("still live", session.canEdit)
+        assertTrue("the erase is sent again", awaitUntil(timeoutMs = 10_000) { erases.get() >= 2 })
+        assertTrue("and settles once stored", awaitUntil(timeoutMs = 10_000) { session.status == null })
+        assertEquals(
+            "nothing owed",
+            0,
+            LocalStore
+                .shared(context())
+                .outbox.read
+                .awaitingCount(),
         )
-        assertTrue(
-            "failure shown",
-            awaitUntil { session.statusBanner == "Could not erase stroke" },
-        )
-        assertEquals("input blocked after server failure", false, session.canEdit)
 
         session.disconnect()
     }
@@ -949,7 +992,8 @@ class PageInkInstrumentedTest {
         )
         assertEquals(PageInkSession.DISCONNECTED, session.statusBanner)
         assertTrue("cause given", session.status?.detail?.isNotBlank() == true)
-        assertEquals("ink is held, not refused, while disconnected (#390)", false, session.inkBlocked)
+        session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0))))
+        assertEquals("ink is kept, not refused, while disconnected (#390, #159)", 1, session.strokes.size)
 
         assertTrue("reconnected", reconnected.await(5, TimeUnit.SECONDS))
         assertTrue("banner cleared by the welcome", awaitUntil { session.status == null })
@@ -991,14 +1035,15 @@ class PageInkInstrumentedTest {
         val client = OkHttpApiClient(server.url("/").toString().removeSuffix("/"), tokenStore, throwingAuth)
         server.enqueue(MockResponse.Builder().code(401).build())
         try {
-            val session = PageInkSession(client, "page_1", CoroutineScope(Dispatchers.Main))
+            val session = PageInkSession(client, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
             session.connect()
 
             assertTrue(
                 "session expired shown",
                 awaitUntil { session.status?.kind == PageStatusKind.SessionExpired },
             )
-            assertTrue("ink blocked", session.inkBlocked)
+            session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0))))
+            assertEquals("editing carries on (#159)", 1, session.strokes.size)
             session.disconnect()
         } finally {
             client.shutdown()
@@ -1006,9 +1051,10 @@ class PageInkInstrumentedTest {
     }
 
     /**
-     * #150: when the refreshed token is refused too, the session is gone.
-     * Ink is blocked, the banner asks for sign-in, and the page stops
-     * reconnecting — every further attempt would be refused the same way.
+     * #150, #159: when the refreshed token is refused too, the session is
+     * gone. Sync pauses for a sign-in and the page stops reconnecting — every
+     * further attempt would be refused the same way — while editing carries
+     * on, and a 401 is never recorded as a rejection.
      */
     @Test
     fun aSessionTheRefreshCannotRenewStopsAndAsksForSignIn() {
@@ -1022,7 +1068,11 @@ class PageInkInstrumentedTest {
             awaitUntil { session.status?.kind == PageStatusKind.SessionExpired },
         )
         assertEquals(PageInkSession.SESSION_EXPIRED, session.statusBanner)
-        assertTrue("ink blocked", session.inkBlocked)
+        session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0))))
+        assertEquals("editing carries on", 1, session.strokes.size)
+        val outbox = LocalStore.shared(context()).outbox.read
+        assertEquals("the stroke is owed, not refused", 1, outbox.awaitingCount())
+        assertTrue("a 401 is never a rejection", outbox.rejections().isEmpty())
         Thread.sleep(2_500)
         assertEquals("stopped after the refreshed token was refused", 2, server.requestCount)
         session.disconnect()
@@ -1090,6 +1140,140 @@ class PageInkInstrumentedTest {
         assertEquals("nothing re-sent", 0, recommits.size)
         assertEquals("local ink equals the server's", listOf(stroke.id), session.strokes.map { it.id })
 
+        session.disconnect()
+    }
+
+    /**
+     * #159, acceptance 1 and 3 at the session level: a stroke accepted while
+     * the server is down outlives its session. The next session — a restarted
+     * app opens a new one — draws it from the device's copy before any answer,
+     * sends it once, and after the echo a third session sends nothing.
+     */
+    @Test
+    fun aStrokeKeptByOneSessionIsSentOnceByTheNextAndNeverAgain() {
+        server.enqueue(MockResponse(code = 503))
+        val first = openSession()
+        assertTrue("offline", awaitUntil { first.status?.kind == PageStatusKind.Disconnected })
+        val stroke = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)))
+        first.commitStroke(stroke)
+        first.disconnect()
+        assertEquals(
+            "owed",
+            1,
+            LocalStore
+                .shared(context())
+                .outbox.read
+                .awaitingCount(),
+        )
+
+        val commits = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = null, commits = commits)
+        val second = openSession()
+        assertEquals("drawn from the device's copy at once", listOf(stroke.id), second.strokes.map { it.id })
+        assertTrue("acknowledged", awaitUntil(timeoutMs = 10_000) { second.pendingBatchCount == 0 && second.canEdit })
+        assertEquals("sent once", 1, commits.size)
+        assertEquals(
+            "nothing owed",
+            0,
+            LocalStore
+                .shared(context())
+                .outbox.read
+                .awaitingCount(),
+        )
+        second.disconnect()
+
+        val again = CopyOnWriteArrayList<JSONObject>()
+        enqueueEchoingPage(stored = AtomicReference(commits.single()), commits = again)
+        val third = openSession()
+        assertTrue("caught up", awaitUntil { third.canEdit })
+        Thread.sleep(300)
+        assertEquals("nothing sent again", 0, again.size)
+        assertEquals("drawn once", listOf(stroke.id), third.strokes.map { it.id })
+        third.disconnect()
+    }
+
+    /**
+     * #159 review: `replay_failed` leaves the socket open but never caught up.
+     * The session starts over on a new socket, which replays from its cursor
+     * and goes live — it does not sit "retrying" forever.
+     */
+    @Test
+    fun aReplayFailureStartsOverOnANewSocket() {
+        openPage { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send("""{"type":"error","code":"replay_failed","message":"could not load the page"}""")
+            }
+        }
+        openPage { webSocket, type ->
+            if (type == "subscribe") webSocket.send("""{"type":"synced","last_seq":0}""")
+        }
+
+        val session = openSession()
+
+        assertTrue("live on the next socket", awaitUntil(timeoutMs = 10_000) { session.canEdit && session.status == null })
+        assertEquals("two upgrades", 2, server.requestCount)
+        session.disconnect()
+    }
+
+    /**
+     * #159, acceptance 10: an upgrade answered 403 (not found, or not this
+     * user's) is a definitive refusal. What the page owes is recorded as
+     * refused — kept, drawn, and never retried or counted as synced.
+     */
+    @Test
+    fun aForbiddenUpgradeIsRecordedAsARejection() {
+        val stroke = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)))
+        LocalStore.shared(context()).outbox.enqueue("page_1", Edit.Batch("batch_owed", listOf(stroke)))
+        server.enqueue(MockResponse(code = 403))
+
+        val session = openSession()
+
+        assertTrue("refused", awaitUntil { session.status?.kind == PageStatusKind.Rejected })
+        assertEquals("kept and drawn", listOf(stroke.id), session.strokes.map { it.id })
+        val rejection =
+            LocalStore
+                .shared(context())
+                .outbox.read
+                .rejections()
+                .single()
+        assertEquals("page_1", rejection.pageId)
+        assertEquals(1, rejection.strokeCount)
+        Thread.sleep(2_500)
+        assertEquals("not retried", 1, server.requestCount)
+        session.disconnect()
+    }
+
+    /**
+     * #159: the server never echoes an add whose every stroke is erased
+     * (delete wins). A batch this device still owes whose stroke another
+     * device erased meanwhile is settled by the replayed tombstone, not
+     * re-sent forever.
+     */
+    @Test
+    fun anOwedBatchWhoseStrokesWereErasedElsewhereIsSettledByTheTombstone() {
+        val stroke = Stroke(points = listOf(StrokePoint(1.0, 2.0, 0)), id = "erased-elsewhere")
+        LocalStore.shared(context()).outbox.enqueue("page_1", Edit.Batch("batch_owed", listOf(stroke)))
+        openPage { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send(
+                    """{"type":"page-replay","page_id":"page_1","last_seq":0,"batches":[],""" +
+                        """"tombstones":[{"revision":3,"client_mutation_id":"other-device-erase","stroke_ids":["erased-elsewhere"]}]}""",
+                )
+            }
+        }
+
+        val session = openSession()
+
+        assertTrue("settled", awaitUntil { session.canEdit && session.pendingBatchCount == 0 })
+        assertEquals("not drawn", emptyList<String>(), session.strokes.map { it.id })
+        assertEquals(
+            "nothing owed",
+            0,
+            LocalStore
+                .shared(context())
+                .outbox.read
+                .awaitingCount(),
+        )
         session.disconnect()
     }
 
@@ -1211,8 +1395,12 @@ class PageInkInstrumentedTest {
         )
     }
 
+    private fun context() = InstrumentationRegistry.getInstrumentation().targetContext
+
+    private fun localSync(): SessionSync = SessionSync(LocalStore.shared(context()))
+
     private fun openSession(): PageInkSession {
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main), sync = localSync())
         session.connect()
         return session
     }

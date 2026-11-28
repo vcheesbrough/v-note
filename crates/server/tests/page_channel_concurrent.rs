@@ -48,6 +48,7 @@ fn router(pool: &PgPool) -> axum::Router {
 
 async fn create_page(pool: &PgPool) -> String {
     let body = serde_json::to_string(&CreatePageRequest {
+        id: None,
         title: Some("concurrent".to_string()),
         paper: Paper::None,
     })

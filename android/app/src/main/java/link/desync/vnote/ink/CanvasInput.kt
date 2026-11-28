@@ -86,7 +86,6 @@ internal class CanvasPointerRouter {
 // What the canvas's current composition says. Written after every composition,
 // so the long-lived input handler reads current values without being rebuilt.
 internal class CanvasInputs {
-    var inkBlocked: Boolean = false
     var selectedTool: CanvasTool = CanvasTool.Drawing
     var drawingStyle: StrokeStyle = StrokeStyle()
     var strokes: List<Stroke> = emptyList()
@@ -202,11 +201,7 @@ internal class CanvasInputController(
                 pan.stop()
                 hoverShowsEraser = false
                 hoverEraserPoint = null
-                // Blocked by another editor: the pen still owns its pointer,
-                // so the hand does not pan, but it draws nothing.
-                if (!inputs.inkBlocked) {
-                    stylus.start(event, index, hoverButtonEraserArmed)
-                }
+                stylus.start(event, index, hoverButtonEraserArmed)
             }
             PointerRole.Finger -> {
                 if (action == MotionEvent.ACTION_DOWN) {

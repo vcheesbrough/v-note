@@ -33,6 +33,7 @@ class LibraryStateHolderTest {
     private val holder =
         LibraryStateHolder(
             apiClient = UnusedApiClient,
+            local = LibraryLocal.None,
             reconnectScope = CoroutineScope(Job()),
             isSignedIn = { true },
             runOnUiThread = { block -> block() },
@@ -304,6 +305,7 @@ class LibraryStateHolderTest {
     private fun holderWith(api: ApiClient): LibraryStateHolder =
         LibraryStateHolder(
             apiClient = api,
+            local = LibraryLocal.None,
             reconnectScope = CoroutineScope(Dispatchers.Unconfined + scopeJob),
             isSignedIn = { true },
             runOnUiThread = { block -> block() },
@@ -387,6 +389,7 @@ class LibraryStateHolderTest {
         override suspend fun createPage(
             title: String?,
             paper: Paper,
+            id: String?,
         ): Result<PageSummary> = error("unused")
 
         override suspend fun deletePage(pageId: String): Result<Unit> = error("unused")
