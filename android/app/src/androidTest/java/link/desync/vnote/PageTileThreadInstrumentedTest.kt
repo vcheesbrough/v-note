@@ -103,6 +103,7 @@ class PageTileThreadInstrumentedTest {
         override suspend fun createPage(
             title: String?,
             paper: Paper,
+            id: String?,
         ): Result<PageSummary> = unused()
 
         override suspend fun deletePage(pageId: String): Result<Unit> = unused()

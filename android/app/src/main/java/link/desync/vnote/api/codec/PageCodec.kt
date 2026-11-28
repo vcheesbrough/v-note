@@ -79,12 +79,17 @@ internal fun encodeEmptyBin(pageIds: List<String>): String = JSONObject().put("p
 
 // The paper is sent on create rather than as a post-create set-paper: one round
 // trip, no revision bump. A null title is omitted, not sent as `null`.
+//
+// [id] is the page id minted on this device (#159), omitted when the server
+// is to choose one.
 internal fun encodeCreatePage(
     title: String?,
     paper: Paper,
+    id: String? = null,
 ): String =
     JSONObject()
         .apply {
+            id?.let { put("id", it) }
             title?.let { put("title", it) }
             put("paper", paper.wireValue)
         }.toString()

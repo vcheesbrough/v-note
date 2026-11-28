@@ -3,12 +3,12 @@ package link.desync.vnote
 import android.os.Build
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -97,7 +97,8 @@ class OfflineInstrumentedTest {
         openPage()
 
         goOffline()
-        awaitTag("page-status-disconnected")
+        // #159: offline is the top bar's icon, not a banner over the canvas.
+        awaitTag("sync-status-offline")
 
         composeRule.onNodeWithContentDescription("Back to library").performClick()
         // Back refetches the list, which can only fail now.
@@ -106,15 +107,17 @@ class OfflineInstrumentedTest {
         composeRule.onNodeWithTag("create-page-button").assertExists()
     }
 
+    /** #159: a page made offline opens at once, like any page; the server gets it later. */
     @Test
-    fun goingOfflineInTheLibraryThenCreatingAPageDoesNotCrash() {
+    fun goingOfflineInTheLibraryThenCreatingAPageOpensIt() {
         awaitTag("page-tile-$PAGE_ID")
 
         goOffline()
         composeRule.onNodeWithTag("create-page-button").performClick()
 
+        awaitTag("ink-canvas")
         stayAlive()
-        composeRule.onNodeWithTag("create-page-button").assertExists()
+        composeRule.onNodeWithTag("ink-canvas").assertExists()
     }
 
     @Test
@@ -125,14 +128,14 @@ class OfflineInstrumentedTest {
         // Every reconnect now fails through the socket's `onError`, which
         // must keep retrying until the network is back.
         goOffline()
-        awaitText("reach the server")
+        awaitTag("sync-status-offline")
         stayAlive()
 
         comeBackOnline(port)
 
         val recovered =
             runCatching {
-                composeRule.waitUntil(timeoutMillis = 30_000) { unreachableTexts().isEmpty() }
+                composeRule.waitUntil(timeoutMillis = 30_000) { offlineIcons() == 0 }
             }
         // CI keeps only the tail of the log, so a bare timeout says nothing:
         // say what the library still shows and what the server saw.
@@ -147,27 +150,30 @@ class OfflineInstrumentedTest {
     }
 
     /**
-     * #589: the app starts with the server unreachable. The session check
-     * fails without crashing or signing out, and Retry signs straight in
+     * #589, #159: the app starts with the server unreachable. With the
+     * identity stored on the device it opens straight into the library — no
+     * error screen, no Retry — keeps the session, and catches up on its own
      * once the server is back.
      */
     @Test
-    fun startingOfflineKeepsTheSessionAndRetrySignsInOnceBack() {
+    fun startingOfflineOpensTheLibraryAndCatchesUpOnceBack() {
+        awaitTag("page-tile-$PAGE_ID")
         val port = server.port
         goOffline()
         // Relaunch with nothing listening on the server's address.
         composeRule.activityRule.scenario.recreate()
 
-        awaitText("reach the server", timeoutMillis = 20_000)
-        composeRule.onNodeWithText("Retry").assertExists()
+        awaitTag("page-tile-$PAGE_ID")
+        awaitTag("sync-status-offline")
+        composeRule.onAllNodesWithText("Retry").assertCountEquals(0)
         stayAlive()
         assertNotNull("an unreachable server never signs the user out", tokenStore.accessToken())
 
         comeBackOnline(port)
-        composeRule.onNodeWithText("Retry").performClick()
 
-        awaitTag("page-tile-$PAGE_ID")
-        assertNotNull("signed in on the kept session", tokenStore.accessToken())
+        composeRule.waitUntil(timeoutMillis = 30_000) { offlineIcons() == 0 }
+        composeRule.onNodeWithTag("page-tile-$PAGE_ID").assertExists()
+        assertNotNull("still signed in", tokenStore.accessToken())
     }
 
     // Airplane mode off and the server answering again on the same address.
@@ -178,6 +184,8 @@ class OfflineInstrumentedTest {
         server.start(InetAddress.getByName("127.0.0.1"), port)
         serverClosed = false
     }
+
+    private fun offlineIcons(): Int = composeRule.onAllNodesWithTag("sync-status-offline").fetchSemanticsNodes().size
 
     private fun unreachableTexts(): List<String> =
         listOf("reach the server", "Failed to connect").flatMap { text ->

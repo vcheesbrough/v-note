@@ -1,5 +1,6 @@
 package link.desync.vnote.api
 
+import link.desync.vnote.auth.RefreshOutcome
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.LibraryEvent
 import link.desync.vnote.model.MeProfile
@@ -32,6 +33,10 @@ interface ApiClient : PageBinApi {
     // The server this client talks to, as the menu names it.
     val baseUrl: String
 
+    // The identity provider's host: a separate host the network may fail to
+    // reach while the server answers (#159). Named in the sync diagnostics.
+    val signInHost: String get() = hostOf(baseUrl)
+
     // One unauthenticated `GET /health`. Failure carries a short reason
     // ("HTTP 502", or the transport error) for the menu to show.
     suspend fun checkHealth(): Result<Unit>
@@ -40,9 +45,13 @@ interface ApiClient : PageBinApi {
 
     suspend fun listPages(): Result<List<PageSummary>>
 
+    // [id], when given, is the page's id minted on this device (#159): the
+    // create is idempotent on it, so an offline create replayed after a lost
+    // answer returns the page it already made.
     suspend fun createPage(
         title: String? = null,
         paper: Paper = Paper.None,
+        id: String? = null,
     ): Result<PageSummary>
 
     // Moves the page to the bin (#631) — nothing is destroyed. The bin's own
@@ -70,8 +79,40 @@ interface ApiClient : PageBinApi {
     // refresh — a test fake — refreshes nothing.
     suspend fun refreshSession(): Boolean = false
 
+    // Why the last [refreshSession] returned false (#159): a refused session
+    // pauses sync for a sign-in, an unreachable identity provider only waits.
+    // A client with no session to refresh — a test fake — was refused.
+    val lastRefreshOutcome: RefreshOutcome get() = RefreshOutcome.Refused
+
     fun shutdown()
 }
+
+// The host an [ApiClient] request or socket failed to reach, for the sync
+// diagnostics (#159): the backend, or the identity provider behind it.
+fun hostOf(url: String): String = runCatching { java.net.URI(url).host }.getOrNull() ?: url
+
+// A request that reached the server and was answered with an HTTP error.
+// [code] tells a definitive refusal (403, 404, 410) from a failing server.
+class HttpStatusException(
+    val code: Int,
+    message: String,
+    val requestId: String?,
+) : IllegalStateException(message)
+
+// The server refused the token and the identity provider could not be reached
+// to refresh it. Not an expired session: sync waits for the provider (#159).
+class AuthUnavailableException(
+    host: String,
+) : java.io.IOException("Can't reach the sign-in server ($host)")
+
+// Why a realtime socket could not be used, with what the diagnostics show.
+data class ConnectionFailure(
+    val message: String,
+    val host: String,
+    val errorClass: String,
+    // The `X-Request-Id` the failed upgrade carried, or the server's own.
+    val correlationId: String?,
+)
 
 // The server refused the session and refreshing the token did not fix it.
 // Distinct from every other failure: only this one means "sign in again" — an
@@ -98,6 +139,9 @@ interface LibraryEventListener {
 
     fun onError(message: String)
 
+    // The socket failed; [failure] says where and why. Defaults to [onError].
+    fun onConnectionFailure(failure: ConnectionFailure) = onError(failure.message)
+
     fun onClosed()
 }
 
@@ -105,6 +149,9 @@ interface PageEventListener {
     fun onEvent(event: PageEvent)
 
     fun onError(message: String)
+
+    // The socket failed; [failure] says where and why. Defaults to [onError].
+    fun onConnectionFailure(failure: ConnectionFailure) = onError(failure.message)
 
     // The upgrade was refused with 401: the access token is no longer valid.
     // Told apart from [onError] because reconnecting with the same token can

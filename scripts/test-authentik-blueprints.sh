@@ -18,7 +18,9 @@
 #      blueprint-created provider to *no* grants, which rejects every authorize
 #      request — #372 shipped exactly that and took dev login down while every
 #      check that existed at the time stayed green;
-#   5. the live smoke user (#179) stays least-privileged — external, one group,
+#   5. the provider's token lifetimes are the ones Android's offline mode
+#      relies on (#159);
+#   6. the live smoke user (#179) stays least-privileged — external, one group,
 #      never the admins group, password only as a secret placeholder — and
 #      agrees with the smoke steps in .woodpecker/verify-tag-deploy.yml on its username
 #      and email, and every step applying the file supplies the placeholder.
@@ -133,6 +135,20 @@ for env, doc in loaded.items():
             "urn:ietf:params:oauth:grant-type:device_code",
         ):
             check(forbidden not in grants, f"{env}: provider does not grant {forbidden}")
+
+        # #159: the session lifetimes Android's offline mode relies on, pinned
+        # in the blueprint so neither an edit here nor a changed upstream
+        # default shortens them unnoticed (the reasoning is beside them in the
+        # blueprint).
+        for field, expected in (
+            ("access_token_validity", "hours=1"),
+            ("refresh_token_validity", "days=30"),
+            ("refresh_token_threshold", "days=7"),
+        ):
+            check(
+                attrs.get(field) == expected,
+                f"{env}: provider sets {field}: {expected} (got {attrs.get(field)!r})",
+            )
 
     retired = {
         e["identifiers"].get("name") or e["identifiers"].get("slug")

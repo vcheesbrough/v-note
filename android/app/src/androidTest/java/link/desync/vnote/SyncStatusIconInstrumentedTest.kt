@@ -33,13 +33,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * #150 on screen: the open page's banner names the kind of trouble — the
- * server unreachable, another editor, a session only signing in can fix — so
- * none of them reads like another, and none shows while sync is nominal. The
- * session-level behaviour behind each is in [PageInkInstrumentedTest].
+ * #159 on screen: the top bar's sync status icon — on every screen — names
+ * the kind of trouble (offline, sign-in needed) and says nothing while sync
+ * is nominal. The open page shows no banner for any of it: only a refusal is
+ * the page's to show. The session-level behaviour behind each state is in
+ * [PageInkInstrumentedTest].
  */
 @RunWith(AndroidJUnit4::class)
-class PageSyncBannerInstrumentedTest {
+class SyncStatusIconInstrumentedTest {
     private lateinit var server: MockWebServer
     private lateinit var tokenStore: TokenStore
     private lateinit var apiClient: ApiClient
@@ -98,72 +99,87 @@ class PageSyncBannerInstrumentedTest {
     val rules: TestRule = RuleChain.outerRule(SnapshotThreadGuard()).around(environmentRule).around(composeRule)
 
     @Test
-    fun aHealthyPageShowsNoBanner() {
+    fun aHealthyPageShowsNoBannerAndNoIcon() {
         openPage()
-        awaitTagGone("page-status-connecting")
+        // Long enough to connect, replay and settle.
+        Thread.sleep(1_000)
+        composeRule.waitForIdle()
+        awaitNoIcon()
         assertNoBanner()
     }
 
     /**
      * The server drops the socket and then refuses upgrades (it is down): the
-     * disconnected banner stays up through every failed attempt, with Retry.
-     * Once the server is back, Retry reconnects at once and the banner goes.
+     * offline icon shows on the page, its details name the host and the
+     * error class, and no banner covers the canvas. Once the server is back,
+     * the page reconnects on its own and the icon goes.
      */
     @Test
-    fun anUnreachableServerShowsDisconnectedUntilRetryReconnects() {
+    fun anUnreachableServerShowsTheOfflineIconUntilItIsBack() {
         pageMode = PageMode.DropAfterSubscribe
         openPage()
 
-        awaitTag("page-status-disconnected")
-        composeRule.onNodeWithText(PageInkSession.DISCONNECTED).assertIsDisplayed()
-        composeRule.onNodeWithTag("page-status-detail").assertIsDisplayed()
-        // Let the backoff grow (1 + 2 + 4 s of refused attempts) so the next
-        // automatic attempt is 8 s away: a reconnect inside the window below
-        // can only be Retry's. A failed attempt does not flip the banner to a
-        // benign "connecting" meanwhile.
-        composeRule.waitUntil(timeoutMillis = 15_000) { pageUpgrades.get() >= 4 }
-        composeRule.onNodeWithTag("page-status-disconnected").assertIsDisplayed()
+        awaitTag("sync-status-offline")
+        assertNoBanner()
+        composeRule.onNodeWithTag("sync-status-offline").performClick()
+        composeRule.onNodeWithTag("sync-status-details").assertIsDisplayed()
+        composeRule.onNodeWithTag("sync-status-host").assertIsDisplayed()
+        composeRule.onNodeWithTag("sync-status-error-class").assertIsDisplayed()
+        composeRule.onNodeWithTag("sync-status-last-sync").assertIsDisplayed()
+        composeRule.onNodeWithText("Close").performClick()
 
         pageMode = PageMode.Healthy
         serverUp.set(true)
-        val before = pageUpgrades.get()
-        composeRule.onNodeWithTag("page-status-retry").performClick()
-
-        composeRule.waitUntil(timeoutMillis = 2_000) { pageUpgrades.get() > before }
-        awaitTagGone("page-status-disconnected", timeoutMillis = 2_000)
+        composeRule.waitUntil(timeoutMillis = 40_000) {
+            composeRule.onAllNodesWithTag("sync-status-offline").fetchSemanticsNodes().isEmpty()
+        }
         assertNoBanner()
     }
 
     /**
      * #630: there is no edit lease, so another device inking the same page is
-     * not trouble. Its ink arrives on the open page and no banner appears.
+     * not trouble. Its ink arrives on the open page and nothing is shown.
      */
     @Test
-    fun anotherDeviceInkingThePageShowsNoBanner() {
+    fun anotherDeviceInkingThePageShowsNothing() {
         pageMode = PageMode.SharedWithAnotherDevice
         openPage()
 
-        awaitTagGone("page-status-connecting")
         composeRule.waitUntil(timeoutMillis = 5_000) { remoteInkSent.get() }
-        // Long enough for the remote batch to be applied and any banner drawn.
+        // Long enough for the remote batch to be applied and anything drawn.
         Thread.sleep(500)
         composeRule.waitForIdle()
         assertNoBanner()
+        awaitNoIcon()
     }
 
+    /**
+     * #159: a refused session pauses sync — the icon asks for a sign-in, with
+     * a Sign in button in its details — while the page stays open for
+     * editing, with no banner.
+     */
     @Test
-    fun aRefusedSessionAsksForSignIn() {
+    fun aRefusedSessionAsksForSignInFromTheIcon() {
         pageMode = PageMode.Unauthorized
         openPage()
 
-        awaitTag("page-status-session-expired")
+        awaitTag("sync-status-sign-in")
+        assertNoBanner()
+        composeRule.onNodeWithTag("sync-status-sign-in").performClick()
+        composeRule.onNodeWithTag("sync-status-details").assertIsDisplayed()
         composeRule.onNodeWithText(PageInkSession.SESSION_EXPIRED).assertIsDisplayed()
-        composeRule.onNodeWithTag("page-status-sign-in").assertIsDisplayed()
-        composeRule.onAllNodesWithTag("page-status-disconnected").assertCountEquals(0)
         // Not clicked here: Sign in starts OIDC discovery against the real
         // identity provider, which the test network guard refuses by crashing
-        // the run. The button's callback is asserted in
-        // PageStatusBannerInstrumentedTest.
+        // the run.
+        composeRule.onAllNodesWithTag("sync-status-offline").assertCountEquals(0)
+    }
+
+    private fun awaitNoIcon() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            listOf("offline", "sign-in", "rejected").all { state ->
+                composeRule.onAllNodesWithTag("sync-status-$state").fetchSemanticsNodes().isEmpty()
+            }
+        }
     }
 
     private fun openPage() {
@@ -174,15 +190,6 @@ class PageSyncBannerInstrumentedTest {
     private fun awaitTag(tag: String) {
         composeRule.waitUntil(timeoutMillis = 10_000) {
             composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
-        }
-    }
-
-    private fun awaitTagGone(
-        tag: String,
-        timeoutMillis: Long = 10_000,
-    ) {
-        composeRule.waitUntil(timeoutMillis = timeoutMillis) {
-            composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isEmpty()
         }
     }
 

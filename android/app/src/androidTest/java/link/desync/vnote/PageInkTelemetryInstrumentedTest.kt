@@ -9,8 +9,10 @@ import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.PageInkSession
+import link.desync.vnote.ink.SessionSync
 import link.desync.vnote.model.Stroke
 import link.desync.vnote.model.StrokePoint
+import link.desync.vnote.store.LocalStore
 import link.desync.vnote.telemetry.ConfigFetch
 import link.desync.vnote.telemetry.ExportOutcome
 import link.desync.vnote.telemetry.Signal
@@ -167,7 +169,13 @@ class PageInkTelemetryInstrumentedTest {
                 ).build(),
         )
 
-        val session = PageInkSession(apiClient, "page_1", CoroutineScope(Dispatchers.Main))
+        val session =
+            PageInkSession(
+                apiClient,
+                "page_1",
+                CoroutineScope(Dispatchers.Main),
+                sync = SessionSync(LocalStore.shared(InstrumentationRegistry.getInstrumentation().targetContext)),
+            )
         session.connect()
         assertTrue("page channel caught up", awaitUntil { session.canEdit })
         session.commitStroke(Stroke(points = listOf(StrokePoint(1.0, 2.0, 0), StrokePoint(3.0, 4.0, 120))))

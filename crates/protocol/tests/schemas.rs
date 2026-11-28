@@ -109,7 +109,7 @@ fn errors(validator: &Validator, instance: &Value) -> Vec<String> {
 /// an unmapped fixture is a hole in the contract, not an oversight to skip.
 fn schema_for_fixture(fixture: &str) -> Option<&'static str> {
     Some(match fixture {
-        "create-page.json" => "create-page.schema.json",
+        "create-page.json" | "create-page-with-id.json" => "create-page.schema.json",
         "page-ids.json" => "page-ids.schema.json",
         "health.json" => "health.schema.json",
         "me.json" => "me.schema.json",
@@ -216,6 +216,11 @@ fn rest_dtos_serialise_to_their_schemas() {
     assert_roundtrip::<ListPagesResponse>(&registry, "pages.json", "pages.schema.json");
     assert_roundtrip::<ListPagesResponse>(&registry, "bin.json", "pages.schema.json");
     assert_roundtrip::<CreatePageRequest>(&registry, "create-page.json", "create-page.schema.json");
+    assert_roundtrip::<CreatePageRequest>(
+        &registry,
+        "create-page-with-id.json",
+        "create-page.schema.json",
+    );
     assert_roundtrip::<PageIds>(&registry, "page-ids.json", "page-ids.schema.json");
     assert_roundtrip::<RealtimeTicketResponse>(
         &registry,

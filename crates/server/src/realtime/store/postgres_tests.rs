@@ -96,7 +96,7 @@ async fn ownership_paper_and_head_seq_are_read_from_the_page(pool: PgPool) {
 async fn persist_batch_allocates_seq_and_revision_and_retries_are_idempotent(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
 
-    let first = persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+    let first = persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("first batch");
     assert_eq!((first.seq, first.revision), (1, 1));
@@ -105,12 +105,12 @@ async fn persist_batch_allocates_seq_and_revision_and_retries_are_idempotent(poo
     assert!(first.thumbnail_job_created);
     assert!(first.updated_at.is_some());
 
-    let second = persist_batch(&pool, PAGE, "batch_2", &[stroke("s2")])
+    let second = persist_batch(&pool, PAGE, OWNER, "batch_2", &[stroke("s2")])
         .await
         .expect("second batch");
     assert_eq!((second.seq, second.revision), (2, 2));
 
-    let retry = persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+    let retry = persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("retry");
     assert_eq!(
@@ -132,15 +132,15 @@ async fn persist_batch_allocates_seq_and_revision_and_retries_are_idempotent(poo
 #[sqlx::test(migrations = "./migrations")]
 async fn a_tombstoned_stroke_is_never_added_back(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
-    persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+    persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("batch");
-    let erased = persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s1"]))
+    let erased = persist_tombstones(&pool, PAGE, OWNER, "erase_1", &owned(&["s1"]))
         .await
         .expect("erase");
     assert_eq!(erased.revision, 2);
 
-    let re_add = persist_batch(&pool, PAGE, "batch_2", &[stroke("s1")])
+    let re_add = persist_batch(&pool, PAGE, OWNER, "batch_2", &[stroke("s1")])
         .await
         .expect("re-add");
 
@@ -159,11 +159,11 @@ async fn a_tombstoned_stroke_is_never_added_back(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn persist_tombstones_dedupes_skips_already_erased_and_is_idempotent(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
-    persist_batch(&pool, PAGE, "batch_1", &[stroke("s1"), stroke("s2")])
+    persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1"), stroke("s2")])
         .await
         .expect("batch");
 
-    let first = persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s2", "s1", "s1"]))
+    let first = persist_tombstones(&pool, PAGE, OWNER, "erase_1", &owned(&["s2", "s1", "s1"]))
         .await
         .expect("erase");
     assert_eq!(first.stroke_ids, ["s1", "s2"]);
@@ -171,7 +171,7 @@ async fn persist_tombstones_dedupes_skips_already_erased_and_is_idempotent(pool:
     assert!(first.thumbnail_job_created);
     assert!(first.updated_at.is_some());
 
-    let nothing_new = persist_tombstones(&pool, PAGE, "erase_2", &owned(&["s1"]))
+    let nothing_new = persist_tombstones(&pool, PAGE, OWNER, "erase_2", &owned(&["s1"]))
         .await
         .expect("second erase");
     assert!(nothing_new.stroke_ids.is_empty());
@@ -182,7 +182,7 @@ async fn persist_tombstones_dedupes_skips_already_erased_and_is_idempotent(pool:
     assert!(!nothing_new.thumbnail_job_created);
     assert_eq!(nothing_new.updated_at, None);
 
-    let retry = persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s2", "s1", "s1"]))
+    let retry = persist_tombstones(&pool, PAGE, OWNER, "erase_1", &owned(&["s2", "s1", "s1"]))
         .await
         .expect("retry");
     assert_eq!(retry.stroke_ids, ["s1", "s2"]);
@@ -194,13 +194,13 @@ async fn persist_tombstones_dedupes_skips_already_erased_and_is_idempotent(pool:
 #[sqlx::test(migrations = "./migrations")]
 async fn load_page_replay_returns_batches_after_the_cursor_and_every_tombstone(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
-    persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+    persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("batch 1");
-    persist_batch(&pool, PAGE, "batch_2", &[stroke("s2")])
+    persist_batch(&pool, PAGE, OWNER, "batch_2", &[stroke("s2")])
         .await
         .expect("batch 2");
-    persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s1"]))
+    persist_tombstones(&pool, PAGE, OWNER, "erase_1", &owned(&["s1"]))
         .await
         .expect("erase");
 
@@ -237,7 +237,7 @@ async fn load_page_replay_returns_batches_after_the_cursor_and_every_tombstone(p
 async fn setting_the_paper_already_in_force_changes_nothing(pool: PgPool) {
     insert_page(&pool, Paper::RuledWide).await;
 
-    let persisted = persist_paper(&pool, PAGE, Paper::RuledWide)
+    let persisted = persist_paper(&pool, PAGE, OWNER, Paper::RuledWide)
         .await
         .expect("paper");
 
@@ -251,7 +251,7 @@ async fn setting_the_paper_already_in_force_changes_nothing(pool: PgPool) {
 async fn changing_paper_on_an_inkless_page_keeps_the_revision(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
 
-    let persisted = persist_paper(&pool, PAGE, Paper::SquaredSmall)
+    let persisted = persist_paper(&pool, PAGE, OWNER, Paper::SquaredSmall)
         .await
         .expect("paper");
 
@@ -272,11 +272,11 @@ async fn changing_paper_on_an_inkless_page_keeps_the_revision(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn changing_paper_on_an_inked_page_mints_a_thumbnail_revision_with_that_paper(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
-    persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+    persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("batch");
 
-    let persisted = persist_paper(&pool, PAGE, Paper::RuledMarginNarrow)
+    let persisted = persist_paper(&pool, PAGE, OWNER, Paper::RuledMarginNarrow)
         .await
         .expect("paper");
 
@@ -293,14 +293,14 @@ async fn changing_paper_on_an_inked_page_mints_a_thumbnail_revision_with_that_pa
 #[sqlx::test(migrations = "./migrations")]
 async fn a_page_whose_ink_is_all_erased_counts_as_inkless_for_paper(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
-    persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+    persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("batch");
-    persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s1"]))
+    persist_tombstones(&pool, PAGE, OWNER, "erase_1", &owned(&["s1"]))
         .await
         .expect("erase");
 
-    let persisted = persist_paper(&pool, PAGE, Paper::RuledWide)
+    let persisted = persist_paper(&pool, PAGE, OWNER, Paper::RuledWide)
         .await
         .expect("paper");
 
@@ -315,7 +315,7 @@ async fn pg_page_store_goes_through_the_same_queries(pool: PgPool) {
     let store = PgPageStore::new(pool);
 
     let persisted = store
-        .persist_batch(PAGE, "batch_1", &[stroke("s1")])
+        .persist_batch(PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("batch through the store");
 
@@ -340,16 +340,16 @@ async fn every_mutation_on_a_binned_page_is_stored_and_the_page_stays_binned(poo
         .await
         .expect("page should bin");
 
-    let batch = persist_batch(&pool, PAGE, "batch_1", &[stroke("s1"), stroke("s2")])
+    let batch = persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1"), stroke("s2")])
         .await
         .expect("a binned page accepts ink");
     assert_eq!(batch.seq, 1);
-    let erased = persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s1"]))
+    let erased = persist_tombstones(&pool, PAGE, OWNER, "erase_1", &owned(&["s1"]))
         .await
         .expect("a binned page accepts erasures");
     assert_eq!(erased.stroke_ids, ["s1"]);
     assert!(
-        persist_paper(&pool, PAGE, Paper::RuledWide)
+        persist_paper(&pool, PAGE, OWNER, Paper::RuledWide)
             .await
             .expect("a binned page accepts paper")
             .changed
@@ -368,7 +368,7 @@ async fn every_mutation_on_a_binned_page_is_stored_and_the_page_stays_binned(poo
 #[sqlx::test(migrations = "./migrations")]
 async fn every_mutation_on_a_permanently_deleted_page_is_page_gone(pool: PgPool) {
     insert_page(&pool, Paper::None).await;
-    persist_batch(&pool, PAGE, "batch_1", &[stroke("s1")])
+    persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
         .await
         .expect("first batch");
     sqlx::query("DELETE FROM pages WHERE id = $1")
@@ -378,15 +378,15 @@ async fn every_mutation_on_a_permanently_deleted_page_is_page_gone(pool: PgPool)
         .expect("page should delete");
 
     assert!(matches!(
-        persist_batch(&pool, PAGE, "batch_2", &[stroke("s2")]).await,
+        persist_batch(&pool, PAGE, OWNER, "batch_2", &[stroke("s2")]).await,
         Err(StoreError::PageGone)
     ));
     assert!(matches!(
-        persist_tombstones(&pool, PAGE, "erase_1", &owned(&["s1"])).await,
+        persist_tombstones(&pool, PAGE, OWNER, "erase_1", &owned(&["s1"])).await,
         Err(StoreError::PageGone)
     ));
     assert!(matches!(
-        persist_paper(&pool, PAGE, Paper::RuledWide).await,
+        persist_paper(&pool, PAGE, OWNER, Paper::RuledWide).await,
         Err(StoreError::PageGone)
     ));
     assert_eq!(binned_at(&pool, PAGE).await.expect("bin state"), None);
@@ -413,4 +413,46 @@ async fn page_was_purged_is_true_only_for_the_owners_purged_page(pool: PgPool) {
             .await
             .expect("query")
     );
+}
+
+/// #159: every mutation re-checks, under the page's row lock, that the page is
+/// the session owner's. Another owner's mutation is `NotOwner` and stores
+/// nothing — no batch, no tombstone, no paper, no revision, no thumbnail job.
+#[sqlx::test(migrations = "./migrations")]
+async fn every_mutation_from_another_owner_is_not_owner_and_stores_nothing(pool: PgPool) {
+    insert_page(&pool, Paper::None).await;
+    persist_batch(&pool, PAGE, OWNER, "batch_1", &[stroke("s1")])
+        .await
+        .expect("the owner's batch");
+    let revision = ink_revision(&pool).await;
+    let jobs = thumbnail_jobs(&pool).await;
+
+    assert!(matches!(
+        persist_batch(&pool, PAGE, "intruder", "batch_2", &[stroke("s2")]).await,
+        Err(StoreError::NotOwner)
+    ));
+    assert!(matches!(
+        persist_tombstones(&pool, PAGE, "intruder", "erase_1", &owned(&["s1"])).await,
+        Err(StoreError::NotOwner)
+    ));
+    assert!(matches!(
+        persist_paper(&pool, PAGE, "intruder", Paper::RuledWide).await,
+        Err(StoreError::NotOwner)
+    ));
+    // A retry of the owner's own batch is still the intruder's to be refused:
+    // the idempotent re-echo must not leak the stored strokes.
+    assert!(matches!(
+        persist_batch(&pool, PAGE, "intruder", "batch_1", &[stroke("s1")]).await,
+        Err(StoreError::NotOwner)
+    ));
+
+    let (batches, tombstones) = load_page_replay(&pool, PAGE, 0).await.expect("replay");
+    assert_eq!(batches.len(), 1, "only the owner's batch is stored");
+    assert!(tombstones.is_empty(), "nothing was erased");
+    assert_eq!(
+        current_paper(&pool, PAGE).await.expect("paper"),
+        Paper::None
+    );
+    assert_eq!(ink_revision(&pool).await, revision);
+    assert_eq!(thumbnail_jobs(&pool).await, jobs);
 }

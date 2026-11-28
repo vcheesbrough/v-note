@@ -18,12 +18,14 @@ use super::store::{PageStore, StoreError};
 use crate::AppState;
 
 /// The connection a page-channel message arrived on: the shared state and the
-/// store it acts on, the page, and the sending session.
+/// store it acts on, the page, the sending session, and the subject it
+/// authenticated as — which every mutation re-checks owns the page (#159).
 pub(super) struct PageContext<'a, S> {
     pub(super) state: &'a AppState,
     pub(super) store: &'a S,
     pub(super) page_id: &'a str,
     pub(super) session_id: &'a str,
+    pub(super) owner_id: &'a str,
 }
 
 /// Routes one parsed page-channel message to its handler. Returns false when
@@ -100,12 +102,15 @@ where
     }
     let persisted = match ctx
         .store
-        .persist_batch(ctx.page_id, &client_batch_id, &strokes)
+        .persist_batch(ctx.page_id, ctx.owner_id, &client_batch_id, &strokes)
         .await
     {
         Ok(persisted) => persisted,
         Err(StoreError::PageGone) => {
             return reject_purged_page(ctx, sender, "commit_batch", client_batch_id).await;
+        }
+        Err(StoreError::NotOwner) => {
+            return reject_not_owner(ctx, sender, "commit_batch", client_batch_id).await;
         }
         Err(StoreError::Db(error)) => {
             tracing::error!(error = %error, "stroke commit failed");
@@ -171,12 +176,15 @@ where
 {
     let persisted = match ctx
         .store
-        .persist_tombstones(ctx.page_id, &client_mutation_id, &stroke_ids)
+        .persist_tombstones(ctx.page_id, ctx.owner_id, &client_mutation_id, &stroke_ids)
         .await
     {
         Ok(persisted) => persisted,
         Err(StoreError::PageGone) => {
             return reject_purged_page(ctx, sender, "commit_tombstones", client_mutation_id).await;
+        }
+        Err(StoreError::NotOwner) => {
+            return reject_not_owner(ctx, sender, "commit_tombstones", client_mutation_id).await;
         }
         Err(StoreError::Db(error)) => {
             tracing::error!(error = %error, "tombstone commit failed");
@@ -233,10 +241,17 @@ where
     // Any session may set the paper. Concurrent changes converge on the last
     // arrival: the store serialises them under the page lock, and each real
     // change is broadcast to every session, the sender included.
-    let persisted = match ctx.store.persist_paper(ctx.page_id, paper).await {
+    let persisted = match ctx
+        .store
+        .persist_paper(ctx.page_id, ctx.owner_id, paper)
+        .await
+    {
         Ok(persisted) => persisted,
         Err(StoreError::PageGone) => {
             return reject_purged_page(ctx, sender, "set_paper", client_mutation_id).await;
+        }
+        Err(StoreError::NotOwner) => {
+            return reject_not_owner(ctx, sender, "set_paper", client_mutation_id).await;
         }
         Err(StoreError::Db(error)) => {
             tracing::error!(error = %error, "paper change failed");
@@ -313,6 +328,38 @@ where
     );
     crate::observability::metrics().record_page_mutation(operation, "page_gone");
     send_page(sender, page_deleted_error(Some(client_mutation_id))).await
+}
+
+/// Answers a mutation from a session whose owner does not own the page (#159)
+/// with the definitive `forbidden` class. Pages never change owner today, so
+/// this is defence in depth behind the upgrade's check: a replayed outbox can
+/// never write to a page that is not its owner's. Ids only in the log line.
+async fn reject_not_owner<S, Tx>(
+    ctx: &PageContext<'_, S>,
+    sender: &mut Tx,
+    operation: &'static str,
+    client_mutation_id: String,
+) -> bool
+where
+    Tx: Sink<Frame> + Unpin,
+{
+    tracing::warn!(
+        page_id = ctx.page_id,
+        session_id = ctx.session_id,
+        client_mutation_id = %client_mutation_id,
+        operation,
+        "page-channel mutation rejected: the page is not the session owner's"
+    );
+    crate::observability::metrics().record_page_mutation(operation, "forbidden");
+    send_page(
+        sender,
+        PageServerMessage::Error {
+            code: protocol::FORBIDDEN_ERROR.to_string(),
+            message: "this page belongs to another account".to_string(),
+            client_mutation_id: Some(client_mutation_id),
+        },
+    )
+    .await
 }
 
 /// The `page_deleted` error envelope: the reply to a mutation on a permanently
@@ -601,7 +648,9 @@ mod tests {
 
     /// Canned results for each mutation, taken on first use — a test that does
     /// not set one up proves dispatch never reached the store for it — plus a
-    /// log of every call dispatch made.
+    /// log of every call dispatch made. Like the Postgres store's row lock, it
+    /// refuses a mutation from anyone but [`OWNER`] with `NotOwner` before
+    /// touching the canned result (#159).
     #[derive(Default)]
     struct FakeStore {
         batch: Mutex<Option<Result<PersistedBatch, StoreError>>>,
@@ -623,12 +672,25 @@ mod tests {
 
         fn take<T>(
             slot: &Mutex<Option<Result<T, StoreError>>>,
+            owner_id: &str,
             call: &str,
         ) -> Result<T, StoreError> {
+            if owner_id != OWNER {
+                return Err(StoreError::NotOwner);
+            }
             slot.lock()
                 .expect("slot lock")
                 .take()
                 .unwrap_or_else(|| panic!("dispatch made an unexpected {call} call"))
+        }
+    }
+
+    /// ` as <owner>` for an owner other than [`OWNER`], else nothing.
+    fn as_other(owner_id: &str) -> String {
+        if owner_id == OWNER {
+            String::new()
+        } else {
+            format!(" as {owner_id}")
         }
     }
 
@@ -675,37 +737,50 @@ mod tests {
             Ok(self.replay.clone())
         }
 
+        // The owner is in the log only when it is not [`OWNER`], so every
+        // existing assertion on the calls reads as it did before #159.
         async fn persist_batch(
             &self,
             page_id: &str,
+            owner_id: &str,
             client_batch_id: &str,
             strokes: &[Stroke],
         ) -> Result<PersistedBatch, StoreError> {
             let ids = joined(strokes.iter().map(|stroke| stroke.id.as_str()));
-            self.record(format!("persist_batch {page_id} {client_batch_id} {ids}"));
-            Self::take(&self.batch, "persist_batch")
+            self.record(format!(
+                "persist_batch {page_id}{} {client_batch_id} {ids}",
+                as_other(owner_id)
+            ));
+            Self::take(&self.batch, owner_id, "persist_batch")
         }
 
         async fn persist_tombstones(
             &self,
             page_id: &str,
+            owner_id: &str,
             client_mutation_id: &str,
             stroke_ids: &[String],
         ) -> Result<PersistedTombstones, StoreError> {
             let ids = joined(stroke_ids.iter().map(String::as_str));
             self.record(format!(
-                "persist_tombstones {page_id} {client_mutation_id} {ids}"
+                "persist_tombstones {page_id}{} {client_mutation_id} {ids}",
+                as_other(owner_id)
             ));
-            Self::take(&self.tombstones, "persist_tombstones")
+            Self::take(&self.tombstones, owner_id, "persist_tombstones")
         }
 
         async fn persist_paper(
             &self,
             page_id: &str,
+            owner_id: &str,
             paper: Paper,
         ) -> Result<PersistedPaper, StoreError> {
-            self.record(format!("persist_paper {page_id} {}", paper.wire_value()));
-            Self::take(&self.paper, "persist_paper")
+            self.record(format!(
+                "persist_paper {page_id}{} {}",
+                as_other(owner_id),
+                paper.wire_value()
+            ));
+            Self::take(&self.paper, owner_id, "persist_paper")
         }
     }
 
@@ -726,11 +801,23 @@ mod tests {
         session_id: &str,
         message: PageClientMessage,
     ) -> (bool, Vec<PageServerMessage>) {
+        handle_from(state, store, session_id, OWNER, message).await
+    }
+
+    /// [`handle_as`], from a session authenticated as `owner_id`.
+    async fn handle_from(
+        state: &AppState,
+        store: &FakeStore,
+        session_id: &str,
+        owner_id: &str,
+        message: PageClientMessage,
+    ) -> (bool, Vec<PageServerMessage>) {
         let ctx = PageContext {
             state,
             store,
             page_id: PAGE,
             session_id,
+            owner_id,
         };
         let mut sink: Vec<Frame> = Vec::new();
         let keep_open =
@@ -984,6 +1071,81 @@ mod tests {
             assert!(drain(&mut page).is_empty(), "{name}");
             assert!(drain(&mut library).is_empty(), "{name}");
         }
+    }
+
+    /// #159: a session whose authenticated owner does not own the page has
+    /// every mutation refused by the store with the definitive `forbidden`
+    /// class, naming what it rejected, counted as `forbidden`, and nothing is
+    /// broadcast — not to the page, and not to either owner's library.
+    #[tokio::test]
+    async fn every_mutation_from_a_session_that_does_not_own_the_page_is_forbidden() {
+        let state = AppState::for_tests();
+        for (name, message) in every_mutation() {
+            let operation = match name {
+                "commit-batch" => "commit_batch",
+                "commit-tombstones" => "commit_tombstones",
+                _ => "set_paper",
+            };
+            let before = forbidden_count(operation);
+            let mut page = state.realtime.subscribe_page(PAGE);
+            let mut library = state.realtime.subscribe_library(OWNER);
+            let mut intruder_library = state.realtime.subscribe_library("intruder");
+            // Canned successes the owner check must never reach.
+            let store = FakeStore {
+                batch: Mutex::new(Some(Ok(persisted_batch(vec![fixture_stroke("kept")])))),
+                tombstones: Mutex::new(Some(Ok(persisted_tombstones()))),
+                paper: Mutex::new(Some(Ok(persisted_paper(true)))),
+                ..FakeStore::default()
+            };
+            let mutation_id = match &message {
+                PageClientMessage::CommitBatch {
+                    client_batch_id, ..
+                } => client_batch_id.clone(),
+                PageClientMessage::CommitTombstones {
+                    client_mutation_id, ..
+                }
+                | PageClientMessage::SetPaper {
+                    client_mutation_id, ..
+                } => client_mutation_id.clone(),
+                PageClientMessage::Subscribe { .. } => unreachable!("not a mutation"),
+            };
+
+            let (keep_open, replies) =
+                handle_from(&state, &store, SESSION, "intruder", message).await;
+
+            assert!(keep_open, "{name}");
+            assert_eq!(
+                replies,
+                [PageServerMessage::Error {
+                    code: protocol::FORBIDDEN_ERROR.to_string(),
+                    message: "this page belongs to another account".to_string(),
+                    client_mutation_id: Some(mutation_id),
+                }],
+                "{name}"
+            );
+            let calls = store.calls();
+            assert_eq!(calls.len(), 1, "{name}: {calls:?}");
+            assert!(
+                calls[0].starts_with(&format!("{} {PAGE} as intruder", operation_call(name))),
+                "{name}: the store was asked as the session's owner: {calls:?}"
+            );
+            assert!(drain(&mut page).is_empty(), "{name}");
+            assert!(drain(&mut library).is_empty(), "{name}");
+            assert!(drain(&mut intruder_library).is_empty(), "{name}");
+            assert_eq!(forbidden_count(operation), before + 1, "{name}");
+        }
+    }
+
+    fn operation_call(name: &str) -> &'static str {
+        match name {
+            "commit-batch" => "persist_batch",
+            "commit-tombstones" => "persist_tombstones",
+            _ => "persist_paper",
+        }
+    }
+
+    fn forbidden_count(operation: &str) -> u64 {
+        crate::observability::metrics().page_mutation_count(operation, "forbidden")
     }
 
     #[tokio::test]

@@ -5,6 +5,11 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "id": {
+      "description": "Optional client-minted page id (#159), for a page created offline. Absent: the server picks one. A repeat by the same owner is answered 200 with the existing page; an id another owner holds is the not-found 403; a permanently deleted one is 410.",
+      "type": "string",
+      "pattern": "^page_[0-9a-f]{32}$"
+    },
     "title": {
       "type": "string"
     },

@@ -102,6 +102,13 @@ pub struct PageResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreatePageRequest {
+    /// A page id the client minted itself (#159): Android creates pages offline
+    /// and replays the create when it reconnects, possibly more than once.
+    /// Absent ⇒ the server picks one (the SPA's path). Present, it must be a
+    /// [`is_page_id`] id; a repeat by the same owner answers `200` with the
+    /// page as it stands, so the replay is idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Paper for the new page. Absent ⇒ `none`. Carrying it on create (rather
@@ -109,6 +116,18 @@ pub struct CreatePageRequest {
     /// one round trip, no revision bump, page born with its paper.
     #[serde(default)]
     pub paper: Paper,
+}
+
+/// Whether `id` is a well-formed page id: `page_` and 32 lowercase hex digits —
+/// the shape the server mints (a simple-form UUID) and the only shape it
+/// accepts from a client that mints its own (#159).
+pub fn is_page_id(id: &str) -> bool {
+    id.strip_prefix("page_").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 /// `DELETE /api/bin` (#631), both ways. The request names the binned pages to
@@ -436,6 +455,13 @@ impl PageClientMessage {
 /// ink it sent. Over REST the same state is `410 Gone`.
 pub const PAGE_DELETED_ERROR: &str = "page_deleted";
 
+/// The page-channel error code for a mutation from a session whose
+/// authenticated owner does not own the page (#159). Ownership is checked when
+/// the socket opens and again, under the page's row lock, on every mutation —
+/// so a replayed outbox can never write to a page that is not its owner's.
+/// Definitive: nothing was stored, and re-sending will not change the answer.
+pub const FORBIDDEN_ERROR: &str = "forbidden";
+
 /// Server → client messages on the page channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -491,6 +517,8 @@ pub enum PageServerMessage {
     /// [`PAGE_DELETED_ERROR`] (protocol 9) is definitive too, and distinct: the
     /// page was permanently deleted, so the client still holds the only copy
     /// of whatever it was sending.
+    /// [`FORBIDDEN_ERROR`] is definitive as well: the session's owner does not
+    /// own the page, and nothing was stored.
     Error {
         code: String,
         message: String,

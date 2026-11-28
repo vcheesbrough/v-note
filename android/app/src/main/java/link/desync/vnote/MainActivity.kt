@@ -12,10 +12,13 @@ import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -24,22 +27,36 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.api.OkHttpApiClient
 import link.desync.vnote.api.SessionExpiredException
+import link.desync.vnote.api.hostOf
 import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
+import link.desync.vnote.ink.LocalPageSync
 import link.desync.vnote.ink.PageCanvasScreen
+import link.desync.vnote.ink.PageSyncHost
 import link.desync.vnote.ink.Paper
 import link.desync.vnote.ink.PaperPreferences
 import link.desync.vnote.ink.normalizedSamsungSpenAction
+import link.desync.vnote.library.LibraryLocal
 import link.desync.vnote.library.LibraryStateHolder
 import link.desync.vnote.library.ServerHealthProbe
+import link.desync.vnote.model.LibraryEvent
+import link.desync.vnote.model.MeProfile
 import link.desync.vnote.net.Endpoints
+import link.desync.vnote.store.LocalStore
+import link.desync.vnote.sync.IdentityDecision
+import link.desync.vnote.sync.SyncEngine
+import link.desync.vnote.sync.SyncStatus
+import link.desync.vnote.sync.decideIdentity
+import link.desync.vnote.sync.resetInstallFor
 import link.desync.vnote.telemetry.AppLog
+import link.desync.vnote.ui.LocalSyncUi
+import link.desync.vnote.ui.SyncActions
+import link.desync.vnote.ui.SyncUi
 import link.desync.vnote.ui.theme.VNoteTheme
 
 class MainActivity : ComponentActivity() {
@@ -64,8 +81,18 @@ class MainActivity : ComponentActivity() {
     private lateinit var library: LibraryStateHolder
     private lateinit var healthProbe: ServerHealthProbe
 
+    // Local-first sync (#159): the device's copy, what the status icon shows,
+    // and the engine that catches the device up with the server.
+    private lateinit var store: LocalStore
+    private lateinit var syncStatus: SyncStatus
+    private lateinit var syncEngine: SyncEngine
+
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
+
+    // A sign-in as a different identity, waiting on the user because this
+    // device still holds another account's unsynced changes (#159).
+    private var identitySwitch by mutableStateOf<IdentitySwitch?>(null)
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         val normalizedAction = normalizedSamsungSpenAction(event.actionMasked)
@@ -92,21 +119,46 @@ class MainActivity : ComponentActivity() {
             apiClientFactory?.invoke(tokenStore, authRepository)
                 ?: OkHttpApiClient(Endpoints.serverBaseUrl, tokenStore, authRepository)
         healthProbe = serverHealthProbe(apiClient)
+        store = LocalStore.shared(applicationContext)
+        syncStatus = SyncStatus(store)
+        syncEngine = SyncEngine(apiClient, store, syncStatus, lifecycleScope)
         library =
             LibraryStateHolder(
                 apiClient = apiClient,
+                local =
+                    LibraryLocal(
+                        store = store,
+                        status = syncStatus,
+                        serverHost = hostOf(apiClient.baseUrl),
+                        signInHost = apiClient.signInHost,
+                        kick = syncEngine::kick,
+                    ),
                 reconnectScope = lifecycleScope,
                 isSignedIn = { sessionState.value is SessionState.SignedIn },
                 runOnUiThread = { block -> runOnUiThread { block() } },
             )
+        // A page the server now holds after a create made here: as if its own
+        // `page-created` had arrived.
+        syncEngine.onPageCreated = { page -> library.applyLibraryEvent(LibraryEvent.PageCreated(page)) }
+        // The status icon recounts whenever the store changes.
+        lifecycleScope.launch { store.changes.collect { syncStatus.refresh() } }
 
+        val syncUi =
+            SyncUi(
+                syncStatus,
+                SyncActions(onSignIn = ::signIn, onKeepAsNewPage = ::keepAsNewPage, onDiscard = ::discardRefused),
+            )
+        val pageSync = PageSyncHost(store, syncStatus, syncEngine)
         setContent {
             VNoteTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    AppRoot { CurrentScreen() }
+                    CompositionLocalProvider(LocalSyncUi provides syncUi, LocalPageSync provides pageSync) {
+                        AppRoot { CurrentScreen() }
+                        identitySwitch?.let { IdentitySwitchDialog(it) }
+                    }
                 }
             }
         }
@@ -176,6 +228,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        syncEngine.stop()
         library.close()
         authRepository.shutdown()
         super.onDestroy()
@@ -183,7 +236,9 @@ class MainActivity : ComponentActivity() {
 
     private fun signIn() {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            sessionState.value = SessionState.Loading
+            // Signed in from the device with sync paused (#159): the library
+            // stays on screen while the browser signs in again.
+            if (sessionState.value !is SessionState.SignedIn) sessionState.value = SessionState.Loading
             runCatching {
                 authRepository.beginLogin(
                     completedIntent = authPendingIntent(AUTH_COMPLETED_ACTION, AUTH_COMPLETED_REQUEST_CODE),
@@ -191,8 +246,9 @@ class MainActivity : ComponentActivity() {
                 )
             }.onFailure { error ->
                 AppLog.w(TAG, "sign in could not start", error)
-                sessionState.value =
-                    SessionState.Error(error.message ?: "Unable to start sign in")
+                if (sessionState.value !is SessionState.SignedIn) {
+                    sessionState.value = SessionState.Error(error.message ?: "Unable to start sign in")
+                }
             }
         }
     }
@@ -230,63 +286,192 @@ class MainActivity : ComponentActivity() {
         }
         if (action == AUTH_CANCELED_ACTION) {
             AppLog.i(TAG, "sign in canceled")
-            sessionState.value = SessionState.Error("Sign in was canceled")
+            if (sessionState.value !is SessionState.SignedIn) sessionState.value = SessionState.Error("Sign in was canceled")
             return true
         }
 
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            // The tokens before this sign-in, so backing out of an identity
+            // switch puts them back and changes nothing (#159).
+            val previousTokens = tokenStore.snapshot()
             authRepository.handleAuthorizationResponse(intent).fold(
-                onSuccess = { reloadSession() },
+                onSuccess = { adoptSignIn(previousTokens) },
                 onFailure = { error ->
                     AppLog.w(TAG, "sign in failed", error)
-                    sessionState.value =
-                        SessionState.Error(error.message ?: "Sign in failed")
+                    if (sessionState.value !is SessionState.SignedIn) {
+                        sessionState.value = SessionState.Error(error.message ?: "Sign in failed")
+                    }
                 },
             )
         }
         return true
     }
 
+    // An explicit sign-out keeps every local record (#159): signing in again
+    // as the same identity carries on where it left off. Only the sign-in
+    // screen comes back, and sync stops until then.
     private fun signOut() {
         AppLog.i(TAG, "signed out")
         val endSessionIntent = authRepository.createEndSessionIntent()
+        syncEngine.stop()
         library.clear()
+        store.identity.markSignedOut()
         authRepository.signOutLocal()
+        syncStatus.requireSignIn()
         sessionState.value = SessionState.SignedOut
         endSessionIntent?.data?.let { uri ->
             CustomTabsIntent.Builder().build().launchUrl(this, uri)
         }
     }
 
+    // Start signed in from the device (#159): the stored identity opens the
+    // library straight away, online or not, and `/me` runs in the background
+    // as one more sync step. The sign-in screen is only for first use and
+    // after an explicit sign-out.
     private fun reloadSession() {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            val stored = store.identity.current()
+            if (stored != null && !store.identity.signedOut()) {
+                enterSignedIn(stored)
+                checkProfileInBackground(stored)
+                return@launch
+            }
             sessionState.value = SessionState.Loading
             if (!tokenStore.hasSession()) {
                 sessionState.value = SessionState.SignedOut
                 return@launch
             }
-            authRepository.refreshAccessTokenIfNeeded()
+            // Tokens and no stored identity: an install from before #159, or
+            // a sign-out followed by a sign-in. The server says who this is.
             apiClient.fetchMe().fold(
-                onSuccess = { profile ->
-                    sessionState.value = SessionState.SignedIn(profile)
-                    library.start()
-                },
+                onSuccess = { profile -> adoptIdentity(profile, previousTokens = null) },
                 onFailure = { error ->
                     // Only a refused session signs the user out (#150). A
-                    // failing or unreachable server (no network, airplane
-                    // mode) keeps the stored tokens, so Retry picks up where
-                    // the user was once it is back.
+                    // failing or unreachable server keeps the stored tokens,
+                    // so Retry picks up where the user was once it is back.
                     if (error is SessionExpiredException) {
                         AppLog.w(TAG, "session check refused; signing out locally", error)
                         authRepository.signOutLocal()
                     } else {
                         AppLog.w(TAG, "session check failed; keeping the session", error)
                     }
-                    sessionState.value =
-                        SessionState.Error(error.message ?: "Session check failed")
+                    sessionState.value = SessionState.Error(error.message ?: "Session check failed")
                 },
             )
         }
+    }
+
+    // A sign-in completed: who is it?
+    private suspend fun adoptSignIn(previousTokens: TokenStore.Snapshot) {
+        apiClient.fetchMe().fold(
+            onSuccess = { profile -> adoptIdentity(profile, previousTokens) },
+            onFailure = { error ->
+                AppLog.w(TAG, "profile check after sign in failed", error)
+                if (sessionState.value !is SessionState.SignedIn) {
+                    sessionState.value = SessionState.Error(error.message ?: "Session check failed")
+                }
+            },
+        )
+    }
+
+    // One identity per install (#159). The same identity carries on with
+    // everything kept; a different one resets the install — silently when
+    // nothing is owed to the server, after a warning when something is.
+    private fun adoptIdentity(
+        profile: MeProfile,
+        previousTokens: TokenStore.Snapshot?,
+    ) {
+        when (val decision = decideIdentity(store, profile)) {
+            IdentityDecision.Continue -> {
+                store.identity.save(profile)
+                enterSignedIn(profile)
+            }
+            IdentityDecision.Reset -> switchIdentity(profile)
+            is IdentityDecision.Warn -> {
+                AppLog.w(TAG, "a different identity signed in with unsynced changes on the device: count=${decision.unsynced}")
+                identitySwitch = IdentitySwitch(profile, decision.unsynced, previousTokens)
+            }
+        }
+    }
+
+    // The library, signed in as [profile], with sync running if there is a
+    // token to sync with and paused for a sign-in if not.
+    private fun enterSignedIn(profile: MeProfile) {
+        sessionState.value = SessionState.SignedIn(profile)
+        if (tokenStore.hasSession()) syncStatus.signedIn() else syncStatus.requireSignIn()
+        library.start()
+        syncEngine.start()
+    }
+
+    // `/me` as a sync step: refreshes the email shown, and learns of an
+    // expired session. Never signs out and never blocks the library.
+    private suspend fun checkProfileInBackground(stored: MeProfile) {
+        if (!tokenStore.hasSession()) return
+        apiClient.fetchMe().fold(
+            onSuccess = { profile -> if (profile.sub == stored.sub) store.identity.save(profile) },
+            onFailure = { error -> if (error is SessionExpiredException) syncStatus.requireSignIn() },
+        )
+    }
+
+    private fun switchIdentity(profile: MeProfile) {
+        AppLog.i(TAG, "a different identity signed in; resetting the install")
+        identitySwitch = null
+        syncEngine.stop()
+        library.clear()
+        resetInstallFor(store, profile)
+        enterSignedIn(profile)
+    }
+
+    // Cancel changes nothing: the new sign-in is undone, its tokens replaced
+    // by the ones from before, and the previous account's data kept.
+    private fun cancelIdentitySwitch(switch: IdentitySwitch) {
+        AppLog.i(TAG, "identity switch canceled; keeping the device's data")
+        identitySwitch = null
+        switch.previousTokens?.let(tokenStore::restore) ?: authRepository.signOutLocal()
+        reloadSession()
+    }
+
+    @Composable
+    private fun IdentitySwitchDialog(switch: IdentitySwitch) {
+        AlertDialog(
+            onDismissRequest = { cancelIdentitySwitch(switch) },
+            modifier = Modifier.testTag("identity-switch-dialog"),
+            title = { Text("Different account") },
+            text = {
+                val what = if (switch.unsynced == 1) "1 unsynced change" else "${switch.unsynced} unsynced changes"
+                Text("$what from another account will be deleted.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { switchIdentity(switch.profile) },
+                    modifier = Modifier.testTag("identity-switch-delete"),
+                ) { Text("Delete and continue") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { cancelIdentitySwitch(switch) },
+                    modifier = Modifier.testTag("identity-switch-cancel"),
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    // A refused page's strokes, kept as a new page and opened (#159).
+    private fun keepAsNewPage(pageId: String) {
+        val madeHere = store.library.isLocalOnly(pageId)
+        val page = syncEngine.recovery.keepAsNewPage(pageId)
+        // A refused page that only ever existed here goes with its refusal.
+        if (madeHere) library.applyLibraryEvent(LibraryEvent.PageDeleted(pageId))
+        library.applyLibraryEvent(LibraryEvent.PageCreated(page))
+        library.openPage(page)
+        syncEngine.kick()
+    }
+
+    private fun discardRefused(pageId: String) {
+        val madeHere = store.library.isLocalOnly(pageId)
+        syncEngine.recovery.discard(pageId)
+        if (library.selectedPage?.id == pageId) library.closePage()
+        if (madeHere) library.applyLibraryEvent(LibraryEvent.PageDeleted(pageId))
     }
 
     private fun createPage() {

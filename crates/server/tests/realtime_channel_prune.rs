@@ -40,6 +40,7 @@ fn token() -> String {
 
 async fn create_page(app: &axum::Router, title: &str) -> String {
     let body = serde_json::to_string(&CreatePageRequest {
+        id: None,
         title: Some(title.to_string()),
         paper: Paper::None,
     })

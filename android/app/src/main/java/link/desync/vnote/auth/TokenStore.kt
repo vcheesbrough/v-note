@@ -46,6 +46,26 @@ class TokenStore(
 
     fun hasSession(): Boolean = !accessToken().isNullOrBlank()
 
+    // The tokens as they are, so a sign-in the user then backs out of — a
+    // different identity, with unsynced changes at stake (#159) — can be
+    // undone and change nothing.
+    fun snapshot(): Snapshot = Snapshot(accessToken(), refreshToken(), accessTokenExpiryEpochSeconds())
+
+    fun restore(snapshot: Snapshot) {
+        val accessToken = snapshot.accessToken
+        if (accessToken == null) {
+            clear()
+        } else {
+            saveTokens(accessToken, snapshot.refreshToken, snapshot.accessTokenExpiryEpochSeconds)
+        }
+    }
+
+    data class Snapshot(
+        val accessToken: String?,
+        val refreshToken: String?,
+        val accessTokenExpiryEpochSeconds: Long?,
+    )
+
     companion object {
         private const val PREFS_NAME = "vnote_auth_tokens"
         private const val KEY_ACCESS_TOKEN = "access_token"

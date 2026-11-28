@@ -428,7 +428,7 @@ pub async fn page_socket(
             session_id = tracing::field::Empty,
         );
         crate::observability::set_remote_parent(&span, &origin);
-        handle_page_socket(state, store, page_id, socket).instrument(span)
+        handle_page_socket(state, store, page_id, owner_id, socket).instrument(span)
     })
 }
 
@@ -437,6 +437,7 @@ async fn handle_page_socket(
     state: AppState,
     store: PgPageStore,
     page_id: String,
+    owner_id: String,
     socket: HttpWebSocket,
 ) {
     let _connection_guard = crate::observability::metrics().realtime_connection_guard();
@@ -473,7 +474,7 @@ async fn handle_page_socket(
                             break "text frame was not UTF-8";
                         };
                         if !handle_page_client_message(
-                            &state, &store, &page_id, &session_id, &mut sender, text,
+                            &state, &store, &page_id, &session_id, &owner_id, &mut sender, text,
                         )
                         .await
                         {
@@ -656,6 +657,7 @@ async fn handle_page_client_message(
     store: &PgPageStore,
     page_id: &str,
     session_id: &str,
+    owner_id: &str,
     sender: &mut PageSender,
     text: &str,
 ) -> bool {
@@ -691,6 +693,7 @@ async fn handle_page_client_message(
         store,
         page_id,
         session_id,
+        owner_id,
     };
     let keep_open = dispatch_page_client_message(&ctx, sender, message, received).await;
     // Server-side handling only — parse to the last frame this handler sends.

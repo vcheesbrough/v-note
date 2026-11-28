@@ -89,6 +89,7 @@ async fn call(
 
 async fn create_page(server: &Server, title: &str) -> String {
     let body = serde_json::to_string(&CreatePageRequest {
+        id: None,
         title: Some(title.to_string()),
         paper: Paper::None,
     })
@@ -538,6 +539,7 @@ async fn emptying_the_bin_deletes_only_the_callers_binned_pages(pool: PgPool) {
         .await;
     }
     let body = serde_json::to_string(&CreatePageRequest {
+        id: None,
         title: None,
         paper: Paper::None,
     })

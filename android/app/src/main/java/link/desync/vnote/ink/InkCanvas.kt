@@ -29,11 +29,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 // touch handling in CanvasInput.kt (stylus capture and erasing, finger
 // pan/zoom with momentum).
 //
-// Ink is captured whether or not the page channel has caught up yet (#390):
-// the session decides what happens to a finished stroke, so the canvas never
-// drops a pen-down because the replay is still a round trip away. Only
-// [inkBlocked] stops it: the session knows its ink cannot be stored (the
-// channel failed, or the session expired).
+// Ink is always captured (#390, #159): the session writes every finished
+// stroke to the device's outbox, so the canvas never drops a pen-down —
+// not while the replay is a round trip away, not offline, not while sync
+// waits for a sign-in.
 //
 // Other devices' ink arrives as a new [strokes] list at any moment (#630).
 // It only reaches the committed layer: the stroke under the nib lives in the
@@ -44,7 +43,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 internal fun InkCanvas(
     strokes: List<Stroke>,
     paper: Paper,
-    inkBlocked: Boolean,
     selectedTool: CanvasTool,
     drawingStyle: StrokeStyle,
     onStrokeFinished: (Stroke) -> Unit,
@@ -58,7 +56,6 @@ internal fun InkCanvas(
     val input = remember { CanvasInputController(scope) }
     val eraserRadiusPx = with(LocalDensity.current) { 12.dp.toPx() }
     SideEffect {
-        input.inputs.inkBlocked = inkBlocked
         input.inputs.selectedTool = selectedTool
         input.inputs.drawingStyle = drawingStyle
         input.inputs.strokes = strokes

@@ -414,6 +414,65 @@ fn deserializes_page_fixtures() {
     assert_eq!(create.paper, Paper::RuledWide);
 }
 
+/// #159: Android mints its own page id offline and sends it on create. The id
+/// is optional and omitted when absent, so the SPA's server-picked create is
+/// byte-for-byte what it was.
+#[test]
+fn create_page_carries_an_optional_client_minted_id() {
+    let create: CreatePageRequest = serde_json::from_str(&fixture("create-page-with-id.json"))
+        .expect("create page with id fixture should parse");
+    assert_eq!(
+        create.id.as_deref(),
+        Some("page_0123456789abcdef0123456789abcdef")
+    );
+    assert_eq!(create.title.as_deref(), Some(""));
+    assert_eq!(create.paper, Paper::None);
+    assert!(protocol::is_page_id(
+        create.id.as_deref().unwrap_or_default()
+    ));
+
+    // The exact body Android sends, title omitted.
+    let minimal: CreatePageRequest =
+        serde_json::from_str(r#"{"id":"page_0123456789abcdef0123456789abcdef","paper":"none"}"#)
+            .expect("a create without a title should parse");
+    assert_eq!(minimal.title, None);
+
+    let server_picked: CreatePageRequest =
+        serde_json::from_str(&fixture("create-page.json")).expect("create page fixture");
+    assert_eq!(server_picked.id, None);
+    let emitted = serde_json::to_value(&server_picked).expect("serialisable");
+    assert!(
+        emitted.get("id").is_none(),
+        "an absent id is omitted, not null: {emitted}"
+    );
+}
+
+#[test]
+fn a_page_id_is_page_and_32_lowercase_hex_digits() {
+    for valid in [
+        "page_0123456789abcdef0123456789abcdef",
+        "page_00000000000000000000000000000000",
+    ] {
+        assert!(protocol::is_page_id(valid), "{valid}");
+    }
+    for invalid in [
+        "",
+        "page_",
+        "0123456789abcdef0123456789abcdef",
+        "page_0123456789ABCDEF0123456789abcdef",
+        "page_0123456789abcdef0123456789abcde",
+        "page_0123456789abcdef0123456789abcdef0",
+        "page_0123456789abcdef0123456789abcdeg",
+        "Page_0123456789abcdef0123456789abcdef",
+        "page-0123456789abcdef0123456789abcdef",
+        "page_0123456789abcdef0123456789abcdé",
+        " page_0123456789abcdef0123456789abcdef",
+        "page_01j00000000000000000000000",
+    ] {
+        assert!(!protocol::is_page_id(invalid), "{invalid:?}");
+    }
+}
+
 /// Pre-v5 payloads carry no `paper` and must keep parsing as blank pages, so an
 /// older client's JSON is never rejected or mis-rendered.
 #[test]

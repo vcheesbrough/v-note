@@ -424,6 +424,38 @@ Canvas input tests (`PageCanvasInputInstrumentedTest`) send `MotionEvent`s strai
 - **A test that swaps telemetry** (`Telemetry.install(recording)`) no longer leaves the replaced runtime's export loop running: `install` stops the runtime it replaces, and swapping back restarts it.
 - There is no test-only network security config: changing the build type would ripple through the CI lanes and lane keys, and the guard already covers AppAuth's `HttpURLConnection` through its `ConnectionBuilder`.
 
+### Offline, captive portal and session expiry (#159)
+
+The app is local-first: the library, every page's ink and an outbox of unsynced edits live in
+`vnote-local.db` (plain SQLite, `android/app/.../store/`). To exercise the cases that matter
+locally — with `devLocal` against a laptop server (`just android-install`), or the `dev` APK
+against the dev stack:
+
+- **Offline.** Turn on airplane mode (`adb shell cmd connectivity airplane-mode enable`, API 30+),
+  or stop the laptop server. The app stays in the library; pages open and take ink; new pages can
+  be made; the top bar's status icon shows offline with the pending count, and tapping it names
+  the host, the error class, the last successful sync and the correlation id. Turn the network
+  back on (`… airplane-mode disable`): the outbox replays on its own and the icon goes. Kill the
+  process while offline (`adb shell am force-stop link.desync.vnote.dev`) to check nothing
+  accepted is lost.
+- **Only one host reachable.** The backend and Authentik (`auth.desync.link`) are separate hosts.
+  With `devLocal`, `adb reverse` reaches the laptop server while Authentik may be out of reach:
+  sync keeps working while the access token is valid, and an expired token waits (offline icon,
+  sign-in host named) rather than signing out.
+- **Captive portal.** Point the device at a Wi-Fi network whose portal you have not accepted, or
+  answer the token endpoint with HTML from a proxy. A refresh that gets HTML — with any status —
+  keeps the session; only an OAuth `invalid_grant` ends it
+  (`AuthRepositoryInstrumentedTest.noAnswerButInvalidGrantEndsTheSession` covers 502/503/HTML).
+- **Session expiry.** Revoke the refresh token in Authentik (the user's *Tokens* tab), then make
+  the access token expire (wait an hour, or clear it: `adb shell run-as link.desync.vnote.dev rm
+  -r shared_prefs/vnote_auth_tokens.xml` clears both). Sync pauses with the *sign-in needed* icon
+  while editing carries on; signing in as the same user resumes replay. Signing in as a different
+  user warns first when unsynced changes exist (*N unsynced changes from another account will be
+  deleted*).
+- **Inspect the store.** `adb shell run-as link.desync.vnote.dev sqlite3 databases/vnote-local.db
+  "select position, page_id, kind, state from outbox"` lists what is owed (`sqlite3` is on
+  emulator images; on a device, `adb exec-out run-as … cat databases/vnote-local.db > local.db`).
+
 ### Emulator (WSL2 / Hyper-V)
 
 On **Windows + WSL2**, do **not** install the **Android Emulator hypervisor driver (AEHD)**. It conflicts with Hyper-V/WSL2 and often fails with:
