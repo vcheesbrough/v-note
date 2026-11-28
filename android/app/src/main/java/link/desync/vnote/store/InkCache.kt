@@ -113,7 +113,7 @@ class InkCache internal constructor(
     }
 
     // The page was permanently deleted: its confirmed ink goes with it. Any
-    // outbox entries stay, to be rejected and offered as a new page.
+    // outbox entries stay owed, and are offered as a new page (#651).
     fun forget(pageId: String) {
         store.transaction { db ->
             listOf(BATCHES, TOMBSTONES, PAGE_INK).forEach { table -> db.delete(table, "page_id = ?", arrayOf(pageId)) }

@@ -1,16 +1,13 @@
 package link.desync.vnote.library
 
-import link.desync.vnote.api.AuthUnavailableException
 import link.desync.vnote.api.ConnectionFailure
-import link.desync.vnote.api.HttpStatusException
-import link.desync.vnote.api.SessionExpiredException
 import link.desync.vnote.store.LocalStore
 import link.desync.vnote.sync.ErrorClass
 import link.desync.vnote.sync.SyncStatus
 
 // What the library holder needs of local-first sync (#159): the device's
 // copy of the library, the sync status its failures go to, and a way to tell
-// the sync engine there is work. [None] — no store, no status — is the
+// the sync engine there is work, or that the server is back. [None] — no store, no status — is the
 // library as it was before #159, which the JVM unit tests drive.
 internal class LibraryLocal(
     val store: LocalStore?,
@@ -18,16 +15,18 @@ internal class LibraryLocal(
     val serverHost: String,
     private val signInHost: String = serverHost,
     private val kick: () -> Unit = {},
+    private val retryNow: () -> Unit = kick,
 ) {
     fun onLocalEdit() {
         status?.refresh()
         kick()
     }
 
-    // The library channel is open: the server is reachable.
+    // The library channel is open: the server is reachable, so whatever
+    // was waiting out a backoff is tried now.
     fun onOnline() {
         status?.reportReachable()
-        kick()
+        retryNow()
     }
 
     fun onSnapshot() {
@@ -35,19 +34,12 @@ internal class LibraryLocal(
         status?.markSynced()
     }
 
+    // Whatever the failure, the library stays the device's copy and the
+    // channel keeps reconnecting (#651).
     fun onFailure(
         status: SyncStatus,
         failure: Throwable,
-    ) {
-        when (failure) {
-            is SessionExpiredException -> status.requireSignIn()
-            is AuthUnavailableException -> status.reportFailure(signInHost, ErrorClass.OFFLINE, null)
-            is HttpStatusException -> status.reportFailure(serverHost, ErrorClass.http(failure.code), failure.requestId)
-            is java.io.IOException -> status.reportFailure(serverHost, ErrorClass.OFFLINE, null)
-            // "Not signed in": there is no token to sync with.
-            else -> status.requireSignIn()
-        }
-    }
+    ) = status.reportFailure(failure, serverHost, signInHost)
 
     fun failure(message: String): ConnectionFailure = ConnectionFailure(message, serverHost, ErrorClass.OFFLINE, null)
 

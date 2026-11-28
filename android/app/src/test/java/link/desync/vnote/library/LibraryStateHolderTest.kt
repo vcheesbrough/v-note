@@ -12,6 +12,7 @@ import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.LibraryEvent
 import link.desync.vnote.model.MeProfile
 import link.desync.vnote.model.PageSummary
+import link.desync.vnote.sync.Backoff
 import okhttp3.Request
 import okhttp3.WebSocket
 import okio.ByteString
@@ -290,6 +291,108 @@ class LibraryStateHolderTest {
         assertEquals("no reconnect after sign-out", 1, api.socketsOpened)
     }
 
+    /**
+     * #651: the channel never gives up. Driven through more failures than the
+     * backoff has steps, it reconnects after every one, waiting 1 s doubling
+     * to 30 s and then 30 s each time — not the flat 1 s it used to poll at.
+     */
+    @Test
+    fun theChannelReconnectsAfterEveryFailureForeverAtThirtySeconds() {
+        val api = ChannelControlledApiClient()
+        val waits = mutableListOf<Long>()
+        val holder =
+            holderWith(
+                api,
+                Backoff { step ->
+                    waits += Backoff.delayMs(step)
+                    0
+                },
+            )
+        holder.start()
+
+        repeat(FAILURES) {
+            api.failChannel("Realtime connection failed: HTTP 404")
+            // A channel that never opened takes a snapshot before it waits.
+            api.completeListPages(Result.failure(IllegalStateException("HTTP 404")))
+        }
+
+        assertEquals("a new channel after every failure", FAILURES + 1, api.socketsOpened)
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L), waits.take(5))
+        assertEquals("then every 30 s, with no last attempt", List(FAILURES - 5) { 30_000L }, waits.drop(5))
+    }
+
+    /** Any success starts the backoff over: the next outage is retried promptly. */
+    @Test
+    fun aChannelThatOpensStartsTheBackoffOver() {
+        val api = ChannelControlledApiClient()
+        val steps = mutableListOf<Int>()
+        val holder =
+            holderWith(
+                api,
+                Backoff { step ->
+                    steps += step
+                    0
+                },
+            )
+        holder.start()
+        repeat(3) {
+            api.failChannel("down")
+            api.completeListPages(Result.failure(IllegalStateException("down")))
+        }
+
+        api.openChannel()
+        api.completeListPages(Result.success(emptyList()))
+        api.failChannel("down again")
+
+        assertEquals(listOf(0, 1, 2, 0), steps)
+    }
+
+    /**
+     * #651: when the network returns, a channel waiting out its backoff
+     * reconnects at once, and the backoff starts over.
+     */
+    @Test
+    fun aReturningNetworkReconnectsNowAndStartsTheBackoffOver() {
+        val api = ChannelControlledApiClient()
+        val steps = mutableListOf<Int>()
+        val holder =
+            holderWith(
+                api,
+                Backoff { step ->
+                    steps += step
+                    // The third wait is one the test would never sit through.
+                    if (steps.size < 3) 0 else LONG_WAIT_MILLIS
+                },
+            )
+        holder.start()
+        repeat(3) {
+            api.failChannel("down")
+            api.completeListPages(Result.failure(IllegalStateException("down")))
+        }
+        assertEquals("waiting out the third backoff step", 3, api.socketsOpened)
+
+        holder.retryNow()
+
+        assertEquals("reconnected without waiting", 4, api.socketsOpened)
+        api.failChannel("still down")
+        api.completeListPages(Result.failure(IllegalStateException("down")))
+        assertEquals("the backoff started over", listOf(0, 1, 2, 0), steps)
+    }
+
+    /** A channel that is open, or connecting, is not torn down by a network callback. */
+    @Test
+    fun aReturningNetworkLeavesAChannelThatIsNotWaitingAlone() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+
+        holder.retryNow()
+        api.openChannel()
+        holder.retryNow()
+
+        assertEquals(1, api.socketsOpened)
+    }
+
     // Unconfined runs each coroutine inline on this thread up to its first
     // suspension and resumes it inline on the thread that completes it, so the
     // tests above step the fetch by hand with no sleeps or idling. A zero
@@ -302,14 +405,17 @@ class LibraryStateHolderTest {
         scopeJob.cancel()
     }
 
-    private fun holderWith(api: ApiClient): LibraryStateHolder =
+    private fun holderWith(
+        api: ApiClient,
+        backoff: Backoff = Backoff { 0 },
+    ): LibraryStateHolder =
         LibraryStateHolder(
             apiClient = api,
             local = LibraryLocal.None,
             reconnectScope = CoroutineScope(Dispatchers.Unconfined + scopeJob),
             isSignedIn = { true },
             runOnUiThread = { block -> block() },
-            reconnectDelayMillis = 0,
+            reconnectBackoff = backoff,
         )
 
     private fun page(
@@ -374,6 +480,12 @@ class LibraryStateHolderTest {
         ): Boolean = true
 
         override fun cancel() = Unit
+    }
+
+    private companion object {
+        // More than the backoff's five doublings, several times over.
+        const val FAILURES = 20
+        const val LONG_WAIT_MILLIS = 600_000L
     }
 
     // The baseline every fake narrows: a call nobody overrode is a test bug.

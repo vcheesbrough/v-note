@@ -79,8 +79,9 @@ interface ApiClient : PageBinApi {
     // refresh — a test fake — refreshes nothing.
     suspend fun refreshSession(): Boolean = false
 
-    // Why the last [refreshSession] returned false (#159): a refused session
-    // pauses sync for a sign-in, an unreachable identity provider only waits.
+    // Why the last [refreshSession] returned false (#159): a refused refresh
+    // leaves no token, so sync waits for a sign-in; an unreachable identity
+    // provider is a failure like any other and is retried.
     // A client with no session to refresh — a test fake — was refused.
     val lastRefreshOutcome: RefreshOutcome get() = RefreshOutcome.Refused
 
@@ -91,8 +92,9 @@ interface ApiClient : PageBinApi {
 // diagnostics (#159): the backend, or the identity provider behind it.
 fun hostOf(url: String): String = runCatching { java.net.URI(url).host }.getOrNull() ?: url
 
-// A request that reached the server and was answered with an HTTP error.
-// [code] tells a definitive refusal (403, 404, 410) from a failing server.
+// A request answered with anything but a 2xx — by the server or by whatever
+// stands in front of it (a proxy, a captive portal). Every [code] is the same
+// failure (#651): retried until it succeeds. [code] is only what is shown.
 class HttpStatusException(
     val code: Int,
     message: String,
@@ -114,9 +116,11 @@ data class ConnectionFailure(
     val correlationId: String?,
 )
 
-// The server refused the session and refreshing the token did not fix it.
-// Distinct from every other failure: only this one means "sign in again" — an
-// unreachable or failing server must never sign the user out.
+// There is no token to sync with (#651): none is stored, or the identity
+// provider refused the refresh (`invalid_grant`). The one failure retrying
+// cannot fix — only signing in again can. Nothing else raises it: a 401 that
+// is still a 401 after a successful refresh is an [HttpStatusException] like
+// any other status, and no failure ever signs the user out.
 class SessionExpiredException : IllegalStateException("Session expired")
 
 // The request never reached the server: no network (airplane mode), no route,
@@ -153,9 +157,8 @@ interface PageEventListener {
     // The socket failed; [failure] says where and why. Defaults to [onError].
     fun onConnectionFailure(failure: ConnectionFailure) = onError(failure.message)
 
-    // The upgrade was refused with 401: the access token is no longer valid.
-    // Told apart from [onError] because reconnecting with the same token can
-    // never succeed.
+    // The upgrade was refused with 401. Told apart from [onError] only so the
+    // token is refreshed before the reconnect.
     fun onUnauthorized(message: String) = onError(message)
 
     fun onClosed()

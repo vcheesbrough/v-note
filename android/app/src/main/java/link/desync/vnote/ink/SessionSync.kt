@@ -15,7 +15,7 @@ class SessionSync(
     // outbox or fetch its ink, and closes it once [onIdle] fires.
     val headless: Boolean = false,
     // Nothing left this session can do now: caught up with nothing owed, or
-    // stopped by a rejection or an expired session.
+    // failed — a headless session leaves the retry to the sync engine.
     val onIdle: () -> Unit = {},
     // True while the page was made on this device and the server has not
     // acknowledged its create: there is no page channel to open yet.
@@ -29,7 +29,7 @@ class PageSyncHost(
     val status: SyncStatus,
     val engine: SyncEngine,
 ) {
-    fun sessionSync(pageId: String): SessionSync = SessionSync(store, status, createPending = { engine.createPending(pageId) })
+    fun sessionSync(pageId: String): SessionSync = SessionSync(store, status, createPending = { store.library.isLocalOnly(pageId) })
 }
 
 val LocalPageSync = compositionLocalOf<PageSyncHost?> { null }

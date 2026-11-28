@@ -2,6 +2,7 @@ package link.desync.vnote.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -12,12 +13,14 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 
 // The one top bar every screen wears (#317), ending in the sync status icon
@@ -60,7 +63,14 @@ internal fun VNoteTopBar(
         ) {
             content()
             // Every screen wears the sync status (#159), at the bar's end.
-            SyncStatusIcon()
+            // Its place is kept whether it shows or not (#651), so the
+            // controls never move when it appears or goes.
+            Box(
+                modifier = Modifier.size(SyncStatusSlot).testTag("sync-status-slot"),
+                contentAlignment = Alignment.Center,
+            ) {
+                SyncStatusIcon()
+            }
         }
         HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
     }

@@ -24,7 +24,6 @@ import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
@@ -37,10 +36,9 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * #159 review: a different identity signs in while sync is running for the
  * one the device holds. The new identity's tokens are stored by then, so
- * anything still syncing would open the old identity's pages with them, be
- * refused (403 → `forbidden`), and record the old identity's edits as
- * rejected — and Cancel would no longer change nothing. Sync must stop while
- * the user decides.
+ * anything still syncing would open the old identity's pages with them — and
+ * Cancel would no longer change nothing. Sync must stop while the user
+ * decides.
  *
  * The old identity's page cannot be reached (503, so it keeps retrying with
  * backoff); a page upgrade carrying the new identity's token is refused.
@@ -106,12 +104,6 @@ class IdentitySwitchWhileSyncingInstrumentedTest {
         // would have reconnected by now, with the new token.
         Thread.sleep(RETRY_WINDOW_MILLIS)
         assertEquals("nothing synced with the new identity's token", 0, upgradesWithTheNewToken.get())
-        assertTrue(
-            "nothing recorded as refused",
-            store.outbox.read
-                .rejections()
-                .isEmpty(),
-        )
 
         composeRule.onNodeWithTag("identity-switch-cancel").performClick()
 
@@ -120,13 +112,7 @@ class IdentitySwitchWhileSyncingInstrumentedTest {
         }
         assertEquals("the previous sign-in is back", OLD_TOKEN, tokenStore.accessToken())
         assertEquals(PREVIOUS.sub, store.identity.current()?.sub)
-        assertEquals("the owed change is still owed", 1, store.outbox.read.awaitingCount())
-        assertTrue(
-            "and not refused",
-            store.outbox.read
-                .rejections()
-                .isEmpty(),
-        )
+        assertEquals("the owed change is still owed", 1, store.outbox.read.unsyncedCount())
     }
 
     private fun awaitTag(tag: String) {

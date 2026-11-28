@@ -3,14 +3,10 @@ package link.desync.vnote.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Login
 import androidx.compose.material.icons.outlined.CloudOff
-import androidx.compose.material.icons.outlined.CloudSync
-import androidx.compose.material.icons.outlined.SyncProblem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -26,23 +22,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import link.desync.vnote.store.Rejection
+import link.desync.vnote.sync.GonePage
 import link.desync.vnote.sync.SyncIndicator
 import link.desync.vnote.sync.SyncStatus
 import java.text.DateFormat
 import java.util.Date
 
-// What the status icon can do besides show (#159): sign in again, and the two
-// ways out of a refused page.
+// What the status icon can do besides show (#651): sign in again when there
+// is no token, and keep a permanently deleted page's edits as a new page.
 class SyncActions(
     val onSignIn: () -> Unit = {},
     val onKeepAsNewPage: (String) -> Unit = {},
-    val onDiscard: (String) -> Unit = {},
 )
 
 class SyncUi(
@@ -55,10 +49,13 @@ class SyncUi(
 // screen rendered on its own (a UI test), which then shows no icon.
 val LocalSyncUi = compositionLocalOf<SyncUi?> { null }
 
-// The top bar's sync status (#159), on every screen. Quiet means healthy:
-// nothing is drawn while everything is synced. Otherwise an icon per state —
-// offline or syncing (with the pending count), sign-in needed, or a refused
-// edit — and tapping it says what is wrong and offers what can be done.
+// The top bar's sync status (#159, #651), on every screen. Online shows
+// nothing — not while edits are on their way either, so drawing never makes
+// it flash. Everything that is not online wears the one icon, the cloud with
+// a line through it: the last attempt failed, whatever the failure, or there
+// is no token to sync with. Tapping it says what is wrong and what is
+// waiting. The top bar reserves its place ([SyncStatusSlot]), so nothing
+// moves when it appears or goes.
 @Composable
 fun SyncStatusIcon() {
     val ui = LocalSyncUi.current ?: return
@@ -66,7 +63,7 @@ fun SyncStatusIcon() {
     val indicator = status.indicator
     if (indicator == SyncIndicator.Synced) return
     var open by remember { mutableStateOf(false) }
-    val (icon, label) = iconFor(indicator, status)
+    val label = if (indicator == SyncIndicator.SignInNeeded) "Sign in to sync" else "Offline — ${status.pendingCount} changes waiting"
     IconButton(
         modifier =
             Modifier
@@ -75,8 +72,7 @@ fun SyncStatusIcon() {
         onClick = { open = true },
     ) {
         BadgedBox(badge = { if (status.pendingCount > 0) Badge { Text("${status.pendingCount}") } }) {
-            val tint = if (indicator == SyncIndicator.Rejected) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-            Icon(icon, contentDescription = null, tint = tint)
+            Icon(Icons.Outlined.CloudOff, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
         }
     }
     if (open) {
@@ -84,20 +80,9 @@ fun SyncStatusIcon() {
     }
 }
 
-private fun iconFor(
-    indicator: SyncIndicator,
-    status: SyncStatus,
-): Pair<ImageVector, String> =
-    when (indicator) {
-        SyncIndicator.Rejected -> Icons.Outlined.SyncProblem to "Changes refused by the server"
-        SyncIndicator.SignInNeeded -> Icons.AutoMirrored.Outlined.Login to "Sign in to sync"
-        else ->
-            if (status.problem != null) {
-                Icons.Outlined.CloudOff to "Offline — ${status.pendingCount} changes waiting"
-            } else {
-                Icons.Outlined.CloudSync to "Syncing ${status.pendingCount} changes"
-            }
-    }
+// The place the top bar keeps for the icon, shown or not: an icon button's
+// touch target.
+internal val SyncStatusSlot = 48.dp
 
 @Composable
 private fun SyncDetailsDialog(
@@ -105,23 +90,26 @@ private fun SyncDetailsDialog(
     onDismiss: () -> Unit,
 ) {
     val status = ui.status
+    val signInNeeded = status.indicator == SyncIndicator.SignInNeeded
     AlertDialog(
         onDismissRequest = onDismiss,
         modifier = Modifier.testTag("sync-status-details"),
-        title = { Text(titleFor(status.indicator)) },
+        title = { Text(if (signInNeeded) "Sign in to sync" else "Offline") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 SyncDiagnostics(status)
-                status.rejections.forEach { rejection ->
-                    RejectionRow(rejection, ui.actions, onDone = onDismiss)
+                status.gonePages.forEach { page ->
+                    GonePageRow(page, ui.actions, onDone = onDismiss)
                 }
             }
         },
         confirmButton = {
-            if (status.indicator == SyncIndicator.SignInNeeded) {
+            // Only having no token needs the user (#651); everything else
+            // recovers by itself.
+            if (signInNeeded) {
                 TextButton(
                     modifier = Modifier.testTag("sync-status-sign-in"),
                     onClick = {
@@ -135,14 +123,6 @@ private fun SyncDetailsDialog(
         },
     )
 }
-
-private fun titleFor(indicator: SyncIndicator): String =
-    when (indicator) {
-        SyncIndicator.Rejected -> "Some changes were refused"
-        SyncIndicator.SignInNeeded -> "Sign in to sync"
-        SyncIndicator.Offline -> "Not synced yet"
-        SyncIndicator.Synced -> "Synced"
-    }
 
 // Which host, what failed, when sync last worked, and the id support can
 // find the request by. Ids and classes only, never content.
@@ -174,35 +154,30 @@ private fun DiagnosticLine(
     Text(text, modifier = Modifier.testTag(tag), style = MaterialTheme.typography.bodyMedium)
 }
 
-// A refused page: what the server said, and the two ways out. Keeping the
-// strokes as a new page is first because it is the one that loses nothing.
+// A page permanently deleted elsewhere that this device still owes edits
+// (#651). They stay owed and retried whatever the user does; this only
+// offers to move them to a new page, where they can land. It never
+// interrupts, and there is no way to discard them.
 @Composable
-private fun RejectionRow(
-    rejection: Rejection,
+private fun GonePageRow(
+    page: GonePage,
     actions: SyncActions,
     onDone: () -> Unit,
 ) {
-    Box(modifier = Modifier.testTag("sync-rejection-${rejection.pageId}")) {
+    Box(modifier = Modifier.testTag("sync-gone-${page.pageId}")) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            val strokes = if (rejection.strokeCount == 1) "1 stroke" else "${rejection.strokeCount} strokes"
-            Text("$strokes refused: ${rejection.message}", style = MaterialTheme.typography.bodyMedium)
-            Text(rejection.code, style = MaterialTheme.typography.labelSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(
-                    modifier = Modifier.testTag("sync-rejection-keep"),
-                    onClick = {
-                        onDone()
-                        actions.onKeepAsNewPage(rejection.pageId)
-                    },
-                ) { Text("Keep as a new page") }
-                TextButton(
-                    modifier = Modifier.testTag("sync-rejection-discard"),
-                    onClick = {
-                        onDone()
-                        actions.onDiscard(rejection.pageId)
-                    },
-                ) { Text("Discard") }
-            }
+            val strokes = if (page.strokeCount == 1) "1 stroke is" else "${page.strokeCount} strokes are"
+            Text(
+                "A page was permanently deleted on another device. $strokes waiting for it.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TextButton(
+                modifier = Modifier.testTag("sync-gone-keep"),
+                onClick = {
+                    onDone()
+                    actions.onKeepAsNewPage(page.pageId)
+                },
+            ) { Text("Keep as a new page") }
         }
     }
 }

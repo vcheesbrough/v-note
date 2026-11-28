@@ -47,6 +47,7 @@ import link.desync.vnote.library.ServerHealthProbe
 import link.desync.vnote.model.LibraryEvent
 import link.desync.vnote.model.MeProfile
 import link.desync.vnote.net.Endpoints
+import link.desync.vnote.net.NetworkWatcher
 import link.desync.vnote.store.LocalStore
 import link.desync.vnote.sync.IdentityDecision
 import link.desync.vnote.sync.SyncEngine
@@ -86,6 +87,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var store: LocalStore
     private lateinit var syncStatus: SyncStatus
     private lateinit var syncEngine: SyncEngine
+
+    // Cuts every retry backoff short when the network returns (#651).
+    private lateinit var networkWatcher: NetworkWatcher
 
     private val sessionState =
         androidx.compose.runtime.mutableStateOf<SessionState>(SessionState.Loading)
@@ -132,6 +136,7 @@ class MainActivity : ComponentActivity() {
                         serverHost = hostOf(apiClient.baseUrl),
                         signInHost = apiClient.signInHost,
                         kick = syncEngine::kick,
+                        retryNow = syncEngine::retryNow,
                     ),
                 reconnectScope = lifecycleScope,
                 isSignedIn = { sessionState.value is SessionState.SignedIn },
@@ -142,11 +147,17 @@ class MainActivity : ComponentActivity() {
         syncEngine.onPageCreated = { page -> library.applyLibraryEvent(LibraryEvent.PageCreated(page)) }
         // The status icon recounts whenever the store changes.
         lifecycleScope.launch { store.changes.collect { syncStatus.refresh() } }
+        networkWatcher =
+            NetworkWatcher(applicationContext) {
+                library.retryNow()
+                syncEngine.retryNow()
+            }
+        networkWatcher.register()
 
         val syncUi =
             SyncUi(
                 syncStatus,
-                SyncActions(onSignIn = ::signIn, onKeepAsNewPage = ::keepAsNewPage, onDiscard = ::discardRefused),
+                SyncActions(onSignIn = ::signIn, onKeepAsNewPage = ::keepAsNewPage),
             )
         val pageSync = PageSyncHost(store, syncStatus, syncEngine)
         setContent {
@@ -181,10 +192,6 @@ class MainActivity : ComponentActivity() {
                 page = selectedPage,
                 userId = session.profile.sub,
                 onBack = { library.closePage() },
-                onSignIn = {
-                    library.closePage()
-                    signIn()
-                },
             )
         } else if (session is SessionState.SignedIn && library.bin.showing) {
             BinScreen(
@@ -228,8 +235,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        networkWatcher.unregister()
         syncEngine.stop()
-        library.close()
+        library.clear()
         authRepository.shutdown()
         super.onDestroy()
     }
@@ -346,15 +354,11 @@ class MainActivity : ComponentActivity() {
             apiClient.fetchMe().fold(
                 onSuccess = { profile -> adoptIdentity(profile, previousTokens = null) },
                 onFailure = { error ->
-                    // Only a refused session signs the user out (#150). A
-                    // failing or unreachable server keeps the stored tokens,
-                    // so Retry picks up where the user was once it is back.
-                    if (error is SessionExpiredException) {
-                        AppLog.w(TAG, "session check refused; signing out locally", error)
-                        authRepository.signOutLocal()
-                    } else {
-                        AppLog.w(TAG, "session check failed; keeping the session", error)
-                    }
+                    // A failed `/me` never signs the user out (#651),
+                    // whatever the failure: the stored tokens are kept, so
+                    // Retry picks up where the user was. Only a refused
+                    // refresh clears them, and that is [AuthRepository]'s.
+                    AppLog.w(TAG, "session check failed; keeping the session", error)
                     sessionState.value = SessionState.Error(error.message ?: "Session check failed")
                 },
             )
@@ -409,8 +413,10 @@ class MainActivity : ComponentActivity() {
         syncEngine.start()
     }
 
-    // `/me` as a sync step: refreshes the email shown, and learns of an
-    // expired session. Never signs out and never blocks the library.
+    // `/me` as a sync step: refreshes the email shown, and learns that no
+    // token is left (the only thing [SessionExpiredException] means, #651).
+    // Never signs out and never blocks the library. Any other failure is
+    // left to the channels, which report it and retry.
     private suspend fun checkProfileInBackground(stored: MeProfile) {
         if (!tokenStore.hasSession()) return
         apiClient.fetchMe().fold(
@@ -462,22 +468,17 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    // A refused page's strokes, kept as a new page and opened (#159).
+    // The strokes owed to a permanently deleted page, kept as a new page and
+    // opened (#651).
     private fun keepAsNewPage(pageId: String) {
         val madeHere = store.library.isLocalOnly(pageId)
         val page = syncEngine.recovery.keepAsNewPage(pageId)
-        // A refused page that only ever existed here goes with its refusal.
+        // A page that only ever existed here goes with what it owed.
         if (madeHere) library.applyLibraryEvent(LibraryEvent.PageDeleted(pageId))
         library.applyLibraryEvent(LibraryEvent.PageCreated(page))
         library.openPage(page)
+        syncStatus.refresh()
         syncEngine.kick()
-    }
-
-    private fun discardRefused(pageId: String) {
-        val madeHere = store.library.isLocalOnly(pageId)
-        syncEngine.recovery.discard(pageId)
-        if (library.selectedPage?.id == pageId) library.closePage()
-        if (madeHere) library.applyLibraryEvent(LibraryEvent.PageDeleted(pageId))
     }
 
     private fun createPage() {

@@ -547,7 +547,7 @@ class PageCanvasInputInstrumentedTest {
         }
         composeRule.onNodeWithTag("unsent-ink-dialog").assertDoesNotExist()
         val outbox = LocalStore.shared(InstrumentationRegistry.getInstrumentation().targetContext).outbox.read
-        assertEquals("the stroke is kept, owed to the server", 1, outbox.awaitingCount())
+        assertEquals("the stroke is kept, owed to the server", 1, outbox.unsyncedCount())
     }
 
     /** PR #72 review: with nothing unsent, back leaves at once — no dialog. */

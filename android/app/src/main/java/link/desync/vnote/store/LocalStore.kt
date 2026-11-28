@@ -85,12 +85,17 @@ class LocalStore internal constructor(
             db: SQLiteDatabase,
             oldVersion: Int,
             newVersion: Int,
-        ) = Unit
+        ) {
+            if (oldVersion < SCHEMA_NO_REFUSALS) db.execSQL(UNSTICK_REFUSED)
+        }
     }
 
     companion object {
         private const val DB_NAME = "vnote-local.db"
-        private const val SCHEMA_VERSION = 1
+
+        // 2 (#651): the outbox has no refused state. See [UNSTICK_REFUSED].
+        private const val SCHEMA_NO_REFUSALS = 2
+        private const val SCHEMA_VERSION = SCHEMA_NO_REFUSALS
 
         @Volatile
         private var shared: LocalStore? = null
@@ -135,9 +140,20 @@ private val SCHEMA =
         // Edits on their way to the server, in the order they were made
         // (`position`, which is also the per-page replay order). `op_id` is
         // the immutable id the server is idempotent on: `client_batch_id` or
-        // `client_mutation_id`, or the page id for a create.
+        // `client_mutation_id`, or the page id for a create. `detail_code`
+        // and `detail_message` held a refusal's reason until #651 and are
+        // unused since: kept so both schema versions have one shape.
         "CREATE TABLE $OUTBOX (position INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL UNIQUE, " +
             "page_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, " +
             "detail_code TEXT, detail_message TEXT)",
         "CREATE INDEX outbox_page_idx ON $OUTBOX (page_id, state)",
     )
+
+// Schema 1 → 2 (#651). Before it, a failure the app took for a definitive
+// refusal — a proxy's 404 with the server down, a 403 off the VPN — parked
+// every edit the page owed as `rejected`, never to be sent again. Nothing is
+// refused any more: those entries are owed like any other and replay by
+// themselves. The server is idempotent on each entry's id, so one it had in
+// fact stored is only re-echoed — nothing is lost and nothing duplicated.
+private const val UNSTICK_REFUSED =
+    "UPDATE $OUTBOX SET state = 'pending', detail_code = NULL, detail_message = NULL WHERE state = 'rejected'"

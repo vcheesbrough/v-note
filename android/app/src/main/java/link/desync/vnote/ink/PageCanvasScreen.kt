@@ -39,20 +39,17 @@ import androidx.compose.ui.unit.dp
 import link.desync.vnote.api.ApiClient
 import link.desync.vnote.model.PageSummary
 import link.desync.vnote.store.LocalStore
-import link.desync.vnote.ui.LocalSyncUi
 import link.desync.vnote.ui.VNoteTopBar
 import link.desync.vnote.ui.displayTitle
 import link.desync.vnote.ui.hasDisplayTitle
 
-// The open-page screen: top bar (back, title, paper, pen and eraser controls), the
-// status banner, and the ink canvas, wired to one PageInkSession.
+// The open-page screen: top bar (back, title, paper, pen and eraser controls)
+// and the ink canvas, wired to one PageInkSession.
 
-// Full-screen ink editor for one open page: top bar with back + title, the
-// sync status banner when there is trouble (#150: disconnected, retrying,
-// another editor, session expired, rejected), and the infinite canvas.
-// Connects the page channel on enter and releases it on exit. [onSignIn] is the
-// banner's action when the session expired and a refresh could not renew it:
-// leave the page and sign in again.
+// Full-screen ink editor for one open page: top bar with back + title, and
+// the infinite canvas. Connects the page channel on enter and releases it on
+// exit. Sync trouble is never shown on the page (#651): whatever fails, the
+// page keeps taking ink and the top bar's status icon says what is waiting.
 @Composable
 fun PageCanvasScreen(
     apiClient: ApiClient,
@@ -60,7 +57,6 @@ fun PageCanvasScreen(
     userId: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
-    onSignIn: () -> Unit = onBack,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -167,19 +163,6 @@ fun PageCanvasScreen(
         }
         session.binnedAt?.let {
             BinnedPageNotice(page = page, restoreError = session.restoreError, onRestore = session::restore)
-        }
-        // Only a refusal is the page's to show (#159): offline, syncing and
-        // sign-in are the top bar's status icon, on every screen alike.
-        session.status?.takeIf { it.kind == PageStatusKind.Rejected }?.let { status ->
-            val actions = LocalSyncUi.current?.actions
-            PageStatusBanner(
-                status = status,
-                unsentStrokes = session.unsentStrokeCount,
-                onRetry = session::retryNow,
-                onSignIn = onSignIn,
-                onKeepAsNewPage = { actions?.onKeepAsNewPage(page.id) },
-                onDiscard = { actions?.onDiscard(page.id) },
-            )
         }
         InkCanvas(
             strokes = session.strokes,
