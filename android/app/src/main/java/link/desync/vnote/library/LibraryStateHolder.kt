@@ -99,6 +99,10 @@ internal class LibraryStateHolder(
     fun closePage() {
         selectedPage = null
         Telemetry.startScreen(LIBRARY_SCREEN)
+        // The page's edits moved its last-updated time in the device's copy
+        // (#657), which is everything this list holds plus those: the library
+        // shows them at once, and offline, where the refetch below fails.
+        local.store?.let { store -> pageState = store.library.pages() }
         // Shares the connect path's snapshot guard: a refetch superseded by a
         // sign-out or a reconnect is dropped rather than applied late. Safe
         // because each of those either clears the list deliberately or takes its

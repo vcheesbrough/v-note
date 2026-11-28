@@ -1,6 +1,8 @@
 package link.desync.vnote.library
 
 import kotlinx.coroutines.runBlocking
+import link.desync.vnote.sync.ConnectionProblem
+import link.desync.vnote.sync.ErrorClass
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.net.UnknownHostException
@@ -71,6 +73,27 @@ class ServerHealthProbeTest {
         assertEquals("Checking server health…", ServerHealth.Checking.label)
         assertEquals("Server healthy at $BASE_URL", ServerHealth.Healthy(BASE_URL).label)
         assertEquals("Health check failed: HTTP 502", ServerHealth.Unhealthy("HTTP 502").label)
+    }
+
+    @Test
+    fun onlineTheLineIsTheVerdict() {
+        for (health in listOf(ServerHealth.Checking, ServerHealth.Healthy(BASE_URL), ServerHealth.Unhealthy("HTTP 502"))) {
+            assertEquals(health.label, health.lineGiven(offline = null))
+        }
+    }
+
+    /**
+     * #657: while the app knows it is offline, a healthy verdict — kept up
+     * through a re-probe, and perhaps from before going offline — is not
+     * shown. A check under way and a failed one still say what they are.
+     */
+    @Test
+    fun offlineTheLineNeverClaimsHealthy() {
+        val offline = ConnectionProblem("v-notes-dev.example", ErrorClass.OFFLINE, correlationId = null, atMillis = 0)
+
+        assertEquals("Offline — can't reach v-notes-dev.example", ServerHealth.Healthy(BASE_URL).lineGiven(offline))
+        assertEquals("Checking server health…", ServerHealth.Checking.lineGiven(offline))
+        assertEquals("Health check failed: HTTP 502", ServerHealth.Unhealthy("HTTP 502").lineGiven(offline))
     }
 
     private fun httpFailure(code: Int): Result<Unit> = Result.failure(IllegalStateException("HTTP $code"))

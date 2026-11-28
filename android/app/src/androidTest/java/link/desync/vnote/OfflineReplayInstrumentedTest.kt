@@ -7,6 +7,8 @@ import android.view.View
 import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
@@ -17,6 +19,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import link.desync.vnote.api.ApiClient
@@ -26,8 +29,10 @@ import link.desync.vnote.auth.AuthConfig
 import link.desync.vnote.auth.AuthRepository
 import link.desync.vnote.auth.TokenStore
 import link.desync.vnote.ink.DrawingToolPreferences
+import link.desync.vnote.model.PageSummary
 import link.desync.vnote.store.LocalStore
 import link.desync.vnote.store.OpState
+import link.desync.vnote.ui.displayUpdatedAge
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -210,6 +215,62 @@ class OfflineReplayInstrumentedTest {
         Thread.sleep(3_000)
         assertEquals("not sent again once acknowledged", sent, commitsReceived.getValue(batchId).get())
         assertEquals("still stored once", 1, batches.getValue(PAGE_ID).size)
+    }
+
+    /**
+     * #657: offline, the app says what it knows and claims nothing it does
+     * not. A stroke drawn offline moves the page's last-updated time on its
+     * tile at once, and the server's own time replaces it once it is back.
+     * The offline icon carries no count — its details do. And the menu,
+     * which had found the server healthy, does not say so any more.
+     */
+    @Test
+    fun offlineTheLibraryShowsTheEditAndClaimsNothingItCannotKnow() {
+        awaitTag("page-tile-$PAGE_ID")
+        val port = server.port
+        val host = hostOf(checkNotNull(apiClient).baseUrl)
+        openMenu()
+        awaitHealthLine("Server healthy at ${checkNotNull(apiClient).baseUrl}")
+        Espresso.pressBack()
+
+        goOffline()
+        awaitTag("sync-status-offline", timeoutMillis = 30_000)
+        // The monitor still holds its healthy verdict while it re-probes.
+        openMenu()
+        awaitHealthLine("Offline — can't reach $host")
+        Espresso.pressBack()
+
+        openPage(PAGE_ID)
+        drawStroke()
+        awaitOwed(1)
+        leavePage()
+
+        assertTrue(
+            "the device's copy says the page was updated now",
+            store.library
+                .pages()
+                .single { it.id == PAGE_ID }
+                .updatedAt > SERVER_UPDATED_AT,
+        )
+        composeRule.waitUntil(timeoutMillis = 10_000) { textOf("page-updated-$PAGE_ID") == "just now" }
+        val icon = composeRule.onNodeWithTag("sync-status-offline")
+        icon.assert(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("Offline")))
+        icon.assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.Text))
+        icon.performClick()
+        awaitTag("sync-status-details")
+        composeRule.onNodeWithTag("sync-status-pending").assertTextEquals("1 change is waiting to sync")
+        composeRule.onNodeWithText("Close").performClick()
+
+        comeBackOnline(port)
+        awaitOwed(0, timeoutMillis = 45_000)
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            store.library
+                .pages()
+                .single { it.id == PAGE_ID }
+                .updatedAt == SERVER_UPDATED_AT
+        }
+        val serverPage = PageSummary(id = PAGE_ID, title = "", createdAt = SERVER_UPDATED_AT, updatedAt = SERVER_UPDATED_AT)
+        composeRule.waitUntil(timeoutMillis = 10_000) { textOf("page-updated-$PAGE_ID") == serverPage.displayUpdatedAge() }
     }
 
     /** A page made offline is created on the server under its own id, then its ink follows. */
@@ -619,6 +680,15 @@ class OfflineReplayInstrumentedTest {
         awaitTag("ink-canvas")
     }
 
+    private fun openMenu() {
+        composeRule.onNodeWithTag("main-menu-button").performClick()
+        awaitTag("server-health")
+    }
+
+    private fun awaitHealthLine(expected: String) {
+        composeRule.waitUntil(timeoutMillis = 10_000) { textOf("server-health") == expected }
+    }
+
     private fun leavePage() {
         composeRule.onNodeWithContentDescription("Back to library").performClick()
         awaitTag("create-page-button")
@@ -752,6 +822,7 @@ class OfflineReplayInstrumentedTest {
                     else -> Unit
                 }
                 return when {
+                    path == "/health" -> json("""{"status":"ok"}""")
                     path == "/api/me" -> json("""{"sub":"replay-user","email":"test@example.com"}""")
                     path == "/api/pages" && request.method == "POST" -> create(JSONObject(request.body?.utf8().orEmpty()))
                     // A permanently deleted page is not in the library any more.
@@ -863,8 +934,8 @@ class OfflineReplayInstrumentedTest {
         JSONObject()
             .put("id", id)
             .put("title", if (id == PAGE_ID) "Replay test" else "")
-            .put("created_at", "2026-11-28T00:00:00Z")
-            .put("updated_at", "2026-11-28T00:00:00Z")
+            .put("created_at", SERVER_UPDATED_AT)
+            .put("updated_at", SERVER_UPDATED_AT)
             .put("paper", "none")
 
     private fun libraryChannel() =
@@ -958,6 +1029,11 @@ class OfflineReplayInstrumentedTest {
 
     private companion object {
         const val PAGE_ID = "page_replay"
+
+        // When the server says its pages were made and last updated: long
+        // before any test runs, so a tile showing it never reads "just now".
+        const val SERVER_UPDATED_AT = "2026-01-01T00:00:00Z"
+
         const val STROKE_Y = 300f
         const val STROKE_START_X = 240f
         const val STROKE_END_X = 440f

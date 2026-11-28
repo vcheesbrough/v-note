@@ -120,7 +120,7 @@ private fun PageTileFooter(
     ) {
         Text(
             page.displayUpdatedAge(),
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).testTag("page-updated-${page.id}"),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.secondary,
         )

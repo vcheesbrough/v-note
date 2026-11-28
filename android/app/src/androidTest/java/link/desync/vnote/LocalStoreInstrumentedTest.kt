@@ -25,6 +25,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.time.Instant
 
 /**
  * The device's own copy (#159): what survives a restart, how an
@@ -225,6 +226,64 @@ class LocalStoreInstrumentedTest {
         assertEquals(setOf("page_kept", "page_edited"), stored.keys)
         assertEquals("the changed row is written", "renamed", stored.getValue("page_edited").title)
         assertEquals("an unchanged page is not rewritten", "stored", stored.getValue("page_kept").title)
+    }
+
+    /**
+     * #657: an edit moves its page's last-updated time to now, in the same
+     * transaction as its outbox entry, so the library says so offline. A
+     * page whose ink was current stays current — this device's own edit is
+     * nothing to fetch — and one already stale stays stale. The server's time
+     * wins as soon as the library is written from it, earlier or not.
+     */
+    @Test
+    fun anEditMovesItsPagesLastUpdatedTimeUntilTheServersArrives() {
+        val current = page("page_current")
+        val stale = page("page_stale")
+        store.library.write(listOf(current, stale))
+        store.library.markInkSynced(current.id, current.updatedAt)
+        val before = Instant.now()
+
+        store.outbox.enqueue(current.id, Edit.Batch("batch_1", listOf(stroke("s1"))))
+        store.outbox.enqueue(stale.id, Edit.Erase("erase_1", listOf("s0")))
+
+        val edited = store.library.pages().associateBy { it.id }
+        for (id in listOf(current.id, stale.id)) {
+            assertTrue("$id was updated now", !Instant.parse(edited.getValue(id).updatedAt).isBefore(before))
+        }
+        assertEquals(
+            "only the page that was already stale needs its ink",
+            listOf(stale.id),
+            store.library.staleInk().map { it.id },
+        )
+
+        val fromServer = current.copy(updatedAt = "2026-11-28T00:00:05Z")
+        store.library.write(listOf(fromServer, stale))
+
+        val reconciled = store.library.pages().associateBy { it.id }
+        assertEquals("the server's time wins", fromServer.updatedAt, reconciled.getValue(current.id).updatedAt)
+        assertEquals("the server's time wins", stale.updatedAt, reconciled.getValue(stale.id).updatedAt)
+        assertEquals(
+            "a time the server stamped is caught up with once",
+            setOf(current.id, stale.id),
+            store.library
+                .staleInk()
+                .map { it.id }
+                .toSet(),
+        )
+    }
+
+    /** #657: an edit never moves a page's last-updated time back, whatever this device's clock says. */
+    @Test
+    fun anEditNeverMovesTheLastUpdatedTimeBack() {
+        val ahead = page("page_ahead").copy(updatedAt = "2999-01-01T00:00:00Z")
+        store.library.write(listOf(ahead))
+        store.library.markInkSynced(ahead.id, ahead.updatedAt)
+
+        store.outbox.enqueue(ahead.id, Edit.SetPaper("paper_1", Paper.RuledWide))
+
+        val stored = store.library.pages().single()
+        assertEquals(ahead.updatedAt, stored.updatedAt)
+        assertTrue("still current", store.library.staleInk().isEmpty())
     }
 
     /** Acceptance 9: signing in again as the same identity keeps the cache and the outbox. */
