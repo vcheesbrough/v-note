@@ -195,9 +195,6 @@ class PageInkSession(
     // Opens a page socket. Everything the session holds is kept, so the
     // `subscribe(lastSeq)` asks only for what it has not seen.
     private fun open() {
-        // Whatever socket the session still held is closed first, so no path
-        // here can leave a second channel connected behind the new one.
-        retireSocket()
         val generation = ++socketGeneration
         connectSpan = Telemetry.span("realtime.connect", screen).attr("vnote.channel", "page")
         val opened =

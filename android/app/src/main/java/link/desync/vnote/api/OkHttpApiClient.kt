@@ -403,7 +403,7 @@ class OkHttpApiClient(
             }
             if (!response.isSuccessful) {
                 logHttpFailure("thumbnail request", response)
-                return Result.failure(httpFailure("Thumbnail request failed", response))
+                return Result.failure(IllegalStateException(requestFailureMessage("Thumbnail request failed", response)))
             }
             return Result.success(response.body.bytes())
         }
