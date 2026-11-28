@@ -389,6 +389,11 @@ class MainActivity : ComponentActivity() {
             IdentityDecision.Reset -> switchIdentity(profile)
             is IdentityDecision.Warn -> {
                 AppLog.w(TAG, "a different identity signed in with unsynced changes on the device: count=${decision.unsynced}")
+                // The new identity's tokens are already stored: nothing may
+                // sync with them against the old identity's data while the
+                // user decides. Cancel's reload starts everything again.
+                syncEngine.stop()
+                library.clear()
                 identitySwitch = IdentitySwitch(profile, decision.unsynced, previousTokens)
             }
         }

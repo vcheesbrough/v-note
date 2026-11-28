@@ -4,7 +4,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -158,14 +157,15 @@ class PagePaperInstrumentedTest {
     }
 
     /**
-     * Until the page has caught up (welcomed and its replay applied) the
-     * control is disabled. There is no edit lease to wait for (#630).
+     * #159: paper is editable before the page has caught up — or with no
+     * connection at all. The change is drawn at once and kept for the
+     * server.
      */
     @Test
-    fun thePaperControlIsDisabledUntilThePageCatchesUp() {
+    fun thePaperControlWorksBeforeThePageCatchesUp() {
         holdReplay.set(true)
         openPageTile()
-        composeRule.onNodeWithTag("paper-tool").assertIsNotEnabled()
+        composeRule.onNodeWithTag("paper-tool").assertIsEnabled()
     }
 
     /** An acknowledged change becomes the sticky new-page default. */
@@ -185,39 +185,26 @@ class PagePaperInstrumentedTest {
     }
 
     /**
-     * A change the server refuses must not become the sticky default. The
-     * preference is written on acknowledgement, not on dispatch, so a rejected
-     * pick leaves both the canvas and the stored default untouched.
+     * A change the server has not confirmed must not become the sticky
+     * default: the preference is written on acknowledgement, not on dispatch.
+     * `paper_failed` is the server failing to store it (#159), so the change
+     * stays drawn and is sent again, and only once it lands is it the default.
      */
     @Test
-    fun rejectedChangeDoesNotPersistTheStickyDefault() {
+    fun aFailedChangeIsKeptRetriedAndOnlyThenTheStickyDefault() {
         failPaper.set(true)
         openEditor()
         composeRule.onNodeWithTag("paper-tool").performClick()
         composeRule.onNodeWithTag("paper-option-squared-large").performClick()
 
         assertNotNull("set-paper sent", awaitMutation("set-paper"))
-        composeRule.awaitInkPixels { countPaperPixels(it) == 0 }
-        assertEquals(
-            "a refused change must not become the new-page default",
-            Paper.None,
-            storedPaper(),
-        )
-    }
+        val pixels = composeRule.awaitInkPixels { countPaperPixels(it) > 0 }
+        assertTrue("the change stays drawn", countPaperPixels(pixels) > 0)
+        assertEquals("not the default while unconfirmed", Paper.None, storedPaper())
 
-    /** A rejected change reverts to the last confirmed value rather than sticking. */
-    @Test
-    fun paperFailedRevertsTheOptimisticChange() {
-        failPaper.set(true)
-        openEditor()
-        composeRule.onNodeWithTag("paper-tool").performClick()
-        composeRule.onNodeWithTag("paper-option-squared-small").performClick()
-
-        assertNotNull("set-paper sent", awaitMutation("set-paper"))
-        // The server rejects, the session reverts to Paper.None, and no paper
-        // pixels survive on the canvas.
-        val pixels = composeRule.awaitInkPixels { countPaperPixels(it) == 0 }
-        assertEquals("optimistic paper reverted", 0, countPaperPixels(pixels))
+        failPaper.set(false)
+        assertNotNull("sent again", awaitMutation("set-paper", timeoutMillis = 10_000))
+        composeRule.waitUntil(timeoutMillis = 5_000) { storedPaper() == Paper.SquaredLarge }
     }
 
     /** A new page is born with the paper last picked on this device. */

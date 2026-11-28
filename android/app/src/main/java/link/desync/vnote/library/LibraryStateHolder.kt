@@ -46,8 +46,9 @@ internal class LibraryStateHolder(
     var pages: List<PageSummary>
         get() = pageState
         private set(value) {
+            val previous = pageState
             pageState = value
-            local.store?.library?.write(value)
+            local.store?.library?.write(value, previous)
         }
 
     var selectedPage by mutableStateOf<PageSummary?>(null)

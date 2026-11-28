@@ -1193,6 +1193,29 @@ class PageInkInstrumentedTest {
     }
 
     /**
+     * #159 review: `replay_failed` leaves the socket open but never caught up.
+     * The session starts over on a new socket, which replays from its cursor
+     * and goes live — it does not sit "retrying" forever.
+     */
+    @Test
+    fun aReplayFailureStartsOverOnANewSocket() {
+        openPage { webSocket, type ->
+            if (type == "subscribe") {
+                webSocket.send("""{"type":"error","code":"replay_failed","message":"could not load the page"}""")
+            }
+        }
+        openPage { webSocket, type ->
+            if (type == "subscribe") webSocket.send("""{"type":"synced","last_seq":0}""")
+        }
+
+        val session = openSession()
+
+        assertTrue("live on the next socket", awaitUntil(timeoutMs = 10_000) { session.canEdit && session.status == null })
+        assertEquals("two upgrades", 2, server.requestCount)
+        session.disconnect()
+    }
+
+    /**
      * #159, acceptance 10: an upgrade answered 403 (not found, or not this
      * user's) is a definitive refusal. What the page owes is recorded as
      * refused — kept, drawn, and never retried or counted as synced.

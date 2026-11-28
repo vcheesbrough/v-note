@@ -8,9 +8,9 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.DpRect
@@ -127,11 +127,9 @@ class PageLibraryOrderingInstrumentedTest {
             librarySocket.get()?.close(1000, "server going away") == true,
         )
 
+        // #159: the drop is the top bar's sync status icon, not a banner.
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            runCatching {
-                composeRule.onNodeWithText("Realtime disconnected").assertIsDisplayed()
-                true
-            }.getOrDefault(false)
+            composeRule.onAllNodesWithTag("sync-status-offline").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.waitUntil(timeoutMillis = 10_000) {
             realtimeUpgrades.get() > upgradesBeforeClose && pageListRequests.get() > fetchesBeforeClose

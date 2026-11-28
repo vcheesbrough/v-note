@@ -56,10 +56,10 @@ class PageStatusBannerInstrumentedTest {
                 onSignIn = {},
             )
         }
-        composeRule.onNodeWithTag("page-status-unsent").assertTextEquals("1 stroke not yet saved")
+        composeRule.onNodeWithTag("page-status-unsent").assertTextEquals("1 stroke not yet synced")
 
         unsent = 3
-        composeRule.onNodeWithTag("page-status-unsent").assertTextEquals("3 strokes not yet saved")
+        composeRule.onNodeWithTag("page-status-unsent").assertTextEquals("3 strokes not yet synced")
 
         // Nothing held, nothing to say.
         unsent = 0
@@ -97,6 +97,6 @@ class PageStatusBannerInstrumentedTest {
         show(PageStatus(PageStatusKind.Retrying, "Couldn't save your ink — retrying"), unsent = 1)
         composeRule.onAllNodesWithTag("page-status-retry").assertCountEquals(0)
         composeRule.onAllNodesWithTag("page-status-sign-in").assertCountEquals(0)
-        composeRule.onNodeWithTag("page-status-unsent").assertTextEquals("1 stroke not yet saved")
+        composeRule.onNodeWithTag("page-status-unsent").assertTextEquals("1 stroke not yet synced")
     }
 }

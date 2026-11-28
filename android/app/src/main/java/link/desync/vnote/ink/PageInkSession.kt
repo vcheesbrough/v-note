@@ -436,10 +436,12 @@ class PageInkSession(
     private fun acknowledged() {
         sync.status?.markSynced()
         refreshSyncCounts()
-        if (resendJob != null && !ledger.hasWork) {
+        // Keyed on the status, not the job: the job clears itself before the
+        // resend it makes is answered.
+        if (status?.kind == PageStatusKind.Retrying && !ledger.hasWork) {
             AppLog.i(TAG, "failed edits recovered after attempts=$resendAttempts", context = screen)
             stopResend()
-            if (status?.kind == PageStatusKind.Retrying) status = null
+            status = null
         }
         idleIfDone()
     }
@@ -483,7 +485,16 @@ class PageInkSession(
             scope.launch {
                 delay(delayMs)
                 resendJob = null
-                if (!closing && canEdit) resendPending()
+                when {
+                    closing -> Unit
+                    canEdit -> resendPending()
+                    // Failed before the replay caught up (`replay_failed`,
+                    // `welcome_failed`): the socket stays open but will never
+                    // reach `synced`, so start over on a new one, which
+                    // re-subscribes from the cursor.
+                    else ->
+                        handleDisconnected(ConnectionFailure(event.code, hostOf(apiClient.baseUrl), ErrorClass.SERVER_ERROR, null))
+                }
             }
     }
 

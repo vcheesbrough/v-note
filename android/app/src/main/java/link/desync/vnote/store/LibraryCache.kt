@@ -22,15 +22,21 @@ class LibraryCache internal constructor(
     // Mirrors the library's list: rows not in [pages] go, the rest are
     // written. A page created here and not yet acknowledged is never dropped,
     // whatever the list says — it is not on the server to be listed yet.
-    fun write(pages: List<PageSummary>) {
+    // [previous] is the list as last written, so only what changed is touched:
+    // the library is rewritten on every event, which is every stroke from
+    // any device, on the main thread.
+    fun write(
+        pages: List<PageSummary>,
+        previous: List<PageSummary> = pages(),
+    ) {
+        val before = previous.associateBy { it.id }
+        val keep = pages.map { it.id }.toSet()
+        val removed = before.keys.filterNot { it in keep }
+        val changed = pages.filter { before[it.id] != it }
+        if (removed.isEmpty() && changed.isEmpty()) return
         store.transaction { db ->
-            val keep = pages.map { it.id }.toSet()
-            val existing =
-                db.rawQuery("SELECT id FROM $PAGES WHERE local_only = 0", null).use { cursor ->
-                    buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
-                }
-            existing.filterNot { it in keep }.forEach { db.delete(PAGES, "id = ?", arrayOf(it)) }
-            pages.forEach { upsert(it) }
+            removed.forEach { db.delete(PAGES, "id = ? AND local_only = 0", arrayOf(it)) }
+            changed.forEach { upsert(it) }
         }
     }
 

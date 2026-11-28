@@ -726,6 +726,85 @@ fn server_error(error: sqlx::Error) -> ApiError {
 }
 
 #[cfg(test)]
+fn test_claims(sub: &str) -> Claims {
+    Claims {
+        sub: sub.to_string(),
+        email: None,
+        preferred_username: None,
+        scope: None,
+        iss: "test".to_string(),
+        exp: u64::MAX,
+    }
+}
+
+#[cfg(test)]
+fn client_minted_create(id: &str) -> Json<CreatePageRequest> {
+    Json(CreatePageRequest {
+        id: Some(id.to_string()),
+        title: None,
+        paper: Paper::default(),
+    })
+}
+
+/// `create_page`'s outcomes on the page-mutation metric (#159): the signals
+/// that show replayed offline creates and misbehaving clients in production.
+/// The metrics are process-wide and tests run in parallel, so each asserts
+/// its own count rose rather than an absolute value.
+#[cfg(test)]
+mod create_page_metrics {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_malformed_client_minted_id_counts_invalid_id() {
+        let metrics = crate::observability::metrics();
+        let before = metrics.page_mutation_count("create_page", "invalid_id");
+
+        let result = create_page(
+            State(AppState::for_tests()),
+            Extension(test_claims("metrics-owner")),
+            client_minted_create("not-a-page-id"),
+        )
+        .await;
+
+        assert!(matches!(result, Err(error) if error.status == StatusCode::BAD_REQUEST));
+        assert!(metrics.page_mutation_count("create_page", "invalid_id") > before);
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_replayed_create_counts_replayed(pool: sqlx::PgPool) {
+        let metrics = crate::observability::metrics();
+        let state = AppState {
+            db: pool,
+            ..AppState::for_tests()
+        };
+        let id = "page_0123456789abcdef0123456789abcdef";
+        let created_before = metrics.page_mutation_count("create_page", "success");
+        let replayed_before = metrics.page_mutation_count("create_page", "replayed");
+
+        let first = create_page(
+            State(state.clone()),
+            Extension(test_claims("metrics-owner")),
+            client_minted_create(id),
+        )
+        .await
+        .map(|(status, _)| status);
+        let replay = create_page(
+            State(state),
+            Extension(test_claims("metrics-owner")),
+            client_minted_create(id),
+        )
+        .await
+        .map(|(status, _)| status);
+
+        assert!(matches!(first, Ok(StatusCode::CREATED)));
+        assert!(matches!(replay, Ok(StatusCode::OK)));
+        assert!(metrics.page_mutation_count("create_page", "success") > created_before);
+        assert!(metrics.page_mutation_count("create_page", "replayed") > replayed_before);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;

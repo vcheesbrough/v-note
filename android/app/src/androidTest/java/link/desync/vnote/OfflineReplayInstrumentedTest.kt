@@ -245,6 +245,37 @@ class OfflineReplayInstrumentedTest {
         assertEquals("the stroke landed on the new page", 1, batches.getValue(newPage).size)
     }
 
+    /** Discard is the other way out of a refusal: the edits go, and nothing is created. */
+    @Test
+    fun discardingARefusalLetsItsEditsGo() {
+        awaitTag("page-tile-$PAGE_ID")
+        val port = server.port
+        openPage(PAGE_ID)
+        goOffline()
+        drawStroke()
+        awaitOwed(1)
+        leavePage()
+
+        purged += PAGE_ID
+        comeBackOnline(port)
+        awaitTag("sync-status-rejected", timeoutMillis = 45_000)
+        composeRule.onNodeWithTag("sync-status-rejected").performClick()
+        awaitTag("sync-rejection-$PAGE_ID")
+        composeRule.onNodeWithTag("sync-rejection-discard").performClick()
+
+        awaitOwed(0)
+        assertTrue(
+            "nothing refused",
+            store.outbox.read
+                .rejections()
+                .isEmpty(),
+        )
+        assertTrue("no page created", created.isEmpty())
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTag("sync-status-rejected").fetchSemanticsNodes().isEmpty()
+        }
+    }
+
     private fun awaitOwed(
         count: Int,
         timeoutMillis: Long = 10_000,
