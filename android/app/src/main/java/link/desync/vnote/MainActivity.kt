@@ -377,7 +377,8 @@ class MainActivity : ComponentActivity() {
     // One identity per install (#159). The same identity carries on with
     // everything kept; a different one resets the install — silently when
     // nothing is owed to the server, after a warning when something is.
-    private fun adoptIdentity(
+    @androidx.annotation.VisibleForTesting
+    internal fun adoptIdentity(
         profile: MeProfile,
         previousTokens: TokenStore.Snapshot?,
     ) {

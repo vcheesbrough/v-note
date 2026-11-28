@@ -342,7 +342,6 @@ class PageInkSession(
         status = null
         // A binned page says so straight after `welcome`.
         restored()
-        reconnectAttempts = 0
         refreshedAfterUnauthorized = false
         // The paper in force; a paper this device still owes stays drawn
         // until the server has it.
@@ -409,6 +408,9 @@ class PageInkSession(
             return
         }
         canEdit = true
+        // Reset here, not on `welcome`: a socket that is welcomed and then
+        // fails its replay every time must still back off.
+        reconnectAttempts = 0
         resendPending()
         idleIfDone()
     }

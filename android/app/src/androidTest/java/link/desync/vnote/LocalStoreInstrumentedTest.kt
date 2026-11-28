@@ -175,6 +175,30 @@ class LocalStoreInstrumentedTest {
         )
     }
 
+    /**
+     * #159 review: given the list it replaces, a write touches only what
+     * changed — the removed rows go, the changed ones are written, and the
+     * rest are left alone (shown by a row the store holds differently from
+     * [previous], which an unchanged page must not overwrite).
+     */
+    @Test
+    fun aWriteGivenThePreviousListTouchesOnlyWhatChanged() {
+        val kept = page("page_kept")
+        val edited = page("page_edited")
+        val gone = page("page_gone")
+        store.library.write(listOf(kept, edited, gone))
+        // The store's row for `kept` drifts from the in-memory list.
+        store.library.write(listOf(kept.copy(title = "stored"), edited, gone), previous = listOf(kept, edited, gone))
+
+        val next = listOf(kept, edited.copy(title = "renamed"))
+        store.library.write(next, previous = listOf(kept, edited, gone))
+
+        val stored = store.library.pages().associateBy { it.id }
+        assertEquals(setOf("page_kept", "page_edited"), stored.keys)
+        assertEquals("the changed row is written", "renamed", stored.getValue("page_edited").title)
+        assertEquals("an unchanged page is not rewritten", "stored", stored.getValue("page_kept").title)
+    }
+
     /** Acceptance 9: signing in again as the same identity keeps the cache and the outbox. */
     @Test
     fun theSameIdentityKeepsEverything() {
