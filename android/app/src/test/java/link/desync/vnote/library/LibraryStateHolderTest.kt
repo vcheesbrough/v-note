@@ -12,7 +12,10 @@ import link.desync.vnote.ink.Paper
 import link.desync.vnote.model.LibraryEvent
 import link.desync.vnote.model.MeProfile
 import link.desync.vnote.model.PageSummary
+import okhttp3.Request
 import okhttp3.WebSocket
+import okio.ByteString
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -22,8 +25,9 @@ import org.junit.Test
 /**
  * The library holder's own decisions, beyond the list rules in
  * [LibraryPagesTest]: closing a deleted open page, refusing to reconnect a
- * stale or signed-out channel (#337 review), and ordering the snapshot fetch
- * ahead of the channel it precedes (#347).
+ * stale or signed-out channel (#337 review), and fetching the snapshot only
+ * once the channel is open (#635) without letting it roll back an event
+ * (#347).
  */
 class LibraryStateHolderTest {
     private val holder =
@@ -94,90 +98,280 @@ class LibraryStateHolderTest {
     }
 
     /**
-     * The regression behind #347: the snapshot fetch assigns the whole list, so
-     * while it is in flight the channel must not be live — an event delivered
-     * in that window was silently rolled back when the fetch landed on top of
-     * it, leaving a stale library until the next refetch.
+     * #635: the snapshot is read only once the channel is open. The server
+     * subscribes a socket before it answers the upgrade (#631), so from
+     * `onOpen` on every event is queued on it; fetching first left a window
+     * in which an event published elsewhere was lost until the next refetch.
      */
     @Test
-    fun theChannelOpensOnlyOnceTheSnapshotHasBeenApplied() {
-        val api = SnapshotControlledApiClient()
+    fun theSnapshotIsFetchedOnlyOnceTheChannelHasOpened() {
+        val api = ChannelControlledApiClient()
         val holder = holderWith(api)
 
         holder.start()
 
-        assertEquals("no channel while the snapshot is in flight", 0, api.socketsOpened)
-        assertTrue(holder.pages.isEmpty())
+        assertEquals("the channel opens first", 1, api.socketsOpened)
+        assertEquals("no snapshot before the channel is open", 0, api.listPagesCalls)
+
+        api.openChannel()
+        assertEquals("the snapshot follows the open", 1, api.listPagesCalls)
 
         api.completeListPages(Result.success(listOf(page("new"), page("old"))))
-
         assertEquals(listOf("new", "old"), holder.pages.map { it.id })
-        assertEquals("the channel opens once the list is applied", 1, api.socketsOpened)
-    }
-
-    /** A library that failed to load still needs the channel to recover it. */
-    @Test
-    fun aFailedSnapshotStillOpensTheChannel() {
-        val api = SnapshotControlledApiClient()
-        val holder = holderWith(api)
-
-        holder.start()
-        api.completeListPages(Result.failure(RuntimeException("offline")))
-
-        assertEquals("offline", holder.error)
-        assertTrue("a failed snapshot must not touch the list", holder.pages.isEmpty())
-        assertEquals(1, api.socketsOpened)
     }
 
     /**
-     * Awaiting the snapshot widens the window between the decision to connect
-     * and the connect itself, so the sign-out guard has to hold across it.
+     * The #347 guarantee, kept: the snapshot assigns the whole list, so an
+     * event that arrives while it is in flight must not be rolled back when
+     * it lands. Here a page created elsewhere arrives mid-fetch, and the
+     * snapshot (read before it) does not have it.
      */
     @Test
-    fun signingOutWhileTheSnapshotIsInFlightNeitherConnectsNorRepopulates() {
-        val api = SnapshotControlledApiClient()
+    fun anEventDuringTheSnapshotIsNotRolledBackByIt() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+        api.openChannel()
+
+        api.sendEvent(LibraryEvent.PageCreated(page("live", updatedAt = "2026-07-23T00:00:00Z")))
+        api.completeListPages(Result.success(listOf(page("old"))))
+
+        assertEquals(listOf("live", "old"), holder.pages.map { it.id })
+    }
+
+    /** A removal mid-fetch survives a snapshot that still lists the page. */
+    @Test
+    fun aPageBinnedDuringTheSnapshotStaysOutOfTheLibrary() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+        api.openChannel()
+
+        api.sendEvent(LibraryEvent.PageBinned(page("gone").copy(binnedAt = "2026-07-23T00:00:00Z")))
+        api.completeListPages(Result.success(listOf(page("gone"), page("kept"))))
+
+        assertEquals(listOf("kept"), holder.pages.map { it.id })
+    }
+
+    /**
+     * Replaying an event the snapshot already reflects changes nothing: the
+     * snapshot was read after the page was edited again, and the replayed
+     * creation must not undo that edit.
+     */
+    @Test
+    fun replayingAnEventTheSnapshotAlreadyHasIsHarmless() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+        api.openChannel()
+
+        api.sendEvent(LibraryEvent.PageCreated(page("a", updatedAt = "2026-07-23T00:00:00Z")))
+        api.sendEvent(LibraryEvent.PageUpdated("a", "2026-07-24T00:00:00Z"))
+        api.completeListPages(Result.success(listOf(page("a", updatedAt = "2026-07-24T00:00:00Z"), page("b"))))
+
+        assertEquals(listOf("a", "b"), holder.pages.map { it.id })
+        assertEquals("2026-07-24T00:00:00Z", holder.pages.first().updatedAt)
+    }
+
+    /** A failed snapshot leaves the live channel and its events in place. */
+    @Test
+    fun aFailedSnapshotKeepsTheChannelAndItsEvents() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+        api.openChannel()
+
+        api.sendEvent(LibraryEvent.PageCreated(page("live")))
+        api.completeListPages(Result.failure(RuntimeException("offline")))
+
+        assertEquals("offline", holder.error)
+        assertEquals(listOf("live"), holder.pages.map { it.id })
+        assertEquals("no reconnect: the channel is still live", 1, api.socketsOpened)
+    }
+
+    /**
+     * A channel refused before it opens took no snapshot. The list still
+     * loads — its REST call is also what refreshes an expired token, which
+     * the upgrade cannot — and the realtime banner stays up, because the
+     * library is not live.
+     */
+    @Test
+    fun aChannelThatNeverOpensStillLoadsTheListAndKeepsTheBanner() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+
+        api.failChannel("Realtime connection failed: HTTP 503")
+        assertEquals(1, api.listPagesCalls)
+        api.completeListPages(Result.success(listOf(page("a"))))
+
+        assertEquals(listOf("a"), holder.pages.map { it.id })
+        assertEquals("Realtime connection failed: HTTP 503", holder.error)
+        assertEquals("then it reconnects", 2, api.socketsOpened)
+    }
+
+    /**
+     * A channel that had opened already took its snapshot; its reconnect
+     * goes straight to a new channel, whose own open fetches the next one.
+     */
+    @Test
+    fun anOpenedChannelReconnectsWithoutASnapshotOfItsOwn() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+        api.openChannel()
+        api.completeListPages(Result.success(listOf(page("a"))))
+
+        api.failChannel("Realtime disconnected")
+
+        assertEquals("no snapshot between the close and the reconnect", 1, api.listPagesCalls)
+        assertEquals(2, api.socketsOpened)
+        assertEquals("Realtime disconnected", holder.error)
+
+        api.openChannel()
+        assertEquals("the new channel's open fetches", 2, api.listPagesCalls)
+        api.completeListPages(Result.success(listOf(page("b"), page("a"))))
+        assertEquals(listOf("b", "a"), holder.pages.map { it.id })
+        assertNull("a live channel with a fresh list clears the banner", holder.error)
+    }
+
+    /**
+     * A refused channel's snapshot that lands after sign-out is dropped, and
+     * the channel it was taken for does not reconnect: no stray socket.
+     */
+    @Test
+    fun aRefusedChannelWhoseSnapshotIsSupersededDoesNotReconnect() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+        holder.start()
+
+        api.failChannel("Realtime connection failed: HTTP 503")
+        holder.clear()
+        api.completeListPages(Result.success(listOf(page("a"))))
+
+        assertTrue("a superseded snapshot must not repopulate the library", holder.pages.isEmpty())
+        assertEquals("a superseded channel must not reconnect", 1, api.socketsOpened)
+    }
+
+    /**
+     * With no access token there is no channel to wait for, so the list is
+     * loaded at once; nothing else would ever load it.
+     */
+    @Test
+    fun withNoChannelTheListStillLoads() {
+        val api = ChannelControlledApiClient(hasAccessToken = false)
         val holder = holderWith(api)
 
         holder.start()
+
+        assertEquals(1, api.listPagesCalls)
+        api.completeListPages(Result.success(listOf(page("a"))))
+        assertEquals(listOf("a"), holder.pages.map { it.id })
+    }
+
+    /**
+     * The sign-out guard holds across the fetch: a snapshot that lands after
+     * sign-out neither repopulates the library, and nor does a late event
+     * from the channel sign-out closed.
+     */
+    @Test
+    fun signingOutWhileTheSnapshotIsInFlightNeitherRepopulatesNorApplies() {
+        val api = ChannelControlledApiClient()
+        val holder = holderWith(api)
+
+        holder.start()
+        api.openChannel()
         holder.clear()
         api.completeListPages(Result.success(listOf(page("new"))))
+        api.sendEvent(LibraryEvent.PageCreated(page("late")))
 
-        assertEquals("a superseded snapshot must not open a channel", 0, api.socketsOpened)
         assertTrue("a superseded snapshot must not repopulate the library", holder.pages.isEmpty())
+        assertEquals("no reconnect after sign-out", 1, api.socketsOpened)
     }
 
     // Unconfined runs each coroutine inline on this thread up to its first
     // suspension and resumes it inline on the thread that completes it, so the
-    // tests above step the fetch by hand with no sleeps or idling.
+    // tests above step the fetch by hand with no sleeps or idling. A zero
+    // reconnect delay runs each reconnect inline too. Cancelled after each
+    // test, so nothing still suspended carries into the next one.
+    private val scopeJob = Job()
+
+    @After
+    fun cancelReconnects() {
+        scopeJob.cancel()
+    }
+
     private fun holderWith(api: ApiClient): LibraryStateHolder =
         LibraryStateHolder(
             apiClient = api,
-            reconnectScope = CoroutineScope(Dispatchers.Unconfined),
+            reconnectScope = CoroutineScope(Dispatchers.Unconfined + scopeJob),
             isSignedIn = { true },
             runOnUiThread = { block -> block() },
+            reconnectDelayMillis = 0,
         )
 
-    private fun page(id: String): PageSummary =
-        PageSummary(id = id, title = id, createdAt = "2026-07-22T00:00:00Z", updatedAt = "2026-07-22T00:00:00Z")
+    private fun page(
+        id: String,
+        updatedAt: String = "2026-07-22T00:00:00Z",
+    ): PageSummary = PageSummary(id = id, title = id, createdAt = "2026-07-22T00:00:00Z", updatedAt = updatedAt)
 
-    // Holds `listPages` open until the test releases it, and counts the channels
-    // opened, so the order of snapshot and channel is observable.
-    private class SnapshotControlledApiClient : ApiClient by UnusedApiClient {
-        private val pending = CompletableDeferred<Result<List<PageSummary>>>()
+    // Holds each `listPages` open until the test releases it, and drives the
+    // newest channel's listener by hand, so the order of channel, snapshot and
+    // events is observable. Without an access token it opens no channel, as
+    // the real client does.
+    private class ChannelControlledApiClient(
+        private val hasAccessToken: Boolean = true,
+    ) : ApiClient by UnusedApiClient {
+        private val pending = ArrayDeque<CompletableDeferred<Result<List<PageSummary>>>>()
+        private var listener: LibraryEventListener? = null
 
         var socketsOpened = 0
             private set
 
+        var listPagesCalls = 0
+            private set
+
+        fun openChannel() = checkNotNull(listener).onOpen()
+
+        fun sendEvent(event: LibraryEvent) = checkNotNull(listener).onEvent(event)
+
+        fun failChannel(message: String) = checkNotNull(listener).onError(message)
+
         fun completeListPages(result: Result<List<PageSummary>>) {
-            pending.complete(result)
+            pending.removeFirst().complete(result)
         }
 
-        override suspend fun listPages(): Result<List<PageSummary>> = pending.await()
+        override suspend fun listPages(): Result<List<PageSummary>> {
+            listPagesCalls += 1
+            val reply = CompletableDeferred<Result<List<PageSummary>>>()
+            pending.addLast(reply)
+            return reply.await()
+        }
 
+        // A real socket is not needed: the holder only closes it.
         override fun openLibrarySocket(listener: LibraryEventListener): WebSocket? {
+            if (!hasAccessToken) return null
             socketsOpened += 1
-            return null
+            this.listener = listener
+            return ClosableSocket
         }
+    }
+
+    private object ClosableSocket : WebSocket {
+        override fun request(): Request = error("unused")
+
+        override fun queueSize(): Long = 0
+
+        override fun send(text: String): Boolean = false
+
+        override fun send(bytes: ByteString): Boolean = false
+
+        override fun close(
+            code: Int,
+            reason: String?,
+        ): Boolean = true
+
+        override fun cancel() = Unit
     }
 
     // The baseline every fake narrows: a call nobody overrode is a test bug.
