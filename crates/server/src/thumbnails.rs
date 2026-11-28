@@ -134,16 +134,30 @@ pub fn enqueue(state: AppState, page_id: String, owner_id: String, source_seq: u
         let thumbnail = match result {
             Ok(Generated::JobGone) => {
                 // The job's row went while it was queued or rendering: its page
-                // was permanently deleted (#631), or retention `cleanup` pruned
-                // that older revision. Acked and dropped — nothing failed, and
-                // a newer revision (if the page lives) carries the preview.
+                // was permanently deleted (#631) and the row cascaded with it.
+                // Retention `cleanup` leaves in-flight rows alone (#634), so
+                // that is the only way here. Acked and dropped — nothing failed.
                 tracing::info!(
                     page_id = %page_id,
                     source_seq,
-                    "thumbnail job dropped: its row is gone (page permanently deleted or revision pruned)"
+                    "thumbnail job dropped: its row is gone (page permanently deleted)"
                 );
                 crate::observability::metrics()
                     .record_page_mutation("generate_thumbnail", "job_gone");
+                crate::observability::metrics().thumbnail_generation_finished();
+                return;
+            }
+            Ok(Generated::Superseded) => {
+                // Newer revisions overtook this one while it queued, so it would
+                // be pruned the moment it rendered (#634). One per revision of a
+                // commit burst, so the counter is the signal, not a log line.
+                tracing::debug!(
+                    page_id = %page_id,
+                    source_seq,
+                    "thumbnail job skipped: revision superseded before render"
+                );
+                crate::observability::metrics()
+                    .record_page_mutation("generate_thumbnail", "superseded");
                 crate::observability::metrics().thumbnail_generation_finished();
                 return;
             }
@@ -204,9 +218,14 @@ fn render_permits() -> &'static Semaphore {
 enum Generated {
     Rendered,
     /// The job's row is gone — its page was permanently deleted (the row
-    /// cascades with it, #631), or retention `cleanup` pruned that older
-    /// revision. Not a failure to retry or report.
+    /// cascades with it, #631); retention `cleanup` never prunes a row still
+    /// `generating` (#634). Not a failure to retry or report.
     JobGone,
+    /// Newer revisions overtook this job while it waited for a permit, so
+    /// retention would prune it as soon as it rendered: it removes its own row
+    /// instead of rendering (#634). This is what coalesces a commit burst into a
+    /// handful of renders.
+    Superseded,
 }
 
 async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<Generated, String> {
@@ -227,8 +246,27 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<Gener
     // place paper is read for rendering, so no caller can pass a stale value
     // (notably `recover_pending`, which re-queues jobs after a restart with no
     // in-memory context at all).
-    let Some(paper) = sqlx::query_scalar::<_, String>(
-        "SELECT paper FROM page_thumbnails WHERE page_id = $1 AND source_seq = $2",
+    //
+    // The same read asks whether retention would keep this revision: the head,
+    // or one of the 10 newest other revisions from the last 7 days — the rule
+    // `cleanup` applies, and the two must agree. `cleanup` no longer prunes a
+    // job in flight (#634), so a revision a burst of newer commits has already
+    // pushed out of that window drops itself here rather than rendering a
+    // preview its own cleanup would delete straight away.
+    let Some((paper, retained)) = sqlx::query_as::<_, (String, bool)>(
+        r#"SELECT t.paper,
+                  t.source_seq = p.ink_revision OR (
+                    t.created_at >= now() - interval '7 days' AND (
+                      SELECT count(*) FROM page_thumbnails n
+                      WHERE n.page_id = t.page_id
+                        AND n.source_seq > t.source_seq
+                        AND n.source_seq <> p.ink_revision
+                        AND n.created_at >= now() - interval '7 days'
+                    ) < 10
+                  )
+           FROM page_thumbnails t
+           JOIN pages p ON p.id = t.page_id
+           WHERE t.page_id = $1 AND t.source_seq = $2"#,
     )
     .bind(page_id)
     .bind(source_seq as i64)
@@ -239,6 +277,18 @@ async fn generate(pool: &PgPool, page_id: &str, source_seq: u64) -> Result<Gener
     else {
         return Ok(Generated::JobGone);
     };
+    if !retained {
+        sqlx::query(
+            "DELETE FROM page_thumbnails WHERE page_id = $1 AND source_seq = $2 AND status = 'generating'",
+        )
+        .bind(page_id)
+        .bind(source_seq as i64)
+        .execute(metered(pool))
+        .instrument(db_query_span!("DELETE", "thumbnail_drop_superseded"))
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok(Generated::Superseded);
+    }
     let paper =
         Paper::from_wire(&paper).ok_or_else(|| format!("unknown stored paper {paper:?}"))?;
 
@@ -679,20 +729,37 @@ fn render_stroke(
     }
 }
 
+/// Retention for one page's thumbnails: the head revision, and the 10 newest
+/// other revisions from the last 7 days. `generate` asks the same question of
+/// its own job before rendering, and the two must agree.
+///
+/// Only finished artifacts (`available` or `failed`) are deleted here (#634).
+/// A `generating` row is a job queued or rendering — several run at once under
+/// `render_permits`, and `recover_pending` re-queues a whole backlog — and
+/// deleting it under the job turned it into a `job_gone`, the signal meant for
+/// permanently deleted pages. A job outside the window drops its own row when
+/// it reaches a permit (`Generated::Superseded`); one inside it renders and is
+/// pruned here later, once newer revisions push it out.
+///
+/// The window still counts in-flight revisions. Those inside it will render
+/// and fill it, those outside drop themselves, so it settles on the 10 newest
+/// revisions as before; counting only finished rows would instead keep older
+/// artifacts the moment a burst made them obsolete.
 async fn cleanup(pool: &PgPool, page_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"DELETE FROM page_thumbnails
            WHERE page_id = $1
+             AND status IN ('available', 'failed')
              AND source_seq <> (SELECT ink_revision FROM pages WHERE id = $1)
              AND (
-             created_at < now() - interval '7 days' OR source_seq NOT IN (
-               SELECT source_seq FROM page_thumbnails
-               WHERE page_id = $1
-             AND source_seq <> (SELECT ink_revision FROM pages WHERE id = $1)
-                 AND created_at >= now() - interval '7 days'
-               ORDER BY source_seq DESC LIMIT 10
-             )
-           )"#,
+               created_at < now() - interval '7 days' OR source_seq NOT IN (
+                 SELECT source_seq FROM page_thumbnails
+                 WHERE page_id = $1
+                   AND source_seq <> (SELECT ink_revision FROM pages WHERE id = $1)
+                   AND created_at >= now() - interval '7 days'
+                 ORDER BY source_seq DESC LIMIT 10
+               )
+             )"#,
     )
     .bind(page_id)
     .execute(metered(pool))
